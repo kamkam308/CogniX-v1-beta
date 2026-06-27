@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from auth import storage as auth_storage
 from auth.authentication import get_current_jwt_subject
 from core.cognix import hardware as cognix_hardware
+from core.cognix import recommender as cognix_recommender
 from core.cognix.router import classify_objective
 from core.cognix.strategy import build_strategy
 from storage import cognix_db
@@ -772,6 +773,17 @@ async def hardware_profile(current_subject: str = Depends(get_current_jwt_subjec
     return {
         "username": current_subject,
         "hardware": cognix_hardware.get_hardware_profile(),
+    }
+
+
+@router.get("/models/recommendation")
+async def model_recommendation(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    hardware = cognix_hardware.get_hardware_profile()
+    recommendation = cognix_recommender.build_model_recommendation(hardware)
+    return {
+        "username": current_subject,
+        "hardware": hardware,
+        **recommendation,
     }
 
 
