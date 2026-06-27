@@ -111,7 +111,38 @@ def test_router_endpoint_uses_project_hint(client):
     assert response.status_code == 200
     body = response.json()
     assert body["username"] == "alice"
+    assert body["logId"].startswith("rtl_")
     classification = body["classification"]
     assert classification["routingMode"] == "local_keyword_router_v1"
     assert classification["selectedDomain"] == "code"
     assert classification["recommendedModelLabel"] == "CogniX Code 4B"
+
+
+def test_router_decisions_are_logged_for_admin_review(client):
+    seed_accounts()
+    admin_headers = login_headers(client, storage.DEFAULT_ADMIN_USERNAME, "admin-password-123")
+    user_headers = login_headers(client, "alice", "alice-password-123")
+
+    created = client.post(
+        "/api/cognix/router/classify",
+        headers = user_headers,
+        json = {"objective": "Corrige ce bug Python dans mon backend API", "project_type": "code"},
+    )
+    assert created.status_code == 200
+
+    user_read = client.get("/api/cognix/admin/router-logs", headers = user_headers)
+    assert user_read.status_code == 403
+
+    admin_read = client.get("/api/cognix/admin/router-logs", headers = admin_headers)
+
+    assert admin_read.status_code == 200
+    logs = admin_read.json()["logs"]
+    assert len(logs) == 1
+    log = logs[0]
+    assert log["id"] == created.json()["logId"]
+    assert log["username"] == "alice"
+    assert log["selectedDomain"] == "code"
+    assert log["modelLabel"] == "CogniX Code 4B"
+    assert log["routingMode"] == "local_keyword_router_v1"
+    assert log["needsClarification"] is False
+    assert "Python" in log["objectiveExcerpt"]

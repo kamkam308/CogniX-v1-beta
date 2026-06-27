@@ -158,6 +158,25 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_security_username
             ON cognix_security_events(username, created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_router_logs (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            objective_excerpt TEXT NOT NULL,
+            project_type TEXT,
+            selected_domain TEXT NOT NULL,
+            model_label TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            needs_clarification INTEGER NOT NULL DEFAULT 0,
+            routing_mode TEXT NOT NULL,
+            scores_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_router_logs_created
+            ON cognix_router_logs(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_router_logs_username
+            ON cognix_router_logs(username, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_reports (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -565,6 +584,87 @@ def list_security_events(limit: int = 200) -> list[dict[str, Any]]:
             """,
             (max(1, min(int(limit), 500)),),
         ).fetchall()
+        return _rows_to_dicts(rows)
+    finally:
+        conn.close()
+
+
+def create_router_log(
+    username: str,
+    objective: str,
+    *,
+    project_type: str | None,
+    classification: dict[str, Any],
+) -> dict[str, Any]:
+    created_at = _now()
+    log_id = _new_id("rtl")
+    objective_excerpt = re.sub(r"\s+", " ", objective or "").strip()[:500]
+    scores = classification.get("scores")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_router_logs
+                (
+                    id,
+                    username,
+                    objective_excerpt,
+                    project_type,
+                    selected_domain,
+                    model_label,
+                    confidence,
+                    needs_clarification,
+                    routing_mode,
+                    scores_json,
+                    created_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                log_id,
+                username,
+                objective_excerpt,
+                (project_type or "").strip() or None,
+                str(classification.get("selectedDomain") or "general"),
+                str(classification.get("recommendedModelLabel") or "CogniX General 3B"),
+                float(classification.get("confidence") or 0.0),
+                1 if classification.get("needsClarification") else 0,
+                str(classification.get("routingMode") or "unknown"),
+                json.dumps(scores if isinstance(scores, dict) else {}, ensure_ascii = False),
+                created_at,
+            ),
+        )
+        conn.commit()
+        return row_to_dict(
+            conn.execute("SELECT * FROM cognix_router_logs WHERE id = ?", (log_id,)).fetchone()
+        ) or {}
+    finally:
+        conn.close()
+
+
+def list_router_logs(username: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        normalized_limit = max(1, min(int(limit), 500))
+        if username:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_router_logs
+                WHERE username = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, normalized_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_router_logs
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (normalized_limit,),
+            ).fetchall()
         return _rows_to_dicts(rows)
     finally:
         conn.close()

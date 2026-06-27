@@ -200,10 +200,19 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "opponent_type": "opponentType",
         "opponent_username": "opponentUsername",
         "state_json": "stateJson",
+        "objective_excerpt": "objectiveExcerpt",
+        "project_type": "projectType",
+        "selected_domain": "selectedDomain",
+        "model_label": "modelLabel",
+        "needs_clarification": "needsClarification",
+        "routing_mode": "routingMode",
+        "scores_json": "scoresJson",
     }
     for source, target in alias_map.items():
         if source in out:
             out[target] = out[source]
+    if "needsClarification" in out:
+        out["needsClarification"] = bool(out["needsClarification"])
     return out
 
 
@@ -762,12 +771,20 @@ async def classify_route(
     payload: RouterClassifyRequest,
     current_subject: str = Depends(get_current_jwt_subject),
 ) -> dict[str, Any]:
+    classification = classify_objective(
+        payload.objective,
+        project_type = payload.project_type,
+    )
+    log = cognix_db.create_router_log(
+        current_subject,
+        payload.objective,
+        project_type = payload.project_type,
+        classification = classification,
+    )
     return {
         "username": current_subject,
-        "classification": classify_objective(
-            payload.objective,
-            project_type = payload.project_type,
-        ),
+        "classification": classification,
+        "logId": log.get("id"),
     }
 
 
@@ -1490,6 +1507,12 @@ async def admin_security_threats(current_subject: str = Depends(get_current_jwt_
             for item in cognix_db.KNOWN_ATTACK_SIGNATURES
         ],
     }
+
+
+@router.get("/admin/router-logs")
+async def admin_router_logs(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    return {"logs": _rows(cognix_db.list_router_logs(limit = 500))}
 
 
 @router.get("/admin/reports")
