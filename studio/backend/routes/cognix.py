@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from auth import storage as auth_storage
 from auth.authentication import get_current_jwt_subject
 from core.cognix import cache_manager as cognix_cache_manager
+from core.cognix import context_manager as cognix_context_manager
 from core.cognix import hardware as cognix_hardware
 from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import registry as cognix_registry
@@ -58,6 +59,11 @@ class BanStatusRequest(BaseModel):
 
 class ContextMemoryRequest(BaseModel):
     content: str = Field("", max_length = 120000)
+
+
+class ContextPackRequest(BaseModel):
+    objective: str | None = Field(None, max_length = 4000)
+    project_id: str | None = Field(None, max_length = 160)
 
 
 class LibraryItemRequest(BaseModel):
@@ -1023,6 +1029,33 @@ async def update_my_context_memory(
 ) -> dict[str, Any]:
     memory = cognix_db.update_context_memory(current_subject, payload.content, current_subject)
     return {"memory": _row(memory)}
+
+
+@router.post("/context/pack")
+async def build_context_pack(
+    payload: ContextPackRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    warnings: list[str] = []
+    project: dict[str, Any] | None = None
+    if payload.project_id:
+        project = get_chat_project(
+            payload.project_id,
+            owner_username = current_subject,
+            include_all = False,
+        )
+        if project is None or project.get("archived"):
+            project = None
+            warnings.append("Project context unavailable for this user.")
+
+    return cognix_context_manager.build_context_packet(
+        current_subject = current_subject,
+        user_memory = cognix_db.get_context_memory(current_subject),
+        project = project,
+        project_id = payload.project_id,
+        objective = payload.objective,
+        warnings = warnings,
+    )
 
 
 @router.get("/library")

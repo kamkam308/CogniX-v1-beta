@@ -137,6 +137,34 @@ export interface CogniXExecutionPlan {
   logId: string | number | null;
 }
 
+export interface CogniXContextSection {
+  id: string;
+  label: string;
+  source: string;
+  priority: number;
+  content: string;
+  charCount: number;
+  included: boolean;
+  truncated: boolean;
+}
+
+export interface CogniXContextPack {
+  username: string;
+  contextManagerVersion: string;
+  mode: string;
+  projectId: string | null;
+  objectiveExcerpt: string;
+  sections: CogniXContextSection[];
+  systemInstruction: string;
+  includedSectionIds: string[];
+  warnings: string[];
+  sideEffects: {
+    modelLoad: boolean;
+    generation: boolean;
+    networkModelCall: boolean;
+  };
+}
+
 export async function classifyCogniXObjective(payload: {
   objective: string;
   projectType?: string | null;
@@ -151,6 +179,21 @@ export async function classifyCogniXObjective(payload: {
     body: JSON.stringify({
       objective: payload.objective,
       project_type: payload.projectType ?? null,
+    }),
+  });
+  return parseJsonOrThrow(response);
+}
+
+export async function buildCogniXContextPack(payload: {
+  objective?: string | null;
+  projectId?: string | null;
+}): Promise<CogniXContextPack> {
+  const response = await authFetch("/api/cognix/context/pack", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      objective: payload.objective ?? null,
+      project_id: payload.projectId ?? null,
     }),
   });
   return parseJsonOrThrow(response);

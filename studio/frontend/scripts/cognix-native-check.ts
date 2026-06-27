@@ -56,8 +56,10 @@ const checks: Check[] = [
   {
     file: "src/features/chat/api/chat-api.ts",
     includes: [
+      "CogniXContextPack",
       "CogniXExecutionPlan",
       'CHAT_HISTORY_UPDATED_EVENT = "cognix-chat-history-updated"',
+      'authFetch("/api/cognix/context/pack"',
       'authFetch("/api/cognix/orchestrator/plan"',
     ],
     excludes: [
@@ -67,6 +69,8 @@ const checks: Check[] = [
   {
     file: "src/features/chat/api/chat-adapter.ts",
     includes: [
+      "buildCogniXContextPack",
+      "buildLatestCogniXContextInstruction",
       "planCogniXExecution",
       "planLatestCogniXObjective",
       "willLoadModel",
@@ -88,9 +92,20 @@ const checks: Check[] = [
   {
     file: "../backend/routes/cognix.py",
     includes: [
+      '@router.post("/context/pack")',
       '@router.post("/orchestrator/plan")',
       '"runtimeType": "dry_run"',
       '"runtimeError": None',
+    ],
+  },
+  {
+    file: "../backend/core/cognix/context_manager.py",
+    includes: [
+      'CONTEXT_MANAGER_VERSION = "cognix_context_manager_v1"',
+      '"systemInstruction"',
+      '"user_memory"',
+      '"project_instructions"',
+      '"networkModelCall": False',
     ],
   },
   {
@@ -106,6 +121,8 @@ const checks: Check[] = [
   {
     file: "../backend/tests/test_cognix_router.py",
     includes: [
+      "test_context_manager_builds_bounded_context_packet",
+      "test_context_pack_endpoint_combines_user_memory_and_project_instructions",
       "test_orchestrator_builds_dry_run_plan_without_loading",
       "test_orchestrator_plan_endpoint_logs_dry_run_decision",
       "willLoadModel",

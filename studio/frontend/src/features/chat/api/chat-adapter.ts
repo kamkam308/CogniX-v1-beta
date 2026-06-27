@@ -60,7 +60,6 @@ import type {
 import type { ChatModelSummary } from "../types/runtime";
 import {
   getStoredChatThread,
-  getStoredChatProject,
   listStoredChatThreads,
   updateStoredChatThread,
 } from "../utils/chat-history-storage";
@@ -72,6 +71,7 @@ import {
 import {
   generateAudio,
   getProjectDefaultModel,
+  buildCogniXContextPack,
   listCachedGguf,
   listCachedModels,
   listGgufVariants,
@@ -572,6 +572,24 @@ async function planLatestCogniXObjective(
     return route;
   } catch {
     return null;
+  }
+}
+
+async function buildLatestCogniXContextInstruction(
+  messages: RunMessages,
+  projectId: string | null,
+): Promise<string> {
+  const objective = findLatestUserObjective(messages);
+  try {
+    const contextPack = await buildCogniXContextPack({
+      objective: objective || null,
+      projectId,
+    });
+    return typeof contextPack.systemInstruction === "string"
+      ? contextPack.systemInstruction.trim()
+      : "";
+  } catch {
+    return "";
   }
 }
 
@@ -1163,21 +1181,6 @@ async function resolveUseAdapter(
   } catch {
     return undefined;
   }
-}
-
-async function resolveProjectInstructions(
-  threadId: string | undefined,
-): Promise<string> {
-  const projectId = await resolveProjectId(threadId);
-  if (!projectId) {
-    return "";
-  }
-
-  const project = await getStoredChatProject(projectId).catch(() => null);
-  if (!project || project.archived) {
-    return "";
-  }
-  return project.instructions?.trim() ?? "";
 }
 
 async function resolveProjectId(
@@ -1931,12 +1934,10 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
 
       const safeSystemPrompt =
         typeof params.systemPrompt === "string" ? params.systemPrompt : "";
-      const projectInstructions =
-        await resolveProjectInstructions(resolvedThreadId);
+      const cognixContextInstruction =
+        await buildLatestCogniXContextInstruction(messages, ragProjectId);
       const combinedSystemPrompt = [
-        projectInstructions
-          ? `<project_instructions>\n${projectInstructions}\n</project_instructions>`
-          : "",
+        cognixContextInstruction,
         safeSystemPrompt.trim(),
       ]
         .filter(Boolean)
