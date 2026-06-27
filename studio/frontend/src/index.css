@@ -582,10 +582,13 @@
 
 	.cognix-logo-mark {
 		filter: none;
+		transform: scale(1.04);
+		transform-origin: center;
 	}
 
-	.dark .cognix-logo-mark {
-		filter: brightness(0) invert(1);
+	.dark .cognix-logo-mark,
+	html.dark .cognix-logo-mark {
+		filter: brightness(0) saturate(100%) invert(1) contrast(1.08);
 	}
 
 	/* Standard icon size — drives every nav/menu/action-bar icon
