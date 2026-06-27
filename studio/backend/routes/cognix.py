@@ -413,7 +413,11 @@ def _provider_summary() -> dict[str, Any]:
     base_url = str(default_provider.get("baseUrl") or COGNIX_DEFAULT_OLLAMA_BASE_URL)
     reachable, models = _ollama_models(base_url)
     has_default_model = COGNIX_DEFAULT_OLLAMA_MODEL_ID in models
-    recommended_model = COGNIX_DEFAULT_OLLAMA_MODEL_ID if has_default_model else (models[0] if models else COGNIX_DEFAULT_OLLAMA_MODEL_ID)
+    recommended_model = (
+        COGNIX_DEFAULT_OLLAMA_MODEL_ID
+        if has_default_model
+        else (models[0] if models else COGNIX_DEFAULT_OLLAMA_MODEL_ID)
+    )
     return {
         "configured": configured,
         "ollama": {

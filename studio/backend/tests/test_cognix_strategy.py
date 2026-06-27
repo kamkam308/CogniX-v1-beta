@@ -106,6 +106,26 @@ def test_strategy_recommends_default_ollama_qwen(client, monkeypatch):
     assert body["providers"]["ollama"]["hasDefaultModel"] is True
 
 
+def test_strategy_keeps_qwen_available_when_memory_is_tight(client, monkeypatch):
+    seed_accounts()
+    headers = login_headers(client, "alice", "alice-password-123")
+    monkeypatch.setattr(cognix_routes, "_hardware_profile", lambda: _cpu_hardware(available_gb = 3.3))
+    monkeypatch.setattr(
+        cognix_routes,
+        "_ollama_models",
+        lambda _base_url: (True, [cognix_routes.COGNIX_DEFAULT_OLLAMA_MODEL_ID]),
+    )
+
+    response = client.get("/api/cognix/strategy", headers = headers)
+
+    assert response.status_code == 200
+    recommendation = response.json()["recommendation"]
+    assert recommendation["readiness"] == "ready_with_caution"
+    assert recommendation["modelId"] == cognix_routes.COGNIX_DEFAULT_OLLAMA_MODEL_ID
+    assert recommendation["memoryFit"]["level"] == "tight"
+    assert any("RAM disponible serree" in warning for warning in recommendation["warnings"])
+
+
 def test_strategy_reports_ollama_service_unreachable(client, monkeypatch):
     seed_accounts()
     headers = login_headers(client, "alice", "alice-password-123")
