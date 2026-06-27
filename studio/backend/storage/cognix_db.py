@@ -21,6 +21,8 @@ _schema_ready = False
 DEVELOPER_MODE_PERMISSION = "developer_mode"
 AUDIT_LOG_RETENTION_LIMIT = 5000
 PERMISSION_KEY_PATTERN = re.compile(r"^[a-z0-9:_-]{1,160}$")
+RATE_LIMIT_KEY_PATTERN = re.compile(r"^[a-z0-9:_-]{1,160}$")
+RATE_LIMIT_EVENT_RETENTION_DAYS = 7
 
 KNOWN_ATTACK_SIGNATURES: list[dict[str, str]] = [
     {
@@ -178,6 +180,19 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
             ON cognix_audit_logs(username, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_cognix_audit_action
             ON cognix_audit_logs(action, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_rate_limit_events (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            rate_limit_key TEXT NOT NULL,
+            action TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_rate_limit_user_key_created
+            ON cognix_rate_limit_events(username, rate_limit_key, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_rate_limit_created
+            ON cognix_rate_limit_events(created_at DESC);
 
         CREATE TABLE IF NOT EXISTS cognix_router_logs (
             id TEXT PRIMARY KEY,
@@ -703,6 +718,102 @@ def list_security_events(limit: int = 200) -> list[dict[str, Any]]:
             (max(1, min(int(limit), 500)),),
         ).fetchall()
         return _rows_to_dicts(rows)
+    finally:
+        conn.close()
+
+
+def _normalize_rate_limit_key(rate_limit_key: str) -> str:
+    normalized = (rate_limit_key or "").strip().lower()
+    if not RATE_LIMIT_KEY_PATTERN.fullmatch(normalized):
+        raise ValueError("Invalid rate limit key")
+    return normalized
+
+
+def _prune_rate_limit_events(conn: sqlite3.Connection) -> None:
+    cutoff = (datetime.now(timezone.utc) - timedelta(days = RATE_LIMIT_EVENT_RETENTION_DAYS)).isoformat()
+    conn.execute(
+        "DELETE FROM cognix_rate_limit_events WHERE created_at < ?",
+        (cutoff,),
+    )
+
+
+def check_rate_limit(
+    *,
+    username: str,
+    rate_limit_key: str,
+    action: str,
+    window_seconds: int,
+    max_events: int,
+    consume: bool = True,
+) -> dict[str, Any]:
+    normalized_key = _normalize_rate_limit_key(rate_limit_key)
+    normalized_window = max(1, int(window_seconds))
+    normalized_max = max(1, int(max_events))
+    now_dt = datetime.now(timezone.utc)
+    created_at = now_dt.isoformat()
+    window_start = (now_dt - timedelta(seconds = normalized_window)).isoformat()
+    conn = get_connection()
+    try:
+        _prune_rate_limit_events(conn)
+        used = int(
+            conn.execute(
+                """
+                SELECT COUNT(*) FROM cognix_rate_limit_events
+                WHERE username = ?
+                  AND rate_limit_key = ?
+                  AND created_at >= ?
+                """,
+                (username, normalized_key, window_start),
+            ).fetchone()[0]
+        )
+        allowed = used < normalized_max
+        consumed = False
+        if allowed and consume:
+            event_id = _new_id("rl")
+            conn.execute(
+                """
+                INSERT INTO cognix_rate_limit_events
+                    (id, username, rate_limit_key, action, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (event_id, username, normalized_key, action.strip()[:160], created_at),
+            )
+            used += 1
+            consumed = True
+
+        oldest = conn.execute(
+            """
+            SELECT created_at FROM cognix_rate_limit_events
+            WHERE username = ?
+              AND rate_limit_key = ?
+              AND created_at >= ?
+            ORDER BY created_at ASC
+            LIMIT 1
+            """,
+            (username, normalized_key, window_start),
+        ).fetchone()
+        if oldest is not None:
+            try:
+                resets_at = (
+                    datetime.fromisoformat(str(oldest["created_at"]))
+                    + timedelta(seconds = normalized_window)
+                ).isoformat()
+            except ValueError:
+                resets_at = (now_dt + timedelta(seconds = normalized_window)).isoformat()
+        else:
+            resets_at = (now_dt + timedelta(seconds = normalized_window)).isoformat()
+
+        conn.commit()
+        return {
+            "allowed": allowed,
+            "rateLimitKey": normalized_key,
+            "windowSeconds": normalized_window,
+            "maxEvents": normalized_max,
+            "used": used,
+            "remaining": max(0, normalized_max - used),
+            "consumed": consumed,
+            "resetsAt": resets_at,
+        }
     finally:
         conn.close()
 

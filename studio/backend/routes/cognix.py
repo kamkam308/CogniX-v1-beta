@@ -911,6 +911,31 @@ async def plan_tool_action(
         is_admin = is_admin,
         has_developer_mode = has_developer_mode,
     )
+    rate_limit = None
+    rate_limit_policy = plan.get("rateLimitPolicy")
+    rate_limit_key = plan.get("rateLimitKey")
+    if isinstance(rate_limit_policy, dict) and rate_limit_key:
+        try:
+            rate_limit = cognix_db.check_rate_limit(
+                username = current_subject,
+                rate_limit_key = str(rate_limit_key),
+                action = "tool_action_planned",
+                window_seconds = int(rate_limit_policy.get("windowSeconds") or 60),
+                max_events = int(rate_limit_policy.get("maxEvents") or 60),
+                consume = True,
+            )
+        except ValueError:
+            rate_limit = {
+                "allowed": False,
+                "rateLimitKey": rate_limit_key,
+                "reason": "Invalid rate limit key",
+            }
+        plan["rateLimit"] = rate_limit
+        if not rate_limit.get("allowed"):
+            plan["allowed"] = False
+            plan["status"] = "rate_limited"
+            plan["reason"] = "Tool action rate limit reached."
+
     audit = cognix_db.create_audit_log(
         username = current_subject,
         actor_username = current_subject,
@@ -926,6 +951,7 @@ async def plan_tool_action(
             "riskLevel": plan.get("riskLevel"),
             "requiresConfirmation": plan.get("requiresConfirmation"),
             "missingPermissions": plan.get("missingPermissions", []),
+            "rateLimit": rate_limit,
             "sideEffects": plan.get("sideEffects", {}),
         },
     )

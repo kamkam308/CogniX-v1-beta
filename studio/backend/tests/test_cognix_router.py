@@ -304,6 +304,7 @@ def test_tool_registry_declares_permissions_and_guardrails():
     assert registry["mode"] == "declarative_guarded"
     assert registry["summary"]["executionEnabled"] is False
     assert registry["globalPolicies"]["frontendDirectExecutionAllowed"] is False
+    assert registry["globalPolicies"]["rateLimitsEnabled"] is True
     assert registry["sideEffects"]["toolExecution"] is False
 
     tools = {tool["id"]: tool for tool in registry["tools"]}
@@ -315,6 +316,10 @@ def test_tool_registry_declares_permissions_and_guardrails():
     assert send_mail["riskLevel"] == "high"
     assert send_mail["requiresConfirmation"] is True
     assert send_mail["auditRequired"] is True
+    assert cognix_tool_registry.rate_limit_policy_for_key(send_mail["rateLimitKey"]) == {
+        "windowSeconds": 300,
+        "maxEvents": 5,
+    }
 
     kali_actions = {action["id"]: action for action in tools["kali-isolated"]["actions"]}
     assert kali_actions["active_test"]["sandboxRequired"] is True
@@ -339,6 +344,8 @@ def test_tool_plan_endpoint_allows_safe_declared_action_and_logs_audit():
     assert body["requiresConfirmation"] is False
     assert body["sideEffects"]["toolExecution"] is False
     assert body["sideEffects"]["networkToolCall"] is False
+    assert body["rateLimit"]["allowed"] is True
+    assert body["rateLimit"]["rateLimitKey"] == "codex:plan"
     assert body["auditLogId"].startswith("aud_")
 
     admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
@@ -350,7 +357,77 @@ def test_tool_plan_endpoint_allows_safe_declared_action_and_logs_audit():
     assert log["resourceType"] == "cognix_tool_action"
     assert log["metadata"]["toolId"] == "codex-secure-agent"
     assert log["metadata"]["actionId"] == "plan_feature"
+    assert log["metadata"]["rateLimit"]["allowed"] is True
     assert log["metadata"]["sideEffects"]["toolExecution"] is False
+
+
+def test_tool_rate_limit_storage_blocks_after_capacity():
+    seed_accounts()
+
+    first = cognix_db.check_rate_limit(
+        username = "alice",
+        rate_limit_key = "codex:plan",
+        action = "unit_test",
+        window_seconds = 60,
+        max_events = 2,
+    )
+    second = cognix_db.check_rate_limit(
+        username = "alice",
+        rate_limit_key = "codex:plan",
+        action = "unit_test",
+        window_seconds = 60,
+        max_events = 2,
+    )
+    third = cognix_db.check_rate_limit(
+        username = "alice",
+        rate_limit_key = "codex:plan",
+        action = "unit_test",
+        window_seconds = 60,
+        max_events = 2,
+    )
+
+    assert first["allowed"] is True
+    assert first["remaining"] == 1
+    assert second["allowed"] is True
+    assert second["remaining"] == 0
+    assert third["allowed"] is False
+    assert third["remaining"] == 0
+    assert third["consumed"] is False
+
+
+def test_tool_plan_applies_rate_limit_guard(monkeypatch):
+    seed_accounts()
+    monkeypatch.setitem(
+        cognix_tool_registry.RATE_LIMIT_POLICIES,
+        "codex:plan",
+        {"windowSeconds": 60, "maxEvents": 1},
+    )
+
+    first = run_async(
+        cognix_routes.plan_tool_action(
+            cognix_routes.ToolActionPlanRequest(
+                tool_id = "codex-secure-agent",
+                action_id = "plan_feature",
+            ),
+            current_subject = "alice",
+        )
+    )
+    second = run_async(
+        cognix_routes.plan_tool_action(
+            cognix_routes.ToolActionPlanRequest(
+                tool_id = "codex-secure-agent",
+                action_id = "plan_feature",
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    assert first["allowed"] is True
+    assert first["rateLimit"]["allowed"] is True
+    assert second["allowed"] is False
+    assert second["status"] == "rate_limited"
+    assert second["rateLimit"]["allowed"] is False
+    assert second["sideEffects"]["toolExecution"] is False
 
 
 def test_tool_plan_blocks_disabled_connectors_before_permissions():

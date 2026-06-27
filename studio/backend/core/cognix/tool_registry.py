@@ -27,6 +27,30 @@ IMPLICIT_AUTHENTICATED_PERMISSION = "authenticated"
 DEVELOPER_MODE_PERMISSION = "developer_mode"
 ADMIN_PERMISSION = "admin"
 
+DEFAULT_RATE_LIMIT_POLICY = {
+    "windowSeconds": 60,
+    "maxEvents": 60,
+}
+
+RATE_LIMIT_POLICIES: dict[str, dict[str, int]] = {
+    "github:read": {"windowSeconds": 60, "maxEvents": 120},
+    "github:write": {"windowSeconds": 60, "maxEvents": 20},
+    "github:merge": {"windowSeconds": 300, "maxEvents": 3},
+    "drive:read": {"windowSeconds": 60, "maxEvents": 120},
+    "drive:delete": {"windowSeconds": 300, "maxEvents": 3},
+    "gmail:read": {"windowSeconds": 60, "maxEvents": 120},
+    "gmail:draft": {"windowSeconds": 60, "maxEvents": 30},
+    "gmail:send": {"windowSeconds": 300, "maxEvents": 5},
+    "notion:read": {"windowSeconds": 60, "maxEvents": 120},
+    "notion:write": {"windowSeconds": 60, "maxEvents": 30},
+    "rag:index": {"windowSeconds": 300, "maxEvents": 12},
+    "codex:plan": {"windowSeconds": 60, "maxEvents": 120},
+    "codex:write": {"windowSeconds": 300, "maxEvents": 20},
+    "codex:merge": {"windowSeconds": 600, "maxEvents": 2},
+    "security:scan": {"windowSeconds": 600, "maxEvents": 5},
+    "security:active": {"windowSeconds": 1800, "maxEvents": 1},
+}
+
 
 TOOL_MANIFESTS: list[dict[str, Any]] = [
     {
@@ -338,6 +362,7 @@ def build_tool_registry() -> dict[str, Any]:
             "humanConfirmationForRiskAtLeast": "medium",
             "adminOnlyForRiskAtLeast": "critical",
             "auditRequired": True,
+            "rateLimitsEnabled": True,
             "secretsMustStayServerSide": True,
             "frontendDirectExecutionAllowed": False,
         },
@@ -347,6 +372,13 @@ def build_tool_registry() -> dict[str, Any]:
             "externalWrite": False,
         },
     }
+
+
+def rate_limit_policy_for_key(rate_limit_key: str | None) -> dict[str, int] | None:
+    if not rate_limit_key:
+        return None
+    policy = RATE_LIMIT_POLICIES.get(rate_limit_key.strip().lower())
+    return deepcopy(policy or DEFAULT_RATE_LIMIT_POLICY)
 
 
 def find_tool_action(tool_id: str, action_id: str) -> tuple[dict[str, Any], dict[str, Any]] | None:
@@ -411,6 +443,7 @@ def plan_tool_action(
     allowed = enabled and not missing
     risk_level = str(action.get("riskLevel") or "medium")
     mode = str(action.get("mode") or "read")
+    rate_limit_key = action.get("rateLimitKey")
     return {
         "registryVersion": TOOL_REGISTRY_VERSION,
         "username": username,
@@ -436,7 +469,10 @@ def plan_tool_action(
         "requiresConfirmation": bool(action.get("requiresConfirmation")),
         "auditRequired": bool(action.get("auditRequired", True)),
         "sandboxRequired": bool(action.get("sandboxRequired")),
-        "rateLimitKey": action.get("rateLimitKey"),
+        "rateLimitKey": rate_limit_key,
+        "rateLimitPolicy": rate_limit_policy_for_key(
+            str(rate_limit_key) if rate_limit_key else None
+        ),
         "secretsRequired": bool(action.get("secretsRequired")),
         "dataIsolation": tool.get("dataIsolation"),
         "sideEffects": {
