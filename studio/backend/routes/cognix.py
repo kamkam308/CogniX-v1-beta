@@ -20,6 +20,7 @@ from auth import storage as auth_storage
 from auth.authentication import get_current_jwt_subject
 from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import hardware as cognix_hardware
+from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import registry as cognix_registry
 from core.cognix import recommender as cognix_recommender
 from core.cognix.router import classify_objective
@@ -128,6 +129,12 @@ class AgentRunRequest(BaseModel):
 class RouterClassifyRequest(BaseModel):
     objective: str = Field(..., min_length = 1, max_length = 4000)
     project_type: str | None = Field(None, max_length = 80)
+
+
+class OrchestratorPlanRequest(BaseModel):
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    project_type: str | None = Field(None, max_length = 80)
+    project_id: str | None = Field(None, max_length = 160)
 
 
 class NewsRefreshRequest(BaseModel):
@@ -896,6 +903,37 @@ async def classify_route(
     return {
         "username": current_subject,
         "classification": classification,
+        "logId": log.get("id"),
+    }
+
+
+@router.post("/orchestrator/plan")
+async def orchestrator_plan(
+    payload: OrchestratorPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    runtime = {
+        "runtimeType": "dry_run",
+        "activeModel": None,
+        "loadedModels": [],
+        "loadingModels": [],
+    }
+    plan = cognix_orchestrator.build_execution_plan(
+        payload.objective,
+        current_subject = current_subject,
+        project_type = payload.project_type,
+        project_id = payload.project_id,
+        runtime_snapshot = runtime,
+    )
+    log = cognix_db.create_router_log(
+        current_subject,
+        payload.objective,
+        project_type = payload.project_type,
+        classification = plan["classification"],
+    )
+    return {
+        **plan,
+        "runtimeError": None,
         "logId": log.get("id"),
     }
 

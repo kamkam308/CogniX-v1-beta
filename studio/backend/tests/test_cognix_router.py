@@ -1,16 +1,20 @@
+import asyncio
+import inspect
 import secrets
 import sys
 from pathlib import Path
 
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from fastapi import HTTPException
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(_BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(_BACKEND_ROOT))
 
 from auth import storage
+from auth.authentication import get_current_jwt_subject
+from core.cognix import cache_manager as cognix_cache_manager
+from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix.router import classify_objective
 from routes import auth as auth_routes
 from routes import cognix as cognix_routes
@@ -29,23 +33,17 @@ def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "_api_key_pbkdf2_salt_cache", None)
     monkeypatch.setattr(cognix_db, "_schema_ready", False)
     monkeypatch.setattr(studio_db_storage, "_schema_ready", False)
+    cognix_cache_manager.reset_cache_state()
     auth_routes._LOGIN_BUCKETS.clear()
     auth_routes._LOGIN_IP_BUCKETS.clear()
     auth_routes._REGISTER_IP_BUCKETS.clear()
     yield
     cognix_db._schema_ready = False
     studio_db_storage._schema_ready = False
+    cognix_cache_manager.reset_cache_state()
     auth_routes._LOGIN_BUCKETS.clear()
     auth_routes._LOGIN_IP_BUCKETS.clear()
     auth_routes._REGISTER_IP_BUCKETS.clear()
-
-
-@pytest.fixture
-def client():
-    app = FastAPI()
-    app.include_router(auth_routes.router, prefix = "/api/auth")
-    app.include_router(cognix_routes.router, prefix = "/api/cognix")
-    return TestClient(app)
 
 
 def seed_accounts() -> None:
@@ -62,13 +60,62 @@ def seed_accounts() -> None:
     )
 
 
-def login_headers(client: TestClient, username: str, password: str) -> dict[str, str]:
-    response = client.post(
-        "/api/auth/login",
-        json = {"username": username, "password": password},
-    )
-    assert response.status_code == 200
-    return {"Authorization": f"Bearer {response.json()['access_token']}"}
+def run_async(coro):
+    return asyncio.run(coro)
+
+
+def stub_hardware_profile() -> dict[str, object]:
+    return {
+        "deviceBackend": "cpu",
+        "cpuCount": 8,
+        "memory": {
+            "totalGb": 16.0,
+            "availableGb": 10.0,
+        },
+        "gpu": {
+            "available": False,
+            "devices": [],
+        },
+    }
+
+
+def stub_recommendation(hardware: dict[str, object]) -> dict[str, object]:
+    return {
+        "providers": {
+            "configured": [
+                {
+                    "id": "ollama-local",
+                    "type": "ollama",
+                    "name": "Ollama Local",
+                    "baseUrl": "http://127.0.0.1:11434/v1",
+                    "enabled": True,
+                }
+            ],
+            "ollama": {
+                "configured": True,
+                "reachable": True,
+                "hasDefaultModel": True,
+            },
+        },
+        "recommendation": {
+            "readiness": "ready",
+            "executionMode": "local",
+            "providerId": "ollama-local",
+            "providerType": "ollama",
+            "providerName": "Ollama Local",
+            "baseUrl": "http://127.0.0.1:11434/v1",
+            "modelId": "huihui_ai/qwen3-vl-abliterated:4b-instruct",
+            "modelLabel": "Qwen 4B local via Ollama",
+            "memoryFit": {
+                "level": "ok",
+                "estimatedRamGb": 4.4,
+                "label": "Compatible avec la memoire actuellement disponible",
+            },
+            "confidence": 0.82,
+            "warnings": [],
+            "reason": "Machine test compatible avec un petit modele Ollama local.",
+        },
+    }
 
 
 def test_router_selects_code_for_python_bug():
@@ -89,27 +136,60 @@ def test_router_flags_close_math_physics_domains():
     assert classification["scores"]["physique"] > 0.4
 
 
-def test_router_endpoint_requires_authentication(client):
-    response = client.post(
-        "/api/cognix/router/classify",
-        json = {"objective": "Corrige ce bug Python"},
+def test_orchestrator_builds_dry_run_plan_without_loading(monkeypatch):
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
     )
 
-    assert response.status_code in {401, 403}
+    plan = cognix_orchestrator.build_execution_plan(
+        "Corrige ce bug Python dans mon backend API",
+        current_subject = "alice",
+        project_type = "code",
+        runtime_snapshot = {
+            "runtimeType": "ollama",
+            "activeModel": None,
+            "loadedModels": [],
+            "loadingModels": [],
+        },
+    )
+
+    assert plan["mode"] == "dry_run"
+    assert plan["classification"]["selectedDomain"] == "code"
+    assert plan["executionStrategy"]["selectedModelLabel"] == "Qwen 4B local via Ollama"
+    assert plan["executionStrategy"]["domainModelLabel"] == "CogniX Code 4B"
+    assert plan["executionStrategy"]["willLoadModel"] is False
+    assert plan["executionStrategy"]["willGenerate"] is False
+    assert plan["sideEffects"]["modelLoad"] is False
+    assert plan["sideEffects"]["generation"] is False
+    assert any(step["id"] == "dry_run_guard" for step in plan["steps"])
 
 
-def test_router_endpoint_uses_project_hint(client):
+def test_router_endpoint_declares_jwt_dependency():
+    current_subject = inspect.signature(cognix_routes.classify_route).parameters["current_subject"]
+
+    assert current_subject.default.dependency is get_current_jwt_subject
+
+
+def test_router_endpoint_uses_project_hint():
     seed_accounts()
-    headers = login_headers(client, "alice", "alice-password-123")
 
-    response = client.post(
-        "/api/cognix/router/classify",
-        headers = headers,
-        json = {"objective": "Explique ce probleme simplement", "project_type": "code"},
+    body = run_async(
+        cognix_routes.classify_route(
+            cognix_routes.RouterClassifyRequest(
+                objective = "Explique ce probleme simplement",
+                project_type = "code",
+            ),
+            current_subject = "alice",
+        )
     )
 
-    assert response.status_code == 200
-    body = response.json()
     assert body["username"] == "alice"
     assert body["logId"].startswith("rtl_")
     classification = body["classification"]
@@ -118,28 +198,64 @@ def test_router_endpoint_uses_project_hint(client):
     assert classification["recommendedModelLabel"] == "CogniX Code 4B"
 
 
-def test_router_decisions_are_logged_for_admin_review(client):
+def test_orchestrator_plan_endpoint_logs_dry_run_decision(monkeypatch):
     seed_accounts()
-    admin_headers = login_headers(client, storage.DEFAULT_ADMIN_USERNAME, "admin-password-123")
-    user_headers = login_headers(client, "alice", "alice-password-123")
-
-    created = client.post(
-        "/api/cognix/router/classify",
-        headers = user_headers,
-        json = {"objective": "Corrige ce bug Python dans mon backend API", "project_type": "code"},
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
     )
-    assert created.status_code == 200
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+    body = run_async(
+        cognix_routes.orchestrator_plan(
+            cognix_routes.OrchestratorPlanRequest(
+                objective = "Corrige ce bug Python dans mon backend API",
+                project_type = "code",
+                project_id = "project-local",
+            ),
+            current_subject = "alice",
+        )
+    )
 
-    user_read = client.get("/api/cognix/admin/router-logs", headers = user_headers)
-    assert user_read.status_code == 403
+    assert body["username"] == "alice"
+    assert body["logId"].startswith("rtl_")
+    assert body["mode"] == "dry_run"
+    assert body["classification"]["selectedDomain"] == "code"
+    assert body["executionStrategy"]["willLoadModel"] is False
+    assert body["sideEffects"]["networkModelCall"] is False
 
-    admin_read = client.get("/api/cognix/admin/router-logs", headers = admin_headers)
+    admin_read = run_async(cognix_routes.admin_router_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    logs = admin_read["logs"]
+    assert len(logs) == 1
+    assert logs[0]["id"] == body["logId"]
+    assert logs[0]["selectedDomain"] == "code"
 
-    assert admin_read.status_code == 200
-    logs = admin_read.json()["logs"]
+
+def test_router_decisions_are_logged_for_admin_review():
+    seed_accounts()
+    created = run_async(
+        cognix_routes.classify_route(
+            cognix_routes.RouterClassifyRequest(
+                objective = "Corrige ce bug Python dans mon backend API",
+                project_type = "code",
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    with pytest.raises(HTTPException) as user_read:
+        run_async(cognix_routes.admin_router_logs(current_subject = "alice"))
+    assert user_read.value.status_code == 403
+
+    admin_read = run_async(cognix_routes.admin_router_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    logs = admin_read["logs"]
     assert len(logs) == 1
     log = logs[0]
-    assert log["id"] == created.json()["logId"]
+    assert log["id"] == created["logId"]
     assert log["username"] == "alice"
     assert log["selectedDomain"] == "code"
     assert log["modelLabel"] == "CogniX Code 4B"

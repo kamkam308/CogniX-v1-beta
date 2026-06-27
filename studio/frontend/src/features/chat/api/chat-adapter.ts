@@ -70,16 +70,15 @@ import {
   parseAssistantContent,
 } from "../utils/parse-assistant-content";
 import {
-  classifyCogniXObjective,
   generateAudio,
   getProjectDefaultModel,
   listCachedGguf,
   listCachedModels,
   listGgufVariants,
   loadModel,
+  planCogniXExecution,
   streamChatCompletions,
   validateModel,
-  type CogniXRouterClassification,
   type ProjectDefaultModel,
 } from "./chat-api";
 import {
@@ -509,47 +508,68 @@ function findLatestUserObjective(messages: RunMessages): string {
   return "";
 }
 
-function formatCogniXRouteSummary(
-  classification: CogniXRouterClassification | null,
-): string {
-  if (!classification) {
+type CogniXRouteSummary = Pick<
+  CogniXRouteSnapshot,
+  "label" | "recommendedModelLabel" | "confidence" | "executionStatus"
+>;
+
+function formatCogniXRouteSummary(route: CogniXRouteSummary | null): string {
+  if (!route) {
     return "CogniX Auto could not classify this request yet.";
   }
   const confidence =
-    typeof classification.confidence === "number"
-      ? ` (${Math.round(classification.confidence * 100)}%)`
+    typeof route.confidence === "number"
+      ? ` (${Math.round(route.confidence * 100)}%)`
       : "";
-  return `${classification.label} -> ${classification.recommendedModelLabel}${confidence}`;
+  const status = route.executionStatus ? ` / ${route.executionStatus}` : "";
+  return `${route.label} -> ${route.recommendedModelLabel}${confidence}${status}`;
 }
 
-async function classifyLatestCogniXObjective(
+async function planLatestCogniXObjective(
   messages: RunMessages,
-  options: { showToast?: boolean } = {},
-): Promise<CogniXRouterClassification | null> {
+  options: { showToast?: boolean; projectId?: string | null } = {},
+): Promise<CogniXRouteSnapshot | null> {
   const objective = findLatestUserObjective(messages);
   if (!objective) {
     return null;
   }
   try {
-    const { classification } = await classifyCogniXObjective({ objective });
+    const plan = await planCogniXExecution({
+      objective,
+      projectId: options.projectId ?? null,
+    });
+    const classification = plan.classification;
+    const strategy = plan.executionStrategy;
     const route: CogniXRouteSnapshot = {
       selectedDomain: classification.selectedDomain,
       label: classification.label,
-      recommendedModelLabel: classification.recommendedModelLabel,
+      recommendedModelLabel:
+        strategy.selectedModelLabel ??
+        strategy.selectedModelId ??
+        classification.recommendedModelLabel,
+      domainModelLabel:
+        strategy.domainModelLabel ?? classification.recommendedModelLabel,
+      executionStatus: strategy.status,
+      executionMode: strategy.executionMode ?? plan.mode,
+      willLoadModel: strategy.willLoadModel,
+      willGenerate: strategy.willGenerate,
+      planMode: plan.mode,
+      planSteps: plan.steps.map((step) => step.label),
+      warnings: plan.warnings,
       confidence: classification.confidence,
       needsClarification: classification.needsClarification,
       routingMode: classification.routingMode,
-      reason: classification.reason,
+      reason: strategy.reason || classification.reason,
       createdAt: Date.now(),
     };
     useChatRuntimeStore.getState().setLatestCogniXRoute(route);
     if (options.showToast !== false) {
       toast("CogniX Auto", {
-        description: formatCogniXRouteSummary(classification),
+        description: formatCogniXRouteSummary(route),
         duration: 2800,
       });
     }
-    return classification;
+    return route;
   } catch {
     return null;
   }
@@ -1677,8 +1697,9 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
       }
 
       const runtimeBeforeRoute = useChatRuntimeStore.getState();
-      const cognixRoute = await classifyLatestCogniXObjective(messages, {
+      const cognixRoute = await planLatestCogniXObjective(messages, {
         showToast: !runtimeBeforeRoute.params.checkpoint,
+        projectId: ragProjectId,
       });
 
       if (!useChatRuntimeStore.getState().params.checkpoint) {

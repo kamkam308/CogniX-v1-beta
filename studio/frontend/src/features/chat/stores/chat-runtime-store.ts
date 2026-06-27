@@ -205,6 +205,14 @@ export type CogniXRouteSnapshot = {
   selectedDomain: string;
   label: string;
   recommendedModelLabel: string;
+  domainModelLabel?: string | null;
+  executionStatus?: string | null;
+  executionMode?: string | null;
+  willLoadModel?: boolean;
+  willGenerate?: boolean;
+  planMode?: string | null;
+  planSteps?: string[];
+  warnings?: string[];
   confidence: number;
   needsClarification: boolean;
   routingMode: string;

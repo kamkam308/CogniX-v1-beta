@@ -189,6 +189,12 @@ function cognixReadinessLabel(value: string | undefined): string {
       return "Setup";
     case "hardware_blocked":
       return "Blocked";
+    case "needs_clarification":
+      return "Clarify";
+    case "needs_setup":
+      return "Setup";
+    case "blocked":
+      return "Blocked";
     default:
       return value || "Checking";
   }
@@ -199,6 +205,9 @@ function cognixReadinessTone(value: string | undefined): string {
     return "border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
   }
   if (value === "ready_with_caution") {
+    return "border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-300";
+  }
+  if (value === "needs_clarification") {
     return "border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-300";
   }
   if (!value) {
@@ -240,7 +249,9 @@ function CogniXAutoChip({ active }: { active: boolean }): ReactElement | null {
   if (!active) return null;
 
   const recommendation = strategy?.recommendation;
-  const readiness = failed ? "service_unreachable" : recommendation?.readiness;
+  const readiness =
+    latestRoute?.executionStatus ??
+    (failed ? "service_unreachable" : recommendation?.readiness);
   const readinessLabel = cognixReadinessLabel(readiness);
   const modelLabel =
     latestRoute?.recommendedModelLabel ??
@@ -256,6 +267,7 @@ function CogniXAutoChip({ active }: { active: boolean }): ReactElement | null {
       strategy?.roadmapPhase ??
       "CogniX Core is checking the local strategy.");
   const modeLabel = latestRoute ? latestRoute.label : "Auto";
+  const planDetail = latestRoute?.planSteps?.slice(0, 3).join(" / ");
 
   return (
     <Tooltip>
@@ -293,7 +305,13 @@ function CogniXAutoChip({ active }: { active: boolean }): ReactElement | null {
           </span>
           {latestRoute ? (
             <span className="text-xs text-muted-foreground">
-              Last routed prompt / {confidence} confidence
+              Plan {latestRoute.planMode ?? "dry_run"} / {readinessLabel} /{" "}
+              {confidence} confidence
+            </span>
+          ) : null}
+          {planDetail ? (
+            <span className="text-xs text-muted-foreground">
+              {planDetail}
             </span>
           ) : null}
           <span className="text-xs text-muted-foreground">

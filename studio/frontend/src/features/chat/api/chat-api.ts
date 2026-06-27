@@ -96,6 +96,47 @@ export interface CogniXRouterClassification {
   reason: string;
 }
 
+export interface CogniXExecutionStep {
+  id: string;
+  label: string;
+  status: string;
+  detail: string;
+}
+
+export interface CogniXExecutionStrategy {
+  status: string;
+  executionMode?: string | null;
+  providerId?: string | null;
+  providerType?: string | null;
+  providerName?: string | null;
+  baseUrl?: string | null;
+  selectedModelId?: string | null;
+  selectedModelLabel?: string | null;
+  domainModelLabel?: string | null;
+  requiresModelLoad: boolean;
+  willLoadModel: boolean;
+  willGenerate: boolean;
+  reason: string;
+}
+
+export interface CogniXExecutionPlan {
+  username: string;
+  orchestratorVersion: string;
+  mode: "dry_run" | string;
+  objectiveExcerpt: string;
+  classification: CogniXRouterClassification;
+  executionStrategy: CogniXExecutionStrategy;
+  steps: CogniXExecutionStep[];
+  warnings: string[];
+  sideEffects: {
+    modelLoad: boolean;
+    generation: boolean;
+    networkModelCall: boolean;
+    cacheMode: string;
+  };
+  logId: string | number | null;
+}
+
 export async function classifyCogniXObjective(payload: {
   objective: string;
   projectType?: string | null;
@@ -110,6 +151,23 @@ export async function classifyCogniXObjective(payload: {
     body: JSON.stringify({
       objective: payload.objective,
       project_type: payload.projectType ?? null,
+    }),
+  });
+  return parseJsonOrThrow(response);
+}
+
+export async function planCogniXExecution(payload: {
+  objective: string;
+  projectType?: string | null;
+  projectId?: string | null;
+}): Promise<CogniXExecutionPlan> {
+  const response = await authFetch("/api/cognix/orchestrator/plan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      objective: payload.objective,
+      project_type: payload.projectType ?? null,
+      project_id: payload.projectId ?? null,
     }),
   });
   return parseJsonOrThrow(response);
