@@ -203,8 +203,7 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
   const passwordHint = "Au moins 8 caracteres, avec deux types de caracteres, sans reprendre votre identifiant.";
 
   const title = useMemo(() => {
-    if (isLoginMode) return "Se connecter a CogniX";
-    if (isSignupMode) return "Creer votre compte CogniX";
+    if (isLoginMode || isSignupMode) return null;
     return "Securiser votre acces";
   }, [isLoginMode, isSignupMode]);
 
@@ -393,9 +392,11 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
       )}
 
       <div className="space-y-2">
-        <h2 className="text-[2rem] font-semibold leading-none tracking-normal text-foreground">
-          {title}
-        </h2>
+        {title && (
+          <h2 className="text-[2rem] font-semibold leading-none tracking-normal text-foreground">
+            {title}
+          </h2>
+        )}
         <p className="text-muted-foreground">{subtitle}</p>
       </div>
 
