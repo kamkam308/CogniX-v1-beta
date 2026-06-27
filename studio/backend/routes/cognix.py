@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from auth import storage as auth_storage
 from auth.authentication import get_current_jwt_subject
 from core.cognix import hardware as cognix_hardware
+from core.cognix import registry as cognix_registry
 from core.cognix import recommender as cognix_recommender
 from core.cognix.router import classify_objective
 from core.cognix.strategy import build_strategy
@@ -784,6 +785,14 @@ async def model_recommendation(current_subject: str = Depends(get_current_jwt_su
         "username": current_subject,
         "hardware": hardware,
         **recommendation,
+    }
+
+
+@router.get("/models/registry")
+async def model_registry(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    return {
+        "username": current_subject,
+        "registry": cognix_registry.build_model_registry(),
     }
 
 

@@ -12,7 +12,7 @@ if str(_BACKEND_ROOT) not in sys.path:
 
 from auth import storage
 from core.cognix import hardware as cognix_hardware
-from core.cognix import recommender as cognix_recommender
+from core.cognix import registry as cognix_registry
 from routes import auth as auth_routes
 from routes import cognix as cognix_routes
 from storage import cognix_db, providers_db
@@ -88,9 +88,9 @@ def test_strategy_recommends_default_ollama_qwen(client, monkeypatch):
     headers = login_headers(client, "alice", "alice-password-123")
     monkeypatch.setattr(cognix_hardware, "get_hardware_profile", lambda: _cpu_hardware())
     monkeypatch.setattr(
-        cognix_recommender,
+        cognix_registry,
         "_ollama_models",
-        lambda _base_url: (True, [cognix_recommender.COGNIX_DEFAULT_OLLAMA_MODEL_ID]),
+        lambda _base_url: (True, [cognix_registry.COGNIX_DEFAULT_OLLAMA_MODEL_ID]),
     )
 
     response = client.get("/api/cognix/strategy", headers = headers)
@@ -102,8 +102,8 @@ def test_strategy_recommends_default_ollama_qwen(client, monkeypatch):
     assert body["recommendation"]["readiness"] == "ready"
     assert body["recommendation"]["executionMode"] == "local"
     assert body["recommendation"]["providerType"] == "ollama"
-    assert body["recommendation"]["providerId"] == cognix_recommender.COGNIX_DEFAULT_OLLAMA_PROVIDER_ID
-    assert body["recommendation"]["modelId"] == cognix_recommender.COGNIX_DEFAULT_OLLAMA_MODEL_ID
+    assert body["recommendation"]["providerId"] == cognix_registry.COGNIX_DEFAULT_OLLAMA_PROVIDER_ID
+    assert body["recommendation"]["modelId"] == cognix_registry.COGNIX_DEFAULT_OLLAMA_MODEL_ID
     assert body["providers"]["ollama"]["reachable"] is True
     assert body["providers"]["ollama"]["hasDefaultModel"] is True
 
@@ -113,9 +113,9 @@ def test_strategy_keeps_qwen_available_when_memory_is_tight(client, monkeypatch)
     headers = login_headers(client, "alice", "alice-password-123")
     monkeypatch.setattr(cognix_hardware, "get_hardware_profile", lambda: _cpu_hardware(available_gb = 3.3))
     monkeypatch.setattr(
-        cognix_recommender,
+        cognix_registry,
         "_ollama_models",
-        lambda _base_url: (True, [cognix_recommender.COGNIX_DEFAULT_OLLAMA_MODEL_ID]),
+        lambda _base_url: (True, [cognix_registry.COGNIX_DEFAULT_OLLAMA_MODEL_ID]),
     )
 
     response = client.get("/api/cognix/strategy", headers = headers)
@@ -123,7 +123,7 @@ def test_strategy_keeps_qwen_available_when_memory_is_tight(client, monkeypatch)
     assert response.status_code == 200
     recommendation = response.json()["recommendation"]
     assert recommendation["readiness"] == "ready_with_caution"
-    assert recommendation["modelId"] == cognix_recommender.COGNIX_DEFAULT_OLLAMA_MODEL_ID
+    assert recommendation["modelId"] == cognix_registry.COGNIX_DEFAULT_OLLAMA_MODEL_ID
     assert recommendation["memoryFit"]["level"] == "tight"
     assert any("RAM disponible serree" in warning for warning in recommendation["warnings"])
 
@@ -132,7 +132,7 @@ def test_strategy_reports_ollama_service_unreachable(client, monkeypatch):
     seed_accounts()
     headers = login_headers(client, "alice", "alice-password-123")
     monkeypatch.setattr(cognix_hardware, "get_hardware_profile", lambda: _cpu_hardware())
-    monkeypatch.setattr(cognix_recommender, "_ollama_models", lambda _base_url: (False, []))
+    monkeypatch.setattr(cognix_registry, "_ollama_models", lambda _base_url: (False, []))
 
     response = client.get("/api/cognix/strategy", headers = headers)
 
@@ -140,7 +140,7 @@ def test_strategy_reports_ollama_service_unreachable(client, monkeypatch):
     recommendation = response.json()["recommendation"]
     assert recommendation["readiness"] == "service_unreachable"
     assert recommendation["providerType"] == "ollama"
-    assert recommendation["modelId"] == cognix_recommender.COGNIX_DEFAULT_OLLAMA_MODEL_ID
+    assert recommendation["modelId"] == cognix_registry.COGNIX_DEFAULT_OLLAMA_MODEL_ID
     assert any("Ollama non joignable" in warning for warning in recommendation["warnings"])
 
 
@@ -164,9 +164,9 @@ def test_model_recommendation_endpoint_returns_recommender_output(client, monkey
     headers = login_headers(client, "alice", "alice-password-123")
     monkeypatch.setattr(cognix_hardware, "get_hardware_profile", lambda: _cpu_hardware(available_gb = 5.5))
     monkeypatch.setattr(
-        cognix_recommender,
+        cognix_registry,
         "_ollama_models",
-        lambda _base_url: (True, [cognix_recommender.COGNIX_DEFAULT_OLLAMA_MODEL_ID]),
+        lambda _base_url: (True, [cognix_registry.COGNIX_DEFAULT_OLLAMA_MODEL_ID]),
     )
 
     response = client.get("/api/cognix/models/recommendation", headers = headers)
@@ -176,5 +176,27 @@ def test_model_recommendation_endpoint_returns_recommender_output(client, monkey
     assert body["username"] == "alice"
     assert body["hardware"]["memory"]["availableGb"] == 5.5
     assert body["recommendation"]["readiness"] == "ready"
-    assert body["recommendation"]["modelId"] == cognix_recommender.COGNIX_DEFAULT_OLLAMA_MODEL_ID
+    assert body["recommendation"]["modelId"] == cognix_registry.COGNIX_DEFAULT_OLLAMA_MODEL_ID
     assert body["providers"]["ollama"]["hasDefaultModel"] is True
+
+
+def test_model_registry_endpoint_returns_native_registry(client, monkeypatch):
+    seed_accounts()
+    headers = login_headers(client, "alice", "alice-password-123")
+    monkeypatch.setattr(
+        cognix_registry,
+        "_ollama_models",
+        lambda _base_url: (True, [cognix_registry.COGNIX_DEFAULT_OLLAMA_MODEL_ID]),
+    )
+
+    response = client.get("/api/cognix/models/registry", headers = headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["username"] == "alice"
+    registry = body["registry"]
+    assert registry["registryVersion"] == "local_model_registry_v1"
+    assert registry["defaultModelId"] == cognix_registry.COGNIX_DEFAULT_OLLAMA_MODEL_ID
+    assert registry["recommendedModelId"] == cognix_registry.COGNIX_DEFAULT_OLLAMA_MODEL_ID
+    assert registry["ollama"]["hasDefaultModel"] is True
+    assert registry["models"][0]["id"] == cognix_registry.COGNIX_DEFAULT_OLLAMA_MODEL_ID

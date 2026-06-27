@@ -5,18 +5,14 @@
 
 from __future__ import annotations
 
-import json
 import re
-import urllib.request
 from typing import Any
 
-from storage import providers_db
+from core.cognix import registry as cognix_registry
 
 
-COGNIX_DEFAULT_OLLAMA_PROVIDER_ID = "b6878df754d543b1"
-COGNIX_DEFAULT_OLLAMA_MODEL_ID = "huihui_ai/qwen3-vl-abliterated:4b-instruct"
-COGNIX_DEFAULT_OLLAMA_PROVIDER_NAME = "Ollama Qwen 4B"
-COGNIX_DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
+COGNIX_DEFAULT_OLLAMA_PROVIDER_ID = cognix_registry.COGNIX_DEFAULT_OLLAMA_PROVIDER_ID
+COGNIX_DEFAULT_OLLAMA_MODEL_ID = cognix_registry.COGNIX_DEFAULT_OLLAMA_MODEL_ID
 
 
 def _parse_model_size_b(model_id: str) -> float | None:
@@ -69,84 +65,9 @@ def _memory_fit(
     }
 
 
-def _ollama_models(base_url: str, timeout: float = 1.25) -> tuple[bool, list[str]]:
-    endpoint = base_url.rstrip("/") + "/models"
-    try:
-        with urllib.request.urlopen(endpoint, timeout = timeout) as response:
-            payload = json.loads(response.read().decode("utf-8", errors = "replace"))
-    except Exception:
-        return False, []
-    data = payload.get("data")
-    if not isinstance(data, list):
-        return True, []
-    models = sorted(
-        str(item.get("id"))
-        for item in data
-        if isinstance(item, dict) and isinstance(item.get("id"), str) and item.get("id")
-    )
-    return True, models
-
-
-def _provider_summary() -> dict[str, Any]:
-    rows = providers_db.list_providers()
-    configured = [
-        {
-            "id": row.get("id"),
-            "type": row.get("provider_type"),
-            "name": row.get("display_name"),
-            "baseUrl": row.get("base_url"),
-            "enabled": bool(row.get("is_enabled")),
-        }
-        for row in rows
-    ]
-    enabled_ollama = [
-        provider
-        for provider in configured
-        if provider.get("type") == "ollama" and provider.get("enabled")
-    ]
-    default_provider = next(
-        (
-            provider
-            for provider in enabled_ollama
-            if provider.get("id") == COGNIX_DEFAULT_OLLAMA_PROVIDER_ID
-        ),
-        None,
-    )
-    if default_provider is None and enabled_ollama:
-        default_provider = enabled_ollama[0]
-    if default_provider is None:
-        default_provider = {
-            "id": COGNIX_DEFAULT_OLLAMA_PROVIDER_ID,
-            "type": "ollama",
-            "name": COGNIX_DEFAULT_OLLAMA_PROVIDER_NAME,
-            "baseUrl": COGNIX_DEFAULT_OLLAMA_BASE_URL,
-            "enabled": False,
-        }
-
-    base_url = str(default_provider.get("baseUrl") or COGNIX_DEFAULT_OLLAMA_BASE_URL)
-    reachable, models = _ollama_models(base_url)
-    has_default_model = COGNIX_DEFAULT_OLLAMA_MODEL_ID in models
-    recommended_model = (
-        COGNIX_DEFAULT_OLLAMA_MODEL_ID
-        if has_default_model
-        else (models[0] if models else COGNIX_DEFAULT_OLLAMA_MODEL_ID)
-    )
-    return {
-        "configured": configured,
-        "ollama": {
-            "configured": bool(enabled_ollama),
-            "reachable": reachable,
-            "provider": default_provider,
-            "models": models,
-            "hasDefaultModel": has_default_model,
-            "recommendedModel": recommended_model,
-        },
-    }
-
-
 def build_model_recommendation(hardware: dict[str, Any]) -> dict[str, Any]:
-    providers = _provider_summary()
-    ollama = providers["ollama"]
+    registry = cognix_registry.build_model_registry()
+    ollama = registry["ollama"]
     recommended_model = str(ollama["recommendedModel"])
     memory = hardware.get("memory") or {}
     fit = _memory_fit(
@@ -192,7 +113,11 @@ def build_model_recommendation(hardware: dict[str, Any]) -> dict[str, Any]:
     }[readiness]
 
     return {
-        "providers": providers,
+        "registry": registry,
+        "providers": {
+            "configured": registry["providers"],
+            "ollama": registry["ollama"],
+        },
         "recommendation": {
             "readiness": readiness,
             "executionMode": "local",
