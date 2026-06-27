@@ -95,7 +95,10 @@ const checks: Check[] = [
     includes: [
       '@router.post("/context/pack")',
       '@router.get("/admin/audit-logs")',
+      '@router.get("/tools/registry")',
+      '@router.post("/tools/plan")',
       "context_pack_built",
+      "tool_action_planned",
       '@router.post("/orchestrator/plan")',
       '"runtimeType": "dry_run"',
       '"runtimeError": None',
@@ -123,6 +126,18 @@ const checks: Check[] = [
     ],
   },
   {
+    file: "../backend/core/cognix/tool_registry.py",
+    includes: [
+      'TOOL_REGISTRY_VERSION = "cognix_tool_registry_v1"',
+      "frontendDirectExecutionAllowed",
+      "requiresConfirmation",
+      "auditRequired",
+      "sandboxRequired",
+      '"toolExecution": False',
+      "def plan_tool_action",
+    ],
+  },
+  {
     file: "../backend/core/cognix/orchestrator.py",
     includes: [
       '"orchestratorVersion": "cognix_orchestrator_v1"',
@@ -139,6 +154,9 @@ const checks: Check[] = [
       "test_context_pack_endpoint_combines_user_memory_and_project_instructions",
       "test_context_pack_writes_sanitized_audit_log",
       "test_audit_log_retention_prunes_old_entries",
+      "test_tool_registry_declares_permissions_and_guardrails",
+      "test_tool_plan_endpoint_allows_safe_declared_action_and_logs_audit",
+      "test_tool_plan_blocks_disabled_connectors_before_permissions",
       "test_orchestrator_builds_dry_run_plan_without_loading",
       "test_orchestrator_plan_endpoint_logs_dry_run_decision",
       "willLoadModel",

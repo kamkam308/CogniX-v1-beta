@@ -24,6 +24,7 @@ from core.cognix import hardware as cognix_hardware
 from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import registry as cognix_registry
 from core.cognix import recommender as cognix_recommender
+from core.cognix import tool_registry as cognix_tool_registry
 from core.cognix.router import classify_objective
 from core.cognix.strategy import build_strategy
 from storage import cognix_db
@@ -141,6 +142,11 @@ class OrchestratorPlanRequest(BaseModel):
     objective: str = Field(..., min_length = 1, max_length = 4000)
     project_type: str | None = Field(None, max_length = 80)
     project_id: str | None = Field(None, max_length = 160)
+
+
+class ToolActionPlanRequest(BaseModel):
+    tool_id: str = Field(..., min_length = 1, max_length = 120)
+    action_id: str = Field(..., min_length = 1, max_length = 120)
 
 
 class NewsRefreshRequest(BaseModel):
@@ -869,6 +875,53 @@ async def model_registry(current_subject: str = Depends(get_current_jwt_subject)
         "username": current_subject,
         "registry": cognix_registry.build_model_registry(),
     }
+
+
+@router.get("/tools/registry")
+async def tool_registry(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    return {
+        "username": current_subject,
+        "registry": cognix_tool_registry.build_tool_registry(),
+    }
+
+
+@router.post("/tools/plan")
+async def plan_tool_action(
+    payload: ToolActionPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    is_admin = auth_storage.is_admin(current_subject)
+    has_developer_mode = cognix_db.user_has_permission(
+        current_subject,
+        cognix_db.DEVELOPER_MODE_PERMISSION,
+    )
+    plan = cognix_tool_registry.plan_tool_action(
+        tool_id = payload.tool_id,
+        action_id = payload.action_id,
+        username = current_subject,
+        is_admin = is_admin,
+        has_developer_mode = has_developer_mode,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "tool_action_planned",
+        resource_type = "cognix_tool_action",
+        resource_id = f"{payload.tool_id}:{payload.action_id}",
+        severity = "notice" if plan.get("allowed") else "warning",
+        metadata = {
+            "toolRegistryVersion": plan.get("registryVersion"),
+            "toolId": plan.get("toolId"),
+            "actionId": plan.get("actionId"),
+            "status": plan.get("status"),
+            "riskLevel": plan.get("riskLevel"),
+            "requiresConfirmation": plan.get("requiresConfirmation"),
+            "missingPermissions": plan.get("missingPermissions", []),
+            "sideEffects": plan.get("sideEffects", {}),
+        },
+    )
+    plan["auditLogId"] = audit.get("id")
+    return plan
 
 
 @router.get("/models/cache")

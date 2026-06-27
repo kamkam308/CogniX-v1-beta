@@ -17,6 +17,7 @@ from auth.authentication import get_current_jwt_subject
 from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import context_manager as cognix_context_manager
 from core.cognix import orchestrator as cognix_orchestrator
+from core.cognix import tool_registry as cognix_tool_registry
 from core.cognix.router import classify_objective
 from routes import auth as auth_routes
 from routes import cognix as cognix_routes
@@ -294,6 +295,83 @@ def test_audit_log_retention_prunes_old_entries():
     assert len(logs) == 3
     assert set(created_ids[-3:]) == kept_ids
     assert set(created_ids[:2]).isdisjoint(kept_ids)
+
+
+def test_tool_registry_declares_permissions_and_guardrails():
+    registry = cognix_tool_registry.build_tool_registry()
+
+    assert registry["registryVersion"] == "cognix_tool_registry_v1"
+    assert registry["mode"] == "declarative_guarded"
+    assert registry["summary"]["executionEnabled"] is False
+    assert registry["globalPolicies"]["frontendDirectExecutionAllowed"] is False
+    assert registry["sideEffects"]["toolExecution"] is False
+
+    tools = {tool["id"]: tool for tool in registry["tools"]}
+    assert {"github", "google-drive", "gmail", "codex-secure-agent", "kali-isolated"}.issubset(
+        tools
+    )
+    gmail_actions = {action["id"]: action for action in tools["gmail"]["actions"]}
+    send_mail = gmail_actions["send_mail"]
+    assert send_mail["riskLevel"] == "high"
+    assert send_mail["requiresConfirmation"] is True
+    assert send_mail["auditRequired"] is True
+
+    kali_actions = {action["id"]: action for action in tools["kali-isolated"]["actions"]}
+    assert kali_actions["active_test"]["sandboxRequired"] is True
+    assert "admin" in kali_actions["active_test"]["permissions"]
+
+
+def test_tool_plan_endpoint_allows_safe_declared_action_and_logs_audit():
+    seed_accounts()
+
+    body = run_async(
+        cognix_routes.plan_tool_action(
+            cognix_routes.ToolActionPlanRequest(
+                tool_id = "codex-secure-agent",
+                action_id = "plan_feature",
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    assert body["allowed"] is True
+    assert body["status"] == "allowed"
+    assert body["requiresConfirmation"] is False
+    assert body["sideEffects"]["toolExecution"] is False
+    assert body["sideEffects"]["networkToolCall"] is False
+    assert body["auditLogId"].startswith("aud_")
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    logs = admin_read["logs"]
+    assert len(logs) == 1
+    log = logs[0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "tool_action_planned"
+    assert log["resourceType"] == "cognix_tool_action"
+    assert log["metadata"]["toolId"] == "codex-secure-agent"
+    assert log["metadata"]["actionId"] == "plan_feature"
+    assert log["metadata"]["sideEffects"]["toolExecution"] is False
+
+
+def test_tool_plan_blocks_disabled_connectors_before_permissions():
+    seed_accounts()
+
+    body = run_async(
+        cognix_routes.plan_tool_action(
+            cognix_routes.ToolActionPlanRequest(
+                tool_id = "github",
+                action_id = "create_issue",
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    assert body["allowed"] is False
+    assert body["status"] == "connector_disabled"
+    assert body["requiresConfirmation"] is True
+    assert body["riskLevel"] == "medium"
+    assert body["sideEffects"]["externalWrite"] is False
+    assert "developer_mode" in body["missingPermissions"]
 
 
 def test_router_endpoint_declares_jwt_dependency():
