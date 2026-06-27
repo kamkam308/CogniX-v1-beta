@@ -272,6 +272,30 @@ def test_context_pack_writes_sanitized_audit_log():
     assert "Preference sensible" not in log["metadataJson"]
 
 
+def test_audit_log_retention_prunes_old_entries():
+    seed_accounts()
+    created_ids: list[str] = []
+    for index in range(5):
+        log = cognix_db.create_audit_log(
+            username = "alice",
+            actor_username = "alice",
+            action = "retention_test",
+            resource_type = "test",
+            resource_id = str(index),
+            metadata = {"index": index},
+        )
+        created_ids.append(log["id"])
+
+    deleted = cognix_db.prune_audit_logs(max_entries = 3)
+    logs = cognix_db.list_audit_logs(limit = 10)
+    kept_ids = {log["id"] for log in logs}
+
+    assert deleted == 2
+    assert len(logs) == 3
+    assert set(created_ids[-3:]) == kept_ids
+    assert set(created_ids[:2]).isdisjoint(kept_ids)
+
+
 def test_router_endpoint_declares_jwt_dependency():
     current_subject = inspect.signature(cognix_routes.classify_route).parameters["current_subject"]
 

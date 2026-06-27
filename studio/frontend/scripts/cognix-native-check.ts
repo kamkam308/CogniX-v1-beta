@@ -105,8 +105,10 @@ const checks: Check[] = [
     file: "../backend/storage/cognix_db.py",
     includes: [
       "CREATE TABLE IF NOT EXISTS cognix_audit_logs",
+      "AUDIT_LOG_RETENTION_LIMIT",
       "def create_audit_log",
       "def list_audit_logs",
+      "def prune_audit_logs",
       "metadata_json",
     ],
   },
@@ -136,6 +138,7 @@ const checks: Check[] = [
       "test_context_manager_builds_bounded_context_packet",
       "test_context_pack_endpoint_combines_user_memory_and_project_instructions",
       "test_context_pack_writes_sanitized_audit_log",
+      "test_audit_log_retention_prunes_old_entries",
       "test_orchestrator_builds_dry_run_plan_without_loading",
       "test_orchestrator_plan_endpoint_logs_dry_run_decision",
       "willLoadModel",

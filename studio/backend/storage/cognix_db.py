@@ -19,6 +19,7 @@ _schema_lock = threading.Lock()
 _schema_ready = False
 
 DEVELOPER_MODE_PERMISSION = "developer_mode"
+AUDIT_LOG_RETENTION_LIMIT = 5000
 
 KNOWN_ATTACK_SIGNATURES: list[dict[str, str]] = [
     {
@@ -622,6 +623,32 @@ def list_security_events(limit: int = 200) -> list[dict[str, Any]]:
         conn.close()
 
 
+def _prune_audit_logs(conn: sqlite3.Connection, max_entries: int) -> int:
+    normalized_limit = max(1, int(max_entries))
+    cur = conn.execute(
+        """
+        DELETE FROM cognix_audit_logs
+        WHERE id NOT IN (
+            SELECT id FROM cognix_audit_logs
+            ORDER BY created_at DESC
+            LIMIT ?
+        )
+        """,
+        (normalized_limit,),
+    )
+    return int(cur.rowcount or 0)
+
+
+def prune_audit_logs(max_entries: int = AUDIT_LOG_RETENTION_LIMIT) -> int:
+    conn = get_connection()
+    try:
+        deleted = _prune_audit_logs(conn, max_entries)
+        conn.commit()
+        return deleted
+    finally:
+        conn.close()
+
+
 def create_audit_log(
     *,
     username: str | None,
@@ -667,6 +694,7 @@ def create_audit_log(
                 created_at,
             ),
         )
+        _prune_audit_logs(conn, AUDIT_LOG_RETENTION_LIMIT)
         conn.commit()
         return row_to_dict(
             conn.execute("SELECT * FROM cognix_audit_logs WHERE id = ?", (audit_id,)).fetchone()
