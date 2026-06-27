@@ -1634,7 +1634,8 @@ def _inject_bootstrap(html_bytes: bytes, app: FastAPI):
     import json as _json
     import secrets as _secrets
 
-    if not storage.requires_password_change(storage.DEFAULT_ADMIN_USERNAME):
+    admin_username = storage.get_default_admin_username()
+    if not storage.requires_password_change(admin_username):
         return html_bytes, None
 
     bootstrap_pw = getattr(app.state, "bootstrap_password", None)
@@ -1643,7 +1644,7 @@ def _inject_bootstrap(html_bytes: bytes, app: FastAPI):
 
     payload = _json.dumps(
         {
-            "username": storage.DEFAULT_ADMIN_USERNAME,
+            "username": admin_username,
             "password": bootstrap_pw,
         }
     )

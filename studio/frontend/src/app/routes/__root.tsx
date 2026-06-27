@@ -91,7 +91,7 @@ export const Route = createRootRoute({
   component: RootLayout,
 });
 
-const HIDDEN_NAVBAR_ROUTES = ["/onboarding", "/login", "/change-password"];
+const HIDDEN_NAVBAR_ROUTES = ["/onboarding", "/login", "/signup", "/change-password"];
 
 // Fallback when no matched route declares a `staticData.title`.
 const DEFAULT_DOCUMENT_TITLE = "CogniX";

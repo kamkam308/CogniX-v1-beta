@@ -1,20 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
-import { apiUrl } from "@/lib/api-base";
 import { Button } from "@/components/ui/button";
-import { MascotImg } from "@/components/mascot-img";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { apiUrl } from "@/lib/api-base";
+import { cn } from "@/lib/utils";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { Eye, EyeOff } from "lucide-react";
-import { useEffect, useState } from "react";
-import type { ReactElement } from "react";
-import type { SyntheticEvent } from "react";
+import { useEffect, useMemo, useState } from "react";
+import type { ReactElement, SyntheticEvent } from "react";
 import { refreshSession } from "../api";
 
 // Bootstrap credentials injected into index.html by the backend (only present
-// while default admin must_change_password is true)
+// while default admin must_change_password is true).
 declare global {
   interface Window {
     __UNSLOTH_BOOTSTRAP__?: { username: string; password: string };
@@ -33,10 +32,11 @@ import {
   storeAuthTokens,
 } from "../session";
 
-type AuthMode = "login" | "change-password";
+type AuthMode = "login" | "signup" | "change-password";
 
 type AuthStatusResponse = {
   initialized: boolean;
+  default_username?: string;
   requires_password_change: boolean;
 };
 
@@ -46,41 +46,75 @@ type TokenResponse = {
   must_change_password: boolean;
 };
 
+type AuthFormProps = {
+  mode: AuthMode;
+};
+
+const DEFAULT_LOGIN_IDENTIFIER = "";
+
 async function loginWithPassword(
-  username: string,
+  identifier: string,
   password: string,
 ): Promise<TokenResponse> {
+  const trimmedIdentifier = identifier.trim();
   const response = await fetch(apiUrl("/api/auth/login"), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      username: username.trim(),
+      identifier: trimmedIdentifier,
+      username: trimmedIdentifier,
       password,
     }),
   });
 
   if (!response.ok) {
     const errorPayload = (await response.json().catch(() => null)) as { detail?: string } | null;
-    throw new Error(errorPayload?.detail ?? "Login failed.");
+    throw new Error(errorPayload?.detail ?? "Connexion impossible.");
   }
 
   return (await response.json()) as TokenResponse;
 }
 
-type AuthFormProps = {
-  mode: AuthMode;
-};
+async function registerWithPassword(params: {
+  username: string;
+  email: string;
+  displayName: string;
+  password: string;
+}): Promise<TokenResponse> {
+  const response = await fetch(apiUrl("/api/auth/register"), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      username: params.username.trim(),
+      email: params.email.trim() || null,
+      display_name: params.displayName.trim() || null,
+      password: params.password,
+    }),
+  });
 
-const HIDDEN_LOGIN_USERNAME = "unsloth";
+  if (!response.ok) {
+    const errorPayload = (await response.json().catch(() => null)) as { detail?: string } | null;
+    throw new Error(errorPayload?.detail ?? "Inscription impossible.");
+  }
+
+  return (await response.json()) as TokenResponse;
+}
 
 export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
   const navigate = useNavigate();
   const isLoginMode = mode === "login";
+  const isSignupMode = mode === "signup";
+  const isPasswordSetupMode = mode === "change-password";
   const [showPassword, setShowPassword] = useState(false);
   const [showNewPassword, setShowNewPassword] = useState(false);
-  const username = HIDDEN_LOGIN_USERNAME;
+  const [identifier, setIdentifier] = useState(DEFAULT_LOGIN_IDENTIFIER);
+  const [signupUsername, setSignupUsername] = useState("");
+  const [signupEmail, setSignupEmail] = useState("");
+  const [signupDisplayName, setSignupDisplayName] = useState("");
   const [password, setPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -94,53 +128,53 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
     let canceled = false;
 
     async function initializeAuthForm(): Promise<void> {
-      // Always check the server first; localStorage flags can be stale (e.g.
-      // tokens from a previous install). /api/auth/status is the source of
-      // truth for requires_password_change.
       try {
         const response = await fetch(apiUrl("/api/auth/status"));
-        if (!response.ok) throw new Error("Failed to load auth status.");
+        if (!response.ok) {
+          throw new Error("Impossible de charger l'etat de l'authentification.");
+        }
         const result = (await response.json()) as AuthStatusResponse;
-        if (!canceled) {
-          setInitialized(result.initialized);
-          setRequiresPasswordChange(result.requires_password_change);
+        if (canceled) return;
 
-          // Server truth wins; keep localStorage in sync both ways.
-          if (result.requires_password_change !== mustChangePassword()) {
-            setMustChangePassword(result.requires_password_change);
-          }
+        setInitialized(result.initialized);
+        setRequiresPasswordChange(result.requires_password_change);
+        if (result.default_username) {
+          setIdentifier((current) =>
+            current === DEFAULT_LOGIN_IDENTIFIER ? result.default_username! : current,
+          );
+        }
 
-          // Redirect between login / change-password per server state
-          if (mode === "login" && result.requires_password_change) {
-            navigate({ to: "/change-password" });
-            return;
-          }
-          if (mode === "change-password" && !result.requires_password_change) {
-            navigate({ to: "/login" });
-            return;
-          }
+        if (result.requires_password_change !== mustChangePassword()) {
+          setMustChangePassword(result.requires_password_change);
+        }
 
-          // On login, skip to the app if a valid session exists and no
-          // password change is required.
-          if (isLoginMode && !result.requires_password_change) {
-            if (hasRefreshToken()) {
-              const refreshed = await refreshSession();
-              if (refreshed) {
-                if (!canceled) setStatusLoading(false);
-                navigate({ to: getPostAuthRoute() });
-                return;
-              }
-            }
-            if (hasAuthToken()) {
+        if ((isLoginMode || isSignupMode) && result.requires_password_change) {
+          navigate({ to: "/change-password" });
+          return;
+        }
+        if (isPasswordSetupMode && !result.requires_password_change) {
+          navigate({ to: "/login" });
+          return;
+        }
+
+        if ((isLoginMode || isSignupMode) && !result.requires_password_change) {
+          if (hasRefreshToken()) {
+            const refreshed = await refreshSession();
+            if (refreshed) {
               if (!canceled) setStatusLoading(false);
               navigate({ to: getPostAuthRoute() });
               return;
             }
           }
+          if (hasAuthToken()) {
+            if (!canceled) setStatusLoading(false);
+            navigate({ to: getPostAuthRoute() });
+            return;
+          }
         }
       } catch (err: unknown) {
         if (!canceled) {
-          setError(err instanceof Error ? err.message : "Failed to load.");
+          setError(err instanceof Error ? err.message : "Chargement impossible.");
         }
       } finally {
         if (!canceled) setStatusLoading(false);
@@ -152,82 +186,149 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
     return () => {
       canceled = true;
     };
-  }, [navigate]);
+  }, [isLoginMode, isPasswordSetupMode, isSignupMode, navigate]);
 
-  // Seed password from bootstrap credentials injected into HTML by web CLI.
   useEffect(() => {
-    function loadBootstrap() {
-      const bootstrap = window.__UNSLOTH_BOOTSTRAP__;
-      if (bootstrap && !isLoginMode && !password) {
-        setPassword(bootstrap.password);
+    const bootstrap = window.__UNSLOTH_BOOTSTRAP__;
+    if (bootstrap && isPasswordSetupMode && !password) {
+      if (bootstrap.username.trim()) {
+        setIdentifier(bootstrap.username);
       }
+      setPassword(bootstrap.password);
     }
-    loadBootstrap();
-  }, []);
+  }, [isPasswordSetupMode, password]);
 
+  const hasBootstrapPassword = Boolean(window.__UNSLOTH_BOOTSTRAP__?.password);
+  const currentPassword = password || window.__UNSLOTH_BOOTSTRAP__?.password || "";
+  const passwordHint = "Au moins 8 caracteres, avec deux types de caracteres, sans reprendre votre identifiant.";
+
+  const title = useMemo(() => {
+    if (isLoginMode) return "Se connecter a CogniX";
+    if (isSignupMode) return "Creer votre compte CogniX";
+    return "Securiser votre acces";
+  }, [isLoginMode, isSignupMode]);
+
+  const subtitle = useMemo(() => {
+    if (isLoginMode) return "Accedez a votre espace local securise.";
+    if (isSignupMode) return "Inscription locale avec mot de passe renforce.";
+    return "Remplacez le mot de passe temporaire avant d'ouvrir CogniX.";
+  }, [isLoginMode, isSignupMode]);
+
+  const submitLabel = useMemo(() => {
+    if (isLoginMode) return "Se connecter";
+    if (isSignupMode) return "Creer le compte";
+    return "Activer CogniX";
+  }, [isLoginMode, isSignupMode]);
+
+  const activeAuthMode = isLoginMode ? "login" : "signup";
   const blockedByState =
     initialized === false ||
-    (mode === "login" && requiresPasswordChange) ||
-    (mode === "change-password" && !requiresPasswordChange);
+    ((isLoginMode || isSignupMode) && requiresPasswordChange) ||
+    (isPasswordSetupMode && !requiresPasswordChange);
 
   let helperText: string | null = null;
   if (initialized === false) {
-    helperText = "Auth is still bootstrapping the default admin account.";
-  } else if (isLoginMode && requiresPasswordChange) {
-    helperText = "Sign in once with the seeded credentials to change the password.";
-  } else if (!isLoginMode && !requiresPasswordChange) {
-    helperText = "Password already updated. Use the login screen.";
+    helperText = "Auth est encore en initialisation.";
+  } else if ((isLoginMode || isSignupMode) && requiresPasswordChange) {
+    helperText = "Le mot de passe admin temporaire doit etre remplace avant l'inscription.";
+  } else if (isPasswordSetupMode && !requiresPasswordChange) {
+    helperText = "Le mot de passe initial a deja ete remplace.";
   }
-  const title = isLoginMode ? "Welcome back" : "Setup your account";
-  const subtitle = isLoginMode  
-    ? "Sign in with your password."
-    : "Choose a new password";
-  const submitLabel = isLoginMode ? "Login" : "Change password";
-  const showSwitchLink = !isLoginMode;
-  const switchText = "Password already setup? ";
-  const switchLinkTo = "/login";
-  const switchLinkText = "Back to login";
-  const currentPassword = password || window.__UNSLOTH_BOOTSTRAP__?.password || "";
-  // On first boot the backend injects __UNSLOTH_BOOTSTRAP__ and we silently
-  // reuse that password; the Current password input is only rendered for the
-  // admin-forced must_change_password path where no bootstrap is available.
-  const hasBootstrapPassword = Boolean(window.__UNSLOTH_BOOTSTRAP__?.password);
-  const invalidChangePasswordForm =
-    !isLoginMode &&
-    (currentPassword.length < 8 ||
-      newPassword.length < 8 ||
-      newPassword !== confirmPassword ||
-      currentPassword === newPassword);
-  const showPasswordMismatchWarning =
-    !isLoginMode &&
+
+  const invalidLoginForm = identifier.trim().length < 3 || password.length < 8;
+  const signupPasswordMismatch =
+    isSignupMode &&
+    password.length > 0 &&
+    confirmPassword.length > 0 &&
+    password !== confirmPassword;
+  const invalidSignupForm =
+    signupUsername.trim().length < 3 ||
+    password.length < 8 ||
+    password !== confirmPassword;
+  const setupPasswordMismatch =
+    isPasswordSetupMode &&
     newPassword.length > 0 &&
     confirmPassword.length > 0 &&
     newPassword !== confirmPassword;
+  const invalidPasswordSetupForm =
+    currentPassword.length < 8 ||
+    newPassword.length < 8 ||
+    newPassword !== confirmPassword ||
+    currentPassword === newPassword;
+
+  async function handlePasswordSetup(): Promise<TokenResponse> {
+    let accessToken = getAuthToken();
+
+    if (hasRefreshToken()) {
+      const refreshed = await refreshSession();
+      accessToken = getAuthToken();
+      if (!refreshed) {
+        clearAuthTokens();
+        accessToken = null;
+      }
+    }
+
+    if (!accessToken) {
+      const bootstrapToken = await loginWithPassword(identifier, currentPassword);
+      storeAuthTokens(
+        bootstrapToken.access_token,
+        bootstrapToken.refresh_token,
+      );
+      setMustChangePassword(bootstrapToken.must_change_password);
+      accessToken = bootstrapToken.access_token;
+    }
+
+    const response = await fetch(apiUrl("/api/auth/change-password"), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({
+        current_password: currentPassword,
+        new_password: newPassword,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorPayload = (await response.json().catch(() => null)) as { detail?: string } | null;
+      throw new Error(errorPayload?.detail ?? "Mise a jour du mot de passe impossible.");
+    }
+
+    return (await response.json()) as TokenResponse;
+  }
 
   async function handleSubmit(event: SyntheticEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
 
-    if (!isLoginMode) {
-      // Mirror the disable gate: Enter / autofill can bypass the button.
+    if (isLoginMode && invalidLoginForm) {
+      setError("Identifiant ou mot de passe invalide.");
+      return;
+    }
+    if (isSignupMode && invalidSignupForm) {
+      setError(
+        password !== confirmPassword
+          ? "Les mots de passe doivent correspondre."
+          : "Completez le formulaire d'inscription.",
+      );
+      return;
+    }
+    if (isPasswordSetupMode) {
       if (currentPassword.length < 8) {
-        setError(
-          currentPassword
-            ? "Current password must be at least 8 characters."
-            : "Unable to initialize setup. Reload the page and try again.",
-        );
+        setError("Mot de passe temporaire introuvable. Rechargez la page.");
         return;
       }
       if (newPassword.length < 8) {
-        setError("New password must be at least 8 characters.");
+        setError("Le nouveau mot de passe doit contenir au moins 8 caracteres.");
         return;
       }
       if (newPassword !== confirmPassword) {
-        setError("Passwords do not match.");
+        setError("Les mots de passe doivent correspondre.");
         return;
       }
       if (currentPassword === newPassword) {
-        setError("New password must be different from your current password.");
+        setError("Le nouveau mot de passe doit etre different.");
         return;
       }
     }
@@ -237,70 +338,26 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
       let token: TokenResponse;
 
       if (isLoginMode) {
-        token = await loginWithPassword(username, password);
-      } else {
-        let accessToken = getAuthToken();
-
-        if (hasRefreshToken()) {
-          const refreshed = await refreshSession();
-          accessToken = getAuthToken();
-          if (!refreshed) {
-            clearAuthTokens();
-            accessToken = null;
-          }
-        }
-
-        if (!accessToken) {
-          const bootstrapToken = await loginWithPassword(username, currentPassword);
-          storeAuthTokens(
-            bootstrapToken.access_token,
-            bootstrapToken.refresh_token,
-          );
-          setMustChangePassword(bootstrapToken.must_change_password);
-          accessToken = bootstrapToken.access_token;
-        }
-
-        const response = await fetch(apiUrl("/api/auth/change-password"), {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${accessToken}`,
-          },
-          body: JSON.stringify({
-            current_password: currentPassword,
-            new_password: newPassword,
-          }),
+        token = await loginWithPassword(identifier, password);
+      } else if (isSignupMode) {
+        token = await registerWithPassword({
+          username: signupUsername,
+          email: signupEmail,
+          displayName: signupDisplayName,
+          password,
         });
-
-        if (!response.ok) {
-          let message = "Password update failed.";
-          const errorPayload = (await response
-            .json()
-            .catch(() => null)) as { detail?: string } | null;
-          if (errorPayload?.detail) message = errorPayload.detail;
-          throw new Error(message);
-        }
-
-        token = (await response.json()) as TokenResponse;
-      }
-
-      if (!isLoginMode) {
+        resetOnboardingDone();
+      } else {
+        token = await handlePasswordSetup();
         resetOnboardingDone();
         setRequiresPasswordChange(false);
-        setMustChangePassword(false);
-      } else {
-        setMustChangePassword(token.must_change_password);
       }
+
+      setMustChangePassword(token.must_change_password);
       storeAuthTokens(token.access_token, token.refresh_token);
       navigate({ to: getPostAuthRoute() });
     } catch (err: unknown) {
-      // The backend returns the correct PATH-based command ("unsloth studio
-      // reset-password"), which the installer puts on PATH on every platform.
-      // Do NOT rewrite it to a relative Windows path like
-      // ".\unsloth_studio\Scripts\unsloth.exe ..." -- that only resolves inside
-      // the Studio home dir and fails with CommandNotFoundException elsewhere.
-      // Show the backend message as-is.
-      const msg = err instanceof Error ? err.message : "Auth failed.";
+      const msg = err instanceof Error ? err.message : "Authentification impossible.";
       setError(msg);
     } finally {
       setLoading(false);
@@ -310,68 +367,160 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
   if (statusLoading && initialized === null && error === null) return null;
 
   return (
-    <div className="w-full max-w-sm space-y-6">
-      <div className="space-y-1.5 text-center">
-        <MascotImg
-          src="Sloth emojis/large sloth wave.png"
-          className="mx-auto mb-2 h-20 w-20 object-contain"
-        />
-        <h2 className="text-2xl font-semibold text-foreground">{title}</h2>
+    <div className="w-full space-y-6">
+      {!isPasswordSetupMode && (
+        <div className="grid grid-cols-2 gap-1 rounded-full border border-black/10 bg-black/[0.045] p-1 dark:border-white/10 dark:bg-white/[0.06]">
+          {[
+            { key: "login", label: "Connexion", to: "/login" },
+            { key: "signup", label: "Inscription", to: "/signup" },
+          ].map((item) => (
+            <Link
+              key={item.key}
+              to={item.to}
+              role="tab"
+              aria-selected={activeAuthMode === item.key}
+              className={cn(
+                "flex min-h-10 items-center justify-center rounded-full px-3 text-sm font-semibold transition-colors",
+                activeAuthMode === item.key
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              {item.label}
+            </Link>
+          ))}
+        </div>
+      )}
+
+      <div className="space-y-2">
+        <h2 className="text-[2rem] font-semibold leading-none tracking-normal text-foreground">
+          {title}
+        </h2>
         <p className="text-muted-foreground">{subtitle}</p>
       </div>
-      <form className="space-y-5" onSubmit={handleSubmit}>
+
+      <form className="grid gap-4" onSubmit={handleSubmit}>
         {isLoginMode && (
-          <div className="space-y-2">
-            <Label htmlFor="password">Password</Label>
-            <div className="relative">
+          <>
+            <div className="grid gap-2">
+              <Label htmlFor="identifier">Identifiant ou email</Label>
               <Input
-                id="password"
-                type={showPassword ? "text" : "password"}
-                className="pr-10"
-                autoComplete="current-password"
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-                minLength={8}
+                id="identifier"
+                className="h-12 rounded-2xl bg-background"
+                autoComplete="username"
+                value={identifier}
+                onChange={(event) => setIdentifier(event.target.value)}
+                minLength={3}
+                maxLength={254}
                 required
               />
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="absolute right-0 top-0 h-full px-3 text-muted-foreground hover:bg-transparent"
-                onClick={() => setShowPassword((prev) => !prev)}
-              >
-                {showPassword ? (
-                  <EyeOff className="h-4 w-4" />
-                ) : (
-                  <Eye className="h-4 w-4" />
-                )}
-              </Button>
             </div>
-          </div>
+            <div className="grid gap-2">
+              <Label htmlFor="password">Mot de passe</Label>
+              <div className="relative">
+                <Input
+                  id="password"
+                  type={showPassword ? "text" : "password"}
+                  className="h-12 rounded-2xl bg-background pr-11"
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  minLength={8}
+                  maxLength={128}
+                  required
+                />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  aria-label={showPassword ? "Masquer le mot de passe" : "Afficher le mot de passe"}
+                  className="absolute right-1 top-1/2 -translate-y-1/2 text-muted-foreground hover:bg-transparent"
+                  onClick={() => setShowPassword((prev) => !prev)}
+                >
+                  {showPassword ? (
+                    <EyeOff className="h-4 w-4" />
+                  ) : (
+                    <Eye className="h-4 w-4" />
+                  )}
+                </Button>
+              </div>
+            </div>
+          </>
         )}
 
-        {!isLoginMode && (
+        {isSignupMode && (
+          <>
+            <div className="grid gap-2">
+              <Label htmlFor="signup-username">Nom d'utilisateur</Label>
+              <Input
+                id="signup-username"
+                className="h-12 rounded-2xl bg-background"
+                autoComplete="username"
+                value={signupUsername}
+                onChange={(event) => setSignupUsername(event.target.value)}
+                minLength={3}
+                maxLength={32}
+                required
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="signup-email">Email</Label>
+              <Input
+                id="signup-email"
+                type="email"
+                className="h-12 rounded-2xl bg-background"
+                autoComplete="email"
+                value={signupEmail}
+                onChange={(event) => setSignupEmail(event.target.value)}
+                maxLength={254}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="display-name">Nom affiche</Label>
+              <Input
+                id="display-name"
+                className="h-12 rounded-2xl bg-background"
+                autoComplete="name"
+                value={signupDisplayName}
+                onChange={(event) => setSignupDisplayName(event.target.value)}
+                maxLength={80}
+              />
+            </div>
+            <PasswordFields
+              password={password}
+              confirmPassword={confirmPassword}
+              showPassword={showPassword}
+              onPasswordChange={setPassword}
+              onConfirmPasswordChange={setConfirmPassword}
+              onTogglePassword={() => setShowPassword((prev) => !prev)}
+            />
+            <PasswordHint warning={signupPasswordMismatch} text={passwordHint} />
+          </>
+        )}
+
+        {isPasswordSetupMode && (
           <>
             {!hasBootstrapPassword && (
-              <div className="space-y-2">
-                <Label htmlFor="current-password">Current password</Label>
+              <div className="grid gap-2">
+                <Label htmlFor="current-password">Mot de passe temporaire</Label>
                 <div className="relative">
                   <Input
                     id="current-password"
                     type={showPassword ? "text" : "password"}
-                    className="pr-10"
+                    className="h-12 rounded-2xl bg-background pr-11"
                     autoComplete="current-password"
                     value={password}
                     onChange={(event) => setPassword(event.target.value)}
                     minLength={8}
+                    maxLength={128}
                     required
                   />
                   <Button
                     type="button"
                     variant="ghost"
                     size="icon"
-                    className="absolute right-0 top-0 h-full px-3 text-muted-foreground hover:bg-transparent"
+                    aria-label={showPassword ? "Masquer le mot de passe" : "Afficher le mot de passe"}
+                    className="absolute right-1 top-1/2 -translate-y-1/2 text-muted-foreground hover:bg-transparent"
                     onClick={() => setShowPassword((prev) => !prev)}
                   >
                     {showPassword ? (
@@ -383,24 +532,26 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
                 </div>
               </div>
             )}
-            <div className="space-y-2">
-              <Label htmlFor="new-password">New password</Label>
+            <div className="grid gap-2">
+              <Label htmlFor="new-password">Nouveau mot de passe</Label>
               <div className="relative">
                 <Input
                   id="new-password"
                   type={showNewPassword ? "text" : "password"}
-                  className="pr-10"
+                  className="h-12 rounded-2xl bg-background pr-11"
                   autoComplete="new-password"
                   value={newPassword}
                   onChange={(event) => setNewPassword(event.target.value)}
                   minLength={8}
+                  maxLength={128}
                   required
                 />
                 <Button
                   type="button"
                   variant="ghost"
                   size="icon"
-                  className="absolute right-0 top-0 h-full px-3 text-muted-foreground hover:bg-transparent"
+                  aria-label={showNewPassword ? "Masquer le mot de passe" : "Afficher le mot de passe"}
+                  className="absolute right-1 top-1/2 -translate-y-1/2 text-muted-foreground hover:bg-transparent"
                   onClick={() => setShowNewPassword((prev) => !prev)}
                 >
                   {showNewPassword ? (
@@ -411,28 +562,21 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
                 </Button>
               </div>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="confirm-password">Confirm password</Label>
+            <div className="grid gap-2">
+              <Label htmlFor="confirm-new-password">Confirmer le mot de passe</Label>
               <Input
-                id="confirm-password"
+                id="confirm-new-password"
                 type="password"
+                className="h-12 rounded-2xl bg-background"
                 autoComplete="new-password"
                 value={confirmPassword}
                 onChange={(event) => setConfirmPassword(event.target.value)}
                 minLength={8}
+                maxLength={128}
                 required
               />
             </div>
-            <p
-              className={`min-h-4 text-xs ${
-                showPasswordMismatchWarning ? "text-destructive" : "text-muted-foreground"
-              }`}
-              aria-live="polite"
-            >
-              {showPasswordMismatchWarning
-                ? "Please ensure passwords match."
-                : "Must be at least 8 characters."}
-            </p>
+            <PasswordHint warning={setupPasswordMismatch} text={passwordHint} />
           </>
         )}
 
@@ -443,27 +587,106 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
 
         <Button
           type="submit"
-          className="mx-auto flex w-fit px-4"
+          className="h-12 w-full rounded-2xl bg-foreground text-background hover:bg-foreground/85"
           disabled={
             loading ||
             statusLoading ||
             blockedByState ||
-            (isLoginMode && password.length < 8) ||
-            invalidChangePasswordForm
+            (isLoginMode && invalidLoginForm) ||
+            (isSignupMode && invalidSignupForm) ||
+            (isPasswordSetupMode && invalidPasswordSetupForm)
           }
         >
-          {loading ? "Please wait..." : submitLabel}
+          {loading ? "Veuillez patienter..." : submitLabel}
         </Button>
       </form>
 
-      {showSwitchLink && (
-        <p className="text-center text-sm text-muted-foreground">
-          {switchText}
-          <Link to={switchLinkTo} className="text-primary hover:underline">
-            {switchLinkText}
-          </Link>
-        </p>
-      )}
+      <p className="text-sm leading-relaxed text-muted-foreground">
+        {isLoginMode
+          ? "Connexion protegee par verrouillage progressif et session locale."
+          : isSignupMode
+            ? "Votre compte reste local a cette installation CogniX."
+            : "Cette etape protege le compte admin de depart."}
+      </p>
     </div>
+  );
+}
+
+function PasswordFields({
+  password,
+  confirmPassword,
+  showPassword,
+  onPasswordChange,
+  onConfirmPasswordChange,
+  onTogglePassword,
+}: {
+  password: string;
+  confirmPassword: string;
+  showPassword: boolean;
+  onPasswordChange: (value: string) => void;
+  onConfirmPasswordChange: (value: string) => void;
+  onTogglePassword: () => void;
+}) {
+  return (
+    <>
+      <div className="grid gap-2">
+        <Label htmlFor="signup-password">Mot de passe</Label>
+        <div className="relative">
+          <Input
+            id="signup-password"
+            type={showPassword ? "text" : "password"}
+            className="h-12 rounded-2xl bg-background pr-11"
+            autoComplete="new-password"
+            value={password}
+            onChange={(event) => onPasswordChange(event.target.value)}
+            minLength={8}
+            maxLength={128}
+            required
+          />
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label={showPassword ? "Masquer le mot de passe" : "Afficher le mot de passe"}
+            className="absolute right-1 top-1/2 -translate-y-1/2 text-muted-foreground hover:bg-transparent"
+            onClick={onTogglePassword}
+          >
+            {showPassword ? (
+              <EyeOff className="h-4 w-4" />
+            ) : (
+              <Eye className="h-4 w-4" />
+            )}
+          </Button>
+        </div>
+      </div>
+      <div className="grid gap-2">
+        <Label htmlFor="signup-confirm-password">Confirmer le mot de passe</Label>
+        <Input
+          id="signup-confirm-password"
+          type="password"
+          className="h-12 rounded-2xl bg-background"
+          autoComplete="new-password"
+          value={confirmPassword}
+          onChange={(event) => onConfirmPasswordChange(event.target.value)}
+          minLength={8}
+          maxLength={128}
+          required
+        />
+      </div>
+    </>
+  );
+}
+
+function PasswordHint({ warning, text }: { warning: boolean; text: string }) {
+  return (
+    <p
+      className={cn(
+        "min-h-4 text-xs",
+        warning ? "text-destructive" : "text-muted-foreground",
+      )}
+      aria-live="polite"
+    >
+      {warning ? "Les mots de passe doivent correspondre." : text}
+    </p>
   );
 }

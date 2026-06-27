@@ -17,8 +17,9 @@ from typing import Optional, Tuple
 from utils.paths import auth_db_path, ensure_dir
 
 DB_PATH = auth_db_path()
-DEFAULT_ADMIN_USERNAME = "unsloth"
-ADMIN_USERNAMES = frozenset({DEFAULT_ADMIN_USERNAME, "kamil", "kamil_ebk"})
+DEFAULT_ADMIN_USERNAME = "kamil"
+LEGACY_ADMIN_USERNAME = "unsloth"
+ADMIN_USERNAMES = frozenset({DEFAULT_ADMIN_USERNAME, LEGACY_ADMIN_USERNAME, "kamil_ebk"})
 ADMIN_LOGIN_ALIASES = frozenset({"kamil", "kamil_ebk", "ceo"})
 DEFAULT_USER_PLAN = "free"
 CEO_PLAN = "CEO"
@@ -621,7 +622,7 @@ def get_user_login_record(identifier: str) -> Optional[dict]:
                 FROM auth_user
                 WHERE username = ?
                 """,
-                (DEFAULT_ADMIN_USERNAME,),
+                (get_default_admin_username(),),
             ).fetchone()
         return dict(row) if row else None
     finally:
@@ -913,6 +914,15 @@ def get_user_and_secret(username: str) -> Optional[Tuple[str, str, str, bool]]:
         conn.close()
 
 
+def get_default_admin_username() -> str:
+    """Return the native CogniX admin, falling back to legacy installs."""
+    if get_user_and_secret(DEFAULT_ADMIN_USERNAME) is not None:
+        return DEFAULT_ADMIN_USERNAME
+    if get_user_and_secret(LEGACY_ADMIN_USERNAME) is not None:
+        return LEGACY_ADMIN_USERNAME
+    return DEFAULT_ADMIN_USERNAME
+
+
 def get_jwt_secret(username: str) -> Optional[str]:
     """Return the current JWT signing secret for a user."""
     conn = get_connection()
@@ -967,6 +977,9 @@ def ensure_default_admin() -> bool:
     Returns True when the default admin was created in this call.
     """
     if get_user_and_secret(DEFAULT_ADMIN_USERNAME) is not None:
+        _load_bootstrap_password()
+        return False
+    if get_user_and_secret(LEGACY_ADMIN_USERNAME) is not None:
         _load_bootstrap_password()
         return False
 
@@ -1173,7 +1186,8 @@ def validate_desktop_secret(raw_secret: str) -> Optional[str]:
     """Return the real admin username when the desktop secret matches."""
     if not raw_secret.startswith(DESKTOP_SECRET_PREFIX):
         return None
-    if get_user_and_secret(DEFAULT_ADMIN_USERNAME) is None:
+    admin_username = get_default_admin_username()
+    if get_user_and_secret(admin_username) is None:
         return None
 
     secret_hash = _pbkdf2_desktop_secret(raw_secret)
@@ -1188,7 +1202,7 @@ def validate_desktop_secret(raw_secret: str) -> Optional[str]:
             return None
         if not secrets.compare_digest(row["value"], secret_hash):
             return None
-        return DEFAULT_ADMIN_USERNAME
+        return admin_username
     finally:
         conn.close()
 

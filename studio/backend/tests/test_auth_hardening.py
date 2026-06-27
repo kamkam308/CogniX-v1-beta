@@ -55,6 +55,24 @@ def seed_user(username = "alice", password = "correct-password-123") -> None:
     )
 
 
+def test_auth_status_exposes_cognix_admin_before_initialization(client):
+    response = client.get("/api/auth/status")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["initialized"] is False
+    assert body["default_username"] == "kamil"
+
+
+def test_default_admin_bootstrap_uses_cognix_username():
+    created = storage.ensure_default_admin()
+
+    assert created is True
+    assert storage.DEFAULT_ADMIN_USERNAME == "kamil"
+    assert storage.get_user_and_secret("kamil") is not None
+    assert storage.get_user_and_secret("unsloth") is None
+
+
 def test_auth_status_does_not_disclose_admin_username_after_initialization(client):
     seed_admin()
 
