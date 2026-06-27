@@ -69,6 +69,7 @@ import {
   parseAssistantContent,
 } from "../utils/parse-assistant-content";
 import {
+  classifyCogniXObjective,
   generateAudio,
   getProjectDefaultModel,
   listCachedGguf,
@@ -77,6 +78,7 @@ import {
   loadModel,
   streamChatCompletions,
   validateModel,
+  type CogniXRouterClassification,
   type ProjectDefaultModel,
 } from "./chat-api";
 import {
@@ -495,6 +497,47 @@ function collectTextParts(message: RunMessage): string[] {
   }
 
   return textParts;
+}
+
+function findLatestUserObjective(messages: RunMessages): string {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (!message || message.role !== "user") continue;
+    return collectTextParts(message).join("\n").trim();
+  }
+  return "";
+}
+
+function formatCogniXRouteSummary(
+  classification: CogniXRouterClassification | null,
+): string {
+  if (!classification) {
+    return "CogniX Auto could not classify this request yet.";
+  }
+  const confidence =
+    typeof classification.confidence === "number"
+      ? ` (${Math.round(classification.confidence * 100)}%)`
+      : "";
+  return `${classification.label} -> ${classification.recommendedModelLabel}${confidence}`;
+}
+
+async function classifyLatestCogniXObjective(
+  messages: RunMessages,
+): Promise<CogniXRouterClassification | null> {
+  const objective = findLatestUserObjective(messages);
+  if (!objective) {
+    return null;
+  }
+  try {
+    const { classification } = await classifyCogniXObjective({ objective });
+    toast("CogniX Auto", {
+      description: formatCogniXRouteSummary(classification),
+      duration: 2800,
+    });
+    return classification;
+  } catch {
+    return null;
+  }
 }
 
 function collectImageParts(
@@ -1619,6 +1662,7 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
       }
 
       if (!useChatRuntimeStore.getState().params.checkpoint) {
+        const cognixRoute = await classifyLatestCogniXObjective(messages);
         // Prefer a model already loaded by the CLI/API before auto-loading.
         let loaded: boolean;
         let blockedByTrustRemoteCode: boolean;
@@ -1637,11 +1681,15 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
             {
               description: blockedByTrustRemoteCode
                 ? "Select it from the top bar to review and approve its custom code, or pick another model."
-                : "Pick a model in the top bar, then retry.",
+                : `${formatCogniXRouteSummary(cognixRoute)} Pick a model in the top bar, then retry.`,
             },
           );
           clearSelectedImageEditReference();
-          throw new Error("Load a model first.");
+          throw new Error(
+            blockedByTrustRemoteCode
+              ? "This model needs custom code approval."
+              : `${formatCogniXRouteSummary(cognixRoute)} Load a model first.`,
+          );
         }
       }
 

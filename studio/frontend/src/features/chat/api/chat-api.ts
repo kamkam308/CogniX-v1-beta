@@ -85,6 +85,36 @@ export async function getApiMonitorEntry(id: string): Promise<ApiMonitorEntry> {
   return parseJsonOrThrow<ApiMonitorEntry>(response);
 }
 
+export interface CogniXRouterClassification {
+  selectedDomain: string;
+  label: string;
+  recommendedModelLabel: string;
+  confidence: number;
+  needsClarification: boolean;
+  scores: Record<string, number>;
+  routingMode: string;
+  reason: string;
+}
+
+export async function classifyCogniXObjective(payload: {
+  objective: string;
+  projectType?: string | null;
+}): Promise<{
+  username: string;
+  classification: CogniXRouterClassification;
+  logId: string | number | null;
+}> {
+  const response = await authFetch("/api/cognix/router/classify", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      objective: payload.objective,
+      project_type: payload.projectType ?? null,
+    }),
+  });
+  return parseJsonOrThrow(response);
+}
+
 export async function loadModel(
   payload: LoadModelRequest,
 ): Promise<LoadModelResponse> {
