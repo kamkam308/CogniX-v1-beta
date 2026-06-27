@@ -5,7 +5,11 @@ import type { RememberedLoadSettings } from "@/components/assistant-ui/model-sel
 import { cancelStagedModelDownload } from "@/features/hub";
 import { toast } from "@/lib/toast";
 import { create } from "zustand";
-import { isExternalModelId, parseExternalModelId } from "../external-providers";
+import {
+  COGNIX_DEFAULT_EXTERNAL_CHECKPOINT,
+  isExternalModelId,
+  parseExternalModelId,
+} from "../external-providers";
 import {
   type ChatPresetSource,
   type Preset,
@@ -1037,9 +1041,10 @@ export const useChatRuntimeStore = create<ChatRuntimeStore>((set, get) => ({
   // useChatModelRuntime and intentionally NOT persisted here.
   params: (() => {
     const persistedExternal = loadLastExternalCheckpoint();
-    return persistedExternal
-      ? { ...DEFAULT_INFERENCE_PARAMS, checkpoint: persistedExternal }
-      : DEFAULT_INFERENCE_PARAMS;
+    return {
+      ...DEFAULT_INFERENCE_PARAMS,
+      checkpoint: persistedExternal ?? COGNIX_DEFAULT_EXTERNAL_CHECKPOINT,
+    };
   })(),
   customPresets: [],
   activePreset: "Default",

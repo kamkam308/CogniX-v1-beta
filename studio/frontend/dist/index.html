@@ -7,73 +7,20 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/png" href="/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>CogniX</title>
-    <script>
-      (() => {
-        const providerId = "b6878df754d543b1";
-        const modelId = "huihui_ai/qwen3-vl-abliterated:4b-instruct";
-        const provider = {
-          id: providerId,
-          providerType: "ollama",
-          name: "Ollama Qwen 4B",
-          baseUrl: "http://127.0.0.1:11434/v1",
-          models: [modelId],
-          availableModels: [modelId],
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-        };
-        try {
-          const key = "unsloth_chat_external_providers";
-          const raw = localStorage.getItem(key);
-          const providers = raw ? JSON.parse(raw) : [];
-          const list = Array.isArray(providers) ? providers : [];
-          const next = [
-            provider,
-            ...list.filter((item) => item && item.id !== providerId),
-          ];
-          localStorage.setItem(key, JSON.stringify(next));
-          localStorage.setItem("unsloth_chat_connections_enabled", "true");
-          localStorage.setItem(
-            "unsloth_chat_last_external_checkpoint",
-            `external::${providerId}::${encodeURIComponent(modelId)}`,
-          );
-        } catch {
-          // Local storage can be unavailable in private/locked-down contexts.
-        }
-      })();
-    </script>
-    <script type="module" crossorigin src="/assets/index-DDtZQQ8j.js"></script>
-    <link rel="modulepreload" crossorigin href="/assets/chunk-CMxvf4Kt.js">
-    <link rel="modulepreload" crossorigin href="/assets/preload-helper-zJ_50EbN.js">
-    <link rel="modulepreload" crossorigin href="/assets/react-cS1o3OVs.js">
-    <link rel="modulepreload" crossorigin href="/assets/HugeiconsIcon-B9eKeMx3.js">
-    <link rel="modulepreload" crossorigin href="/assets/bundle-mjs-BS1IYED4.js">
-    <link rel="modulepreload" crossorigin href="/assets/jsx-runtime-sLPvdpSW.js">
-    <link rel="modulepreload" crossorigin href="/assets/card-CnEWRPL1.js">
-    <link rel="modulepreload" crossorigin href="/assets/react-BnVQU_v5.js">
-    <link rel="modulepreload" crossorigin href="/assets/tauri-auto-auth-sPCKnT3j.js">
-    <link rel="modulepreload" crossorigin href="/assets/auth--UkfIhCv.js">
-    <link rel="modulepreload" crossorigin href="/assets/format-fastapi-error-02LLMC_N.js">
-    <link rel="modulepreload" crossorigin href="/assets/shallow-BCswqwpq.js">
-    <link rel="modulepreload" crossorigin href="/assets/progress-BC_lHes7.js">
-    <link rel="modulepreload" crossorigin href="/assets/string-f6JzSHaO.js">
-    <link rel="modulepreload" crossorigin href="/assets/src-CzF_J1j8.js">
-    <link rel="modulepreload" crossorigin href="/assets/dist-Dt2rhXkS.js">
-    <link rel="modulepreload" crossorigin href="/assets/step-D4Q0arzR.js">
-    <link rel="modulepreload" crossorigin href="/assets/math-Bi_r_ZWc.js">
-    <link rel="modulepreload" crossorigin href="/assets/chunk-CSCIHK7Q-BZTo178x.js">
-    <link rel="modulepreload" crossorigin href="/assets/chunk-5ZQYHXKU-BVJG5PNb.js">
-    <link rel="modulepreload" crossorigin href="/assets/chunk-O5CBEL6O-DIERM_s0.js">
-    <link rel="modulepreload" crossorigin href="/assets/invariant-DEEwAagU.js">
-    <link rel="modulepreload" crossorigin href="/assets/path-BWPyau1x.js">
-    <link rel="modulepreload" crossorigin href="/assets/array-BifhSqXX.js">
-    <link rel="modulepreload" crossorigin href="/assets/line-BMvOdiSv.js">
-    <link rel="modulepreload" crossorigin href="/assets/chunk-L5ZTLDWV-CmcG3u_D.js">
-    <link rel="modulepreload" crossorigin href="/assets/chunk-NZK2D7GU-DCphoR0f.js">
-    <link rel="modulepreload" crossorigin href="/assets/rough.esm-CSKSodPl.js">
-    <link rel="modulepreload" crossorigin href="/assets/chunk-3OPIFGDE-D_YieXoX.js">
-    <link rel="modulepreload" crossorigin href="/assets/chunk-BSJP7CBP-DJ4LP8a5.js">
-    <link rel="stylesheet" crossorigin href="/assets/index-BYOHIwO0.css">
+    <title>Unsloth Studio</title>
+    <script type="module" crossorigin src="/assets/index-x9BSa6p8.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/chunk-jRWAZmH_.js">
+    <link rel="modulepreload" crossorigin href="/assets/preload-helper-D4M6sveU.js">
+    <link rel="modulepreload" crossorigin href="/assets/one-dark-pro-CH0XOllr.js">
+    <link rel="modulepreload" crossorigin href="/assets/one-light-DqAx742G.js">
+    <link rel="modulepreload" crossorigin href="/assets/path-04Iapt4k.js">
+    <link rel="modulepreload" crossorigin href="/assets/array-Bycb6e-0.js">
+    <link rel="modulepreload" crossorigin href="/assets/step-Ct4do_Z8.js">
+    <link rel="modulepreload" crossorigin href="/assets/math-ClKh9N92.js">
+    <link rel="modulepreload" crossorigin href="/assets/browser-DoQFIMxi.js">
+    <link rel="modulepreload" crossorigin href="/assets/katex-D0LOXkFG.js">
+    <link rel="modulepreload" crossorigin href="/assets/rough.esm-CxFEZIS4.js">
+    <link rel="stylesheet" crossorigin href="/assets/index-m3eDiiAN.css">
   </head>
   <body>
     <div id="root"></div>

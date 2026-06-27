@@ -262,6 +262,12 @@ const EXTERNAL_PROVIDERS_KEY = "unsloth_chat_external_providers";
 const EXTERNAL_PROVIDER_KEYS_KEY = "unsloth_chat_external_provider_keys";
 const CONNECTIONS_ENABLED_KEY = "unsloth_chat_connections_enabled";
 const EXTERNAL_MODEL_PREFIX = "external::";
+export const COGNIX_OLLAMA_PROVIDER_ID = "b6878df754d543b1";
+export const COGNIX_OLLAMA_MODEL_ID =
+  "huihui_ai/qwen3-vl-abliterated:4b-instruct";
+export const COGNIX_OLLAMA_PROVIDER_NAME = "Ollama Qwen 4B";
+export const COGNIX_OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1";
+const COGNIX_OLLAMA_CREATED_AT = 1790000000000;
 
 function canUseStorage(): boolean {
   return typeof window !== "undefined";
@@ -276,6 +282,11 @@ export function isExternalModelId(
 export function buildExternalModelId(providerId: string, modelId: string): string {
   return `${EXTERNAL_MODEL_PREFIX}${providerId}::${encodeURIComponent(modelId)}`;
 }
+
+export const COGNIX_DEFAULT_EXTERNAL_CHECKPOINT = buildExternalModelId(
+  COGNIX_OLLAMA_PROVIDER_ID,
+  COGNIX_OLLAMA_MODEL_ID,
+);
 
 export function parseExternalModelId(
   value: string | null | undefined,
@@ -344,6 +355,48 @@ function normalizeProvider(raw: ExternalProviderConfig): ExternalProviderConfig 
   };
 }
 
+function cognixDefaultOllamaProvider(): ExternalProviderConfig {
+  return {
+    id: COGNIX_OLLAMA_PROVIDER_ID,
+    providerType: "ollama",
+    name: COGNIX_OLLAMA_PROVIDER_NAME,
+    baseUrl: COGNIX_OLLAMA_BASE_URL,
+    models: [COGNIX_OLLAMA_MODEL_ID],
+    availableModels: [COGNIX_OLLAMA_MODEL_ID],
+    createdAt: COGNIX_OLLAMA_CREATED_AT,
+    updatedAt: COGNIX_OLLAMA_CREATED_AT,
+  };
+}
+
+function withCogniXOllamaProvider(
+  providers: ExternalProviderConfig[],
+): ExternalProviderConfig[] {
+  const defaultProvider = cognixDefaultOllamaProvider();
+  const existingIndex = providers.findIndex(
+    (provider) => provider.id === COGNIX_OLLAMA_PROVIDER_ID,
+  );
+  if (existingIndex < 0) return [defaultProvider, ...providers];
+
+  const next = [...providers];
+  const existing = next[existingIndex];
+  next[existingIndex] = normalizeProvider({
+    ...defaultProvider,
+    ...existing,
+    providerType: "ollama",
+    baseUrl: existing.baseUrl || defaultProvider.baseUrl,
+    models: Array.from(
+      new Set([...existing.models, COGNIX_OLLAMA_MODEL_ID]),
+    ),
+    availableModels: Array.from(
+      new Set([
+        ...(existing.availableModels ?? []),
+        COGNIX_OLLAMA_MODEL_ID,
+      ]),
+    ),
+  });
+  return next;
+}
+
 function isCompleteProvider(provider: ExternalProviderConfig): boolean {
   if (!provider.id || !provider.name || !provider.providerType) return false;
   return true;
@@ -404,19 +457,21 @@ export function saveConnectionsEnabled(enabled: boolean): void {
 }
 
 export function loadExternalProviders(): ExternalProviderConfig[] {
-  if (!canUseStorage()) return [];
+  if (!canUseStorage()) return [cognixDefaultOllamaProvider()];
   try {
     const raw = localStorage.getItem(EXTERNAL_PROVIDERS_KEY);
-    if (!raw) return [];
+    if (!raw) return [cognixDefaultOllamaProvider()];
     const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed
+    if (!Array.isArray(parsed)) return [cognixDefaultOllamaProvider()];
+    return withCogniXOllamaProvider(
+      parsed
       .map(fromUnknownProvider)
       .filter((provider): provider is ExternalProviderConfig => provider !== null)
       .map(normalizeProvider)
-      .filter(isCompleteProvider);
+        .filter(isCompleteProvider),
+    );
   } catch {
-    return [];
+    return [cognixDefaultOllamaProvider()];
   }
 }
 
