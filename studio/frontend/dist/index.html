@@ -12,6 +12,7 @@
       (() => {
         const providerId = "b6878df754d543b1";
         const modelId = "huihui_ai/qwen3-vl-abliterated:4b-instruct";
+        const checkpoint = `external::${providerId}::${encodeURIComponent(modelId)}`;
         const provider = {
           id: providerId,
           providerType: "ollama",
@@ -19,30 +20,29 @@
           baseUrl: "http://127.0.0.1:11434/v1",
           models: [modelId],
           availableModels: [modelId],
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
+          createdAt: 1790000000000,
+          updatedAt: 1790000000000,
         };
         try {
-          const key = "unsloth_chat_external_providers";
-          const raw = localStorage.getItem(key);
-          const providers = raw ? JSON.parse(raw) : [];
-          const list = Array.isArray(providers) ? providers : [];
-          const next = [
-            provider,
-            ...list.filter((item) => item && item.id !== providerId),
-          ];
-          localStorage.setItem(key, JSON.stringify(next));
-          localStorage.setItem("unsloth_chat_connections_enabled", "true");
+          const providersKey = "unsloth_chat_external_providers";
+          const raw = localStorage.getItem(providersKey);
+          const current = raw ? JSON.parse(raw) : [];
+          const list = Array.isArray(current) ? current : [];
           localStorage.setItem(
-            "unsloth_chat_last_external_checkpoint",
-            `external::${providerId}::${encodeURIComponent(modelId)}`,
+            providersKey,
+            JSON.stringify([
+              provider,
+              ...list.filter((item) => item && item.id !== providerId),
+            ]),
           );
+          localStorage.setItem("unsloth_chat_connections_enabled", "true");
+          localStorage.setItem("unsloth_chat_last_external_checkpoint", checkpoint);
         } catch {
-          // Local storage can be unavailable in private/locked-down contexts.
+          // Ignore private-mode or locked storage.
         }
       })();
     </script>
-    <script type="module" crossorigin src="/assets/index-DDtZQQ8j.js"></script>
+    <script type="module" crossorigin src="/assets/index-mZV6E4nh.js"></script>
     <link rel="modulepreload" crossorigin href="/assets/chunk-CMxvf4Kt.js">
     <link rel="modulepreload" crossorigin href="/assets/preload-helper-zJ_50EbN.js">
     <link rel="modulepreload" crossorigin href="/assets/react-cS1o3OVs.js">
@@ -61,17 +61,17 @@
     <link rel="modulepreload" crossorigin href="/assets/dist-Dt2rhXkS.js">
     <link rel="modulepreload" crossorigin href="/assets/step-D4Q0arzR.js">
     <link rel="modulepreload" crossorigin href="/assets/math-Bi_r_ZWc.js">
-    <link rel="modulepreload" crossorigin href="/assets/chunk-CSCIHK7Q-BZTo178x.js">
-    <link rel="modulepreload" crossorigin href="/assets/chunk-5ZQYHXKU-BVJG5PNb.js">
-    <link rel="modulepreload" crossorigin href="/assets/chunk-O5CBEL6O-DIERM_s0.js">
+    <link rel="modulepreload" crossorigin href="/assets/chunk-CSCIHK7Q-BjBAVMW9.js">
+    <link rel="modulepreload" crossorigin href="/assets/chunk-5ZQYHXKU-DsvChn93.js">
+    <link rel="modulepreload" crossorigin href="/assets/chunk-O5CBEL6O-DVKbNTEn.js">
     <link rel="modulepreload" crossorigin href="/assets/invariant-DEEwAagU.js">
     <link rel="modulepreload" crossorigin href="/assets/path-BWPyau1x.js">
     <link rel="modulepreload" crossorigin href="/assets/array-BifhSqXX.js">
     <link rel="modulepreload" crossorigin href="/assets/line-BMvOdiSv.js">
-    <link rel="modulepreload" crossorigin href="/assets/chunk-L5ZTLDWV-CmcG3u_D.js">
-    <link rel="modulepreload" crossorigin href="/assets/chunk-NZK2D7GU-DCphoR0f.js">
+    <link rel="modulepreload" crossorigin href="/assets/chunk-L5ZTLDWV-D9JWDcj4.js">
+    <link rel="modulepreload" crossorigin href="/assets/chunk-NZK2D7GU-8h3hGQiK.js">
     <link rel="modulepreload" crossorigin href="/assets/rough.esm-CSKSodPl.js">
-    <link rel="modulepreload" crossorigin href="/assets/chunk-3OPIFGDE-D_YieXoX.js">
+    <link rel="modulepreload" crossorigin href="/assets/chunk-3OPIFGDE-C7cZCUVO.js">
     <link rel="modulepreload" crossorigin href="/assets/chunk-BSJP7CBP-DJ4LP8a5.js">
     <link rel="stylesheet" crossorigin href="/assets/index-BYOHIwO0.css">
   </head>

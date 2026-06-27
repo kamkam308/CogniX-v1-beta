@@ -384,14 +384,9 @@ function withCogniXOllamaProvider(
     ...existing,
     providerType: "ollama",
     baseUrl: existing.baseUrl || defaultProvider.baseUrl,
-    models: Array.from(
-      new Set([...existing.models, COGNIX_OLLAMA_MODEL_ID]),
-    ),
+    models: Array.from(new Set([...existing.models, COGNIX_OLLAMA_MODEL_ID])),
     availableModels: Array.from(
-      new Set([
-        ...(existing.availableModels ?? []),
-        COGNIX_OLLAMA_MODEL_ID,
-      ]),
+      new Set([...(existing.availableModels ?? []), COGNIX_OLLAMA_MODEL_ID]),
     ),
   });
   return next;
@@ -465,9 +460,9 @@ export function loadExternalProviders(): ExternalProviderConfig[] {
     if (!Array.isArray(parsed)) return [cognixDefaultOllamaProvider()];
     return withCogniXOllamaProvider(
       parsed
-      .map(fromUnknownProvider)
-      .filter((provider): provider is ExternalProviderConfig => provider !== null)
-      .map(normalizeProvider)
+        .map(fromUnknownProvider)
+        .filter((provider): provider is ExternalProviderConfig => provider !== null)
+        .map(normalizeProvider)
         .filter(isCompleteProvider),
     );
   } catch {
