@@ -57,7 +57,11 @@ const checks: Check[] = [
     file: "src/features/chat/api/chat-api.ts",
     includes: [
       "CogniXExecutionPlan",
+      'CHAT_HISTORY_UPDATED_EVENT = "cognix-chat-history-updated"',
       'authFetch("/api/cognix/orchestrator/plan"',
+    ],
+    excludes: [
+      "unsloth-chat-history-updated",
     ],
   },
   {

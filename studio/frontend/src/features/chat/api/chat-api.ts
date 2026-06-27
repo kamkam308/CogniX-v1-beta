@@ -26,7 +26,7 @@ import type {
   ValidateModelResponse,
 } from "../types/api";
 
-export const CHAT_HISTORY_UPDATED_EVENT = "unsloth-chat-history-updated";
+export const CHAT_HISTORY_UPDATED_EVENT = "cognix-chat-history-updated";
 
 export function notifyChatHistoryUpdated(): void {
   if (typeof window !== "undefined") {
