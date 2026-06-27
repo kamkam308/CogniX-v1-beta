@@ -8,40 +8,6 @@
     <link rel="icon" type="image/png" href="/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>CogniX</title>
-    <script>
-      (() => {
-        const providerId = "b6878df754d543b1";
-        const modelId = "huihui_ai/qwen3-vl-abliterated:4b-instruct";
-        const checkpoint = `external::${providerId}::${encodeURIComponent(modelId)}`;
-        const provider = {
-          id: providerId,
-          providerType: "ollama",
-          name: "Ollama Qwen 4B",
-          baseUrl: "http://127.0.0.1:11434/v1",
-          models: [modelId],
-          availableModels: [modelId],
-          createdAt: 1790000000000,
-          updatedAt: 1790000000000,
-        };
-        try {
-          const providersKey = "unsloth_chat_external_providers";
-          const raw = localStorage.getItem(providersKey);
-          const current = raw ? JSON.parse(raw) : [];
-          const list = Array.isArray(current) ? current : [];
-          localStorage.setItem(
-            providersKey,
-            JSON.stringify([
-              provider,
-              ...list.filter((item) => item && item.id !== providerId),
-            ]),
-          );
-          localStorage.setItem("unsloth_chat_connections_enabled", "true");
-          localStorage.setItem("unsloth_chat_last_external_checkpoint", checkpoint);
-        } catch {
-          // Ignore private-mode or locked storage.
-        }
-      })();
-    </script>
     <script type="module" crossorigin src="/assets/index-mZV6E4nh.js"></script>
     <link rel="modulepreload" crossorigin href="/assets/chunk-CMxvf4Kt.js">
     <link rel="modulepreload" crossorigin href="/assets/preload-helper-zJ_50EbN.js">

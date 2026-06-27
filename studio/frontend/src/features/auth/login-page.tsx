@@ -6,12 +6,6 @@ import { Card } from "@/components/ui/card";
 import { AuthForm } from "./components/auth-form";
 
 export function LoginPage() {
-  const authMode =
-    typeof window !== "undefined" &&
-    new URLSearchParams(window.location.search).get("mode") === "signup"
-      ? "signup"
-      : "login";
-
   return (
     <div className="relative flex min-h-[calc(100dvh-var(--studio-titlebar-height,0px))] items-center justify-center overflow-hidden bg-background px-4 py-8 sm:px-6 sm:py-10 md:px-10">
       <img
@@ -28,7 +22,7 @@ export function LoginPage() {
         className="opacity-35 dark:opacity-15"
       />
       <Card className="relative z-10 w-full max-w-sm rounded-[2rem] px-7 py-8 shadow-border ring-0 sm:px-8 sm:py-10">
-        <AuthForm mode={authMode} />
+        <AuthForm mode="login" />
       </Card>
     </div>
   );
@@ -43,7 +37,7 @@ export function SignupPage() {
         className="absolute left-6 top-6 z-20 size-7 object-contain sm:left-8 sm:top-8"
       />
       <Card className="relative z-10 w-full max-w-sm rounded-[2rem] px-7 py-8 shadow-border ring-0 sm:px-8 sm:py-10">
-        <AuthForm mode="signup" />
+        <AuthForm mode="login" />
       </Card>
     </div>
   );
