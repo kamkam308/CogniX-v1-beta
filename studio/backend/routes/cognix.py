@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from auth import storage as auth_storage
 from auth.authentication import get_current_jwt_subject
+from core.cognix.router import classify_objective
 from core.cognix.strategy import build_strategy
 from storage import cognix_db
 from storage.studio_db import list_chat_messages_for_threads, list_chat_projects, list_chat_threads
@@ -109,6 +110,11 @@ class ResearchRequest(BaseModel):
 class AgentRunRequest(BaseModel):
     goal: str = Field(..., min_length = 2, max_length = 2000)
     mode: Literal["agent", "research", "automation"] = "agent"
+
+
+class RouterClassifyRequest(BaseModel):
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    project_type: str | None = Field(None, max_length = 80)
 
 
 class NewsRefreshRequest(BaseModel):
@@ -749,6 +755,20 @@ def _apply_ai_chess_reply(state: dict[str, Any]) -> dict[str, Any]:
 @router.get("/strategy")
 async def my_strategy(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
     return build_strategy(current_subject)
+
+
+@router.post("/router/classify")
+async def classify_route(
+    payload: RouterClassifyRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    return {
+        "username": current_subject,
+        "classification": classify_objective(
+            payload.objective,
+            project_type = payload.project_type,
+        ),
+    }
 
 
 @router.get("/permissions/me")
