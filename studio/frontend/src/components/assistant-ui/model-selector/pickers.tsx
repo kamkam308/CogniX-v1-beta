@@ -2142,7 +2142,7 @@ export function HubModelPicker({
         value={recommendedSort}
         options={RECOMMENDED_SORT_OPTIONS}
         onValueChange={setRecommendedSort}
-        ariaLabel="Sort Unsloth models"
+        ariaLabel="Sort CogniX models"
         align="end"
         className={sortTriggerClassName}
         contentClassName={sortMenuContentClassName}
@@ -2505,7 +2505,7 @@ export function HubModelPicker({
                               side="bottom"
                               className="tooltip-compact"
                             >
-                              Other non-Unsloth models
+                              Other non-CogniX models
                             </TooltipContent>
                           </Tooltip>
                         ) : null}
@@ -2555,8 +2555,8 @@ export function HubModelPicker({
                     }
                   >
                     {/* When other providers (LM Studio/Ollama) also show here, name
-                    this group "Unsloth" so the two are easy to tell apart. */}
-                    {sortedLmStudio.length > 0 ? "Unsloth" : "Downloaded"}
+                    this group "CogniX" so the two are easy to tell apart. */}
+                    {sortedLmStudio.length > 0 ? "CogniX" : "Downloaded"}
                   </ListLabel>
                   {!downloadedCollapsed &&
                     unslothCachedGguf.map(renderDownloadedGgufRow)}
@@ -3267,7 +3267,7 @@ export function HubModelPicker({
                   {hfIds.length === 0 && !isLoading ? (
                     filteredRecommendedIds.length === 0 ? (
                       <div className="px-2.5 py-2 text-xs text-muted-foreground">
-                        No matching Unsloth models.
+                        No matching CogniX models.
                       </div>
                     ) : null
                   ) : (

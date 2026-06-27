@@ -52,7 +52,7 @@ export function ShutdownDialog({
     onAfterShutdown?.();
     document.body.innerHTML = `
       <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;gap:12px">
-        <p style="font-size:1.1rem;font-weight:600;margin:0">Unsloth Studio has stopped.</p>
+        <p style="font-size:1.1rem;font-weight:600;margin:0">CogniX has stopped.</p>
         <p style="font-size:0.9rem;color:#888;margin:0">You can now close this tab.</p>
       </div>`;
   };
@@ -61,7 +61,7 @@ export function ShutdownDialog({
     <AlertDialog open={open} onOpenChange={onOpenChange}>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>Stop Unsloth Studio?</AlertDialogTitle>
+          <AlertDialogTitle>Stop CogniX?</AlertDialogTitle>
           <AlertDialogDescription>
             This will shut down the server. Any active training or inference
             jobs will be terminated. You can restart it any time from the

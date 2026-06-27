@@ -321,7 +321,7 @@ export function ChatTab() {
           alignTop={true}
           description={
             <span>
-              On: Unsloth auto-picks the best settings and loads it.
+              On: CogniX auto-picks the best settings and loads it.
               <br />
               Off: opens Run settings to customize, then load.
               <br />

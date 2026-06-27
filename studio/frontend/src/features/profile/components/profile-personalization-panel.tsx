@@ -12,7 +12,6 @@ import { toastError, toastSuccess } from "@/shared/toast";
 import { Camera01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { SLOTH_AVATARS } from "../sloth-avatars";
 import { decodeJwtSubject } from "../utils/jwt-subject";
 import { resizeImageFileToDataUrl } from "../utils/resize-image-file";
 import {
@@ -22,6 +21,7 @@ import {
 import { UserAvatar } from "./user-avatar";
 
 const PROFILE_STORAGE_KEY = "unsloth_user_profile";
+const COGNIX_PROFILE_PRESETS = ["cognix-logo.png", "cognix-logo-512.png"] as const;
 
 function readPersistedProfile(): {
   displayName: string;
@@ -72,7 +72,7 @@ export function ProfilePersonalizationPanel() {
   const lastNicknameRef = useRef(nickname);
 
   const sessionSub = decodeJwtSubject(getAuthToken()) ?? "";
-  const previewName = draftName.trim() || sessionSub || "Unsloth";
+  const previewName = draftName.trim() || sessionSub || "CogniX";
   const hasNameChanges = useMemo(
     () => draftName.trim() !== displayName.trim(),
     [draftName, displayName],
@@ -154,7 +154,7 @@ export function ProfilePersonalizationPanel() {
     }
   };
 
-  const pickSloth = (path: string) => {
+  const pickPreset = (path: string) => {
     setImageError(null);
     applyAvatar(publicAssetUrl(path));
   };
@@ -206,7 +206,7 @@ export function ProfilePersonalizationPanel() {
               }
             }}
             autoComplete="off"
-            placeholder={sessionSub || "Unsloth"}
+            placeholder={sessionSub || "CogniX"}
             className="h-10 min-w-0 flex-1 rounded-full text-sm"
           />
           <Button type="button" size="sm" className="h-10 px-5" onClick={saveName} disabled={!hasNameChanges}>
@@ -273,17 +273,15 @@ export function ProfilePersonalizationPanel() {
           {t("settings.profile.chooseSloth")}
         </Label>
         <div className="grid grid-cols-7 gap-2 sm:grid-cols-9">
-          {SLOTH_AVATARS.map((path) => {
+          {COGNIX_PROFILE_PRESETS.map((path) => {
             const url = publicAssetUrl(path);
             const selected = avatarDataUrl === url;
-            const label =
-              path.split("/").pop()?.replace(/\.png$/i, "").replace(/^large\s+/i, "").trim() ??
-              "sloth";
+            const label = "CogniX";
             return (
               <button
                 key={path}
                 type="button"
-                onClick={() => pickSloth(path)}
+                onClick={() => pickPreset(path)}
                 aria-pressed={selected}
                 aria-label={label}
                 title={label}

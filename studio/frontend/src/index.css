@@ -509,6 +509,16 @@
 			background-position: 0% 0%;
 		}
 	}
+
+	@keyframes cognix-thinking-sheen {
+		0% {
+			background-position: 140% 50%;
+		}
+
+		100% {
+			background-position: -40% 50%;
+		}
+	}
 }
 
 @layer base {
@@ -1347,6 +1357,35 @@
 	.unsloth-welcome-title {
 		font-family: "Hellix", "Space Grotesk Variable", var(--font-sans);
 		font-weight: 500;
+	}
+
+	.cognix-thinking-indicator {
+		position: relative;
+		display: inline-block;
+		overflow: hidden;
+		color: var(--muted-foreground);
+		font-size: 0.875rem;
+		font-weight: 500;
+		letter-spacing: 0;
+	}
+
+	.cognix-thinking-indicator::after {
+		content: "Thinking";
+		position: absolute;
+		inset: 0;
+		background: linear-gradient(
+			100deg,
+			transparent 0%,
+			transparent 36%,
+			var(--foreground) 50%,
+			transparent 64%,
+			transparent 100%
+		);
+		background-size: 260% 100%;
+		background-clip: text;
+		color: transparent;
+		animation: cognix-thinking-sheen 1.45s ease-in-out infinite;
+		-webkit-background-clip: text;
 	}
 
 	/* Right-side Thinking pill (toggle or dropdown). pl-2 matches the left

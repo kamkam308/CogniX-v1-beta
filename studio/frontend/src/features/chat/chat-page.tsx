@@ -8,6 +8,10 @@ import {
   type ModelOption,
   ModelSelector,
 } from "@/components/assistant-ui/model-selector";
+import {
+  loadRememberedLoadSettings,
+  rememberedLoadSettingsKey,
+} from "@/components/assistant-ui/model-selector/remembered-load-settings";
 import { ProjectComposer, Thread } from "@/components/assistant-ui/thread";
 import { CopyableErrorChip } from "@/components/ui/copyable-error-chip";
 import {
@@ -33,6 +37,7 @@ import {
 } from "@/features/native-intents";
 import { ProjectSourcesPanel } from "@/features/rag/components/project-sources-panel";
 import { GuidedTour, useGuidedTourController } from "@/features/tour";
+import { useDeveloperOptions } from "@/hooks/use-developer-mode";
 import { isTauri } from "@/lib/api-base";
 import { toast } from "@/lib/toast";
 import { cn } from "@/lib/utils";
@@ -1082,6 +1087,12 @@ export function ChatPage({
 
   const settingsOpen = useChatRuntimeStore((s) => s.settingsPanelOpen);
   const setSettingsOpen = useChatRuntimeStore((s) => s.setSettingsPanelOpen);
+  const [developerOptions] = useDeveloperOptions();
+  useEffect(() => {
+    if (!developerOptions.rightSidebar && settingsOpen) {
+      setSettingsOpen(false);
+    }
+  }, [developerOptions.rightSidebar, settingsOpen, setSettingsOpen]);
   // Deferred-load staging: downloads a staged GGUF (if needed) and reads its
   // header context so the sheet can show the context slider before the load.
   // autoLoad picks instead load the cached file as soon as the download ends;
@@ -1277,11 +1288,17 @@ export function ChatPage({
   // Load a cached autoLoad pick once its download finishes. The sheet was never
   // opened, so on a load failure just drop the orphaned staged knobs.
   autoLoadStagedRef.current = (pending) => {
+    const remembered = loadRememberedLoadSettings(
+      rememberedLoadSettingsKey(pending),
+    );
+    if (remembered) {
+      useChatRuntimeStore.getState().applyRememberedLoadSettings(remembered);
+    }
     void selectModel({
       ...pending,
       isDownloaded: true,
       forceReload: true,
-      keepSpeculative: false,
+      keepSpeculative: remembered != null,
       throwOnError: true,
     }).catch(() => {
       const store = useChatRuntimeStore.getState();
@@ -1651,7 +1668,15 @@ export function ChatPage({
         // Detach any staged pick first so its edited knobs don't leak into this
         // immediate load. Detach (not abandon) keeps its download running.
         detachStaged();
-        await selectModel(selection);
+        const remembered = hasGgufSource(selection)
+          ? loadRememberedLoadSettings(rememberedLoadSettingsKey(selection))
+          : null;
+        if (remembered) {
+          store.applyRememberedLoadSettings(remembered);
+        }
+        await selectModel(
+          remembered ? { ...selection, keepSpeculative: true } : selection,
+        );
         return;
       }
       // Loads can't queue behind each other, but a download is independent: if
@@ -2498,7 +2523,7 @@ export function ChatPage({
                 </TooltipContent>
               </Tooltip>
             )}
-            {!settingsOpen && (
+            {developerOptions.rightSidebar && !settingsOpen && (
               <Tooltip>
                 <TooltipPrimitive.Trigger asChild={true}>
                   <button
@@ -2575,7 +2600,7 @@ export function ChatPage({
       </div>
 
       <ChatSettingsPanel
-        open={active && settingsOpen}
+        open={active && developerOptions.rightSidebar && settingsOpen}
         onOpenChange={(open) => {
           setSettingsOpen(open);
           // Closing the sheet abandons a staged (not-yet-loaded) pick: cancel its

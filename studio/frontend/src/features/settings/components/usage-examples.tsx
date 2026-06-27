@@ -67,7 +67,7 @@ const OS_AWARE: Record<ExampleType, boolean> = {
 
 const CURL_TYPES = new Set<ExampleType>(["curl", "curlTools", "curlAdvanced"]);
 
-const PROMPT = "Can Unsloth Studio do API calling?";
+const PROMPT = "Can CogniX do API calling?";
 // web_search + python + terminal are the reliable built-in tools.
 const TOOLS = ["web_search", "python", "terminal"];
 // Sampling/thinking knobs for the "+ advanced" examples.
@@ -196,7 +196,7 @@ function pythonSnippet(
   model: string,
   variant: Variant,
 ): string {
-  // Standard OpenAI args are named; Unsloth extensions go through extra_body.
+  // Standard OpenAI args are named; CogniX extensions go through extra_body.
   const named =
     variant === "advanced"
       ? `

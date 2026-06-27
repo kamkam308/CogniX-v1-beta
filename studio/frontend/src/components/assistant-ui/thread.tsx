@@ -38,7 +38,6 @@ import {
   useScrollThreadToBottom,
 } from "@/components/assistant-ui/use-intent-aware-autoscroll";
 import { Button } from "@/components/ui/button";
-import { MascotImg } from "@/components/mascot-img";
 import { Spinner } from "@/components/ui/spinner";
 import {
   DropdownMenu,
@@ -91,7 +90,7 @@ import { listThreadDocuments } from "@/features/rag/api/rag-api";
 import { ThreadDocumentsBar } from "@/features/rag/components/thread-documents-bar";
 import { KnowledgeBaseComposerButton } from "@/features/rag/components/knowledge-base-composer-button";
 import { DocumentPreviewMount } from "@/features/rag/components/document-preview-mount";
-import { useUserProfileStore } from "@/features/profile/stores/user-profile-store";
+import { useEffectiveProfile } from "@/features/profile";
 import { applyQwenThinkingParams } from "@/features/chat/utils/qwen-params";
 import { isTauri } from "@/lib/api-base";
 import { copyToClipboard } from "@/lib/copy-to-clipboard";
@@ -1261,43 +1260,38 @@ const ThreadScrollToBottom: FC = () => {
 const pickRandom = <T,>(arr: T[]): T =>
   arr[Math.floor(Math.random() * arr.length)];
 
-// Each greeting carries its matching sloth picture so a line always shows the
-// same mascot. Greeting varies by local time; name-bearing lines drop the
-// name when none is set.
-type Welcome = { text: string; sloth: string };
+type Welcome = { text: string };
 const DEFAULT_WELCOME: Welcome = {
-  text: "What’s on your mind today?",
-  sloth: "sloth magnify final.png",
+  text: "What is on your mind today?",
 };
 
 function buildWelcome(hour: number, name: string): Welcome {
-  const g = (text: string, sloth: string): Welcome => ({ text, sloth });
-  // Use the name on ~a third of lines (only direct salutations where it reads
-  // naturally); the rest stay name-free so greetings don't feel repetitive.
+  const g = (text: string): Welcome => ({ text });
+  const withName = (text: string, fallback = text): Welcome =>
+    g(name ? `${text}, ${name}` : fallback);
   const base: Welcome[] = [
-    g(name ? `Good to see you, ${name}` : "Good to see you", "large sloth wave.png"),
-    g("Ready when you are", "large sloth thumbs.png"),
+    g(name ? `Good to see you, ${name}` : "Good to see you"),
+    withName("Ready when you are"),
     DEFAULT_WELCOME,
-    g("How can I help?", "sloth sir large.png"),
+    g(name ? `How can I help, ${name}?` : "How can I help?"),
   ];
   if (hour >= 4 && hour < 9) {
-    const morning = g(name ? `Good morning, ${name}` : "Good morning", "large sloth drink.png");
+    const morning = g(name ? `Good morning, ${name}` : "Good morning");
     return pickRandom([...base, morning]);
   }
   if (hour >= 17 && hour < 23) {
     const evening: Welcome[] = [
-      g(name ? `Good evening, ${name}` : "Good evening", "sloth shy large.png"),
-      g("What’s on for tonight?", "large sloth glasses.png"),
+      g(name ? `Good evening, ${name}` : "Good evening"),
+      g(name ? `What is on for tonight, ${name}?` : "What is on for tonight?"),
     ];
-    // Lean toward an evening line, but a base greeting can still appear.
     return pickRandom(Math.random() < 0.75 ? evening : base);
   }
   if (hour >= 23 || hour < 4) {
     return pickRandom([
-      g("Night owl mode?", "large sloth glasses.png"),
-      g("Late night ideas?", "large sloth yay.png"),
-      g("Up late with an idea?", "large sloth heart.png"),
-      g(name ? `The night shift begins, ${name}` : "The night shift begins", "large sloth drink.png"),
+      g(name ? `Night owl mode, ${name}?` : "Night owl mode?"),
+      g(name ? `Late night ideas, ${name}?` : "Late night ideas?"),
+      g(name ? `Up late with an idea, ${name}?` : "Up late with an idea?"),
+      g(name ? `The night shift begins, ${name}` : "The night shift begins"),
     ]);
   }
   return pickRandom(base);
@@ -1308,28 +1302,19 @@ const ThreadWelcome: FC<{
   threadId?: string | null;
 }> = ({ hideComposer, threadId }) => {
   const incognito = useChatRuntimeStore((s) => s.incognito);
-  const displayName = useUserProfileStore((s) => s.displayName);
-  const nickname = useUserProfileStore((s) => s.nickname);
+  const { addressName } = useEffectiveProfile();
   const [welcome, setWelcome] = useState<Welcome>(DEFAULT_WELCOME);
 
   useEffect(() => {
-    // Prefer the nickname; otherwise first name only. Blank falls back to none.
-    const name = nickname.trim() || (displayName.trim().split(/\s+/)[0] ?? "");
+    const name = addressName.trim().split(/\s+/)[0] ?? "";
     setWelcome(buildWelcome(new Date().getHours(), name));
-  }, [displayName, nickname]);
-
-  const currentEmojiSrc = `Sloth emojis/${welcome.sloth}`;
+  }, [addressName]);
 
   return (
     <div className="aui-thread-welcome-root mx-auto my-auto flex w-full max-w-(--thread-max-width) grow flex-col">
       <div className="aui-thread-welcome-center flex w-full grow flex-col items-center justify-start pt-[27.5vh]">
         <div className="aui-thread-welcome-message flex w-full flex-col justify-center gap-9 px-4">
-          {/* Center the greeting (sloth + title) over the composer. */}
           <div className="flex flex-row items-center justify-center gap-[15px]">
-            <MascotImg
-              src={currentEmojiSrc}
-              className="size-[44px] -translate-y-[2px]"
-            />
             <h1 className="aui-thread-welcome-message-inner unsloth-welcome-title fade-in slide-in-from-bottom-1 animate-in text-3xl tracking-[-0.02em] duration-200">
               {incognito ? "Temporary chat" : welcome.text}
             </h1>
@@ -3484,7 +3469,7 @@ const GeneratingIndicator: FC = () => {
   if (!show) {
     return null;
   }
-  return <span className="text-sm text-muted-foreground">Generating...</span>;
+  return <span className="cognix-thinking-indicator">Thinking</span>;
 };
 
 // Placeholder when stop fires before any visible content (e.g. mid-think).

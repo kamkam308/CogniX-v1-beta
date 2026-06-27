@@ -21,6 +21,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import {
   clearRememberedLoadSettings,
   loadRememberedLoadSettings,
+  rememberedLoadSettingsKey,
   saveRememberedLoadSettings,
 } from "@/components/assistant-ui/model-selector/remembered-load-settings";
 import {
@@ -613,10 +614,12 @@ export function ChatSettingsPanel({
   // the saved per-model settings on stage, so the sheet opens with what was used
   // last time; the tick reflects whether a saved entry exists.
   const [remember, setRemember] = useState(false);
-  const pendingId = pendingSelection?.id ?? null;
+  const pendingSettingsKey = pendingSelection
+    ? rememberedLoadSettingsKey(pendingSelection)
+    : null;
   useEffect(() => {
-    if (!pendingId) return;
-    const saved = loadRememberedLoadSettings(pendingId);
+    if (!pendingSettingsKey) return;
+    const saved = loadRememberedLoadSettings(pendingSettingsKey);
     setRemember(saved != null);
     if (!saved) return;
     setCustomContextLength(saved.contextLength);
@@ -625,7 +628,7 @@ export function ChatSettingsPanel({
     setSpecDraftNMax(saved.specDraftNMax);
     setTensorParallel(saved.tensorParallel);
   }, [
-    pendingId,
+    pendingSettingsKey,
     setCustomContextLength,
     setKvCacheDtype,
     setSpeculativeType,
@@ -1215,10 +1218,12 @@ export function ChatSettingsPanel({
                         // Persist (or clear) this model's load knobs before loading.
                         // Save the explicit context override only (null = auto), so
                         // restoring never forces the native context into an OOM.
-                        const pid = pendingSelection?.id;
-                        if (pid) {
+                        const key = pendingSelection
+                          ? rememberedLoadSettingsKey(pendingSelection)
+                          : null;
+                        if (key) {
                           if (remember) {
-                            saveRememberedLoadSettings(pid, {
+                            saveRememberedLoadSettings(key, {
                               contextLength: customContextLength,
                               kvCacheDtype,
                               speculativeType,
@@ -1226,7 +1231,7 @@ export function ChatSettingsPanel({
                               tensorParallel,
                             });
                           } else {
-                            clearRememberedLoadSettings(pid);
+                            clearRememberedLoadSettings(key);
                           }
                         }
                         onLoadPendingModel?.();
@@ -1857,7 +1862,7 @@ function AutoHealToolCallsToggle() {
           Auto-Healing Tool Calls
         </span>
         <InfoHint>
-          Unsloth auto-fixes broken tool calls so inference output is never
+          CogniX auto-fixes broken tool calls so inference output is never
           broken.
         </InfoHint>
       </div>

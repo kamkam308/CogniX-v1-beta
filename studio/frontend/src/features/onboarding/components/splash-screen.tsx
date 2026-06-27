@@ -3,13 +3,14 @@
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { MascotImg } from "@/components/mascot-img";
 import { motion } from "motion/react";
 
 interface SplashScreenProps {
   onStartOnboarding: () => void;
   onSkipOnboarding: () => void;
 }
+
+const COGNIX_LOGO_SRC = `${import.meta.env.BASE_URL}cognix-logo-512.png`;
 
 export function SplashScreen({
   onStartOnboarding,
@@ -18,7 +19,6 @@ export function SplashScreen({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-gradient-to-b from-background via-background to-primary/5 p-6">
       <Card className="w-full max-w-md px-8 py-8 shadow-border ring-1 ring-border">
-        {/* Mascot */}
         <div className="flex justify-center">
           <motion.div
             initial={{ opacity: 0, y: 40, scale: 0.95 }}
@@ -30,11 +30,16 @@ export function SplashScreen({
               delay: 0.1,
             }}
           >
-            <MascotImg src="Sloth emojis/Sloth loca pc.png" className="size-30" />
+            <img
+              src={COGNIX_LOGO_SRC}
+              alt=""
+              aria-hidden={true}
+              className="size-30 object-contain"
+              draggable={false}
+            />
           </motion.div>
         </div>
 
-        {/* Brand text */}
         <motion.div
           className="mt-4 flex flex-col items-center gap-1"
           initial={{ opacity: 0, y: 10 }}
@@ -46,12 +51,11 @@ export function SplashScreen({
           }}
         >
           <h1 className="text-2xl font-semibold tracking-tight">
-            Unsloth Studio
+            CogniX
           </h1>
           <p className="text-sm text-muted-foreground">Train and run LLMs locally</p>
         </motion.div>
 
-        {/* Buttons */}
         <motion.div
           className="mt-8 flex flex-col gap-3"
           initial={{ opacity: 0, y: 10 }}

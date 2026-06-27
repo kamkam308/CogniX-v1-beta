@@ -9,6 +9,7 @@ import {
   SettingsDialog,
   useSettingsDialogStore,
 } from "@/features/settings";
+import { initializeAccentColor } from "@/features/settings/stores/accent-color-store";
 import {
   ChatPage,
   clearNewChatDraft,
@@ -59,6 +60,13 @@ function RouteFallback() {
 
 function PersonalizationSyncMount() {
   usePersonalizationSync(hasAuthToken());
+  return null;
+}
+
+function AccentColorMount() {
+  useLayoutEffect(() => {
+    initializeAccentColor();
+  }, []);
   return null;
 }
 
@@ -215,14 +223,26 @@ function RootLayout() {
 
   return (
     <AppProvider>
+      <AccentColorMount />
       <PersonalizationSyncMount />
       <SettingsDialog />
       <RemoteCodeConsentDialog />
       {hideNavbar ? (
-        <main className="flex-1">
-          <Suspense fallback={<RouteFallback />}>
-            <Outlet />
-          </Suspense>
+        <main className="flex-1 overflow-hidden">
+          <AnimatePresence initial={false} mode="wait">
+            <motion.div
+              key={pathname}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.18, ease: [0.215, 0.61, 0.355, 1] }}
+              className="flex min-h-full flex-1 flex-col"
+            >
+              <Suspense fallback={<RouteFallback />}>
+                <Outlet />
+              </Suspense>
+            </motion.div>
+          </AnimatePresence>
         </main>
       ) : (
         <SidebarProvider

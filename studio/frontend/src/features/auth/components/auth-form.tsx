@@ -8,6 +8,7 @@ import { apiUrl } from "@/lib/api-base";
 import { cn } from "@/lib/utils";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { Eye, EyeOff } from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useEffect, useMemo, useState } from "react";
 import type { ReactElement, SyntheticEvent } from "react";
 import { refreshSession } from "../api";
@@ -106,6 +107,7 @@ async function registerWithPassword(params: {
 
 export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
   const navigate = useNavigate();
+  const reduced = useReducedMotion();
   const isLoginMode = mode === "login";
   const isSignupMode = mode === "signup";
   const isPasswordSetupMode = mode === "change-password";
@@ -220,6 +222,12 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
   }, [isLoginMode, isSignupMode]);
 
   const activeAuthMode = isLoginMode ? "login" : "signup";
+  const authModeTransition = reduced
+    ? { duration: 0 }
+    : { type: "spring" as const, stiffness: 420, damping: 34, mass: 0.55 };
+  const panelTransition = reduced
+    ? { duration: 0 }
+    : { duration: 0.22, ease: [0.215, 0.61, 0.355, 1] as const };
   const blockedByState =
     initialized === false ||
     ((isLoginMode || isSignupMode) && requiresPasswordChange) ||
@@ -368,7 +376,11 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
   return (
     <div className="w-full space-y-6">
       {!isPasswordSetupMode && (
-        <div className="grid grid-cols-2 gap-1 rounded-full border border-black/10 bg-black/[0.045] p-1 dark:border-white/10 dark:bg-white/[0.06]">
+        <div
+          role="tablist"
+          aria-label="Mode d'authentification"
+          className="grid grid-cols-2 gap-1 rounded-full border border-black/10 bg-black/[0.045] p-1 dark:border-white/10 dark:bg-white/[0.06]"
+        >
           {[
             { key: "login", label: "Connexion", to: "/login" },
             { key: "signup", label: "Inscription", to: "/signup" },
@@ -379,207 +391,234 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
               role="tab"
               aria-selected={activeAuthMode === item.key}
               className={cn(
-                "flex min-h-10 items-center justify-center rounded-full px-3 text-sm font-semibold transition-colors",
+                "relative flex min-h-10 items-center justify-center overflow-hidden rounded-full px-3 text-sm font-semibold transition-colors",
                 activeAuthMode === item.key
-                  ? "bg-background text-foreground shadow-sm"
+                  ? "text-foreground"
                   : "text-muted-foreground hover:text-foreground",
               )}
             >
-              {item.label}
+              {activeAuthMode === item.key && (
+                <motion.span
+                  layoutId="cognix-auth-mode-pill"
+                  className="absolute inset-0 rounded-full bg-background shadow-sm"
+                  transition={authModeTransition}
+                />
+              )}
+              <span className="relative z-10">{item.label}</span>
             </Link>
           ))}
         </div>
       )}
 
-      <div className="space-y-2">
-        {title && (
-          <h2 className="text-[2rem] font-semibold leading-none tracking-normal text-foreground">
-            {title}
-          </h2>
-        )}
-        <p className="text-muted-foreground">{subtitle}</p>
-      </div>
+      <AnimatePresence initial={false} mode="wait">
+        <motion.div
+          key={`${mode}-copy`}
+          initial={{ opacity: 0, y: reduced ? 0 : 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: reduced ? 0 : -8 }}
+          transition={panelTransition}
+          className="space-y-2"
+        >
+          {title && (
+            <h2 className="text-[2rem] font-semibold leading-none tracking-normal text-foreground">
+              {title}
+            </h2>
+          )}
+          <p className="text-muted-foreground">{subtitle}</p>
+        </motion.div>
+      </AnimatePresence>
 
-      <form className="grid gap-4" onSubmit={handleSubmit}>
-        {isLoginMode && (
-          <>
-            <div className="grid gap-2">
-              <Label htmlFor="identifier">Identifiant ou email</Label>
-              <Input
-                id="identifier"
-                className="h-12 rounded-2xl bg-background"
-                autoComplete="username"
-                value={identifier}
-                onChange={(event) => setIdentifier(event.target.value)}
-                minLength={3}
-                maxLength={254}
-                required
-              />
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="password">Mot de passe</Label>
-              <div className="relative">
-                <Input
-                  id="password"
-                  type={showPassword ? "text" : "password"}
-                  className="h-12 rounded-2xl bg-background pr-11"
-                  autoComplete="current-password"
-                  value={password}
-                  onChange={(event) => setPassword(event.target.value)}
-                  minLength={8}
-                  maxLength={128}
-                  required
-                />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  aria-label={showPassword ? "Masquer le mot de passe" : "Afficher le mot de passe"}
-                  className="absolute right-1 top-1/2 -translate-y-1/2 text-muted-foreground hover:bg-transparent"
-                  onClick={() => setShowPassword((prev) => !prev)}
-                >
-                  {showPassword ? (
-                    <EyeOff className="h-4 w-4" />
-                  ) : (
-                    <Eye className="h-4 w-4" />
-                  )}
-                </Button>
-              </div>
-            </div>
-          </>
-        )}
-
-        {isSignupMode && (
-          <>
-            <div className="grid gap-2">
-              <Label htmlFor="signup-username">Nom d'utilisateur</Label>
-              <Input
-                id="signup-username"
-                className="h-12 rounded-2xl bg-background"
-                autoComplete="username"
-                value={signupUsername}
-                onChange={(event) => setSignupUsername(event.target.value)}
-                minLength={3}
-                maxLength={32}
-                required
-              />
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="signup-email">Email</Label>
-              <Input
-                id="signup-email"
-                type="email"
-                className="h-12 rounded-2xl bg-background"
-                autoComplete="email"
-                value={signupEmail}
-                onChange={(event) => setSignupEmail(event.target.value)}
-                maxLength={254}
-              />
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="display-name">Nom affiche</Label>
-              <Input
-                id="display-name"
-                className="h-12 rounded-2xl bg-background"
-                autoComplete="name"
-                value={signupDisplayName}
-                onChange={(event) => setSignupDisplayName(event.target.value)}
-                maxLength={80}
-              />
-            </div>
-            <PasswordFields
-              password={password}
-              confirmPassword={confirmPassword}
-              showPassword={showPassword}
-              onPasswordChange={setPassword}
-              onConfirmPasswordChange={setConfirmPassword}
-              onTogglePassword={() => setShowPassword((prev) => !prev)}
-            />
-            <PasswordHint warning={signupPasswordMismatch} text={passwordHint} />
-          </>
-        )}
-
-        {isPasswordSetupMode && (
-          <>
-            {!hasBootstrapPassword && (
-              <div className="grid gap-2">
-                <Label htmlFor="current-password">Mot de passe temporaire</Label>
-                <div className="relative">
+      <motion.form layout className="grid gap-4" onSubmit={handleSubmit}>
+        <AnimatePresence initial={false} mode="wait">
+          <motion.div
+            key={`${mode}-fields`}
+            initial={{ opacity: 0, x: reduced ? 0 : isSignupMode ? 14 : -14 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: reduced ? 0 : isSignupMode ? -14 : 14 }}
+            transition={panelTransition}
+            className="grid gap-4"
+          >
+            {isLoginMode && (
+              <>
+                <div className="grid gap-2">
+                  <Label htmlFor="identifier">Identifiant ou email</Label>
                   <Input
-                    id="current-password"
-                    type={showPassword ? "text" : "password"}
-                    className="h-12 rounded-2xl bg-background pr-11"
-                    autoComplete="current-password"
-                    value={password}
-                    onChange={(event) => setPassword(event.target.value)}
+                    id="identifier"
+                    className="h-12 rounded-2xl bg-background"
+                    autoComplete="username"
+                    value={identifier}
+                    onChange={(event) => setIdentifier(event.target.value)}
+                    minLength={3}
+                    maxLength={254}
+                    required
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="password">Mot de passe</Label>
+                  <div className="relative">
+                    <Input
+                      id="password"
+                      type={showPassword ? "text" : "password"}
+                      className="h-12 rounded-2xl bg-background pr-11"
+                      autoComplete="current-password"
+                      value={password}
+                      onChange={(event) => setPassword(event.target.value)}
+                      minLength={8}
+                      maxLength={128}
+                      required
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      aria-label={showPassword ? "Masquer le mot de passe" : "Afficher le mot de passe"}
+                      className="absolute right-1 top-1/2 -translate-y-1/2 text-muted-foreground hover:bg-transparent"
+                      onClick={() => setShowPassword((prev) => !prev)}
+                    >
+                      {showPassword ? (
+                        <EyeOff className="h-4 w-4" />
+                      ) : (
+                        <Eye className="h-4 w-4" />
+                      )}
+                    </Button>
+                  </div>
+                </div>
+              </>
+            )}
+
+            {isSignupMode && (
+              <>
+                <div className="grid gap-2">
+                  <Label htmlFor="signup-username">Nom d'utilisateur</Label>
+                  <Input
+                    id="signup-username"
+                    className="h-12 rounded-2xl bg-background"
+                    autoComplete="username"
+                    value={signupUsername}
+                    onChange={(event) => setSignupUsername(event.target.value)}
+                    minLength={3}
+                    maxLength={32}
+                    required
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="signup-email">Email</Label>
+                  <Input
+                    id="signup-email"
+                    type="email"
+                    className="h-12 rounded-2xl bg-background"
+                    autoComplete="email"
+                    value={signupEmail}
+                    onChange={(event) => setSignupEmail(event.target.value)}
+                    maxLength={254}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="display-name">Nom affiche</Label>
+                  <Input
+                    id="display-name"
+                    className="h-12 rounded-2xl bg-background"
+                    autoComplete="name"
+                    value={signupDisplayName}
+                    onChange={(event) => setSignupDisplayName(event.target.value)}
+                    maxLength={80}
+                  />
+                </div>
+                <PasswordFields
+                  password={password}
+                  confirmPassword={confirmPassword}
+                  showPassword={showPassword}
+                  onPasswordChange={setPassword}
+                  onConfirmPasswordChange={setConfirmPassword}
+                  onTogglePassword={() => setShowPassword((prev) => !prev)}
+                />
+                <PasswordHint warning={signupPasswordMismatch} text={passwordHint} />
+              </>
+            )}
+
+            {isPasswordSetupMode && (
+              <>
+                {!hasBootstrapPassword && (
+                  <div className="grid gap-2">
+                    <Label htmlFor="current-password">Mot de passe temporaire</Label>
+                    <div className="relative">
+                      <Input
+                        id="current-password"
+                        type={showPassword ? "text" : "password"}
+                        className="h-12 rounded-2xl bg-background pr-11"
+                        autoComplete="current-password"
+                        value={password}
+                        onChange={(event) => setPassword(event.target.value)}
+                        minLength={8}
+                        maxLength={128}
+                        required
+                      />
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        aria-label={showPassword ? "Masquer le mot de passe" : "Afficher le mot de passe"}
+                        className="absolute right-1 top-1/2 -translate-y-1/2 text-muted-foreground hover:bg-transparent"
+                        onClick={() => setShowPassword((prev) => !prev)}
+                      >
+                        {showPassword ? (
+                          <EyeOff className="h-4 w-4" />
+                        ) : (
+                          <Eye className="h-4 w-4" />
+                        )}
+                      </Button>
+                    </div>
+                  </div>
+                )}
+                <div className="grid gap-2">
+                  <Label htmlFor="new-password">Nouveau mot de passe</Label>
+                  <div className="relative">
+                    <Input
+                      id="new-password"
+                      type={showNewPassword ? "text" : "password"}
+                      className="h-12 rounded-2xl bg-background pr-11"
+                      autoComplete="new-password"
+                      value={newPassword}
+                      onChange={(event) => setNewPassword(event.target.value)}
+                      minLength={8}
+                      maxLength={128}
+                      required
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      aria-label={showNewPassword ? "Masquer le mot de passe" : "Afficher le mot de passe"}
+                      className="absolute right-1 top-1/2 -translate-y-1/2 text-muted-foreground hover:bg-transparent"
+                      onClick={() => setShowNewPassword((prev) => !prev)}
+                    >
+                      {showNewPassword ? (
+                        <EyeOff className="h-4 w-4" />
+                      ) : (
+                        <Eye className="h-4 w-4" />
+                      )}
+                    </Button>
+                  </div>
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="confirm-new-password">Confirmer le mot de passe</Label>
+                  <Input
+                    id="confirm-new-password"
+                    type="password"
+                    className="h-12 rounded-2xl bg-background"
+                    autoComplete="new-password"
+                    value={confirmPassword}
+                    onChange={(event) => setConfirmPassword(event.target.value)}
                     minLength={8}
                     maxLength={128}
                     required
                   />
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    aria-label={showPassword ? "Masquer le mot de passe" : "Afficher le mot de passe"}
-                    className="absolute right-1 top-1/2 -translate-y-1/2 text-muted-foreground hover:bg-transparent"
-                    onClick={() => setShowPassword((prev) => !prev)}
-                  >
-                    {showPassword ? (
-                      <EyeOff className="h-4 w-4" />
-                    ) : (
-                      <Eye className="h-4 w-4" />
-                    )}
-                  </Button>
                 </div>
-              </div>
+                <PasswordHint warning={setupPasswordMismatch} text={passwordHint} />
+              </>
             )}
-            <div className="grid gap-2">
-              <Label htmlFor="new-password">Nouveau mot de passe</Label>
-              <div className="relative">
-                <Input
-                  id="new-password"
-                  type={showNewPassword ? "text" : "password"}
-                  className="h-12 rounded-2xl bg-background pr-11"
-                  autoComplete="new-password"
-                  value={newPassword}
-                  onChange={(event) => setNewPassword(event.target.value)}
-                  minLength={8}
-                  maxLength={128}
-                  required
-                />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  aria-label={showNewPassword ? "Masquer le mot de passe" : "Afficher le mot de passe"}
-                  className="absolute right-1 top-1/2 -translate-y-1/2 text-muted-foreground hover:bg-transparent"
-                  onClick={() => setShowNewPassword((prev) => !prev)}
-                >
-                  {showNewPassword ? (
-                    <EyeOff className="h-4 w-4" />
-                  ) : (
-                    <Eye className="h-4 w-4" />
-                  )}
-                </Button>
-              </div>
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="confirm-new-password">Confirmer le mot de passe</Label>
-              <Input
-                id="confirm-new-password"
-                type="password"
-                className="h-12 rounded-2xl bg-background"
-                autoComplete="new-password"
-                value={confirmPassword}
-                onChange={(event) => setConfirmPassword(event.target.value)}
-                minLength={8}
-                maxLength={128}
-                required
-              />
-            </div>
-            <PasswordHint warning={setupPasswordMismatch} text={passwordHint} />
-          </>
-        )}
+          </motion.div>
+        </AnimatePresence>
 
         {helperText && (
           <p className="text-center text-sm text-amber-600">{helperText}</p>
@@ -600,7 +639,7 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
         >
           {loading ? "Veuillez patienter..." : submitLabel}
         </Button>
-      </form>
+      </motion.form>
 
       <p className="text-sm leading-relaxed text-muted-foreground">
         {isLoginMode

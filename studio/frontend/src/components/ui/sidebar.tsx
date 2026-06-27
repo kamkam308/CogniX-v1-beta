@@ -258,7 +258,7 @@ function Sidebar({
       <div
         data-slot="sidebar-gap"
         className={cn(
-          "relative bg-transparent shrink-0",
+          "relative bg-transparent shrink-0 transition-[width] duration-300 ease-[var(--ease-out-cubic)]",
           "group-data-[side=right]:rotate-180",
           hasPinMode
             ? cn(
@@ -286,12 +286,12 @@ function Sidebar({
           hasPinMode
             ? cn(
                 // Pin mode: always push content, full height.
-                "absolute top-0 bottom-0 flex w-(--sidebar-width) data-[side=left]:left-0",
+                "absolute top-0 bottom-0 flex w-(--sidebar-width) data-[side=left]:left-0 transition-[width,left,right,transform] duration-300 ease-[var(--ease-out-cubic)]",
                 "group-data-[collapsible=icon]:w-(--sidebar-width-icon)",
               )
             : cn(
                 // Legacy mode: fixed to viewport (original shadcn behavior).
-                "fixed inset-y-0 z-10 flex h-svh w-(--sidebar-width) data-[side=left]:left-0 data-[side=left]:group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)] data-[side=right]:right-0 data-[side=right]:group-data-[collapsible=offcanvas]:right-[calc(var(--sidebar-width)*-1)]",
+                "fixed inset-y-0 z-10 flex h-svh w-(--sidebar-width) transition-[left,right,width,transform] duration-300 ease-[var(--ease-out-cubic)] data-[side=left]:left-0 data-[side=left]:group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)] data-[side=right]:right-0 data-[side=right]:group-data-[collapsible=offcanvas]:right-[calc(var(--sidebar-width)*-1)]",
               ),
           // Adjust the padding for floating and inset variants.
           variant === "floating" || variant === "inset"

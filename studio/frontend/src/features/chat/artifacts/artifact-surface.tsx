@@ -9,7 +9,6 @@ import {
   unslothDarkTheme,
   unslothLightTheme,
 } from "@/components/assistant-ui/code-themes";
-import { MascotImg } from "@/components/mascot-img";
 import { Button } from "@/components/ui/button";
 import { copyToClipboard } from "@/lib/copy-to-clipboard";
 import { cn } from "@/lib/utils";
@@ -34,6 +33,7 @@ const COPY_RESET_MS = 2000;
 const artifactSourceCodePlugin = createCodePlugin({
   themes: [unslothLightTheme, unslothDarkTheme],
 });
+const COGNIX_LOGO_SRC = `${import.meta.env.BASE_URL}cognix-logo.png`;
 
 function buildHtmlFence(source: string): string {
   const longestBacktickRun = Math.max(
@@ -75,10 +75,12 @@ function ArtifactGeneratingPanel() {
   return (
     <div className="flex h-full min-h-0 flex-col items-center justify-center bg-muted/10 px-6 text-center">
       <div className="max-w-[30ch] space-y-1.5">
-        <MascotImg
-          src="Sloth emojis/sloth w pc transparent.png"
+        <img
+          src={COGNIX_LOGO_SRC}
+          alt=""
           aria-hidden={true}
           className="mx-auto mb-3 size-20 object-contain"
+          draggable={false}
         />
         <p className="text-sm font-medium text-foreground">
           Building canvas preview…

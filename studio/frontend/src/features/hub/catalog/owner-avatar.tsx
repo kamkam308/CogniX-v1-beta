@@ -19,12 +19,12 @@ const SIZES: Record<AvatarSize, string> = {
   lg: "size-12 rounded-[15px] text-[16px]",
 };
 
-// Unsloth's own uploads (no upstream provider match) show the bundled Unsloth
-// brand avatar instead of a colored-initial tile, so they read as Unsloth even
+// CogniX uploads (no upstream provider match) show the bundled CogniX brand
+// avatar instead of a colored-initial tile, so they read as CogniX even
 // in virtualized rows that never fetch the HF profile picture.
 const UNSLOTH_OWNER_LOGO: ProviderLogo = {
   id: "unsloth",
-  name: "Unsloth",
+  name: "CogniX",
   logoPath: "/circle-logo-small.png",
   treatment: "original",
   background: "transparent",

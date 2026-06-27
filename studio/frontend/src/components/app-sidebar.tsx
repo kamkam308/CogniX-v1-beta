@@ -1429,7 +1429,7 @@ export function AppSidebar() {
                 onClick={() => {
                   useSettingsDialogStore
                     .getState()
-                    .openDialog("about");
+                    .openDialog("about", { scrollTarget: "about-updates" });
                   closeMobileIfOpen();
                 }}
                 className="flex h-[44px] w-full items-center gap-[9px] rounded-[14px] border border-border/60 bg-transparent px-2 py-[3px] text-left transition-colors hover:bg-nav-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-data-[collapsible=icon]:mx-auto group-data-[collapsible=icon]:h-[34px] group-data-[collapsible=icon]:w-[34px] group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:gap-0 group-data-[collapsible=icon]:rounded-full group-data-[collapsible=icon]:p-0"

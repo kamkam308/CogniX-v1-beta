@@ -19,11 +19,11 @@ export function WizardSidebar({ returnTo }: { returnTo: string }) {
       <div className="flex items-center gap-3 py-1 md:py-2">
         <img
           src={`${import.meta.env.BASE_URL}sticker.png`}
-          alt="Unsloth"
+          alt="CogniX"
           className="size-12"
         />
         <div className="flex flex-col">
-          <span className="font-semibold text-lg leading-tight">Unsloth</span>
+          <span className="font-semibold text-lg leading-tight">CogniX</span>
           <span className="text-xs text-muted-foreground">Studio</span>
         </div>
       </div>

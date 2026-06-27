@@ -12,11 +12,14 @@ import { cn } from "@/lib/utils";
 import {
   Cancel01Icon,
   CloudIcon,
+  Database02Icon,
   Globe02Icon,
   HelpCircleIcon,
   Message01Icon,
   PaintBrush02Icon,
   Settings02Icon,
+  Shield02Icon,
+  SourceCodeSquareIcon,
   UserIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -27,12 +30,16 @@ import {
   useSettingsDialogStore,
 } from "./stores/settings-dialog-store";
 import { AboutTab } from "./tabs/about-tab";
+import { AdminTab } from "./tabs/admin-tab";
 import { ApiKeysTab } from "./tabs/api-keys-tab";
 import { AppearanceTab } from "./tabs/appearance-tab";
 import { ChatTab } from "./tabs/chat-tab";
 import { ConnectionsTab } from "./tabs/connections-tab";
+import { ContextMemoryTab } from "./tabs/context-memory-tab";
+import { DeveloperTab } from "./tabs/developer-tab";
 import { GeneralTab } from "./tabs/general-tab";
 import { ProfileTab } from "./tabs/profile-tab";
+import { useDeveloperMode } from "@/hooks/use-developer-mode";
 
 interface TabDef {
   id: SettingsTab;
@@ -67,6 +74,17 @@ const TABS: TabDef[] = [
     badgeKey: "common.new",
   },
   { id: "about", labelKey: "settings.tabs.about", icon: HelpCircleIcon },
+  { id: "admin", labelKey: "settings.tabs.admin", icon: Shield02Icon },
+  {
+    id: "context-memory",
+    labelKey: "settings.tabs.contextMemory",
+    icon: Database02Icon,
+  },
+  {
+    id: "developer",
+    labelKey: "settings.tabs.developer",
+    icon: SourceCodeSquareIcon,
+  },
 ];
 
 function renderTab(tab: SettingsTab) {
@@ -85,6 +103,12 @@ function renderTab(tab: SettingsTab) {
       return <ApiKeysTab />;
     case "about":
       return <AboutTab />;
+    case "admin":
+      return <AdminTab />;
+    case "context-memory":
+      return <ContextMemoryTab />;
+    case "developer":
+      return <DeveloperTab />;
   }
 }
 
@@ -95,6 +119,10 @@ export function SettingsDialog() {
   const setActiveTab = useSettingsDialogStore((s) => s.setActiveTab);
   const closeDialog = useSettingsDialogStore((s) => s.closeDialog);
   const opener = useSettingsDialogStore((s) => s.opener);
+  const [developerMode] = useDeveloperMode();
+  const visibleTabs = developerMode
+    ? TABS
+    : TABS.filter((tab) => tab.id !== "developer");
   const reduced = useReducedMotion();
   const tabButtonRefs = useRef<Record<SettingsTab, HTMLButtonElement | null>>({
     general: null,
@@ -104,7 +132,16 @@ export function SettingsDialog() {
     connections: null,
     "api-keys": null,
     about: null,
+    admin: null,
+    "context-memory": null,
+    developer: null,
   });
+
+  useEffect(() => {
+    if (!developerMode && activeTab === "developer") {
+      setActiveTab("appearance");
+    }
+  }, [activeTab, developerMode, setActiveTab]);
 
   useEffect(() => {
     if (!open) return;
@@ -150,7 +187,7 @@ export function SettingsDialog() {
               {t("settings.dialog.title")}
             </h2>
             <nav className="flex flex-col gap-0.5 max-sm:flex-row max-sm:overflow-x-auto">
-              {TABS.map((tab) => {
+              {visibleTabs.map((tab) => {
                 const active = activeTab === tab.id;
                 return (
                   <button

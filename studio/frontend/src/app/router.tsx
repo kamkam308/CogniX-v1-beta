@@ -3,7 +3,6 @@
 
 import { Link, createRouter, useRouterState } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
-import { MascotImg } from "@/components/mascot-img";
 import { useT } from "@/i18n";
 import { Route as rootRoute } from "./routes/__root";
 import { Route as dataRecipesRoute } from "./routes/data-recipes";
@@ -38,13 +37,21 @@ const routeTree = rootRoute.addChildren([
   dataRecipeRoute,
 ]);
 
+const COGNIX_LOGO_SRC = `${import.meta.env.BASE_URL}cognix-logo-512.png`;
+
 function DefaultNotFound() {
   const t = useT();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
 
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center">
-      <MascotImg src="Sloth emojis/sloth shy large.png" className="size-24" />
+      <img
+        src={COGNIX_LOGO_SRC}
+        alt=""
+        aria-hidden={true}
+        className="size-24 object-contain"
+        draggable={false}
+      />
       <div className="flex flex-col items-center gap-1">
         <h1 className="font-heading font-semibold text-2xl tracking-tight">
           {t("shell.notFound.title")}
