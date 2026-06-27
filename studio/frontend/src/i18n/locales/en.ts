@@ -93,6 +93,7 @@ export const en = {
       profile: "Profile",
       appearance: "Appearance",
       chat: "Chat",
+      cognixCore: "CogniX Core",
       admin: "Admin",
       contextMemory: "Context Memory",
       developer: "Developer",

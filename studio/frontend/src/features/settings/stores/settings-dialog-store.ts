@@ -8,6 +8,7 @@ export type SettingsTab =
   | "profile"
   | "appearance"
   | "chat"
+  | "cognix-core"
   | "connections"
   | "api-keys"
   | "about"
@@ -64,6 +65,7 @@ function loadInitialTab(): SettingsTab {
     "profile",
     "appearance",
     "chat",
+    "cognix-core",
     "connections",
     "api-keys",
     "about",

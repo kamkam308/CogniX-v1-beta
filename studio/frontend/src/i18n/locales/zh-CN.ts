@@ -93,6 +93,7 @@ export const zhCN = {
       profile: "个人资料",
       appearance: "外观",
       chat: "聊天",
+      cognixCore: "CogniX Core",
       admin: "管理",
       contextMemory: "上下文记忆",
       developer: "开发者",

@@ -11,6 +11,7 @@ import { type TranslationKey, useT } from "@/i18n";
 import { cn } from "@/lib/utils";
 import {
   Cancel01Icon,
+  AiBrain03Icon,
   CloudIcon,
   Database02Icon,
   Globe02Icon,
@@ -36,6 +37,7 @@ import { AppearanceTab } from "./tabs/appearance-tab";
 import { ChatTab } from "./tabs/chat-tab";
 import { ConnectionsTab } from "./tabs/connections-tab";
 import { ContextMemoryTab } from "./tabs/context-memory-tab";
+import { CogniXCoreTab } from "./tabs/cognix-core-tab";
 import { DeveloperTab } from "./tabs/developer-tab";
 import { GeneralTab } from "./tabs/general-tab";
 import { ProfileTab } from "./tabs/profile-tab";
@@ -60,6 +62,12 @@ const TABS: TabDef[] = [
     id: "chat",
     labelKey: "settings.tabs.chat",
     icon: Message01Icon,
+    badgeKey: "common.new",
+  },
+  {
+    id: "cognix-core",
+    labelKey: "settings.tabs.cognixCore",
+    icon: AiBrain03Icon,
     badgeKey: "common.new",
   },
   {
@@ -97,6 +105,8 @@ function renderTab(tab: SettingsTab) {
       return <AppearanceTab />;
     case "chat":
       return <ChatTab />;
+    case "cognix-core":
+      return <CogniXCoreTab />;
     case "connections":
       return <ConnectionsTab />;
     case "api-keys":
@@ -129,6 +139,7 @@ export function SettingsDialog() {
     profile: null,
     appearance: null,
     chat: null,
+    "cognix-core": null,
     connections: null,
     "api-keys": null,
     about: null,
