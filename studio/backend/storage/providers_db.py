@@ -24,6 +24,7 @@ _schema_ready = False
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     """Create the llm_providers table if absent. Called once per process."""
+    now = datetime.now(timezone.utc).isoformat()
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(
         """
@@ -38,6 +39,23 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO llm_providers (
+            id, provider_type, display_name, base_url, is_enabled, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, 1, ?, ?)
+        """,
+        (
+            "b6878df754d543b1",
+            "ollama",
+            "Ollama Qwen 4B",
+            "http://127.0.0.1:11434/v1",
+            now,
+            now,
+        ),
+    )
+    conn.commit()
 
 
 def get_connection() -> sqlite3.Connection:
