@@ -34,7 +34,7 @@ export function SplashScreen({
               src={COGNIX_LOGO_SRC}
               alt=""
               aria-hidden={true}
-              className="size-30 object-contain"
+              className="cognix-logo-mark size-32 object-contain"
               draggable={false}
             />
           </motion.div>

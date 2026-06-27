@@ -580,6 +580,14 @@
 		@apply inline-flex h-7 w-7 items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring;
 	}
 
+	.cognix-logo-mark {
+		filter: none;
+	}
+
+	.dark .cognix-logo-mark {
+		filter: brightness(0) invert(1);
+	}
+
 	/* Standard icon size — drives every nav/menu/action-bar icon
 	   (left sidebar, app-user menu, settings tabs, chat config toggle,
 	   right-panel close, chat message action bars, code-block actions).

@@ -1003,7 +1003,7 @@ export function AppSidebar() {
             <img
               src="/cognix-logo.png"
               alt="CogniX"
-              className="h-[24px] w-[24px] rounded-full object-cover"
+              className="cognix-logo-mark h-[28px] w-[28px] rounded-full object-cover"
             />
             <span className="font-heading text-[17px] font-semibold tracking-[0em] dark:tracking-[0.02em] leading-none text-black dark:text-white">
               CogniX
@@ -1050,7 +1050,7 @@ export function AppSidebar() {
                     src="/cognix-logo.png"
                     alt=""
                     aria-hidden="true"
-                    className="h-[18px] w-[18px] rounded-full object-cover"
+                    className="cognix-logo-mark h-[22px] w-[22px] rounded-full object-cover"
                   />
                 </button>
               </TooltipPrimitive.Trigger>

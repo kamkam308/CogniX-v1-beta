@@ -79,7 +79,7 @@ function ArtifactGeneratingPanel() {
           src={COGNIX_LOGO_SRC}
           alt=""
           aria-hidden={true}
-          className="mx-auto mb-3 size-20 object-contain"
+          className="cognix-logo-mark mx-auto mb-3 size-24 object-contain"
           draggable={false}
         />
         <p className="text-sm font-medium text-foreground">

@@ -49,7 +49,7 @@ function DefaultNotFound() {
         src={COGNIX_LOGO_SRC}
         alt=""
         aria-hidden={true}
-        className="size-24 object-contain"
+        className="cognix-logo-mark size-28 object-contain"
         draggable={false}
       />
       <div className="flex flex-col items-center gap-1">

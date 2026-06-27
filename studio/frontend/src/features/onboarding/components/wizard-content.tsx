@@ -31,7 +31,7 @@ export function WizardContent() {
           src={COGNIX_LOGO_SRC}
           alt=""
           aria-hidden={true}
-          className="size-12 object-contain sm:size-14"
+          className="cognix-logo-mark size-14 object-contain sm:size-16"
           draggable={false}
         />
         <div className="flex flex-col min-w-0">
