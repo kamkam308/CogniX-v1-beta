@@ -236,6 +236,29 @@ export interface DownloadProgressResponse {
   cache_path: string | null;
 }
 
+export interface ProjectDefaultModel {
+  projectId: string;
+  ownerUsername?: string;
+  modelId: string;
+  label: string;
+  providerType?: string | null;
+  providerId?: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export async function getProjectDefaultModel(
+  projectId: string,
+): Promise<ProjectDefaultModel | null> {
+  const response = await authFetch(
+    `/api/cognix/projects/${encodeURIComponent(projectId)}/default-model`,
+  );
+  const body = await parseJsonOrThrow<{
+    defaultModel: ProjectDefaultModel | null;
+  }>(response);
+  return body.defaultModel;
+}
+
 export async function getDownloadProgress(
   repoId: string,
 ): Promise<DownloadProgressResponse> {

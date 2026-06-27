@@ -801,6 +801,10 @@ class ChatCompletionRequest(BaseModel):
         ge = 1,
         description = "[x-unsloth] Timeout in seconds for each tool call execution (9999 = no limit).",
     )
+    project_id: Optional[str] = Field(
+        None,
+        description = "[x-cognix] Chat project scope used for routing, logs, and project default model resolution.",
+    )
     session_id: Optional[str] = Field(
         None,
         description = "[x-unsloth] Session/thread ID for scoping tool execution sandbox.",

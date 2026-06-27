@@ -10,6 +10,7 @@ import type { MessageTiming, ToolCallMessagePart } from "@assistant-ui/core";
 import type { ChatModelAdapter } from "@assistant-ui/react";
 import {
   getExternalProviderApiKey,
+  buildExternalModelId,
   isCustomProviderType,
   isPromptCacheTtl,
   loadExternalProviders,
@@ -69,12 +70,14 @@ import {
 } from "../utils/parse-assistant-content";
 import {
   generateAudio,
+  getProjectDefaultModel,
   listCachedGguf,
   listCachedModels,
   listGgufVariants,
   loadModel,
   streamChatCompletions,
   validateModel,
+  type ProjectDefaultModel,
 } from "./chat-api";
 import {
   createOpenAIContainer,
@@ -1113,6 +1116,48 @@ async function resolveProjectId(
   return projectId;
 }
 
+async function resolveProjectDefaultModel(
+  projectId: string | null,
+): Promise<ProjectDefaultModel | null> {
+  if (!projectId) {
+    return null;
+  }
+  try {
+    return await getProjectDefaultModel(projectId);
+  } catch {
+    return null;
+  }
+}
+
+function checkpointFromProjectDefault(
+  defaultModel: ProjectDefaultModel | null,
+): string | null {
+  if (!defaultModel) {
+    return null;
+  }
+  const modelId = defaultModel.modelId.trim();
+  if (!modelId) {
+    return null;
+  }
+  const providerId = defaultModel.providerId?.trim();
+  if (providerId) {
+    return buildExternalModelId(providerId, modelId);
+  }
+  const providerType = defaultModel.providerType?.trim();
+  if (providerType) {
+    const provider = loadExternalProviders().find(
+      (item) =>
+        item.providerType === providerType &&
+        (item.models.includes(modelId) ||
+          (item.availableModels ?? []).includes(modelId)),
+    );
+    if (provider) {
+      return buildExternalModelId(provider.id, modelId);
+    }
+  }
+  return modelId;
+}
+
 async function resolveSandboxSessionId(
   threadId: string | undefined,
 ): Promise<string | undefined> {
@@ -1550,6 +1595,18 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
         }
       };
 
+      const ragProjectId = await resolveProjectId(resolvedThreadId);
+      const projectDefaultModel = await resolveProjectDefaultModel(ragProjectId);
+      const projectDefaultCheckpoint =
+        checkpointFromProjectDefault(projectDefaultModel);
+      if (
+        projectDefaultCheckpoint &&
+        projectDefaultCheckpoint !== runtime.params.checkpoint
+      ) {
+        useChatRuntimeStore.getState().setCheckpoint(projectDefaultCheckpoint);
+        runtime = useChatRuntimeStore.getState();
+      }
+
       // Wait for in-progress model load before inferring.
       if (runtime.modelLoading) {
         toast.info("Waiting for model to finish loading…");
@@ -1590,7 +1647,15 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
 
       // Re-read store after auto-load / model-ready wait.
       runtime = useChatRuntimeStore.getState();
-      const { params } = runtime;
+      let params = runtime.params;
+      if (
+        projectDefaultCheckpoint &&
+        projectDefaultCheckpoint !== params.checkpoint
+      ) {
+        useChatRuntimeStore.getState().setCheckpoint(projectDefaultCheckpoint);
+        runtime = useChatRuntimeStore.getState();
+        params = runtime.params;
+      }
       const {
         supportsTools,
         toolsEnabled,
@@ -1611,7 +1676,6 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
       // Project sources auto-scope: a chat inside a project retrieves from the
       // project's indexed sources even when the Docs pill is off. The probe is
       // cached, so this is one round trip per project every ~30s at most.
-      const ragProjectId = await resolveProjectId(resolvedThreadId);
       const projectRagEnabled = ragProjectId
         ? await projectHasSources(ragProjectId)
         : false;
@@ -2491,6 +2555,7 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
                         }
                   : { thinking: { type: reasoningEnabled ? "enabled" : "disabled" } }
                 : {}),
+              ...(ragProjectId ? { project_id: ragProjectId } : {}),
             };
           }
 
@@ -2511,6 +2576,7 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
             image_base64: imageBase64,
             audio_base64: audioBase64,
             cancel_id: cancelId,
+            ...(ragProjectId ? { project_id: ragProjectId } : {}),
             ...(sandboxSessionId ? { session_id: sandboxSessionId } : {}),
             ...(useAdapter === undefined ? {} : { use_adapter: useAdapter }),
             ...(supportsReasoning
