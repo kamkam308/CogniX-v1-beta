@@ -20,6 +20,7 @@ _schema_ready = False
 
 DEVELOPER_MODE_PERMISSION = "developer_mode"
 AUDIT_LOG_RETENTION_LIMIT = 5000
+PERMISSION_KEY_PATTERN = re.compile(r"^[a-z0-9:_-]{1,160}$")
 
 KNOWN_ATTACK_SIGNATURES: list[dict[str, str]] = [
     {
@@ -590,7 +591,18 @@ def set_approval_status(
         conn.close()
 
 
+def _normalize_permission_key(permission_key: str) -> str:
+    normalized = (permission_key or "").strip().lower()
+    if not PERMISSION_KEY_PATTERN.fullmatch(normalized):
+        raise ValueError("Invalid permission key")
+    return normalized
+
+
 def user_has_permission(username: str, permission_key: str) -> bool:
+    try:
+        normalized_permission = _normalize_permission_key(permission_key)
+    except ValueError:
+        return False
     now = _now()
     conn = get_connection()
     try:
@@ -600,9 +612,81 @@ def user_has_permission(username: str, permission_key: str) -> bool:
             WHERE username = ? AND permission_key = ?
               AND (expires_at IS NULL OR expires_at > ?)
             """,
-            (username, permission_key, now),
+            (username, normalized_permission, now),
         ).fetchone()
         return row is not None
+    finally:
+        conn.close()
+
+
+def grant_user_permission(
+    username: str,
+    permission_key: str,
+    *,
+    granted_by: str,
+    expires_at: str | None = None,
+) -> dict[str, Any]:
+    normalized_permission = _normalize_permission_key(permission_key)
+    granted_at = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_user_permissions
+                (username, permission_key, granted_by, granted_at, expires_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(username, permission_key) DO UPDATE SET
+                granted_by = excluded.granted_by,
+                granted_at = excluded.granted_at,
+                expires_at = excluded.expires_at
+            """,
+            (username, normalized_permission, granted_by, granted_at, expires_at),
+        )
+        conn.commit()
+        return row_to_dict(
+            conn.execute(
+                """
+                SELECT * FROM cognix_user_permissions
+                WHERE username = ? AND permission_key = ?
+                """,
+                (username, normalized_permission),
+            ).fetchone()
+        ) or {}
+    finally:
+        conn.close()
+
+
+def revoke_user_permission(username: str, permission_key: str) -> bool:
+    normalized_permission = _normalize_permission_key(permission_key)
+    conn = get_connection()
+    try:
+        cur = conn.execute(
+            """
+            DELETE FROM cognix_user_permissions
+            WHERE username = ? AND permission_key = ?
+            """,
+            (username, normalized_permission),
+        )
+        conn.commit()
+        return bool(cur.rowcount)
+    finally:
+        conn.close()
+
+
+def list_user_permissions(username: str) -> list[dict[str, Any]]:
+    now = _now()
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM cognix_user_permissions
+            WHERE username = ?
+              AND (expires_at IS NULL OR expires_at > ?)
+            ORDER BY permission_key ASC
+            """,
+            (username, now),
+        ).fetchall()
+        return _rows_to_dicts(rows)
     finally:
         conn.close()
 

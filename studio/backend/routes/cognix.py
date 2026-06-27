@@ -43,6 +43,11 @@ class ApprovalDecisionRequest(BaseModel):
     admin_note: str | None = Field(None, max_length = 2000)
 
 
+class AdminPermissionGrantRequest(BaseModel):
+    permission_key: str = Field(..., min_length = 1, max_length = 160)
+    expires_at: str | None = Field(None, max_length = 80)
+
+
 class ReportCreateRequest(BaseModel):
     category: str = Field("general", min_length = 1, max_length = 80)
     title: str = Field(..., min_length = 3, max_length = 160)
@@ -194,7 +199,11 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
     out = dict(row)
     alias_map = {
         "request_type": "requestType",
+        "permission_key": "permissionKey",
         "admin_note": "adminNote",
+        "granted_at": "grantedAt",
+        "granted_by": "grantedBy",
+        "expires_at": "expiresAt",
         "created_at": "createdAt",
         "updated_at": "updatedAt",
         "decided_at": "decidedAt",
@@ -1767,6 +1776,81 @@ async def admin_decide_approval(
     if request is None:
         raise HTTPException(status_code = 404, detail = "Approval request not found")
     return {"request": _row(request)}
+
+
+@router.get("/admin/permissions/{username}")
+async def admin_user_permissions(
+    username: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    return {
+        "username": username,
+        "permissions": _rows(cognix_db.list_user_permissions(username)),
+    }
+
+
+@router.post("/admin/permissions/{username}")
+async def admin_grant_permission(
+    username: str,
+    payload: AdminPermissionGrantRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    try:
+        permission = cognix_db.grant_user_permission(
+            username,
+            payload.permission_key,
+            granted_by = current_subject,
+            expires_at = payload.expires_at,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from exc
+    audit = cognix_db.create_audit_log(
+        username = username,
+        actor_username = current_subject,
+        action = "permission_granted",
+        resource_type = "cognix_user_permission",
+        resource_id = permission.get("permission_key"),
+        severity = "notice",
+        metadata = {
+            "permissionKey": permission.get("permission_key"),
+            "expiresAt": permission.get("expires_at"),
+        },
+    )
+    return {
+        "permission": _row(permission),
+        "auditLogId": audit.get("id"),
+    }
+
+
+@router.delete("/admin/permissions/{username}/{permission_key}")
+async def admin_revoke_permission(
+    username: str,
+    permission_key: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    try:
+        revoked = cognix_db.revoke_user_permission(username, permission_key)
+    except ValueError as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from exc
+    audit = cognix_db.create_audit_log(
+        username = username,
+        actor_username = current_subject,
+        action = "permission_revoked",
+        resource_type = "cognix_user_permission",
+        resource_id = permission_key,
+        severity = "notice" if revoked else "warning",
+        metadata = {
+            "permissionKey": permission_key,
+            "revoked": revoked,
+        },
+    )
+    return {
+        "revoked": revoked,
+        "auditLogId": audit.get("id"),
+    }
 
 
 @router.get("/admin/bans")

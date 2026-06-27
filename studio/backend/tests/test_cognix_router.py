@@ -374,6 +374,74 @@ def test_tool_plan_blocks_disabled_connectors_before_permissions():
     assert "developer_mode" in body["missingPermissions"]
 
 
+def test_admin_permission_grant_and_revoke_affect_tool_planning():
+    seed_accounts()
+
+    with pytest.raises(HTTPException) as user_read:
+        run_async(cognix_routes.admin_user_permissions("alice", current_subject = "alice"))
+    assert user_read.value.status_code == 403
+
+    granted = run_async(
+        cognix_routes.admin_grant_permission(
+            "alice",
+            cognix_routes.AdminPermissionGrantRequest(permission_key = "developer_mode"),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+
+    assert granted["permission"]["permissionKey"] == "developer_mode"
+    assert granted["permission"]["grantedBy"] == storage.DEFAULT_ADMIN_USERNAME
+    assert granted["auditLogId"].startswith("aud_")
+
+    listed = run_async(
+        cognix_routes.admin_user_permissions(
+            "alice",
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert [item["permissionKey"] for item in listed["permissions"]] == ["developer_mode"]
+
+    allowed = run_async(
+        cognix_routes.plan_tool_action(
+            cognix_routes.ToolActionPlanRequest(
+                tool_id = "codex-secure-agent",
+                action_id = "modify_code",
+            ),
+            current_subject = "alice",
+        )
+    )
+    assert allowed["allowed"] is True
+    assert allowed["requiresConfirmation"] is True
+    assert allowed["sandboxRequired"] is True
+
+    revoked = run_async(
+        cognix_routes.admin_revoke_permission(
+            "alice",
+            "developer_mode",
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert revoked["revoked"] is True
+
+    blocked = run_async(
+        cognix_routes.plan_tool_action(
+            cognix_routes.ToolActionPlanRequest(
+                tool_id = "codex-secure-agent",
+                action_id = "modify_code",
+            ),
+            current_subject = "alice",
+        )
+    )
+    assert blocked["allowed"] is False
+    assert blocked["status"] == "missing_permission"
+    assert blocked["missingPermissions"] == ["developer_mode"]
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    actions = [log["action"] for log in admin_read["logs"]]
+    assert "permission_granted" in actions
+    assert "permission_revoked" in actions
+
+
 def test_router_endpoint_declares_jwt_dependency():
     current_subject = inspect.signature(cognix_routes.classify_route).parameters["current_subject"]
 
