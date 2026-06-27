@@ -158,6 +158,7 @@ export interface CogniXContextPack {
   systemInstruction: string;
   includedSectionIds: string[];
   warnings: string[];
+  auditLogId?: string | null;
   sideEffects: {
     modelLoad: boolean;
     generation: boolean;

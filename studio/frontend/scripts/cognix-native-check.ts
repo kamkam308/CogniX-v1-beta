@@ -58,6 +58,7 @@ const checks: Check[] = [
     includes: [
       "CogniXContextPack",
       "CogniXExecutionPlan",
+      "auditLogId",
       'CHAT_HISTORY_UPDATED_EVENT = "cognix-chat-history-updated"',
       'authFetch("/api/cognix/context/pack"',
       'authFetch("/api/cognix/orchestrator/plan"',
@@ -93,9 +94,20 @@ const checks: Check[] = [
     file: "../backend/routes/cognix.py",
     includes: [
       '@router.post("/context/pack")',
+      '@router.get("/admin/audit-logs")',
+      "context_pack_built",
       '@router.post("/orchestrator/plan")',
       '"runtimeType": "dry_run"',
       '"runtimeError": None',
+    ],
+  },
+  {
+    file: "../backend/storage/cognix_db.py",
+    includes: [
+      "CREATE TABLE IF NOT EXISTS cognix_audit_logs",
+      "def create_audit_log",
+      "def list_audit_logs",
+      "metadata_json",
     ],
   },
   {
@@ -123,6 +135,7 @@ const checks: Check[] = [
     includes: [
       "test_context_manager_builds_bounded_context_packet",
       "test_context_pack_endpoint_combines_user_memory_and_project_instructions",
+      "test_context_pack_writes_sanitized_audit_log",
       "test_orchestrator_builds_dry_run_plan_without_loading",
       "test_orchestrator_plan_endpoint_logs_dry_run_decision",
       "willLoadModel",

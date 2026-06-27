@@ -158,6 +158,25 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_security_username
             ON cognix_security_events(username, created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_audit_logs (
+            id TEXT PRIMARY KEY,
+            username TEXT,
+            actor_username TEXT,
+            action TEXT NOT NULL,
+            resource_type TEXT NOT NULL,
+            resource_id TEXT,
+            severity TEXT NOT NULL DEFAULT 'info',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_audit_created
+            ON cognix_audit_logs(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_audit_username
+            ON cognix_audit_logs(username, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_audit_action
+            ON cognix_audit_logs(action, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_router_logs (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -599,6 +618,94 @@ def list_security_events(limit: int = 200) -> list[dict[str, Any]]:
             (max(1, min(int(limit), 500)),),
         ).fetchall()
         return _rows_to_dicts(rows)
+    finally:
+        conn.close()
+
+
+def create_audit_log(
+    *,
+    username: str | None,
+    actor_username: str | None,
+    action: str,
+    resource_type: str,
+    resource_id: str | None = None,
+    severity: str = "info",
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    created_at = _now()
+    audit_id = _new_id("aud")
+    normalized_severity = severity.strip().lower() or "info"
+    if normalized_severity not in {"info", "notice", "warning", "critical"}:
+        normalized_severity = "info"
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_audit_logs
+                (
+                    id,
+                    username,
+                    actor_username,
+                    action,
+                    resource_type,
+                    resource_id,
+                    severity,
+                    metadata_json,
+                    created_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                audit_id,
+                username,
+                actor_username,
+                action.strip()[:160],
+                resource_type.strip()[:120],
+                (resource_id or None),
+                normalized_severity,
+                json.dumps(metadata or {}, ensure_ascii = False),
+                created_at,
+            ),
+        )
+        conn.commit()
+        return row_to_dict(
+            conn.execute("SELECT * FROM cognix_audit_logs WHERE id = ?", (audit_id,)).fetchone()
+        ) or {}
+    finally:
+        conn.close()
+
+
+def list_audit_logs(
+    *,
+    username: str | None = None,
+    action: str | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        normalized_limit = max(1, min(int(limit), 500))
+        clauses: list[str] = []
+        values: list[Any] = []
+        if username:
+            clauses.append("username = ?")
+            values.append(username)
+        if action:
+            clauses.append("action = ?")
+            values.append(action)
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        rows = conn.execute(
+            f"""
+            SELECT * FROM cognix_audit_logs
+            {where}
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (*values, normalized_limit),
+        ).fetchall()
+        logs = _rows_to_dicts(rows)
+        for log in logs:
+            log["metadata"] = _json_or_default(log.get("metadata_json"), {})
+        return logs
     finally:
         conn.close()
 

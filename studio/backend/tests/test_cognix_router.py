@@ -236,6 +236,42 @@ def test_context_pack_endpoint_combines_user_memory_and_project_instructions():
     assert body["sideEffects"]["networkModelCall"] is False
 
 
+def test_context_pack_writes_sanitized_audit_log():
+    seed_accounts()
+    cognix_db.update_context_memory(
+        "alice",
+        "Preference sensible a ne pas recopier dans les logs.",
+        "alice",
+    )
+
+    body = run_async(
+        cognix_routes.build_context_pack(
+            cognix_routes.ContextPackRequest(
+                objective = "Corrige cette route API sans fuite de contexte",
+                project_id = None,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    assert body["auditLogId"].startswith("aud_")
+    with pytest.raises(HTTPException) as user_read:
+        run_async(cognix_routes.admin_audit_logs(current_subject = "alice"))
+    assert user_read.value.status_code == 403
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    logs = admin_read["logs"]
+    assert len(logs) == 1
+    log = logs[0]
+    assert log["id"] == body["auditLogId"]
+    assert log["username"] == "alice"
+    assert log["action"] == "context_pack_built"
+    assert log["resourceType"] == "cognix_context"
+    assert log["metadata"]["sectionIds"] == ["user_memory"]
+    assert log["metadata"]["sideEffects"]["networkModelCall"] is False
+    assert "Preference sensible" not in log["metadataJson"]
+
+
 def test_router_endpoint_declares_jwt_dependency():
     current_subject = inspect.signature(cognix_routes.classify_route).parameters["current_subject"]
 

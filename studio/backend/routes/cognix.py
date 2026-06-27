@@ -193,6 +193,7 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "updated_at": "updatedAt",
         "decided_at": "decidedAt",
         "decided_by": "decidedBy",
+        "actor_username": "actorUsername",
         "temporary_until": "temporaryUntil",
         "admin_decision": "adminDecision",
         "client_key": "clientKey",
@@ -205,6 +206,8 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "display_name": "displayName",
         "app_id": "appId",
         "app_name": "appName",
+        "resource_type": "resourceType",
+        "resource_id": "resourceId",
         "model_id": "modelId",
         "provider_type": "providerType",
         "provider_id": "providerId",
@@ -1048,7 +1051,7 @@ async def build_context_pack(
             project = None
             warnings.append("Project context unavailable for this user.")
 
-    return cognix_context_manager.build_context_packet(
+    packet = cognix_context_manager.build_context_packet(
         current_subject = current_subject,
         user_memory = cognix_db.get_context_memory(current_subject),
         project = project,
@@ -1056,6 +1059,24 @@ async def build_context_pack(
         objective = payload.objective,
         warnings = warnings,
     )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "context_pack_built",
+        resource_type = "cognix_context",
+        resource_id = payload.project_id,
+        metadata = {
+            "contextManagerVersion": packet.get("contextManagerVersion"),
+            "mode": packet.get("mode"),
+            "projectId": payload.project_id,
+            "objectiveChars": len(payload.objective or ""),
+            "sectionIds": packet.get("includedSectionIds", []),
+            "warnings": warnings,
+            "sideEffects": packet.get("sideEffects", {}),
+        },
+    )
+    packet["auditLogId"] = audit.get("id")
+    return packet
 
 
 @router.get("/library")
@@ -1742,6 +1763,12 @@ async def admin_security_threats(current_subject: str = Depends(get_current_jwt_
 async def admin_router_logs(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
     _require_admin(current_subject)
     return {"logs": _rows(cognix_db.list_router_logs(limit = 500))}
+
+
+@router.get("/admin/audit-logs")
+async def admin_audit_logs(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    return {"logs": _rows(cognix_db.list_audit_logs(limit = 500))}
 
 
 @router.get("/admin/reports")
