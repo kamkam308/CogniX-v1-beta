@@ -20,6 +20,7 @@ from loggers import get_logger
 import asyncio
 import threading
 
+from core.cognix import cache_manager as cognix_cache_manager
 
 import re as _re
 
@@ -3287,13 +3288,21 @@ async def unload_model(request: UnloadRequest, current_subject: str = Depends(ge
             or is_registered_native_path_label(llama_backend.model_identifier, request.model_path)
             or not llama_backend.is_loaded
         ):
+            loaded_label = (
+                getattr(llama_backend, "_native_display_label", None)
+                or llama_backend.model_identifier
+                or request.model_path
+            )
             llama_backend.unload_model()
+            cognix_cache_manager.mark_model_unloaded(loaded_label)
+            cognix_cache_manager.mark_model_unloaded(request.model_path)
             logger.info(f"Unloaded GGUF model: {request.model_path}")
             return UnloadResponse(status = "unloaded", model = request.model_path)
 
         # Otherwise, unload from Unsloth backend
         backend = get_inference_backend()
         backend.unload_model(request.model_path)
+        cognix_cache_manager.mark_model_unloaded(request.model_path)
         logger.info(f"Unloaded model: {request.model_path}")
         return UnloadResponse(status = "unloaded", model = request.model_path)
 
@@ -4832,6 +4841,11 @@ async def openai_chat_completions(
 
     if using_gguf:
         model_name = llama_backend.model_identifier or payload.model
+        cognix_cache_manager.mark_model_used(
+            model_name,
+            runtime_type = "gguf",
+            project_id = payload.project_id,
+        )
         if getattr(llama_backend, "_is_audio", False):
             if _wants_multiple_choices(payload):
                 _raise_unsupported_n("GGUF audio chat completions")
@@ -4847,6 +4861,11 @@ async def openai_chat_completions(
                 detail = "No model loaded. Call POST /inference/load first.",
             )
         model_name = backend.active_model_name or payload.model
+        cognix_cache_manager.mark_model_used(
+            model_name,
+            runtime_type = "unsloth",
+            project_id = payload.project_id,
+        )
         if _wants_multiple_choices(payload):
             _raise_unsupported_n("non-GGUF chat completions")
 

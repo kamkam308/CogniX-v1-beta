@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from auth import storage as auth_storage
 from auth.authentication import get_current_jwt_subject
+from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import hardware as cognix_hardware
 from core.cognix import registry as cognix_registry
 from core.cognix import recommender as cognix_recommender
@@ -228,6 +229,42 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
     if "needsClarification" in out:
         out["needsClarification"] = bool(out["needsClarification"])
     return out
+
+
+def _current_model_cache_runtime() -> dict[str, Any]:
+    try:
+        from core.inference import get_inference_backend
+        from routes.inference import get_llama_cpp_backend
+
+        llama_backend = get_llama_cpp_backend()
+        if llama_backend.is_loaded:
+            model_id = (
+                getattr(llama_backend, "_native_display_label", None)
+                or getattr(llama_backend, "model_identifier", None)
+            )
+            loaded_models = [model_id] if model_id else []
+            return {
+                "runtimeType": "gguf",
+                "activeModel": model_id,
+                "loadedModels": loaded_models,
+                "loadingModels": [],
+            }
+
+        backend = get_inference_backend()
+        return {
+            "runtimeType": "unsloth",
+            "activeModel": getattr(backend, "active_model_name", None),
+            "loadedModels": list(getattr(backend, "models", {}).keys()),
+            "loadingModels": list(getattr(backend, "loading_models", set())),
+        }
+    except Exception as exc:
+        return {
+            "runtimeType": "unknown",
+            "activeModel": None,
+            "loadedModels": [],
+            "loadingModels": [],
+            "error": str(exc),
+        }
 
 
 def _rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -815,6 +852,29 @@ async def model_registry(current_subject: str = Depends(get_current_jwt_subject)
     return {
         "username": current_subject,
         "registry": cognix_registry.build_model_registry(),
+    }
+
+
+@router.get("/models/cache")
+async def model_cache_state(
+    project_id: str | None = None,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    hardware = cognix_hardware.get_hardware_profile()
+    runtime = _current_model_cache_runtime()
+    cache = cognix_cache_manager.build_cache_state(
+        hardware,
+        active_model = runtime.get("activeModel"),
+        loaded_models = runtime.get("loadedModels") or [],
+        loading_models = runtime.get("loadingModels") or [],
+        runtime_type = str(runtime.get("runtimeType") or "unknown"),
+        project_id = project_id,
+    )
+    return {
+        "username": current_subject,
+        "hardware": hardware,
+        "runtimeError": runtime.get("error"),
+        "cache": cache,
     }
 
 
