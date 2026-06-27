@@ -11,6 +11,7 @@ if str(_BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(_BACKEND_ROOT))
 
 from auth import storage
+from core.cognix import hardware as cognix_hardware
 from core.cognix import strategy as cognix_strategy
 from routes import auth as auth_routes
 from routes import cognix as cognix_routes
@@ -85,7 +86,7 @@ def _cpu_hardware(available_gb: float = 6.0) -> dict:
 def test_strategy_recommends_default_ollama_qwen(client, monkeypatch):
     seed_accounts()
     headers = login_headers(client, "alice", "alice-password-123")
-    monkeypatch.setattr(cognix_strategy, "_hardware_profile", lambda: _cpu_hardware())
+    monkeypatch.setattr(cognix_hardware, "get_hardware_profile", lambda: _cpu_hardware())
     monkeypatch.setattr(
         cognix_strategy,
         "_ollama_models",
@@ -110,7 +111,7 @@ def test_strategy_recommends_default_ollama_qwen(client, monkeypatch):
 def test_strategy_keeps_qwen_available_when_memory_is_tight(client, monkeypatch):
     seed_accounts()
     headers = login_headers(client, "alice", "alice-password-123")
-    monkeypatch.setattr(cognix_strategy, "_hardware_profile", lambda: _cpu_hardware(available_gb = 3.3))
+    monkeypatch.setattr(cognix_hardware, "get_hardware_profile", lambda: _cpu_hardware(available_gb = 3.3))
     monkeypatch.setattr(
         cognix_strategy,
         "_ollama_models",
@@ -130,7 +131,7 @@ def test_strategy_keeps_qwen_available_when_memory_is_tight(client, monkeypatch)
 def test_strategy_reports_ollama_service_unreachable(client, monkeypatch):
     seed_accounts()
     headers = login_headers(client, "alice", "alice-password-123")
-    monkeypatch.setattr(cognix_strategy, "_hardware_profile", lambda: _cpu_hardware())
+    monkeypatch.setattr(cognix_hardware, "get_hardware_profile", lambda: _cpu_hardware())
     monkeypatch.setattr(cognix_strategy, "_ollama_models", lambda _base_url: (False, []))
 
     response = client.get("/api/cognix/strategy", headers = headers)
@@ -141,3 +142,18 @@ def test_strategy_reports_ollama_service_unreachable(client, monkeypatch):
     assert recommendation["providerType"] == "ollama"
     assert recommendation["modelId"] == cognix_strategy.COGNIX_DEFAULT_OLLAMA_MODEL_ID
     assert any("Ollama non joignable" in warning for warning in recommendation["warnings"])
+
+
+def test_hardware_profile_endpoint_returns_authenticated_profile(client, monkeypatch):
+    seed_accounts()
+    headers = login_headers(client, "alice", "alice-password-123")
+    monkeypatch.setattr(cognix_hardware, "get_hardware_profile", lambda: _cpu_hardware(available_gb = 5.5))
+
+    response = client.get("/api/cognix/hardware/profile", headers = headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["username"] == "alice"
+    assert body["hardware"]["deviceBackend"] == "cpu"
+    assert body["hardware"]["memory"]["availableGb"] == 5.5
+    assert body["hardware"]["gpu"]["available"] is False

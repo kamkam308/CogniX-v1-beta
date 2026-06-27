@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from auth import storage as auth_storage
 from auth.authentication import get_current_jwt_subject
+from core.cognix import hardware as cognix_hardware
 from core.cognix.router import classify_objective
 from core.cognix.strategy import build_strategy
 from storage import cognix_db
@@ -764,6 +765,14 @@ def _apply_ai_chess_reply(state: dict[str, Any]) -> dict[str, Any]:
 @router.get("/strategy")
 async def my_strategy(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
     return build_strategy(current_subject)
+
+
+@router.get("/hardware/profile")
+async def hardware_profile(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    return {
+        "username": current_subject,
+        "hardware": cognix_hardware.get_hardware_profile(),
+    }
 
 
 @router.post("/router/classify")
