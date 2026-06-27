@@ -69,10 +69,45 @@ type CacheResponse = {
   };
 };
 
+type RouterLog = {
+  id?: string;
+  username?: string;
+  objectiveExcerpt?: string;
+  projectType?: string | null;
+  selectedDomain?: string;
+  modelLabel?: string;
+  confidence?: number;
+  needsClarification?: boolean;
+  routingMode?: string;
+  createdAt?: string;
+};
+
+type RouterLogsResponse = {
+  logs?: RouterLog[];
+};
+
 function formatGb(value: number | null | undefined): string {
   return typeof value === "number" && Number.isFinite(value)
     ? `${value.toFixed(value >= 10 ? 0 : 1)} GB`
     : "unknown";
+}
+
+function formatConfidence(value: number | null | undefined): string {
+  return typeof value === "number" && Number.isFinite(value)
+    ? `${Math.round(value * 100)}%`
+    : "unknown";
+}
+
+function formatTimestamp(value: string | null | undefined): string {
+  if (!value) return "unknown";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "unknown";
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function readinessLabel(value: string | undefined): string {
@@ -122,6 +157,7 @@ function InfoPill({
 export function CogniXCoreTab() {
   const [strategy, setStrategy] = useState<StrategyResponse | null>(null);
   const [cache, setCache] = useState<CacheResponse | null>(null);
+  const [routerLogs, setRouterLogs] = useState<RouterLog[] | null>(null);
   const [state, setState] = useState<LoadState>("idle");
   const [message, setMessage] = useState<string | null>(null);
 
@@ -129,15 +165,22 @@ export function CogniXCoreTab() {
     setState("loading");
     setMessage(null);
     try {
-      const [strategyRes, cacheRes] = await Promise.all([
+      const [strategyRes, cacheRes, logsRes] = await Promise.all([
         authFetch("/api/cognix/strategy"),
         authFetch("/api/cognix/models/cache"),
+        authFetch("/api/cognix/admin/router-logs").catch(() => null),
       ]);
       if (!strategyRes.ok || !cacheRes.ok) {
         throw new Error("CogniX Core endpoints unavailable.");
       }
       setStrategy((await strategyRes.json()) as StrategyResponse);
       setCache((await cacheRes.json()) as CacheResponse);
+      if (logsRes?.ok) {
+        const body = (await logsRes.json()) as RouterLogsResponse;
+        setRouterLogs((body.logs ?? []).slice(0, 5));
+      } else {
+        setRouterLogs(null);
+      }
       setState("loaded");
     } catch {
       setState("error");
@@ -218,6 +261,57 @@ export function CogniXCoreTab() {
         >
           <InfoPill label={recommendation?.providerName ?? recommendation?.providerType ?? "Provider"} />
         </SettingsRow>
+      </SettingsSection>
+
+      <SettingsSection
+        title="Recent routing"
+        description="Dernieres decisions CogniX Auto journalisees par le backend."
+      >
+        {routerLogs === null ? (
+          <SettingsRow
+            label="Decision logs"
+            description="Connecte en admin pour voir les decisions du routeur."
+          >
+            <InfoPill label="protected" />
+          </SettingsRow>
+        ) : routerLogs.length ? (
+          routerLogs.map((log) => (
+            <SettingsRow
+              key={log.id ?? `${log.createdAt}:${log.objectiveExcerpt}`}
+              label={log.selectedDomain ?? "general"}
+              description={
+                <span className="flex flex-col gap-1">
+                  <span className="line-clamp-2">
+                    {log.objectiveExcerpt ?? "Aucun extrait disponible."}
+                  </span>
+                  <span>
+                    {log.modelLabel ?? "CogniX General 3B"} /{" "}
+                    {log.routingMode ?? "unknown"} /{" "}
+                    {formatTimestamp(log.createdAt)}
+                  </span>
+                </span>
+              }
+              alignTop
+            >
+              <div className="flex flex-col items-end gap-1">
+                <InfoPill label={formatConfidence(log.confidence)} />
+                {log.needsClarification ? (
+                  <InfoPill
+                    label="clarify"
+                    tone="bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                  />
+                ) : null}
+              </div>
+            </SettingsRow>
+          ))
+        ) : (
+          <SettingsRow
+            label="No decisions yet"
+            description="Envoie un message sans modele selectionne pour creer une decision CogniX Auto."
+          >
+            <InfoPill label="empty" />
+          </SettingsRow>
+        )}
       </SettingsSection>
 
       <SettingsSection
