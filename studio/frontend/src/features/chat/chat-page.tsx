@@ -36,12 +36,15 @@ import {
   useNativePathLeasesSupported,
 } from "@/features/native-intents";
 import { ProjectSourcesPanel } from "@/features/rag/components/project-sources-panel";
+import { useSettingsDialogStore } from "@/features/settings";
 import { GuidedTour, useGuidedTourController } from "@/features/tour";
+import { authFetch } from "@/features/auth";
 import { useDeveloperOptions } from "@/hooks/use-developer-mode";
 import { isTauri } from "@/lib/api-base";
 import { toast } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import {
+  AiBrain03Icon,
   BubbleChatTemporaryIcon,
   Folder02Icon,
   LayoutAlignRightIcon,
@@ -149,6 +152,138 @@ const EXTERNAL_PROVIDER_DROPDOWN_ORDER: Record<string, number> = {
 
 function getExternalProviderDropdownRank(providerType: string): number {
   return EXTERNAL_PROVIDER_DROPDOWN_ORDER[providerType] ?? 2;
+}
+
+type CogniXAutoRecommendation = {
+  readiness?: string;
+  modelLabel?: string | null;
+  providerName?: string | null;
+  providerType?: string | null;
+  confidence?: number | null;
+  reason?: string | null;
+};
+
+type CogniXAutoStrategy = {
+  phase?: string;
+  roadmapPhase?: string;
+  recommendation?: CogniXAutoRecommendation;
+};
+
+function formatCogniXConfidence(value: number | null | undefined): string {
+  return typeof value === "number" && Number.isFinite(value)
+    ? `${Math.round(value * 100)}%`
+    : "pending";
+}
+
+function cognixReadinessLabel(value: string | undefined): string {
+  switch (value) {
+    case "ready":
+      return "Ready";
+    case "ready_with_caution":
+      return "Caution";
+    case "model_missing":
+      return "Missing";
+    case "service_unreachable":
+      return "Offline";
+    case "setup_required":
+      return "Setup";
+    case "hardware_blocked":
+      return "Blocked";
+    default:
+      return value || "Checking";
+  }
+}
+
+function cognixReadinessTone(value: string | undefined): string {
+  if (value === "ready") {
+    return "border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
+  }
+  if (value === "ready_with_caution") {
+    return "border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-300";
+  }
+  if (!value) {
+    return "border-border/70 bg-muted/40 text-muted-foreground";
+  }
+  return "border-destructive/25 bg-destructive/10 text-destructive";
+}
+
+function CogniXAutoChip({ active }: { active: boolean }): ReactElement | null {
+  const openSettings = useSettingsDialogStore((state) => state.openDialog);
+  const [strategy, setStrategy] = useState<CogniXAutoStrategy | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    if (!active) return;
+    let cancelled = false;
+    void authFetch("/api/cognix/strategy")
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error("CogniX strategy unavailable");
+        }
+        const body = (await response.json()) as CogniXAutoStrategy;
+        if (!cancelled) {
+          setStrategy(body);
+          setFailed(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setFailed(true);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [active]);
+
+  if (!active) return null;
+
+  const recommendation = strategy?.recommendation;
+  const readiness = failed ? "service_unreachable" : recommendation?.readiness;
+  const readinessLabel = cognixReadinessLabel(readiness);
+  const modelLabel = recommendation?.modelLabel ?? "CogniX Auto";
+  const confidence = formatCogniXConfidence(recommendation?.confidence);
+  const tooltipDetail = failed
+    ? "CogniX Core is not reachable right now."
+    : (recommendation?.reason ?? strategy?.roadmapPhase ?? "CogniX Core is checking the local strategy.");
+
+  return (
+    <Tooltip>
+      <TooltipPrimitive.Trigger asChild={true}>
+        <button
+          type="button"
+          onClick={() => openSettings("cognix-core")}
+          className={cn(
+            "flex h-[34px] max-w-[46vw] items-center gap-1.5 rounded-full border px-2.5 text-[12px] font-medium transition-colors hover:bg-nav-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:max-w-[260px]",
+            cognixReadinessTone(readiness),
+          )}
+          aria-label={`CogniX Auto: ${modelLabel}, ${readinessLabel}, ${confidence}`}
+        >
+          <HugeiconsIcon
+            icon={AiBrain03Icon}
+            strokeWidth={1.75}
+            className="size-3.5 shrink-0"
+          />
+          <span className="hidden shrink-0 sm:inline">CogniX Auto</span>
+          <span className="hidden text-muted-foreground sm:inline">/</span>
+          <span className="min-w-0 truncate">{modelLabel}</span>
+          <span className="hidden shrink-0 text-muted-foreground md:inline">
+            {confidence}
+          </span>
+        </button>
+      </TooltipPrimitive.Trigger>
+      <TooltipContent side="bottom" sideOffset={6} className="max-w-[320px]">
+        <div className="flex flex-col gap-1">
+          <span className="font-medium">
+            {readinessLabel} / {modelLabel}
+          </span>
+          <span className="text-xs text-muted-foreground">
+            {tooltipDetail}
+          </span>
+        </div>
+      </TooltipContent>
+    </Tooltip>
+  );
 }
 
 function normalizeModelRef(value: string | null | undefined): string {
@@ -2417,6 +2552,9 @@ export function ChatPage({
                 className="max-w-[62vw] !pr-3 sm:max-w-none !h-[34px]"
               />
             )}
+            {view.mode !== "compare" ? (
+              <CogniXAutoChip active={active} />
+            ) : null}
             {view.mode !== "compare" && currentProjectId && (
               <nav
                 aria-label="Project location"
