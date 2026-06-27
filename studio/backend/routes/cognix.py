@@ -14,7 +14,7 @@ from email.utils import parsedate_to_datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from auth import storage as auth_storage
 from auth.authentication import get_current_jwt_subject
@@ -24,7 +24,7 @@ from core.cognix import recommender as cognix_recommender
 from core.cognix.router import classify_objective
 from core.cognix.strategy import build_strategy
 from storage import cognix_db
-from storage.studio_db import list_chat_messages_for_threads, list_chat_projects, list_chat_threads
+from storage.studio_db import get_chat_project, list_chat_messages_for_threads, list_chat_projects, list_chat_threads
 
 
 router = APIRouter()
@@ -94,6 +94,15 @@ class SocialAgentRequest(BaseModel):
 class ModelPinRequest(BaseModel):
     model_id: str = Field(..., min_length = 1, max_length = 240)
     label: str = Field(..., min_length = 1, max_length = 240)
+
+
+class ProjectDefaultModelRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    model_id: str = Field(..., alias = "modelId", min_length = 1, max_length = 240)
+    label: str = Field(..., min_length = 1, max_length = 240)
+    provider_type: str | None = Field(None, alias = "providerType", max_length = 80)
+    provider_id: str | None = Field(None, alias = "providerId", max_length = 160)
 
 
 class ProjectShareCreateRequest(BaseModel):
@@ -183,6 +192,8 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "app_id": "appId",
         "app_name": "appName",
         "model_id": "modelId",
+        "provider_type": "providerType",
+        "provider_id": "providerId",
         "project_id": "projectId",
         "owner_username": "ownerUsername",
         "collaborator_username": "collaboratorUsername",
@@ -221,6 +232,17 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
 
 def _rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [_row(row) for row in rows]
+
+
+def _require_owned_project(project_id: str, owner_username: str) -> dict[str, Any]:
+    project = get_chat_project(
+        project_id,
+        owner_username = owner_username,
+        include_all = False,
+    )
+    if project is None:
+        raise HTTPException(status_code = 404, detail = "Project not found")
+    return project
 
 
 def _dashboard_password_status(user: dict[str, Any]) -> dict[str, Any]:
@@ -1088,6 +1110,52 @@ async def unpin_model(
     current_subject: str = Depends(get_current_jwt_subject),
 ) -> dict[str, Any]:
     cognix_db.delete_model_pin(current_subject, model_id)
+    return {"ok": True}
+
+
+@router.get("/project-model-defaults")
+async def my_project_model_defaults(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    return {"defaults": _rows(cognix_db.list_project_model_defaults(current_subject))}
+
+
+@router.get("/projects/{project_id}/default-model")
+async def get_project_default_model(
+    project_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_owned_project(project_id, current_subject)
+    default_model = cognix_db.get_project_model_default(project_id, current_subject)
+    return {"defaultModel": _row(default_model) if default_model else None}
+
+
+@router.put("/projects/{project_id}/default-model")
+async def set_project_default_model(
+    project_id: str,
+    payload: ProjectDefaultModelRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_owned_project(project_id, current_subject)
+    try:
+        default_model = cognix_db.set_project_model_default(
+            current_subject,
+            project_id,
+            payload.model_id,
+            payload.label,
+            provider_type = payload.provider_type,
+            provider_id = payload.provider_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from exc
+    return {"defaultModel": _row(default_model)}
+
+
+@router.delete("/projects/{project_id}/default-model")
+async def delete_project_default_model(
+    project_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_owned_project(project_id, current_subject)
+    cognix_db.delete_project_model_default(current_subject, project_id)
     return {"ok": True}
 
 

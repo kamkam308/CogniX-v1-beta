@@ -277,6 +277,20 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
             PRIMARY KEY(username, model_id)
         );
 
+        CREATE TABLE IF NOT EXISTS cognix_project_model_defaults (
+            project_id TEXT PRIMARY KEY,
+            owner_username TEXT NOT NULL,
+            model_id TEXT NOT NULL,
+            label TEXT NOT NULL,
+            provider_type TEXT,
+            provider_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_project_model_defaults_owner
+            ON cognix_project_model_defaults(owner_username, updated_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_project_shares (
             id TEXT PRIMARY KEY,
             project_id TEXT NOT NULL,
@@ -1124,6 +1138,123 @@ def delete_model_pin(username: str, model_id: str) -> None:
             (username, model_id),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def list_project_model_defaults(owner_username: str) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM cognix_project_model_defaults
+            WHERE owner_username = ?
+            ORDER BY updated_at DESC
+            """,
+            (owner_username,),
+        ).fetchall()
+        return _rows_to_dicts(rows)
+    finally:
+        conn.close()
+
+
+def get_project_model_default(project_id: str, owner_username: str | None = None) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        if owner_username:
+            row = conn.execute(
+                """
+                SELECT * FROM cognix_project_model_defaults
+                WHERE project_id = ? AND owner_username = ?
+                """,
+                (project_id, owner_username),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM cognix_project_model_defaults WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()
+        return row_to_dict(row)
+    finally:
+        conn.close()
+
+
+def set_project_model_default(
+    owner_username: str,
+    project_id: str,
+    model_id: str,
+    label: str,
+    *,
+    provider_type: str | None = None,
+    provider_id: str | None = None,
+) -> dict[str, Any]:
+    normalized_project_id = project_id.strip()
+    normalized_model_id = model_id.strip()
+    normalized_label = (label or normalized_model_id).strip() or normalized_model_id
+    if not normalized_project_id:
+        raise ValueError("Project id is required")
+    if not normalized_model_id:
+        raise ValueError("Model id is required")
+
+    now = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_project_model_defaults
+                (
+                    project_id,
+                    owner_username,
+                    model_id,
+                    label,
+                    provider_type,
+                    provider_id,
+                    created_at,
+                    updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(project_id) DO UPDATE SET
+                owner_username = excluded.owner_username,
+                model_id = excluded.model_id,
+                label = excluded.label,
+                provider_type = excluded.provider_type,
+                provider_id = excluded.provider_id,
+                updated_at = excluded.updated_at
+            """,
+            (
+                normalized_project_id,
+                owner_username,
+                normalized_model_id,
+                normalized_label,
+                (provider_type or "").strip() or None,
+                (provider_id or "").strip() or None,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        return row_to_dict(
+            conn.execute(
+                "SELECT * FROM cognix_project_model_defaults WHERE project_id = ?",
+                (normalized_project_id,),
+            ).fetchone()
+        ) or {}
+    finally:
+        conn.close()
+
+
+def delete_project_model_default(owner_username: str, project_id: str) -> bool:
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            """
+            DELETE FROM cognix_project_model_defaults
+            WHERE project_id = ? AND owner_username = ?
+            """,
+            (project_id, owner_username),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
     finally:
         conn.close()
 
