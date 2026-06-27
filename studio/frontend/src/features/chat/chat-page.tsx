@@ -209,6 +209,7 @@ function cognixReadinessTone(value: string | undefined): string {
 
 function CogniXAutoChip({ active }: { active: boolean }): ReactElement | null {
   const openSettings = useSettingsDialogStore((state) => state.openDialog);
+  const latestRoute = useChatRuntimeStore((state) => state.latestCogniXRoute);
   const [strategy, setStrategy] = useState<CogniXAutoStrategy | null>(null);
   const [failed, setFailed] = useState(false);
 
@@ -241,11 +242,20 @@ function CogniXAutoChip({ active }: { active: boolean }): ReactElement | null {
   const recommendation = strategy?.recommendation;
   const readiness = failed ? "service_unreachable" : recommendation?.readiness;
   const readinessLabel = cognixReadinessLabel(readiness);
-  const modelLabel = recommendation?.modelLabel ?? "CogniX Auto";
-  const confidence = formatCogniXConfidence(recommendation?.confidence);
+  const modelLabel =
+    latestRoute?.recommendedModelLabel ??
+    recommendation?.modelLabel ??
+    "CogniX Auto";
+  const confidence = formatCogniXConfidence(
+    latestRoute?.confidence ?? recommendation?.confidence,
+  );
   const tooltipDetail = failed
     ? "CogniX Core is not reachable right now."
-    : (recommendation?.reason ?? strategy?.roadmapPhase ?? "CogniX Core is checking the local strategy.");
+    : (latestRoute?.reason ??
+      recommendation?.reason ??
+      strategy?.roadmapPhase ??
+      "CogniX Core is checking the local strategy.");
+  const modeLabel = latestRoute ? latestRoute.label : "Auto";
 
   return (
     <Tooltip>
@@ -257,7 +267,7 @@ function CogniXAutoChip({ active }: { active: boolean }): ReactElement | null {
             "flex h-[34px] max-w-[46vw] items-center gap-1.5 rounded-full border px-2.5 text-[12px] font-medium transition-colors hover:bg-nav-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:max-w-[260px]",
             cognixReadinessTone(readiness),
           )}
-          aria-label={`CogniX Auto: ${modelLabel}, ${readinessLabel}, ${confidence}`}
+          aria-label={`CogniX Auto: ${modeLabel}, ${modelLabel}, ${readinessLabel}, ${confidence}`}
         >
           <HugeiconsIcon
             icon={AiBrain03Icon}
@@ -266,7 +276,9 @@ function CogniXAutoChip({ active }: { active: boolean }): ReactElement | null {
           />
           <span className="hidden shrink-0 sm:inline">CogniX Auto</span>
           <span className="hidden text-muted-foreground sm:inline">/</span>
-          <span className="min-w-0 truncate">{modelLabel}</span>
+          <span className="min-w-0 truncate">
+            {latestRoute ? `${modeLabel}: ${modelLabel}` : modelLabel}
+          </span>
           <span className="hidden shrink-0 text-muted-foreground md:inline">
             {confidence}
           </span>
@@ -275,8 +287,15 @@ function CogniXAutoChip({ active }: { active: boolean }): ReactElement | null {
       <TooltipContent side="bottom" sideOffset={6} className="max-w-[320px]">
         <div className="flex flex-col gap-1">
           <span className="font-medium">
-            {readinessLabel} / {modelLabel}
+            {latestRoute
+              ? `${modeLabel} / ${modelLabel}`
+              : `${readinessLabel} / ${modelLabel}`}
           </span>
+          {latestRoute ? (
+            <span className="text-xs text-muted-foreground">
+              Last routed prompt / {confidence} confidence
+            </span>
+          ) : null}
           <span className="text-xs text-muted-foreground">
             {tooltipDetail}
           </span>

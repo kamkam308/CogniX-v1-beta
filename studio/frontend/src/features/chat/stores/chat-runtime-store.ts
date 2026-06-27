@@ -200,6 +200,17 @@ export type PendingImageEditReference = {
   openaiResponseId?: string;
   openaiReasoningItem?: unknown;
 };
+
+export type CogniXRouteSnapshot = {
+  selectedDomain: string;
+  label: string;
+  recommendedModelLabel: string;
+  confidence: number;
+  needsClarification: boolean;
+  routingMode: string;
+  reason: string;
+  createdAt: number;
+};
 export type ReasoningEffort =
   | "none"
   | "minimal"
@@ -575,6 +586,7 @@ type ChatRuntimeStore = {
    * non-OpenRouter model. UI display only (appended after `openrouter/free:`).
    */
   lastOpenRouterChosenModel: string | null;
+  latestCogniXRoute: CogniXRouteSnapshot | null;
   reasoningStyle: ReasoningStyle;
   reasoningEffort: ReasoningEffort;
   supportsReasoningOff: boolean;
@@ -756,6 +768,7 @@ type ChatRuntimeStore = {
     options?: { persist?: boolean },
   ) => void;
   setLastOpenRouterChosenModel: (chosen: string | null) => void;
+  setLatestCogniXRoute: (route: CogniXRouteSnapshot | null) => void;
   setReasoningStyle: (style: ReasoningStyle) => void;
   setReasoningEffort: (effort: ReasoningEffort) => void;
   setPreserveThinking: (value: boolean) => void;
@@ -1070,6 +1083,7 @@ export const useChatRuntimeStore = create<ChatRuntimeStore>((set, get) => ({
   supportsReasoningOff: false,
   reasoningEffortLevels: ["low", "medium", "high"],
   lastOpenRouterChosenModel: null,
+  latestCogniXRoute: null,
   supportsPreserveThinking: false,
   preserveThinking: false,
   supportsTools: false,
@@ -1383,6 +1397,7 @@ export const useChatRuntimeStore = create<ChatRuntimeStore>((set, get) => ({
     }),
   setLastOpenRouterChosenModel: (lastOpenRouterChosenModel) =>
     set({ lastOpenRouterChosenModel }),
+  setLatestCogniXRoute: (latestCogniXRoute) => set({ latestCogniXRoute }),
   setReasoningStyle: (reasoningStyle) => set({ reasoningStyle }),
   setReasoningEffort: (reasoningEffort) =>
     set((state) => {

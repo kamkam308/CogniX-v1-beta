@@ -39,6 +39,7 @@ import {
   providerSupportsFastMode,
 } from "../provider-capabilities";
 import {
+  type CogniXRouteSnapshot,
   type PendingImageEditReference,
   type RagAutoInject,
   resolveLoadedSpeculativeSettings,
@@ -523,6 +524,7 @@ function formatCogniXRouteSummary(
 
 async function classifyLatestCogniXObjective(
   messages: RunMessages,
+  options: { showToast?: boolean } = {},
 ): Promise<CogniXRouterClassification | null> {
   const objective = findLatestUserObjective(messages);
   if (!objective) {
@@ -530,10 +532,23 @@ async function classifyLatestCogniXObjective(
   }
   try {
     const { classification } = await classifyCogniXObjective({ objective });
-    toast("CogniX Auto", {
-      description: formatCogniXRouteSummary(classification),
-      duration: 2800,
-    });
+    const route: CogniXRouteSnapshot = {
+      selectedDomain: classification.selectedDomain,
+      label: classification.label,
+      recommendedModelLabel: classification.recommendedModelLabel,
+      confidence: classification.confidence,
+      needsClarification: classification.needsClarification,
+      routingMode: classification.routingMode,
+      reason: classification.reason,
+      createdAt: Date.now(),
+    };
+    useChatRuntimeStore.getState().setLatestCogniXRoute(route);
+    if (options.showToast !== false) {
+      toast("CogniX Auto", {
+        description: formatCogniXRouteSummary(classification),
+        duration: 2800,
+      });
+    }
     return classification;
   } catch {
     return null;
@@ -1661,8 +1676,12 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
         }
       }
 
+      const runtimeBeforeRoute = useChatRuntimeStore.getState();
+      const cognixRoute = await classifyLatestCogniXObjective(messages, {
+        showToast: !runtimeBeforeRoute.params.checkpoint,
+      });
+
       if (!useChatRuntimeStore.getState().params.checkpoint) {
-        const cognixRoute = await classifyLatestCogniXObjective(messages);
         // Prefer a model already loaded by the CLI/API before auto-loading.
         let loaded: boolean;
         let blockedByTrustRemoteCode: boolean;
