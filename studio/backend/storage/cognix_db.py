@@ -593,6 +593,58 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_context_heatmap_entries_project
             ON cognix_context_heatmap_entries(username, project_id, bucket, utility_score DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_generated_datasets (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            project_id TEXT,
+            objective_excerpt TEXT NOT NULL DEFAULT '',
+            output_format TEXT NOT NULL DEFAULT 'jsonl',
+            status TEXT NOT NULL DEFAULT 'review_required',
+            example_count INTEGER NOT NULL DEFAULT 0,
+            ready_example_count INTEGER NOT NULL DEFAULT 0,
+            review_example_count INTEGER NOT NULL DEFAULT 0,
+            quality_summary_json TEXT NOT NULL DEFAULT '{}',
+            data_sources_json TEXT NOT NULL DEFAULT '[]',
+            export_plan_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_generated_datasets_username_created
+            ON cognix_generated_datasets(username, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_generated_datasets_project
+            ON cognix_generated_datasets(username, project_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_dataset_examples (
+            id TEXT PRIMARY KEY,
+            dataset_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            instruction TEXT NOT NULL DEFAULT '',
+            input TEXT NOT NULL DEFAULT '',
+            output TEXT NOT NULL DEFAULT '',
+            quality_score REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'review',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_dataset_examples_dataset
+            ON cognix_dataset_examples(username, dataset_id, quality_score DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_dataset_quality_scores (
+            id TEXT PRIMARY KEY,
+            dataset_id TEXT NOT NULL,
+            example_id TEXT,
+            username TEXT NOT NULL,
+            quality_score REAL NOT NULL DEFAULT 0,
+            quality_label TEXT NOT NULL DEFAULT 'review',
+            signals_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_dataset_quality_scores_dataset
+            ON cognix_dataset_quality_scores(username, dataset_id, quality_score DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_intent_predictions (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -3937,6 +3989,181 @@ def list_context_heatmap_entries(username: str, *, project_id: str | None = None
                 (username, safe_limit),
             ).fetchall()
         return [_hydrate_context_heatmap_entry(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_generated_dataset(row: dict[str, Any]) -> dict[str, Any]:
+    row["qualitySummary"] = _json_or_default(row.get("quality_summary_json"), {})
+    row["dataSources"] = _json_or_default(row.get("data_sources_json"), [])
+    row["exportPlan"] = _json_or_default(row.get("export_plan_json"), {})
+    return row
+
+
+def _hydrate_dataset_example(row: dict[str, Any]) -> dict[str, Any]:
+    row["metadata"] = _json_or_default(row.get("metadata_json"), {})
+    return row
+
+
+def _hydrate_dataset_quality_score(row: dict[str, Any]) -> dict[str, Any]:
+    row["signals"] = _json_or_default(row.get("signals_json"), {})
+    return row
+
+
+def create_generated_dataset(
+    username: str,
+    *,
+    plan: dict[str, Any],
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    now = _now()
+    dataset = plan.get("dataset") if isinstance(plan.get("dataset"), dict) else {}
+    dataset_id = str(dataset.get("datasetId") or _new_id("ds"))[:160]
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_generated_datasets
+                (
+                    id, username, project_id, objective_excerpt, output_format, status,
+                    example_count, ready_example_count, review_example_count,
+                    quality_summary_json, data_sources_json, export_plan_json,
+                    created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                dataset_id,
+                username,
+                project_id or plan.get("projectId"),
+                str(dataset.get("objective") or plan.get("objective") or "")[:500],
+                str(dataset.get("format") or "jsonl")[:80],
+                str(dataset.get("status") or "review_required")[:80],
+                int(dataset.get("exampleCount") or 0),
+                int(dataset.get("readyExampleCount") or 0),
+                int(dataset.get("reviewExampleCount") or 0),
+                json.dumps(plan.get("qualitySummary") or {}, ensure_ascii = False),
+                json.dumps(plan.get("dataSources") or [], ensure_ascii = False),
+                json.dumps(plan.get("exportPlan") or {}, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        for example in [item for item in plan.get("examples", []) if isinstance(item, dict)]:
+            example_id = str(example.get("id") or _new_id("ex"))[:180]
+            conn.execute(
+                """
+                INSERT INTO cognix_dataset_examples
+                    (
+                        id, dataset_id, username, instruction, input, output,
+                        quality_score, status, metadata_json, created_at
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    example_id,
+                    dataset_id,
+                    username,
+                    str(example.get("instruction") or ""),
+                    str(example.get("input") or ""),
+                    str(example.get("output") or ""),
+                    float(example.get("qualityScore") or 0.0),
+                    str(example.get("status") or "review")[:80],
+                    json.dumps(example.get("metadata") or {}, ensure_ascii = False),
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO cognix_dataset_quality_scores
+                    (
+                        id, dataset_id, example_id, username, quality_score,
+                        quality_label, signals_json, created_at
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _new_id("dq"),
+                    dataset_id,
+                    example_id,
+                    username,
+                    float(example.get("qualityScore") or 0.0),
+                    str(example.get("qualityLabel") or example.get("status") or "review")[:80],
+                    json.dumps(
+                        {
+                            "matchedObjectiveTerms": example.get("matchedObjectiveTerms") or [],
+                            "sensitiveTerms": example.get("sensitiveTerms") or [],
+                            "tokenCount": example.get("tokenCount"),
+                        },
+                        ensure_ascii = False,
+                    ),
+                    now,
+                ),
+            )
+        conn.commit()
+        return get_generated_dataset(username, dataset_id) or {}
+    finally:
+        conn.close()
+
+
+def list_generated_datasets(username: str, *, project_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        safe_limit = min(max(int(limit or 100), 1), 300)
+        if project_id:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_generated_datasets
+                WHERE username = ? AND project_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, project_id, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_generated_datasets
+                WHERE username = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, safe_limit),
+            ).fetchall()
+        return [_hydrate_generated_dataset(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def get_generated_dataset(username: str, dataset_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM cognix_generated_datasets WHERE id = ? AND username = ?",
+            (dataset_id, username),
+        ).fetchone()
+        if row is None:
+            return None
+        dataset = _hydrate_generated_dataset(row_to_dict(row) or {})
+        example_rows = conn.execute(
+            """
+            SELECT * FROM cognix_dataset_examples
+            WHERE username = ? AND dataset_id = ?
+            ORDER BY quality_score DESC, created_at DESC
+            """,
+            (username, dataset_id),
+        ).fetchall()
+        quality_rows = conn.execute(
+            """
+            SELECT * FROM cognix_dataset_quality_scores
+            WHERE username = ? AND dataset_id = ?
+            ORDER BY quality_score DESC, created_at DESC
+            """,
+            (username, dataset_id),
+        ).fetchall()
+        dataset["examples"] = [_hydrate_dataset_example(item) for item in _rows_to_dicts(example_rows)]
+        dataset["qualityScores"] = [_hydrate_dataset_quality_score(item) for item in _rows_to_dicts(quality_rows)]
+        return dataset
     finally:
         conn.close()
 

@@ -26,6 +26,7 @@ from core.cognix import context_graph as cognix_context_graph
 from core.cognix import context_heatmap as cognix_context_heatmap
 from core.cognix import context_manager as cognix_context_manager
 from core.cognix import cost_optimizer as cognix_cost_optimizer
+from core.cognix import dataset_builder as cognix_dataset_builder
 from core.cognix import debate_orchestrator as cognix_debate_orchestrator
 from core.cognix import deployment_manager as cognix_deployment_manager
 from core.cognix import draft_generation as cognix_draft_generation
@@ -565,6 +566,17 @@ class FineTuningCloudHandoffPlanRequest(BaseModel):
     dataset: dict[str, Any] | None = None
 
 
+class DatasetBuilderPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    documents: list[dict[str, Any]]
+    objective: str | None = Field(None, max_length = 4000)
+    output_format: str | None = Field("jsonl", alias = "outputFormat", max_length = 80)
+    max_examples: int = Field(50, alias = "maxExamples", ge = 1, le = 500)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    store_dataset: bool = Field(True, alias = "storeDataset")
+
+
 class RagPlanRequest(BaseModel):
     objective: str = Field(..., min_length = 1, max_length = 4000)
     project_type: str | None = Field(None, max_length = 80)
@@ -906,6 +918,17 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "recommended_action": "recommendedAction",
         "theme_token": "themeToken",
         "entry_json": "entryJson",
+        "output_format": "outputFormat",
+        "example_count": "exampleCount",
+        "ready_example_count": "readyExampleCount",
+        "review_example_count": "reviewExampleCount",
+        "quality_summary_json": "qualitySummaryJson",
+        "data_sources_json": "dataSourcesJson",
+        "export_plan_json": "exportPlanJson",
+        "dataset_id": "datasetId",
+        "quality_score": "qualityScore",
+        "quality_label": "qualityLabel",
+        "signals_json": "signalsJson",
         "selected_domain": "selectedDomain",
         "probabilities_json": "probabilitiesJson",
         "suggestion_json": "suggestionJson",
@@ -3250,6 +3273,102 @@ async def fine_tuning_cloud_handoff_plan(
         "executionPolicy": plan["executionPolicy"],
         "auditLogId": audit.get("id"),
         "sideEffects": handoff.get("sideEffects", {}),
+    }
+
+
+@router.get("/datasets/blueprint")
+async def dataset_builder_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_dataset_builder.build_dataset_builder_blueprint()
+    return {
+        "username": current_subject,
+        "datasetBuilderBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_dataset_builder.COGNIX_DATASET_BUILDER_VERSION,
+    }
+
+
+@router.post("/datasets/plan")
+async def dataset_builder_plan(
+    payload: DatasetBuilderPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_dataset_builder.build_dataset_plan(
+        username = current_subject,
+        documents = payload.documents,
+        objective = payload.objective,
+        output_format = payload.output_format,
+        max_examples = payload.max_examples,
+        project_id = payload.project_id,
+    )
+    stored_dataset = (
+        cognix_db.create_generated_dataset(
+            current_subject,
+            plan = plan,
+            project_id = payload.project_id,
+        )
+        if payload.store_dataset
+        else None
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "datasetWrite": stored_dataset is not None,
+        "exampleWrite": stored_dataset is not None,
+        "qualityScoreWrite": stored_dataset is not None,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "dataset_builder_plan_built",
+        resource_type = "cognix_generated_dataset",
+        resource_id = str((stored_dataset or {}).get("id") or plan.get("dataset", {}).get("datasetId") or current_subject),
+        severity = "warning" if plan.get("dataset", {}).get("status") == "review_required" else "notice",
+        metadata = {
+            "datasetBuilderVersion": plan.get("datasetBuilderVersion"),
+            "syntheticExampleGeneratorVersion": plan.get("syntheticExampleGeneratorVersion"),
+            "qualityFilterVersion": plan.get("qualityFilterVersion"),
+            "exportServiceVersion": plan.get("exportServiceVersion"),
+            "datasetId": plan.get("dataset", {}).get("datasetId"),
+            "exampleCount": plan.get("dataset", {}).get("exampleCount"),
+            "reviewExampleCount": plan.get("dataset", {}).get("reviewExampleCount"),
+            "sensitiveSourceCount": plan.get("qualitySummary", {}).get("sensitiveSourceCount"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "datasetBuilderPlan": plan,
+        "generatedDataset": _row(stored_dataset) if stored_dataset else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_dataset_builder.COGNIX_DATASET_BUILDER_VERSION,
+    }
+
+
+@router.get("/datasets")
+async def generated_datasets(
+    project_id: str | None = None,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if project_id:
+        _require_owned_project(project_id, current_subject)
+    return {
+        "datasets": _rows(cognix_db.list_generated_datasets(current_subject, project_id = project_id)),
+        "sideEffects": {
+            "datasetWrite": False,
+            "exampleWrite": False,
+            "qualityScoreWrite": False,
+            "fileWrite": False,
+            "datasetExport": False,
+            "datasetUpload": False,
+            "trainingJob": False,
+            "modelLoad": False,
+            "generation": False,
+            "networkCall": False,
+        },
+        "plannerVersion": cognix_dataset_builder.COGNIX_DATASET_BUILDER_VERSION,
     }
 
 

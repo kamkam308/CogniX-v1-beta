@@ -21,6 +21,7 @@ from core.cognix import context_graph as cognix_context_graph
 from core.cognix import context_heatmap as cognix_context_heatmap
 from core.cognix import context_manager as cognix_context_manager
 from core.cognix import cost_optimizer as cognix_cost_optimizer
+from core.cognix import dataset_builder as cognix_dataset_builder
 from core.cognix import debate_orchestrator as cognix_debate_orchestrator
 from core.cognix import deployment_manager as cognix_deployment_manager
 from core.cognix import draft_generation as cognix_draft_generation
@@ -626,6 +627,90 @@ def test_fine_tuning_cloud_handoff_blocks_non_ceo_cpu_without_launch(monkeypatch
     assert handoff["sideEffects"]["datasetUpload"] is False
     assert handoff["sideEffects"]["cloudCredentialRead"] is False
     assert any("training cloud" in item for item in handoff["warnings"])
+
+
+def test_dataset_builder_creates_reviewable_examples_without_generation():
+    plan = cognix_dataset_builder.build_dataset_plan(
+        username = "alice",
+        objective = "cours RAG citations securite",
+        output_format = "jsonl",
+        max_examples = 4,
+        documents = [
+            {
+                "sourceId": "cours-rag",
+                "sourceType": "document",
+                "title": "Cours RAG",
+                "text": (
+                    "Le RAG utilise des documents indexes pour fournir des citations fiables. "
+                    "La securite impose de verifier les sources avant reponse."
+                ),
+            },
+            {
+                "sourceId": "secret-note",
+                "sourceType": "chat",
+                "title": "Note sensible",
+                "text": "Le token prive ne doit jamais etre exporte dans un dataset brut.",
+            },
+        ],
+    )
+
+    assert plan["datasetBuilderVersion"] == "cognix_dataset_builder_v1"
+    assert plan["syntheticExampleGeneratorVersion"] == "cognix_synthetic_example_generator_v1"
+    assert plan["qualityFilterVersion"] == "cognix_dataset_quality_filter_v1"
+    assert plan["exportServiceVersion"] == "cognix_dataset_export_service_v1"
+    assert plan["dataset"]["format"] == "jsonl"
+    assert plan["dataset"]["exampleCount"] >= 2
+    assert plan["qualitySummary"]["sensitiveSourceCount"] == 1
+    assert "quality_score" in plan["exportPlan"]["previewJsonl"]
+    assert plan["exportPlan"]["willWriteFile"] is False
+    assert plan["sideEffects"]["generation"] is False
+    assert plan["sideEffects"]["datasetExport"] is False
+    assert plan["sideEffects"]["trainingJob"] is False
+
+
+def test_dataset_builder_endpoint_stores_dataset_examples_and_audits():
+    seed_accounts()
+    body = run_async(
+        cognix_routes.dataset_builder_plan(
+            cognix_routes.DatasetBuilderPlanRequest(
+                documents = [
+                    {
+                        "sourceId": "cours-rag",
+                        "sourceType": "document",
+                        "title": "Cours RAG",
+                        "text": (
+                            "Le RAG utilise les documents pour repondre avec citations. "
+                            "La qualite du dataset depend de sources claires."
+                        ),
+                    }
+                ],
+                objective = "RAG citations dataset",
+                outputFormat = "jsonl",
+                maxExamples = 5,
+                storeDataset = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    plan = body["datasetBuilderPlan"]
+    dataset = body["generatedDataset"]
+    assert body["auditLogId"].startswith("aud_")
+    assert dataset["id"] == plan["dataset"]["datasetId"]
+    assert dataset["examples"][0]["id"].startswith("ex_")
+    assert dataset["qualityScores"][0]["id"].startswith("dq_")
+    assert body["sideEffects"]["datasetWrite"] is True
+    assert body["sideEffects"]["fileWrite"] is False
+    assert body["sideEffects"]["trainingJob"] is False
+    assert body["sideEffects"]["generation"] is False
+
+    listed = run_async(cognix_routes.generated_datasets(current_subject = "alice"))
+    assert listed["datasets"][0]["id"] == dataset["id"]
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "dataset_builder_plan_built"
+    assert log["metadata"]["datasetBuilderVersion"] == "cognix_dataset_builder_v1"
 
 
 def test_rag_plan_endpoint_prepares_hybrid_retrieval_without_indexing(monkeypatch):
@@ -4358,6 +4443,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-ai-workflow-recorder",
         "cognix-onboarding",
         "cognix-rag",
+        "cognix-dataset-builder",
         "cognix-fine-tuning",
         "cognix-worker-queue",
         "cognix-research-watch",
@@ -4503,6 +4589,12 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "cloud_training_targets" in modules["cognix-fine-tuning"]["capabilities"]
     assert "cloud_training_handoff" in modules["cognix-fine-tuning"]["capabilities"]
     assert "/api/cognix/fine-tuning/cloud-handoff-plan" in modules["cognix-fine-tuning"]["routes"]
+    assert modules["cognix-dataset-builder"]["dependencyState"]["ready"] is True
+    assert "dataset_builder" in modules["cognix-dataset-builder"]["capabilities"]
+    assert "synthetic_example_generation" in modules["cognix-dataset-builder"]["capabilities"]
+    assert "dataset_quality_filter" in modules["cognix-dataset-builder"]["capabilities"]
+    assert "/api/cognix/datasets/plan" in modules["cognix-dataset-builder"]["routes"]
+    assert "/api/cognix/datasets" in modules["cognix-dataset-builder"]["routes"]
     assert "worker_job_specs" in modules["cognix-worker-queue"]["capabilities"]
     assert "cloud_training_job_specs" in modules["cognix-worker-queue"]["capabilities"]
     assert "/api/cognix/workers/registry" in modules["cognix-worker-queue"]["routes"]
