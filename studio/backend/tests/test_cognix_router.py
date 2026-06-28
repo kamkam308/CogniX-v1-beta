@@ -84,6 +84,27 @@ def stub_hardware_profile() -> dict[str, object]:
     }
 
 
+def stub_gpu_hardware_profile() -> dict[str, object]:
+    return {
+        "deviceBackend": "cuda",
+        "cpuCount": 12,
+        "memory": {
+            "totalGb": 32.0,
+            "availableGb": 22.0,
+        },
+        "gpu": {
+            "available": True,
+            "devices": [
+                {
+                    "name": "Test GPU",
+                    "vramTotalGb": 16.0,
+                    "vramFreeGb": 13.0,
+                }
+            ],
+        },
+    }
+
+
 def stub_recommendation(
     hardware: dict[str, object],
     *,
@@ -203,6 +224,11 @@ def test_orchestrator_builds_dry_run_plan_without_loading(monkeypatch):
     assert plan["preloadPlan"]["sideEffects"]["modelLoad"] is False
     assert plan["executionStrategy"]["preloadAction"] == "would_preload"
     assert any(step["id"] == "plan_preload" for step in plan["steps"])
+    assert plan["fineTuningPlan"]["plannerVersion"] == "cognix_fine_tuning_planner_v1"
+    assert plan["fineTuningPlan"]["recommendedPath"] == "no_fine_tuning_needed"
+    assert plan["fineTuningPlan"]["sideEffects"]["fineTuningJob"] is False
+    assert plan["executionStrategy"]["fineTuningMethod"] == "none"
+    assert any(step["id"] == "plan_fine_tuning" for step in plan["steps"])
     assert plan["executionStrategy"]["automaticExecutionAllowed"] is False
     assert plan["executionStrategy"]["securityRiskLevel"] == "high"
     assert plan["executionPolicy"]["policyVersion"] == "cognix_security_policy_v1"
@@ -254,6 +280,102 @@ def test_orchestrator_policy_blocks_tool_execution(monkeypatch):
     assert "tool_execution" in blocked_ids
     assert plan["executionStrategy"]["requiresModelLoad"] is False
     assert plan["executionStrategy"]["willGenerate"] is False
+
+
+def test_fine_tuning_plan_endpoint_prepares_qlora_without_training(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_gpu_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+
+    body = run_async(
+        cognix_routes.fine_tuning_plan(
+            cognix_routes.FineTuningPlanRequest(
+                objective = "Je veux fine-tuning LoRA pour specialiser CogniX sur mon style de reponse",
+                project_type = "education",
+                project_id = "project-training",
+                dataset = {
+                    "format": "jsonl",
+                    "sampleCount": 1500,
+                    "estimatedTokens": 650000,
+                    "duplicateRatio": 0.01,
+                    "invalidRows": 0,
+                    "averageResponseTokens": 48,
+                    "license": "mit",
+                    "containsSensitiveData": False,
+                },
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    plan = body["fineTuningPlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert plan["plannerVersion"] == "cognix_fine_tuning_planner_v1"
+    assert plan["recommendedPath"] == "guided_fine_tuning"
+    assert plan["method"]["type"] == "qlora"
+    assert plan["dataset"]["status"] == "ready"
+    assert plan["approval"]["required"] is True
+    assert plan["approval"]["readyToRequest"] is True
+    assert plan["sideEffects"]["datasetImport"] is False
+    assert plan["sideEffects"]["fineTuningJob"] is False
+    assert plan["sideEffects"]["adapterWrite"] is False
+    assert body["executionPolicy"]["automaticExecutionAllowed"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "fine_tuning_plan_built"
+    assert log["metadata"]["plannerVersion"] == "cognix_fine_tuning_planner_v1"
+    assert log["metadata"]["method"] == "qlora"
+    assert log["metadata"]["sideEffects"]["fineTuningJob"] is False
+
+
+def test_fine_tuning_plan_defers_to_rag_for_document_objective(monkeypatch):
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_gpu_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+
+    plan = cognix_orchestrator.build_execution_plan(
+        "Je veux entrainer CogniX pour repondre a partir de mes PDF de cours",
+        current_subject = "alice",
+        project_type = "education",
+        runtime_snapshot = {
+            "runtimeType": "ollama",
+            "activeModel": None,
+            "loadedModels": [],
+            "loadingModels": [],
+        },
+        fine_tuning_dataset = {
+            "format": "jsonl",
+            "sampleCount": 400,
+            "estimatedTokens": 120000,
+            "license": "mit",
+        },
+    )
+
+    assert plan["taskStrategy"]["path"] == "rag_first"
+    assert plan["fineTuningPlan"]["recommendedPath"] == "rag_before_fine_tuning"
+    assert plan["fineTuningPlan"]["method"]["type"] == "none"
+    assert any(
+        item["id"] == "premature_fine_tuning"
+        for item in plan["fineTuningPlan"]["blockedActions"]
+    )
+    assert plan["fineTuningPlan"]["sideEffects"]["fineTuningJob"] is False
 
 
 def test_context_manager_builds_bounded_context_packet():

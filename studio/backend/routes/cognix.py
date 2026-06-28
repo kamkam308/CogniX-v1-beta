@@ -156,6 +156,13 @@ class PreloadPlanRequest(BaseModel):
     project_id: str | None = Field(None, max_length = 160)
 
 
+class FineTuningPlanRequest(BaseModel):
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    project_type: str | None = Field(None, max_length = 80)
+    project_id: str | None = Field(None, max_length = 160)
+    dataset: dict[str, Any] | None = None
+
+
 class ToolActionPlanRequest(BaseModel):
     tool_id: str = Field(..., min_length = 1, max_length = 120)
     action_id: str = Field(..., min_length = 1, max_length = 120)
@@ -1076,6 +1083,51 @@ async def model_preload_plan(
         "preloadPlan": preload_plan,
         "auditLogId": audit.get("id"),
         "sideEffects": preload_plan.get("sideEffects", {}),
+    }
+
+
+@router.post("/fine-tuning/plan")
+async def fine_tuning_plan(
+    payload: FineTuningPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    runtime = _current_model_cache_runtime()
+    plan = cognix_orchestrator.build_execution_plan(
+        payload.objective,
+        current_subject = current_subject,
+        project_type = payload.project_type,
+        project_id = payload.project_id,
+        runtime_snapshot = runtime,
+        latest_benchmark_run = cognix_db.get_latest_benchmark_run(current_subject),
+        fine_tuning_dataset = payload.dataset,
+    )
+    tuning_plan = plan["fineTuningPlan"]
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "fine_tuning_plan_built",
+        resource_type = "cognix_fine_tuning_plan",
+        resource_id = str(tuning_plan.get("baseModel", {}).get("modelId") or "none"),
+        severity = "warning" if tuning_plan.get("approval", {}).get("required") else "notice",
+        metadata = {
+            "plannerVersion": tuning_plan.get("plannerVersion"),
+            "recommendedPath": tuning_plan.get("recommendedPath"),
+            "targetDomain": tuning_plan.get("targetDomain"),
+            "method": tuning_plan.get("method", {}).get("type"),
+            "datasetStatus": tuning_plan.get("dataset", {}).get("status"),
+            "approval": tuning_plan.get("approval", {}),
+            "sideEffects": tuning_plan.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "runtimeError": runtime.get("error"),
+        "classification": plan["classification"],
+        "taskStrategy": plan["taskStrategy"],
+        "fineTuningPlan": tuning_plan,
+        "executionPolicy": plan["executionPolicy"],
+        "auditLogId": audit.get("id"),
+        "sideEffects": tuning_plan.get("sideEffects", {}),
     }
 
 

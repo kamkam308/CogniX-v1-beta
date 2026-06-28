@@ -15,6 +15,7 @@ from typing import Any
 
 from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import decision_engine as cognix_decision_engine
+from core.cognix import fine_tuning_planner as cognix_fine_tuning_planner
 from core.cognix import hardware as cognix_hardware
 from core.cognix import preload_planner as cognix_preload_planner
 from core.cognix import recommender as cognix_recommender
@@ -80,6 +81,7 @@ def _warnings(
     cache: dict[str, Any],
     task_strategy: dict[str, Any],
     preload_plan: dict[str, Any],
+    fine_tuning_plan: dict[str, Any],
 ) -> list[str]:
     warnings: list[str] = []
     if classification.get("needsClarification"):
@@ -94,6 +96,9 @@ def _warnings(
         if isinstance(item, str) and item:
             warnings.append(item)
     for item in preload_plan.get("warnings") or []:
+        if isinstance(item, str) and item:
+            warnings.append(item)
+    for item in fine_tuning_plan.get("warnings") or []:
         if isinstance(item, str) and item:
             warnings.append(item)
 
@@ -113,6 +118,7 @@ def _steps(
     recommendation: dict[str, Any],
     cache: dict[str, Any],
     preload_plan: dict[str, Any],
+    fine_tuning_plan: dict[str, Any],
     execution_policy: dict[str, Any],
     status: str,
 ) -> list[dict[str, Any]]:
@@ -164,6 +170,15 @@ def _steps(
             ),
         },
         {
+            "id": "plan_fine_tuning",
+            "label": "Evaluer fine-tuning",
+            "status": "complete",
+            "detail": str(
+                fine_tuning_plan.get("reason")
+                or "Fine-tuning observe uniquement: aucun job lance."
+            ),
+        },
+        {
             "id": "apply_execution_policy",
             "label": "Appliquer les garde-fous",
             "status": "complete",
@@ -199,6 +214,7 @@ def build_execution_plan(
     project_id: str | None = None,
     runtime_snapshot: dict[str, Any] | None = None,
     latest_benchmark_run: dict[str, Any] | None = None,
+    fine_tuning_dataset: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     hardware = cognix_hardware.get_hardware_profile()
     recommendation_payload = cognix_recommender.build_model_recommendation(
@@ -230,6 +246,15 @@ def build_execution_plan(
         cache = cache,
         latest_benchmark_run = latest_benchmark_run,
     )
+    fine_tuning_plan = cognix_fine_tuning_planner.build_fine_tuning_plan(
+        objective = objective,
+        classification = classification,
+        task_strategy = task_strategy,
+        recommendation = recommendation,
+        hardware = hardware,
+        dataset = fine_tuning_dataset,
+        latest_benchmark_run = latest_benchmark_run,
+    )
     status = _execution_status(
         classification = classification,
         recommendation = recommendation,
@@ -258,6 +283,8 @@ def build_execution_plan(
         "securityRiskLevel": execution_policy.get("riskLevel"),
         "preloadAction": (preload_plan.get("actions") or [{}])[0].get("type"),
         "preloadTargetModelId": preload_plan.get("target", {}).get("modelId"),
+        "fineTuningMethod": fine_tuning_plan.get("method", {}).get("type"),
+        "fineTuningReadyToRequestApproval": fine_tuning_plan.get("approval", {}).get("readyToRequest"),
         "uses": task_strategy.get("uses"),
         "requiresModelLoad": not bool(cache.get("runtime", {}).get("activeModel")),
         "willLoadModel": False,
@@ -281,6 +308,7 @@ def build_execution_plan(
         "recommendation": recommendation,
         "cache": cache,
         "preloadPlan": preload_plan,
+        "fineTuningPlan": fine_tuning_plan,
         "taskStrategy": task_strategy,
         "executionPolicy": execution_policy,
         "executionStrategy": execution_strategy,
@@ -290,6 +318,7 @@ def build_execution_plan(
             recommendation = recommendation,
             cache = cache,
             preload_plan = preload_plan,
+            fine_tuning_plan = fine_tuning_plan,
             execution_policy = execution_policy,
             status = status,
         ),
@@ -299,6 +328,7 @@ def build_execution_plan(
             cache = cache,
             task_strategy = task_strategy,
             preload_plan = preload_plan,
+            fine_tuning_plan = fine_tuning_plan,
         ),
         "sideEffects": {
             "modelLoad": False,
