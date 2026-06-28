@@ -21,6 +21,7 @@ from core.cognix import deployment_manager as cognix_deployment_manager
 from core.cognix import decision_engine as cognix_decision_engine
 from core.cognix import governance_manager as cognix_governance_manager
 from core.cognix import integration_manager as cognix_integration_manager
+from core.cognix import model_lifecycle as cognix_model_lifecycle
 from core.cognix import module_registry as cognix_module_registry
 from core.cognix import onboarding as cognix_onboarding
 from core.cognix import optimization_planner as cognix_optimization_planner
@@ -1058,6 +1059,136 @@ def test_project_expert_plan_endpoint_uses_project_default_and_logs_audit(monkey
     assert log["metadata"]["sideEffects"]["modelLoad"] is False
 
 
+def test_model_lifecycle_plans_expert_pack_without_loading():
+    hardware = stub_hardware_profile()
+    cache = cognix_cache_manager.build_cache_state(
+        hardware,
+        active_model = None,
+        loaded_models = [],
+        loading_models = [],
+        runtime_type = "ollama",
+    )
+    registry = {
+        "models": [
+            {
+                "id": "huihui_ai/qwen3-vl-abliterated:4b-instruct",
+                "providerId": "ollama-local",
+                "providerType": "ollama",
+                "source": "ollama",
+                "available": True,
+            }
+        ]
+    }
+
+    plan = cognix_model_lifecycle.build_model_lifecycle_plan(
+        objective = "Corrige ce bug Python dans mon backend",
+        hardware = hardware,
+        recommendation = stub_recommendation(hardware)["recommendation"],
+        cache = cache,
+        classification = {"selectedDomain": "code", "scores": {"code": 0.91}},
+        project_expert_plan = {
+            "primaryExpert": {
+                "domain": "code",
+                "selectedModel": {"modelId": "cognix-code-4b-q4"},
+            }
+        },
+        runtime_adapter_plan = {"selectedAdapter": {"adapterId": "llama-cpp"}},
+        model_registry = registry,
+        project_id = "project-code",
+        project_type = "code",
+        quality_priority = "balanced",
+    )
+
+    assert plan["modelLifecycleVersion"] == "cognix_model_lifecycle_v1"
+    assert plan["mode"] == "dry_run"
+    assert plan["request"]["targetDomain"] == "code"
+    assert plan["selectedPack"]["packId"] == "cognix-code-local"
+    assert plan["installPlan"]["required"] is True
+    assert plan["loadPlan"]["action"] == "defer_load_until_install"
+    assert any(item["modelId"] == "glm-700b" for item in plan["blockedModels"])
+    assert plan["policies"]["frontendCannotLoadModelsDirectly"] is True
+    assert plan["sideEffects"]["modelDownload"] is False
+    assert plan["sideEffects"]["modelInstall"] is False
+    assert plan["sideEffects"]["modelLoad"] is False
+    assert plan["sideEffects"]["modelUnload"] is False
+    assert plan["sideEffects"]["runtimeMutation"] is False
+
+
+def test_model_lifecycle_endpoint_logs_audited_dry_run(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+    monkeypatch.setattr(
+        cognix_routes,
+        "_current_model_cache_runtime",
+        lambda: {"runtimeType": "ollama", "activeModel": None, "loadedModels": [], "loadingModels": []},
+    )
+    monkeypatch.setattr(
+        cognix_routes.cognix_registry,
+        "build_model_registry",
+        lambda: {
+            "registryVersion": "local_model_registry_v1",
+            "providers": [],
+            "models": [
+                {
+                    "id": "huihui_ai/qwen3-vl-abliterated:4b-instruct",
+                    "providerId": "ollama-local",
+                    "providerType": "ollama",
+                    "source": "ollama",
+                    "available": True,
+                }
+            ],
+            "defaultModelId": "huihui_ai/qwen3-vl-abliterated:4b-instruct",
+            "recommendedModelId": "huihui_ai/qwen3-vl-abliterated:4b-instruct",
+            "ollama": {
+                "configured": True,
+                "reachable": True,
+                "hasDefaultModel": True,
+                "recommendedModel": "huihui_ai/qwen3-vl-abliterated:4b-instruct",
+            },
+        },
+    )
+
+    body = run_async(
+        cognix_routes.model_lifecycle_plan(
+            cognix_routes.ModelLifecyclePlanRequest(
+                objective = "Teste Qwen 4B en local sans lancer le modele",
+                modelId = "huihui_ai/qwen3-vl-abliterated:4b-instruct",
+                projectType = "code",
+                offlineRequired = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    lifecycle = body["modelLifecyclePlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_model_lifecycle_v1"
+    assert lifecycle["selectedPack"]["packId"] == "ollama-qwen-4b-local"
+    assert lifecycle["selectedPack"]["availability"]["installed"] is True
+    assert lifecycle["installPlan"]["required"] is False
+    assert lifecycle["loadPlan"]["willLoad"] is False
+    assert lifecycle["sideEffects"]["modelDownload"] is False
+    assert lifecycle["sideEffects"]["modelLoad"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "model_lifecycle_plan_built"
+    assert log["resourceType"] == "cognix_model_lifecycle"
+    assert log["metadata"]["modelLifecycleVersion"] == "cognix_model_lifecycle_v1"
+    assert log["metadata"]["selectedPackId"] == "ollama-qwen-4b-local"
+    assert log["metadata"]["sideEffects"]["modelLoad"] is False
+
+
 def test_codex_pipeline_plans_required_gates_without_modifying_code():
     plan = cognix_codex_pipeline.build_codex_pipeline_plan(
         objective = "Ajoute un module CogniX Chemistry dans le code source",
@@ -1341,10 +1472,13 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert registry["sideEffects"]["uiMutation"] is False
 
     modules = {item["id"]: item for item in registry["modules"]}
-    assert {"cognix-local-core", "cognix-onboarding", "cognix-rag", "cognix-integrations", "cognix-codex-secure-agent", "cognix-enterprise-foundation", "cognix-deployment-manager"}.issubset(
+    assert {"cognix-local-core", "cognix-model-lifecycle", "cognix-onboarding", "cognix-rag", "cognix-integrations", "cognix-codex-secure-agent", "cognix-enterprise-foundation", "cognix-deployment-manager"}.issubset(
         modules
     )
     assert modules["cognix-local-core"]["activationState"] == "ready"
+    assert modules["cognix-model-lifecycle"]["activationState"] == "ready"
+    assert "load_unload_planning" in modules["cognix-model-lifecycle"]["capabilities"]
+    assert "/api/cognix/models/lifecycle-plan" in modules["cognix-model-lifecycle"]["routes"]
     assert modules["cognix-onboarding"]["activationState"] == "ready"
     assert modules["cognix-rag"]["dependencyState"]["ready"] is True
     assert "sso_planning" in modules["cognix-enterprise-foundation"]["capabilities"]

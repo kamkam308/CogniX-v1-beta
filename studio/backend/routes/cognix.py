@@ -26,6 +26,7 @@ from core.cognix import deployment_manager as cognix_deployment_manager
 from core.cognix import governance_manager as cognix_governance_manager
 from core.cognix import hardware as cognix_hardware
 from core.cognix import integration_manager as cognix_integration_manager
+from core.cognix import model_lifecycle as cognix_model_lifecycle
 from core.cognix import module_registry as cognix_module_registry
 from core.cognix import onboarding as cognix_onboarding
 from core.cognix import optimization_planner as cognix_optimization_planner
@@ -119,6 +120,18 @@ class SocialAgentRequest(BaseModel):
 class ModelPinRequest(BaseModel):
     model_id: str = Field(..., min_length = 1, max_length = 240)
     label: str = Field(..., min_length = 1, max_length = 240)
+
+
+class ModelLifecyclePlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    model_id: str | None = Field(None, alias = "modelId", max_length = 240)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    project_type: str | None = Field(None, alias = "projectType", max_length = 80)
+    execution_target: str | None = Field(None, alias = "executionTarget", max_length = 120)
+    quality_priority: str | None = Field(None, alias = "qualityPriority", max_length = 80)
+    offline_required: bool = Field(False, alias = "offlineRequired")
 
 
 class ProjectDefaultModelRequest(BaseModel):
@@ -1108,6 +1121,104 @@ async def model_registry(current_subject: str = Depends(get_current_jwt_subject)
     return {
         "username": current_subject,
         "registry": cognix_registry.build_model_registry(),
+    }
+
+
+@router.get("/models/packs")
+async def model_packs(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    registry = cognix_registry.build_model_registry()
+    return {
+        "username": current_subject,
+        "modelRegistry": registry,
+        "registry": cognix_model_lifecycle.build_model_pack_registry(model_registry = registry),
+        "plannerVersion": cognix_model_lifecycle.COGNIX_MODEL_LIFECYCLE_VERSION,
+    }
+
+
+@router.post("/models/lifecycle-plan")
+async def model_lifecycle_plan(
+    payload: ModelLifecyclePlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    runtime = _current_model_cache_runtime()
+    latest_benchmark = cognix_db.get_latest_benchmark_run(current_subject)
+    model_registry_payload = cognix_registry.build_model_registry()
+    plan = cognix_orchestrator.build_execution_plan(
+        payload.objective,
+        current_subject = current_subject,
+        project_type = payload.project_type,
+        project_id = payload.project_id,
+        runtime_snapshot = runtime,
+        latest_benchmark_run = latest_benchmark,
+        rag_available = _rag_available(),
+    )
+    default_model = (
+        cognix_db.get_project_model_default(payload.project_id, current_subject)
+        if payload.project_id
+        else None
+    )
+    project_expert_plan = plan["projectExpertPlan"]
+    if default_model:
+        project_expert_plan = cognix_project_experts.build_project_expert_plan(
+            objective = payload.objective,
+            project_id = payload.project_id,
+            project_type = payload.project_type,
+            project_default_model = default_model,
+            classification = plan["classification"],
+            recommendation = plan["recommendation"],
+            preload_plan = plan["preloadPlan"],
+            rag_plan = plan["ragPlan"],
+            context_plan = plan["contextPlan"],
+        )
+    lifecycle = cognix_model_lifecycle.build_model_lifecycle_plan(
+        objective = payload.objective,
+        hardware = plan["hardware"],
+        recommendation = plan["recommendation"],
+        cache = plan["cache"],
+        classification = plan["classification"],
+        project_expert_plan = project_expert_plan,
+        runtime_adapter_plan = plan["runtimeAdapterPlan"],
+        model_registry = model_registry_payload,
+        latest_benchmark_run = latest_benchmark,
+        project_id = payload.project_id,
+        project_type = payload.project_type,
+        requested_model_id = payload.model_id,
+        execution_target = payload.execution_target,
+        quality_priority = payload.quality_priority,
+        offline_required = payload.offline_required,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "model_lifecycle_plan_built",
+        resource_type = "cognix_model_lifecycle",
+        resource_id = str(lifecycle.get("selectedPack", {}).get("modelId") or "none"),
+        severity = "warning" if lifecycle.get("warnings") else "notice",
+        metadata = {
+            "modelLifecycleVersion": lifecycle.get("modelLifecycleVersion"),
+            "selectedPackId": lifecycle.get("selectedPack", {}).get("packId"),
+            "selectedModelId": lifecycle.get("selectedPack", {}).get("modelId"),
+            "targetDomain": lifecycle.get("request", {}).get("targetDomain"),
+            "installRequired": lifecycle.get("installPlan", {}).get("required"),
+            "loadAction": lifecycle.get("loadPlan", {}).get("action"),
+            "sideEffects": lifecycle.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "runtimeError": runtime.get("error"),
+        "latestBenchmark": latest_benchmark,
+        "modelRegistry": model_registry_payload,
+        "classification": plan["classification"],
+        "taskStrategy": plan["taskStrategy"],
+        "projectExpertPlan": project_expert_plan,
+        "modelLifecyclePlan": lifecycle,
+        "executionPolicy": plan["executionPolicy"],
+        "auditLogId": audit.get("id"),
+        "sideEffects": lifecycle.get("sideEffects", {}),
+        "plannerVersion": cognix_model_lifecycle.COGNIX_MODEL_LIFECYCLE_VERSION,
     }
 
 
