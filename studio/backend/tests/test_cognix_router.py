@@ -39,6 +39,7 @@ from core.cognix import onboarding as cognix_onboarding
 from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import persona_manager as cognix_persona_manager
+from core.cognix import plugin_marketplace as cognix_plugin_marketplace
 from core.cognix import project_experts as cognix_project_experts
 from core.cognix import prompt_compression as cognix_prompt_compression
 from core.cognix import quantization_advisor as cognix_quantization_advisor
@@ -2103,6 +2104,82 @@ def test_model_conversion_endpoint_stores_plan_and_logs_audit():
     assert log["action"] == "model_conversion_plan_built"
     assert log["metadata"]["compatible"] is True
     assert log["metadata"]["sideEffects"]["conversionJobEnqueue"] is False
+
+
+def test_plugin_marketplace_catalog_requires_permission_manifests():
+    catalog = cognix_plugin_marketplace.build_marketplace_catalog()
+
+    assert catalog["marketplaceServiceVersion"] == "cognix_plugin_marketplace_service_v1"
+    assert {"productivity", "education", "code", "research", "business", "connectors", "models"}.issubset(
+        set(catalog["categories"])
+    )
+    assert catalog["summary"]["pluginCount"] >= 3
+    assert all(plugin["permissionCount"] > 0 for plugin in catalog["plugins"])
+    assert all(plugin["signatureStatus"] == "verified" for plugin in catalog["plugins"])
+    assert catalog["sideEffects"]["pluginInstall"] is False
+    assert catalog["sideEffects"]["networkCall"] is False
+
+
+def test_plugin_install_plan_blocks_manifest_without_permissions():
+    plan = cognix_plugin_marketplace.build_plugin_install_plan(
+        username = "alice",
+        plugin_manifest = {
+            "id": "unsafe-plugin",
+            "displayName": "Unsafe Plugin",
+            "category": "code",
+            "version": "1.0.0",
+            "publisher": "unknown",
+            "signature": {"status": "verified", "issuer": "cognix-marketplace"},
+            "capabilities": ["write_code"],
+        },
+        is_admin = False,
+        has_developer_mode = False,
+        granted_permissions = set(),
+    )
+
+    assert plan["status"] == "blocked_missing_permission_manifest"
+    assert plan["validation"]["permissionManifestPresent"] is False
+    assert "missing_permission_manifest" in plan["validation"]["blockingReasons"]
+    assert plan["installationPlan"]["readyToInstall"] is False
+    assert plan["sideEffects"]["pluginInstall"] is False
+    assert plan["sideEffects"]["permissionGrant"] is False
+
+
+def test_plugin_install_plan_endpoint_stores_permissions_and_audit():
+    seed_accounts()
+    body = run_async(
+        cognix_routes.plugin_install_plan(
+            cognix_routes.PluginInstallPlanRequest(
+                pluginId = "github-project-board",
+                targetScope = "user",
+                storePlan = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    plan = body["pluginInstallPlan"]
+    installed = body["installedPlugin"]
+    assert plan["status"] == "blocked_missing_permissions"
+    assert plan["validation"]["signatureStatus"] == "verified"
+    assert "github:read" in plan["permissionScan"]["missingPermissions"]
+    assert installed["id"] == plan["installationPlanId"]
+    assert installed["pluginId"] == "github-project-board"
+    assert installed["reviews"][0]["reviewType"] == "security_scan"
+    assert any(item["permissionKey"] == "github:write" for item in installed["permissions"])
+    assert body["sideEffects"]["pluginPlanWrite"] is True
+    assert body["sideEffects"]["pluginInstall"] is False
+    assert body["sideEffects"]["pluginActivation"] is False
+    assert body["sideEffects"]["networkCall"] is False
+
+    listed = run_async(cognix_routes.plugin_installations(current_subject = "alice"))
+    assert listed["installations"][0]["id"] == installed["id"]
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "plugin_install_plan_built"
+    assert log["metadata"]["pluginId"] == "github-project-board"
+    assert log["metadata"]["sideEffects"]["pluginInstall"] is False
 
 
 def test_thinking_status_redacts_technical_model_details():
@@ -4603,6 +4680,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-worker-queue",
         "cognix-research-watch",
         "cognix-integrations",
+        "cognix-plugin-marketplace",
         "cognix-codex-secure-agent",
         "cognix-enterprise-foundation",
         "cognix-deployment-manager",
@@ -4781,6 +4859,12 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/research/integration-plan" in modules["cognix-research-watch"]["routes"]
     assert "tool_permission_matrix" in modules["cognix-integrations"]["capabilities"]
     assert "/api/cognix/tools/permission-matrix" in modules["cognix-integrations"]["routes"]
+    assert modules["cognix-plugin-marketplace"]["dependencyState"]["ready"] is True
+    assert "plugin_manifest_validation" in modules["cognix-plugin-marketplace"]["capabilities"]
+    assert "plugin_permission_scanning" in modules["cognix-plugin-marketplace"]["capabilities"]
+    assert "plugin_install_planning" in modules["cognix-plugin-marketplace"]["capabilities"]
+    assert "/api/cognix/plugins/marketplace" in modules["cognix-plugin-marketplace"]["routes"]
+    assert "/api/cognix/plugins/install-plan" in modules["cognix-plugin-marketplace"]["routes"]
     assert "sso_planning" in modules["cognix-enterprise-foundation"]["capabilities"]
     assert "/api/cognix/governance/plan" in modules["cognix-enterprise-foundation"]["routes"]
     assert modules["cognix-deployment-manager"]["dependencyState"]["ready"] is True

@@ -46,6 +46,7 @@ from core.cognix import onboarding as cognix_onboarding
 from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import persona_manager as cognix_persona_manager
+from core.cognix import plugin_marketplace as cognix_plugin_marketplace
 from core.cognix import project_experts as cognix_project_experts
 from core.cognix import prompt_compression as cognix_prompt_compression
 from core.cognix import quantization_advisor as cognix_quantization_advisor
@@ -395,6 +396,16 @@ class ModelConversionPlanRequest(BaseModel):
     conversion_options: dict[str, Any] | None = Field(None, alias = "conversionOptions")
     project_id: str | None = Field(None, alias = "projectId", max_length = 160)
     store_conversion: bool = Field(True, alias = "storeConversion")
+
+
+class PluginInstallPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    plugin_id: str | None = Field(None, alias = "pluginId", max_length = 160)
+    plugin_manifest: dict[str, Any] | None = Field(None, alias = "pluginManifest")
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    target_scope: Literal["user", "project", "workspace"] = Field("user", alias = "targetScope")
+    store_plan: bool = Field(True, alias = "storePlan")
 
 
 class ThinkingStatusPlanRequest(BaseModel):
@@ -878,6 +889,11 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "compatibility_status": "compatibilityStatus",
         "plan_json": "planJson",
         "conversion_id": "conversionId",
+        "plugin_id": "pluginId",
+        "target_scope": "targetScope",
+        "install_plan_json": "installPlanJson",
+        "signature_status": "signatureStatus",
+        "review_type": "reviewType",
         "scores_json": "scoresJson",
         "message_id": "messageId",
         "thread_id": "threadId",
@@ -1006,6 +1022,12 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         out["logs"] = [_row(item) if isinstance(item, dict) else item for item in out["logs"]]
     if isinstance(out.get("metrics"), list):
         out["metrics"] = [_row(item) if isinstance(item, dict) else item for item in out["metrics"]]
+    if isinstance(out.get("permissions"), list):
+        out["permissions"] = [_row(item) if isinstance(item, dict) else item for item in out["permissions"]]
+    if isinstance(out.get("reviews"), list):
+        out["reviews"] = [_row(item) if isinstance(item, dict) else item for item in out["reviews"]]
+    if isinstance(out.get("plugin"), dict):
+        out["plugin"] = _row(out["plugin"])
     if isinstance(out.get("sandbox"), dict):
         out["sandbox"] = _row(out["sandbox"])
     if isinstance(out.get("reportRecord"), dict):
@@ -3020,6 +3042,130 @@ async def plan_integration(
     )
     plan["auditLogId"] = audit.get("id")
     return plan
+
+
+@router.get("/plugins/marketplace/blueprint")
+async def plugin_marketplace_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_plugin_marketplace.build_plugin_marketplace_blueprint()
+    return {
+        "username": current_subject,
+        "pluginMarketplaceBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_plugin_marketplace.COGNIX_PLUGIN_MARKETPLACE_SERVICE_VERSION,
+    }
+
+
+@router.get("/plugins/marketplace")
+async def plugin_marketplace_catalog(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    catalog = cognix_plugin_marketplace.build_marketplace_catalog()
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "plugin_marketplace_catalog_built",
+        resource_type = "cognix_plugin_marketplace",
+        resource_id = str(catalog.get("marketplaceServiceVersion")),
+        severity = "notice",
+        metadata = {
+            "marketplaceServiceVersion": catalog.get("marketplaceServiceVersion"),
+            "pluginCount": catalog.get("summary", {}).get("pluginCount"),
+            "installableCount": catalog.get("summary", {}).get("installableCount"),
+            "sideEffects": catalog.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "marketplaceCatalog": catalog,
+        "auditLogId": audit.get("id"),
+        "sideEffects": catalog.get("sideEffects", {}),
+        "plannerVersion": cognix_plugin_marketplace.COGNIX_PLUGIN_MARKETPLACE_SERVICE_VERSION,
+    }
+
+
+@router.post("/plugins/install-plan")
+async def plugin_install_plan(
+    payload: PluginInstallPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    is_admin = auth_storage.is_admin(current_subject)
+    has_developer_mode = cognix_db.user_has_permission(
+        current_subject,
+        cognix_db.DEVELOPER_MODE_PERMISSION,
+    )
+    plan = cognix_plugin_marketplace.build_plugin_install_plan(
+        username = current_subject,
+        plugin_id = payload.plugin_id,
+        plugin_manifest = payload.plugin_manifest,
+        project_id = payload.project_id,
+        target_scope = payload.target_scope,
+        is_admin = is_admin,
+        has_developer_mode = has_developer_mode,
+        granted_permissions = _granted_permission_keys(current_subject),
+    )
+    stored_installation = (
+        cognix_db.create_plugin_install_plan(
+            current_subject,
+            plan = plan,
+            project_id = payload.project_id,
+        )
+        if payload.store_plan
+        else None
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "pluginPlanWrite": stored_installation is not None,
+        "permissionScanWrite": stored_installation is not None,
+        "reviewWrite": stored_installation is not None,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "plugin_install_plan_built",
+        resource_type = "cognix_plugin_installation",
+        resource_id = str((stored_installation or {}).get("id") or plan.get("installationPlanId") or "plugin_plan"),
+        severity = "warning" if plan.get("status") != "ready_for_confirmation" else "notice",
+        metadata = {
+            "marketplaceServiceVersion": plan.get("marketplaceServiceVersion"),
+            "installerVersion": plan.get("installerVersion"),
+            "permissionScannerVersion": plan.get("permissionScannerVersion"),
+            "pluginId": plan.get("plugin", {}).get("id"),
+            "status": plan.get("status"),
+            "signatureStatus": plan.get("validation", {}).get("signatureStatus"),
+            "missingPermissions": plan.get("permissionScan", {}).get("missingPermissions", []),
+            "maxRiskLevel": plan.get("permissionScan", {}).get("maxRiskLevel"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "pluginInstallPlan": plan,
+        "installedPlugin": _row(stored_installation) if stored_installation else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_plugin_marketplace.COGNIX_PLUGIN_MARKETPLACE_SERVICE_VERSION,
+    }
+
+
+@router.get("/plugins/installations")
+async def plugin_installations(
+    project_id: str | None = None,
+    limit: int = 100,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if project_id:
+        _require_owned_project(project_id, current_subject)
+    installations = cognix_db.list_installed_plugins(
+        current_subject,
+        project_id = project_id,
+        limit = limit,
+    )
+    return {
+        "username": current_subject,
+        "installations": [_row(item) for item in installations],
+        "count": len(installations),
+    }
 
 
 @router.post("/tools/plan")

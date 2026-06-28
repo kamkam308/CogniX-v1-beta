@@ -356,6 +356,69 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_conversion_logs_conversion
             ON cognix_conversion_logs(username, conversion_id, created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_plugins (
+            id TEXT PRIMARY KEY,
+            plugin_id TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            category TEXT NOT NULL,
+            publisher TEXT NOT NULL,
+            version TEXT NOT NULL,
+            signature_status TEXT NOT NULL DEFAULT 'unknown',
+            status TEXT NOT NULL DEFAULT 'planned',
+            manifest_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_plugins_category
+            ON cognix_plugins(category, display_name COLLATE NOCASE);
+
+        CREATE TABLE IF NOT EXISTS cognix_installed_plugins (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            plugin_id TEXT NOT NULL,
+            project_id TEXT,
+            target_scope TEXT NOT NULL DEFAULT 'user',
+            status TEXT NOT NULL DEFAULT 'planned_no_install',
+            install_plan_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_installed_plugins_username
+            ON cognix_installed_plugins(username, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_installed_plugins_project
+            ON cognix_installed_plugins(username, project_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_plugin_permissions (
+            id TEXT PRIMARY KEY,
+            installation_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            plugin_id TEXT NOT NULL,
+            permission_key TEXT NOT NULL,
+            risk_level TEXT NOT NULL DEFAULT 'medium',
+            granted INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_plugin_permissions_installation
+            ON cognix_plugin_permissions(username, installation_id);
+
+        CREATE TABLE IF NOT EXISTS cognix_plugin_reviews (
+            id TEXT PRIMARY KEY,
+            installation_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            plugin_id TEXT NOT NULL,
+            review_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            risk_level TEXT NOT NULL DEFAULT 'medium',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_plugin_reviews_installation
+            ON cognix_plugin_reviews(username, installation_id, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_reports (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -2585,6 +2648,213 @@ def get_model_conversion(username: str, conversion_id: str) -> dict[str, Any] | 
         ).fetchall()
         conversion["logs"] = [_hydrate_conversion_log(dict(item)) for item in log_rows]
         return conversion
+    finally:
+        conn.close()
+
+
+def _hydrate_plugin(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["manifest"] = _json_or_default(item.get("manifest_json"), {})
+    return item
+
+
+def _hydrate_installed_plugin(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["installPlan"] = _json_or_default(item.get("install_plan_json"), {})
+    return item
+
+
+def _hydrate_plugin_review(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def create_plugin_install_plan(
+    username: str,
+    *,
+    plan: dict[str, Any],
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    now = _now()
+    plugin = plan.get("plugin") if isinstance(plan.get("plugin"), dict) else {}
+    manifest = plan.get("manifest") if isinstance(plan.get("manifest"), dict) else {}
+    validation = plan.get("validation") if isinstance(plan.get("validation"), dict) else {}
+    permission_scan = plan.get("permissionScan") if isinstance(plan.get("permissionScan"), dict) else {}
+    plugin_id = str(plugin.get("id") or manifest.get("id") or "unknown-plugin")[:160]
+    installation_id = str(plan.get("installationPlanId") or _new_id("plugplan"))[:160]
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_plugins
+                (
+                    id, plugin_id, display_name, category, publisher, version,
+                    signature_status, status, manifest_json, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                display_name = excluded.display_name,
+                category = excluded.category,
+                publisher = excluded.publisher,
+                version = excluded.version,
+                signature_status = excluded.signature_status,
+                manifest_json = excluded.manifest_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                plugin_id,
+                plugin_id,
+                str(plugin.get("displayName") or manifest.get("displayName") or plugin_id)[:160],
+                str(plugin.get("category") or manifest.get("category") or "productivity")[:80],
+                str(plugin.get("publisher") or manifest.get("publisher") or "unknown")[:160],
+                str(plugin.get("version") or manifest.get("version") or "0.0.0")[:80],
+                str(validation.get("signatureStatus") or "unknown")[:80],
+                json.dumps(manifest, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO cognix_installed_plugins
+                (
+                    id, username, plugin_id, project_id, target_scope, status,
+                    install_plan_json, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                installation_id,
+                username,
+                plugin_id,
+                project_id or plan.get("projectId"),
+                str(plan.get("targetScope") or "user")[:80],
+                str(plan.get("status") or "planned_no_install")[:80],
+                json.dumps(plan, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        for permission in permission_scan.get("requestedPermissions") or []:
+            if not isinstance(permission, dict):
+                continue
+            conn.execute(
+                """
+                INSERT INTO cognix_plugin_permissions
+                    (
+                        id, installation_id, username, plugin_id, permission_key,
+                        risk_level, granted, created_at
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _new_id("pperm"),
+                    installation_id,
+                    username,
+                    plugin_id,
+                    str(permission.get("permission") or "")[:160],
+                    str(permission.get("riskLevel") or "medium")[:40],
+                    1 if permission.get("granted") else 0,
+                    now,
+                ),
+            )
+        conn.execute(
+            """
+            INSERT INTO cognix_plugin_reviews
+                (
+                    id, installation_id, username, plugin_id, review_type,
+                    status, risk_level, metadata_json, created_at
+                )
+            VALUES (?, ?, ?, ?, 'security_scan', ?, ?, ?, ?)
+            """,
+            (
+                _new_id("prev"),
+                installation_id,
+                username,
+                plugin_id,
+                "passed" if validation.get("valid") else "blocked",
+                str(permission_scan.get("maxRiskLevel") or "medium")[:40],
+                json.dumps(
+                    {
+                        "validation": validation,
+                        "permissionScan": permission_scan,
+                        "sideEffects": plan.get("sideEffects", {}),
+                    },
+                    ensure_ascii = False,
+                ),
+                now,
+            ),
+        )
+        conn.commit()
+        return get_installed_plugin(username, installation_id) or {}
+    finally:
+        conn.close()
+
+
+def list_installed_plugins(username: str, *, project_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(int(limit), 200))
+    conn = get_connection()
+    try:
+        if project_id:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_installed_plugins
+                WHERE username = ? AND project_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, project_id, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_installed_plugins
+                WHERE username = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, safe_limit),
+            ).fetchall()
+        return [_hydrate_installed_plugin(dict(row)) for row in rows]
+    finally:
+        conn.close()
+
+
+def get_installed_plugin(username: str, installation_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM cognix_installed_plugins WHERE id = ? AND username = ?",
+            (installation_id, username),
+        ).fetchone()
+        if row is None:
+            return None
+        installation = _hydrate_installed_plugin(dict(row))
+        plugin_row = conn.execute(
+            "SELECT * FROM cognix_plugins WHERE id = ?",
+            (installation.get("plugin_id"),),
+        ).fetchone()
+        permission_rows = conn.execute(
+            """
+            SELECT * FROM cognix_plugin_permissions
+            WHERE username = ? AND installation_id = ?
+            ORDER BY risk_level DESC, permission_key
+            """,
+            (username, installation_id),
+        ).fetchall()
+        review_rows = conn.execute(
+            """
+            SELECT * FROM cognix_plugin_reviews
+            WHERE username = ? AND installation_id = ?
+            ORDER BY created_at DESC
+            """,
+            (username, installation_id),
+        ).fetchall()
+        installation["plugin"] = _hydrate_plugin(dict(plugin_row)) if plugin_row else None
+        installation["permissions"] = _rows_to_dicts(permission_rows)
+        installation["reviews"] = [_hydrate_plugin_review(dict(row)) for row in review_rows]
+        return installation
     finally:
         conn.close()
 
