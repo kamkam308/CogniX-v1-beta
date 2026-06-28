@@ -92,6 +92,50 @@ def _as_non_negative_int(value: Any, default: int) -> int:
     return parsed if parsed >= 0 else default
 
 
+def _render_project_dna(project_dna: dict[str, Any] | None) -> str:
+    dna = _as_dict(project_dna)
+    plan = _as_dict(dna.get("dna"))
+    profile = _as_dict(plan.get("profile"))
+    if not profile and dna:
+        profile = {
+            "objective": dna.get("objective"),
+            "context": dna.get("context"),
+            "responseStyle": dna.get("response_style"),
+            "preferredModels": dna.get("preferredModels"),
+            "allowedTools": dna.get("allowedTools"),
+            "constraints": [item.get("label") for item in _as_list(dna.get("constraints")) if isinstance(item, dict)],
+            "decisions": dna.get("decisions"),
+        }
+    if not profile:
+        return ""
+
+    lines: list[str] = []
+    objective = _normalize_text(profile.get("objective"))
+    context = _normalize_text(profile.get("context"))
+    style = _normalize_text(profile.get("responseStyle"))
+    if objective:
+        lines.append(f"Objectif: {objective}")
+    if context:
+        lines.append(f"Contexte: {context}")
+    if style:
+        lines.append(f"Style de reponse: {style}")
+    constraints = [str(item) for item in _as_list(profile.get("constraints")) if str(item).strip()]
+    if constraints:
+        lines.append("Contraintes: " + "; ".join(constraints[:8]))
+    decisions = _as_list(profile.get("decisions"))
+    decision_titles: list[str] = []
+    for item in decisions[:8]:
+        if isinstance(item, dict):
+            title = _clip_text(_normalize_text(item.get("title")), 240)[0]
+        else:
+            title = _clip_text(_normalize_text(str(item)), 240)[0]
+        if title:
+            decision_titles.append(title)
+    if decision_titles:
+        lines.append("Decisions: " + "; ".join(decision_titles))
+    return _clip_text("\n".join(lines), MAX_SECTION_CHARS)[0]
+
+
 def _channel(
     *,
     channel_id: str,
@@ -165,6 +209,7 @@ def build_context_plan(
     rag_plan: dict[str, Any] | None = None,
     user_memory: dict[str, Any] | None = None,
     project: dict[str, Any] | None = None,
+    project_dna: dict[str, Any] | None = None,
     conversation_summary: str | None = None,
     recent_messages: list[dict[str, Any]] | None = None,
     warnings: list[str] | None = None,
@@ -182,6 +227,7 @@ def build_context_plan(
     )
 
     memory_content = _normalize_text(_as_dict(user_memory).get("content"))
+    project_dna_content = _render_project_dna(project_dna)
     project_instructions = _normalize_text(_as_dict(project).get("instructions"))
     project_name = _normalize_text(_as_dict(project).get("name"))
     summary_content = _normalize_text(conversation_summary)
@@ -203,6 +249,16 @@ def build_context_plan(
             max_tokens = int(budget["memoryTokenReserve"]),
             included = bool(memory_content),
             reason = "Preferences stables utilisateur." if memory_content else "Aucune memoire utilisateur utile fournie.",
+        ),
+        _channel(
+            channel_id = "project_dna",
+            label = "Project DNA",
+            source = "cognix_project_dna",
+            priority = 15,
+            status = "ready" if project_dna_content else "missing_optional",
+            max_tokens = 700,
+            included = bool(project_dna_content),
+            reason = "Identite structuree du projet." if project_dna_content else "Aucun Project DNA actif.",
         ),
         _channel(
             channel_id = "project_memory",
@@ -264,7 +320,7 @@ def build_context_plan(
         plan_warnings.append("RAG requis mais aucun passage pret: ne pas halluciner de source.")
     if needs_summary and not summary_content:
         plan_warnings.append("Conversation longue: resume requis avant injection au modele.")
-    if not memory_content and not project_instructions and not rag_ready:
+    if not memory_content and not project_dna_content and not project_instructions and not rag_ready:
         plan_warnings.append("Contexte minimal: reponse basee surtout sur la demande courante.")
 
     compression = ["never_send_raw_history"]
@@ -314,11 +370,13 @@ def build_context_packet(
     current_subject: str,
     user_memory: dict[str, Any] | None = None,
     project: dict[str, Any] | None = None,
+    project_dna: dict[str, Any] | None = None,
     project_id: str | None = None,
     objective: str | None = None,
     warnings: list[str] | None = None,
 ) -> dict[str, Any]:
     memory_content = _normalize_text((user_memory or {}).get("content"))
+    project_dna_content = _render_project_dna(project_dna)
     project_instructions = _normalize_text((project or {}).get("instructions"))
     project_name = _normalize_text((project or {}).get("name"))
     objective_excerpt = _clip_text(_normalize_text(objective)[:500], 500)[0]
@@ -345,11 +403,22 @@ def build_context_packet(
                 priority = 20,
             )
         )
+    if project_dna_content:
+        sections.append(
+            _section(
+                section_id = "project_dna",
+                label = "Project DNA",
+                source = "cognix_project_dna",
+                content = project_dna_content,
+                priority = 15,
+            )
+        )
 
     context_plan = build_context_plan(
         current_subject = current_subject,
         user_memory = user_memory,
         project = project,
+        project_dna = project_dna,
         project_id = project_id,
         objective = objective,
         warnings = warnings,

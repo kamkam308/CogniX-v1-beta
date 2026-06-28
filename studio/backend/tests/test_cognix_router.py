@@ -40,6 +40,7 @@ from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import persona_manager as cognix_persona_manager
 from core.cognix import plugin_marketplace as cognix_plugin_marketplace
+from core.cognix import project_dna as cognix_project_dna
 from core.cognix import project_experts as cognix_project_experts
 from core.cognix import prompt_compression as cognix_prompt_compression
 from core.cognix import quantization_advisor as cognix_quantization_advisor
@@ -1825,6 +1826,90 @@ def test_project_experts_plan_specialized_project_without_loading():
     assert plan["sideEffects"]["modelLoad"] is False
     assert plan["sideEffects"]["defaultModelWrite"] is False
     assert plan["sideEffects"]["projectMutation"] is False
+
+
+def test_project_dna_builds_profile_and_context_injection_plan():
+    plan = cognix_project_dna.build_project_dna_plan(
+        username = "alice",
+        project_id = "project-code",
+        project = {"name": "Backend API", "instructions": "Priorite securite."},
+        objective = "Construire CogniX V1 beta",
+        response_style = "Repondre en francais, clair et direct.",
+        preferred_models = [{"modelId": "qwen-4b", "label": "Qwen 4B"}],
+        allowed_tools = ["github", "terminal"],
+        constraints = ["Changements natifs uniquement", "Ne pas lancer le modele sans demande"],
+        decisions = [{"title": "Utiliser Ollama pour les tests locaux", "rationale": "Rapide et reproductible"}],
+    )
+
+    assert plan["projectDnaServiceVersion"] == "cognix_project_dna_service_v1"
+    assert plan["profileBuilderVersion"] == "cognix_project_profile_builder_v1"
+    assert plan["contextInjectorVersion"] == "cognix_context_injector_v1"
+    assert plan["status"] == "ready_for_context"
+    assert plan["profile"]["completion"]["readySectionCount"] >= 6
+    assert plan["contextInjectionPlan"]["channelId"] == "project_dna"
+    assert plan["contextInjectionPlan"]["contextManagerCompatible"] is True
+    assert plan["contextInjectionPlan"]["willInjectNow"] is False
+    assert plan["sideEffects"]["modelLoad"] is False
+    assert plan["sideEffects"]["generation"] is False
+    assert plan["sideEffects"]["contextMutation"] is False
+
+
+def test_project_dna_endpoint_stores_and_context_pack_includes_dna():
+    seed_accounts()
+    now_ms = int(time.time() * 1000)
+    studio_db_storage.upsert_chat_project(
+        {
+            "id": "project-code",
+            "name": "Backend API",
+            "instructions": "Priorite a la securite et aux tests.",
+            "archived": False,
+            "createdAt": now_ms,
+            "updatedAt": now_ms,
+        },
+        owner_username = "alice",
+    )
+
+    body = run_async(
+        cognix_routes.upsert_project_dna(
+            "project-code",
+            cognix_routes.ProjectDNARequest(
+                objective = "Construire CogniX comme interface ChatGPT locale",
+                responseStyle = "Francais, direct, sans surcouche.",
+                preferredModels = [{"modelId": "qwen-4b", "label": "Qwen 4B"}],
+                allowedTools = ["github", "terminal"],
+                constraints = ["Tous les changements doivent etre natifs"],
+                decisions = [{"title": "Garder cognix.local en HTTPS"}],
+                storeDna = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_project_dna_service_v1"
+    assert body["projectDna"]["projectId"] == "project-code"
+    assert body["projectDna"]["dna"]["contextInjectionPlan"]["channelId"] == "project_dna"
+    assert body["sideEffects"]["projectDnaWrite"] is True
+    assert body["sideEffects"]["modelLoad"] is False
+
+    packet = run_async(
+        cognix_routes.build_context_pack(
+            cognix_routes.ContextPackRequest(
+                objective = "Continue la mission",
+                projectId = "project-code",
+            ),
+            current_subject = "alice",
+        )
+    )
+    assert "project_dna" in packet["includedSectionIds"]
+    assert "project_dna" in packet["contextPlan"]["includedChannelIds"]
+    assert "Construire CogniX" in packet["systemInstruction"]
+    assert packet["sideEffects"]["networkModelCall"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][1]
+    assert log["action"] == "project_dna_upserted"
+    assert log["metadata"]["sideEffects"]["projectDnaWrite"] is True
 
 
 def test_project_expert_plan_endpoint_uses_project_default_and_logs_audit(monkeypatch):
@@ -4688,6 +4773,12 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert modules["cognix-local-core"]["activationState"] == "ready"
     assert "module_manifest_registry" in modules["cognix-local-core"]["capabilities"]
     assert "/api/cognix/modules/manifests" in modules["cognix-local-core"]["routes"]
+    assert "project_dna" in modules["cognix-projects"]["capabilities"]
+    assert "project_dna_context_injection" in modules["cognix-projects"]["capabilities"]
+    assert "project_constraints" in modules["cognix-projects"]["capabilities"]
+    assert "project_decisions" in modules["cognix-projects"]["capabilities"]
+    assert "/api/cognix/projects/{project_id}/dna" in modules["cognix-projects"]["routes"]
+    assert "/api/cognix/projects/{project_id}/dna/injection-plan" in modules["cognix-projects"]["routes"]
     assert modules["cognix-model-lifecycle"]["activationState"] == "ready"
     assert "load_unload_planning" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "cache_load_planning" in modules["cognix-model-lifecycle"]["capabilities"]

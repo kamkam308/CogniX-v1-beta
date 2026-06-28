@@ -47,6 +47,7 @@ from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import persona_manager as cognix_persona_manager
 from core.cognix import plugin_marketplace as cognix_plugin_marketplace
+from core.cognix import project_dna as cognix_project_dna
 from core.cognix import project_experts as cognix_project_experts
 from core.cognix import prompt_compression as cognix_prompt_compression
 from core.cognix import quantization_advisor as cognix_quantization_advisor
@@ -108,8 +109,10 @@ class ContextMemoryRequest(BaseModel):
 
 
 class ContextPackRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
     objective: str | None = Field(None, max_length = 4000)
-    project_id: str | None = Field(None, max_length = 160)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
 
 
 class ContextGraphBuildRequest(BaseModel):
@@ -517,6 +520,19 @@ class ProjectExpertPlanRequest(BaseModel):
     project_type: str | None = Field(None, alias = "projectType", max_length = 80)
 
 
+class ProjectDNARequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str | None = Field(None, max_length = 4000)
+    context: str | None = Field(None, max_length = 12000)
+    response_style: str | None = Field(None, alias = "responseStyle", max_length = 4000)
+    preferred_models: list[Any] | None = Field(None, alias = "preferredModels")
+    allowed_tools: list[Any] | None = Field(None, alias = "allowedTools")
+    constraints: list[Any] | None = None
+    decisions: list[Any] | None = None
+    store_dna: bool = Field(True, alias = "storeDna")
+
+
 class ProjectShareCreateRequest(BaseModel):
     project_id: str = Field(..., min_length = 1, max_length = 160)
     permission: Literal["view", "edit"] = "view"
@@ -894,6 +910,14 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "install_plan_json": "installPlanJson",
         "signature_status": "signatureStatus",
         "review_type": "reviewType",
+        "response_style": "responseStyle",
+        "preferred_models_json": "preferredModelsJson",
+        "allowed_tools_json": "allowedToolsJson",
+        "dna_json": "dnaJson",
+        "dna_hash": "dnaHash",
+        "constraint_type": "constraintType",
+        "decision_key": "decisionKey",
+        "decided_at": "decidedAt",
         "scores_json": "scoresJson",
         "message_id": "messageId",
         "thread_id": "threadId",
@@ -1026,6 +1050,10 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         out["permissions"] = [_row(item) if isinstance(item, dict) else item for item in out["permissions"]]
     if isinstance(out.get("reviews"), list):
         out["reviews"] = [_row(item) if isinstance(item, dict) else item for item in out["reviews"]]
+    if isinstance(out.get("constraints"), list):
+        out["constraints"] = [_row(item) if isinstance(item, dict) else item for item in out["constraints"]]
+    if isinstance(out.get("decisions"), list):
+        out["decisions"] = [_row(item) if isinstance(item, dict) else item for item in out["decisions"]]
     if isinstance(out.get("plugin"), dict):
         out["plugin"] = _row(out["plugin"])
     if isinstance(out.get("sandbox"), dict):
@@ -6552,6 +6580,7 @@ async def build_context_pack(
 ) -> dict[str, Any]:
     warnings: list[str] = []
     project: dict[str, Any] | None = None
+    project_dna: dict[str, Any] | None = None
     if payload.project_id:
         project = get_chat_project(
             payload.project_id,
@@ -6561,11 +6590,14 @@ async def build_context_pack(
         if project is None or project.get("archived"):
             project = None
             warnings.append("Project context unavailable for this user.")
+        else:
+            project_dna = cognix_db.get_project_dna(current_subject, payload.project_id)
 
     packet = cognix_context_manager.build_context_packet(
         current_subject = current_subject,
         user_memory = cognix_db.get_context_memory(current_subject),
         project = project,
+        project_dna = project_dna,
         project_id = payload.project_id,
         objective = payload.objective,
         warnings = warnings,
@@ -6943,6 +6975,156 @@ async def delete_project_default_model(
     _require_owned_project(project_id, current_subject)
     cognix_db.delete_project_model_default(current_subject, project_id)
     return {"ok": True}
+
+
+@router.get("/projects/{project_id}/dna/blueprint")
+async def project_dna_blueprint(
+    project_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_owned_project(project_id, current_subject)
+    blueprint = cognix_project_dna.build_project_dna_blueprint()
+    return {
+        "username": current_subject,
+        "projectId": project_id,
+        "projectDnaBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_project_dna.COGNIX_PROJECT_DNA_SERVICE_VERSION,
+    }
+
+
+@router.get("/projects/{project_id}/dna")
+async def get_project_dna(
+    project_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_owned_project(project_id, current_subject)
+    dna = cognix_db.get_project_dna(current_subject, project_id)
+    return {
+        "username": current_subject,
+        "projectId": project_id,
+        "projectDna": _row(dna) if dna else None,
+    }
+
+
+@router.put("/projects/{project_id}/dna")
+async def upsert_project_dna(
+    project_id: str,
+    payload: ProjectDNARequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    project = _require_owned_project(project_id, current_subject)
+    plan = cognix_project_dna.build_project_dna_plan(
+        username = current_subject,
+        project_id = project_id,
+        project = project,
+        objective = payload.objective,
+        context = payload.context,
+        response_style = payload.response_style,
+        preferred_models = payload.preferred_models,
+        allowed_tools = payload.allowed_tools,
+        constraints = payload.constraints,
+        decisions = payload.decisions,
+    )
+    stored_dna = (
+        cognix_db.upsert_project_dna(
+            current_subject,
+            project_id,
+            plan = plan,
+        )
+        if payload.store_dna
+        else None
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "projectDnaWrite": stored_dna is not None,
+        "constraintWrite": stored_dna is not None,
+        "decisionWrite": stored_dna is not None,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "project_dna_upserted",
+        resource_type = "cognix_project_dna",
+        resource_id = project_id,
+        severity = "notice",
+        metadata = {
+            "projectDnaServiceVersion": plan.get("projectDnaServiceVersion"),
+            "profileBuilderVersion": plan.get("profileBuilderVersion"),
+            "contextInjectorVersion": plan.get("contextInjectorVersion"),
+            "status": plan.get("status"),
+            "readySectionIds": plan.get("profile", {}).get("completion", {}).get("readySectionIds", []),
+            "dnaHash": plan.get("profile", {}).get("dnaHash"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "project": _row(project),
+        "projectDnaPlan": plan,
+        "projectDna": _row(stored_dna) if stored_dna else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_project_dna.COGNIX_PROJECT_DNA_SERVICE_VERSION,
+    }
+
+
+@router.post("/projects/{project_id}/dna/injection-plan")
+async def project_dna_injection_plan(
+    project_id: str,
+    payload: ProjectDNARequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    project = _require_owned_project(project_id, current_subject)
+    stored_dna = cognix_db.get_project_dna(current_subject, project_id)
+    if stored_dna and not any(
+        [
+            payload.objective,
+            payload.context,
+            payload.response_style,
+            payload.preferred_models,
+            payload.allowed_tools,
+            payload.constraints,
+            payload.decisions,
+        ]
+    ):
+        plan = stored_dna.get("dna") if isinstance(stored_dna.get("dna"), dict) else {}
+    else:
+        plan = cognix_project_dna.build_project_dna_plan(
+            username = current_subject,
+            project_id = project_id,
+            project = project,
+            objective = payload.objective,
+            context = payload.context,
+            response_style = payload.response_style,
+            preferred_models = payload.preferred_models,
+            allowed_tools = payload.allowed_tools,
+            constraints = payload.constraints,
+            decisions = payload.decisions,
+        )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "project_dna_injection_plan_built",
+        resource_type = "cognix_project_dna",
+        resource_id = project_id,
+        severity = "notice",
+        metadata = {
+            "projectDnaServiceVersion": plan.get("projectDnaServiceVersion"),
+            "status": plan.get("status"),
+            "includedSectionIds": plan.get("contextInjectionPlan", {}).get("includedSectionIds", []),
+            "sideEffects": plan.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "project": _row(project),
+        "projectDnaPlan": plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": plan.get("sideEffects", {}),
+        "plannerVersion": cognix_project_dna.COGNIX_PROJECT_DNA_SERVICE_VERSION,
+    }
 
 
 @router.post("/projects/{project_id}/expert-plan")

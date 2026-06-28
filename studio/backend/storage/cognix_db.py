@@ -1306,6 +1306,57 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_project_model_defaults_owner
             ON cognix_project_model_defaults(owner_username, updated_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_project_dna (
+            project_id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            objective TEXT NOT NULL DEFAULT '',
+            context TEXT NOT NULL DEFAULT '',
+            response_style TEXT NOT NULL DEFAULT '',
+            preferred_models_json TEXT NOT NULL DEFAULT '[]',
+            allowed_tools_json TEXT NOT NULL DEFAULT '[]',
+            dna_json TEXT NOT NULL DEFAULT '{}',
+            dna_hash TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'draft',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_project_dna_username
+            ON cognix_project_dna(username, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_project_constraints (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            constraint_type TEXT NOT NULL DEFAULT 'general',
+            label TEXT NOT NULL,
+            value TEXT NOT NULL DEFAULT '',
+            priority INTEGER NOT NULL DEFAULT 50,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_project_constraints_project
+            ON cognix_project_constraints(username, project_id, status, priority);
+
+        CREATE TABLE IF NOT EXISTS cognix_project_decisions (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            decision_key TEXT NOT NULL,
+            title TEXT NOT NULL,
+            rationale TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'active',
+            decided_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(username, project_id, decision_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_project_decisions_project
+            ON cognix_project_decisions(username, project_id, status, updated_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_project_shares (
             id TEXT PRIMARY KEY,
             project_id TEXT NOT NULL,
@@ -6713,6 +6764,163 @@ def delete_project_model_default(owner_username: str, project_id: str) -> bool:
         )
         conn.commit()
         return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def _hydrate_project_dna(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["preferredModels"] = _json_or_default(item.get("preferred_models_json"), [])
+    item["allowedTools"] = _json_or_default(item.get("allowed_tools_json"), [])
+    item["dna"] = _json_or_default(item.get("dna_json"), {})
+    return item
+
+
+def _hydrate_project_decision(row: dict[str, Any]) -> dict[str, Any]:
+    return dict(row)
+
+
+def upsert_project_dna(
+    username: str,
+    project_id: str,
+    *,
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    profile = plan.get("profile") if isinstance(plan.get("profile"), dict) else {}
+    now = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_project_dna
+                (
+                    project_id, username, objective, context, response_style,
+                    preferred_models_json, allowed_tools_json, dna_json,
+                    dna_hash, status, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(project_id) DO UPDATE SET
+                username = excluded.username,
+                objective = excluded.objective,
+                context = excluded.context,
+                response_style = excluded.response_style,
+                preferred_models_json = excluded.preferred_models_json,
+                allowed_tools_json = excluded.allowed_tools_json,
+                dna_json = excluded.dna_json,
+                dna_hash = excluded.dna_hash,
+                status = excluded.status,
+                updated_at = excluded.updated_at
+            """,
+            (
+                project_id,
+                username,
+                str(profile.get("objective") or "")[:4000],
+                str(profile.get("context") or "")[:8000],
+                str(profile.get("responseStyle") or "")[:4000],
+                json.dumps(profile.get("preferredModels") or [], ensure_ascii = False),
+                json.dumps(profile.get("allowedTools") or [], ensure_ascii = False),
+                json.dumps(plan, ensure_ascii = False),
+                str(profile.get("dnaHash") or "")[:80],
+                str(plan.get("status") or "draft")[:80],
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            "DELETE FROM cognix_project_constraints WHERE username = ? AND project_id = ?",
+            (username, project_id),
+        )
+        for index, constraint in enumerate(profile.get("constraints") or []):
+            label = str(constraint)[:240]
+            if not label:
+                continue
+            conn.execute(
+                """
+                INSERT INTO cognix_project_constraints
+                    (
+                        id, username, project_id, constraint_type, label, value,
+                        priority, status, created_at, updated_at
+                    )
+                VALUES (?, ?, ?, 'general', ?, ?, ?, 'active', ?, ?)
+                """,
+                (
+                    _new_id("pcon"),
+                    username,
+                    project_id,
+                    label,
+                    label,
+                    50 + index,
+                    now,
+                    now,
+                ),
+            )
+        conn.execute(
+            "DELETE FROM cognix_project_decisions WHERE username = ? AND project_id = ?",
+            (username, project_id),
+        )
+        for decision in profile.get("decisions") or []:
+            if not isinstance(decision, dict):
+                continue
+            title = str(decision.get("title") or "")[:240]
+            if not title:
+                continue
+            conn.execute(
+                """
+                INSERT INTO cognix_project_decisions
+                    (
+                        id, username, project_id, decision_key, title,
+                        rationale, status, decided_at, created_at, updated_at
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _new_id("pdec"),
+                    username,
+                    project_id,
+                    str(decision.get("decisionKey") or _new_id("decision"))[:160],
+                    title,
+                    str(decision.get("rationale") or "")[:4000],
+                    str(decision.get("status") or "active")[:80],
+                    decision.get("decidedAt"),
+                    now,
+                    now,
+                ),
+            )
+        conn.commit()
+        return get_project_dna(username, project_id) or {}
+    finally:
+        conn.close()
+
+
+def get_project_dna(username: str, project_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM cognix_project_dna WHERE username = ? AND project_id = ?",
+            (username, project_id),
+        ).fetchone()
+        if row is None:
+            return None
+        dna = _hydrate_project_dna(row_to_dict(row) or {})
+        constraint_rows = conn.execute(
+            """
+            SELECT * FROM cognix_project_constraints
+            WHERE username = ? AND project_id = ? AND status = 'active'
+            ORDER BY priority ASC, created_at ASC
+            """,
+            (username, project_id),
+        ).fetchall()
+        decision_rows = conn.execute(
+            """
+            SELECT * FROM cognix_project_decisions
+            WHERE username = ? AND project_id = ? AND status = 'active'
+            ORDER BY updated_at DESC
+            """,
+            (username, project_id),
+        ).fetchall()
+        dna["constraints"] = _rows_to_dicts(constraint_rows)
+        dna["decisions"] = [_hydrate_project_decision(row) for row in _rows_to_dicts(decision_rows)]
+        return dna
     finally:
         conn.close()
 
