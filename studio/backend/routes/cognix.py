@@ -23,6 +23,7 @@ from core.cognix import background_agents as cognix_background_agents
 from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import codex_pipeline as cognix_codex_pipeline
 from core.cognix import context_graph as cognix_context_graph
+from core.cognix import context_heatmap as cognix_context_heatmap
 from core.cognix import context_manager as cognix_context_manager
 from core.cognix import cost_optimizer as cognix_cost_optimizer
 from core.cognix import debate_orchestrator as cognix_debate_orchestrator
@@ -239,6 +240,16 @@ class PromptCompressionRequest(BaseModel):
     project_id: str | None = Field(None, alias = "projectId", max_length = 160)
     target_tokens: int = Field(500, alias = "targetTokens", ge = 64, le = 8000)
     store_context: bool = Field(True, alias = "storeContext")
+
+
+class ContextHeatmapPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    context_chunks: list[dict[str, Any]] = Field(..., alias = "contextChunks")
+    response_usage: list[dict[str, Any]] | None = Field(None, alias = "responseUsage")
+    objective: str | None = Field(None, max_length = 4000)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    store_heatmap: bool = Field(True, alias = "storeHeatmap")
 
 
 class IntentPredictionRequest(BaseModel):
@@ -885,6 +896,16 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "ranking_json": "rankingJson",
         "event_type": "eventType",
         "compressed_context_id": "compressedContextId",
+        "chunk_id": "chunkId",
+        "source_id": "sourceId",
+        "source_type": "sourceType",
+        "usage_count": "usageCount",
+        "response_count": "responseCount",
+        "citation_count": "citationCount",
+        "utility_score": "utilityScore",
+        "recommended_action": "recommendedAction",
+        "theme_token": "themeToken",
+        "entry_json": "entryJson",
         "selected_domain": "selectedDomain",
         "probabilities_json": "probabilitiesJson",
         "suggestion_json": "suggestionJson",
@@ -5089,6 +5110,98 @@ async def prompt_compression_plan(
         "auditLogId": audit.get("id"),
         "sideEffects": side_effects,
         "plannerVersion": cognix_prompt_compression.COGNIX_PROMPT_COMPRESSION_VERSION,
+    }
+
+
+@router.get("/context/heatmap/blueprint")
+async def context_heatmap_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_context_heatmap.build_context_heatmap_blueprint()
+    return {
+        "username": current_subject,
+        "contextHeatmapBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_context_heatmap.COGNIX_CONTEXT_HEATMAP_GENERATOR_VERSION,
+    }
+
+
+@router.post("/context/heatmap/plan")
+async def context_heatmap_plan(
+    payload: ContextHeatmapPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_context_heatmap.build_context_heatmap_plan(
+        username = current_subject,
+        context_chunks = payload.context_chunks,
+        response_usage = payload.response_usage,
+        objective = payload.objective,
+        project_id = payload.project_id,
+    )
+    stored = (
+        cognix_db.create_context_heatmap_entries(
+            current_subject,
+            plan = plan,
+            project_id = payload.project_id,
+        )
+        if payload.store_heatmap
+        else {"entries": [], "usageStats": []}
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "usageStatsWrite": payload.store_heatmap,
+        "heatmapEntryWrite": payload.store_heatmap,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "context_heatmap_plan_built",
+        resource_type = "cognix_context_heatmap",
+        resource_id = str(payload.project_id or current_subject),
+        severity = "warning" if plan.get("summary", {}).get("archiveCandidateCount") else "notice",
+        metadata = {
+            "usageTrackerVersion": plan.get("usageTrackerVersion"),
+            "heatmapGeneratorVersion": plan.get("heatmapGeneratorVersion"),
+            "memoryGarbageCollectorVersion": plan.get("memoryGarbageCollectorVersion"),
+            "chunkCount": plan.get("summary", {}).get("chunkCount"),
+            "bucketCounts": plan.get("summary", {}).get("bucketCounts"),
+            "archiveCandidateCount": plan.get("summary", {}).get("archiveCandidateCount"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "contextHeatmapPlan": plan,
+        "storedHeatmapEntries": _rows(stored.get("entries", [])),
+        "storedUsageStats": _rows(stored.get("usageStats", [])),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_context_heatmap.COGNIX_CONTEXT_HEATMAP_GENERATOR_VERSION,
+    }
+
+
+@router.get("/context/heatmap/entries")
+async def context_heatmap_entries(
+    project_id: str | None = None,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if project_id:
+        _require_owned_project(project_id, current_subject)
+    return {
+        "entries": _rows(cognix_db.list_context_heatmap_entries(current_subject, project_id = project_id)),
+        "usageStats": _rows(cognix_db.list_context_usage_stats(current_subject, project_id = project_id)),
+        "sideEffects": {
+            "usageStatsWrite": False,
+            "heatmapEntryWrite": False,
+            "memoryArchive": False,
+            "memoryDelete": False,
+            "contextMutation": False,
+            "modelLoad": False,
+            "generation": False,
+            "networkCall": False,
+        },
+        "plannerVersion": cognix_context_heatmap.COGNIX_CONTEXT_HEATMAP_GENERATOR_VERSION,
     }
 
 

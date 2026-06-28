@@ -18,6 +18,7 @@ from core.cognix import background_agents as cognix_background_agents
 from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import codex_pipeline as cognix_codex_pipeline
 from core.cognix import context_graph as cognix_context_graph
+from core.cognix import context_heatmap as cognix_context_heatmap
 from core.cognix import context_manager as cognix_context_manager
 from core.cognix import cost_optimizer as cognix_cost_optimizer
 from core.cognix import debate_orchestrator as cognix_debate_orchestrator
@@ -3159,6 +3160,105 @@ def test_prompt_compression_endpoint_stores_lists_deletes_and_audits():
     assert {"prompt_compression_plan_built", "prompt_compression_context_deleted"}.issubset(actions)
 
 
+def test_context_heatmap_scores_used_and_archive_candidates_without_generation():
+    plan = cognix_context_heatmap.build_context_heatmap_plan(
+        username = "alice",
+        objective = "RAG PDF citations securite projet",
+        context_chunks = [
+            {
+                "chunkId": "doc-a",
+                "sourceType": "document",
+                "sourceId": "doc-a.pdf",
+                "title": "Document A",
+                "text": "RAG PDF avec citations, securite et objectif projet.",
+                "ageDays": 2,
+            },
+            {
+                "chunkId": "old-chat",
+                "sourceType": "old_message",
+                "title": "Ancien message",
+                "text": "Ancienne note visuelle sans rapport utile.",
+                "ageDays": 90,
+            },
+            {
+                "chunkId": "memory-project",
+                "sourceType": "project_memory",
+                "title": "Memoire projet",
+                "text": "Memoire importante: garder les decisions RAG et les citations.",
+                "ageDays": 8,
+            },
+        ],
+        response_usage = [
+            {"chunkId": "doc-a", "usageCount": 4, "responseCount": 3, "citationCount": 2},
+            {"chunkId": "memory-project", "usageCount": 2, "responseCount": 2, "copiedTermCount": 3},
+        ],
+    )
+    entries = {item["chunkId"]: item for item in plan["entries"]}
+
+    assert plan["usageTrackerVersion"] == "cognix_context_usage_tracker_v1"
+    assert plan["heatmapGeneratorVersion"] == "cognix_context_heatmap_generator_v1"
+    assert plan["memoryGarbageCollectorVersion"] == "cognix_memory_garbage_collector_v1"
+    assert entries["doc-a"]["bucket"] == "very_useful"
+    assert entries["doc-a"]["label"] == "Contexte tres utile"
+    assert entries["old-chat"]["bucket"] == "archive_candidate"
+    assert entries["old-chat"]["recommendedAction"] == "archive"
+    assert entries["memory-project"]["bucket"] in {"very_useful", "low_usage"}
+    assert plan["garbageCollectorPlan"]["automaticArchiveAllowed"] is False
+    assert plan["sideEffects"]["memoryArchive"] is False
+    assert plan["sideEffects"]["memoryDelete"] is False
+    assert plan["sideEffects"]["generation"] is False
+
+
+def test_context_heatmap_endpoint_stores_entries_and_logs_audit():
+    seed_accounts()
+    body = run_async(
+        cognix_routes.context_heatmap_plan(
+            cognix_routes.ContextHeatmapPlanRequest(
+                contextChunks = [
+                    {
+                        "chunkId": "doc-a",
+                        "sourceType": "document",
+                        "sourceId": "doc-a.pdf",
+                        "title": "Document A",
+                        "text": "Document tres utilise pour RAG, citations et securite.",
+                        "ageDays": 1,
+                    },
+                    {
+                        "chunkId": "old-chat",
+                        "sourceType": "old_message",
+                        "title": "Ancien message",
+                        "text": "Message ancien sans usage recent.",
+                        "ageDays": 120,
+                    },
+                ],
+                responseUsage = [{"chunkId": "doc-a", "usageCount": 5, "responseCount": 4, "citationCount": 2}],
+                objective = "RAG citations securite",
+                storeHeatmap = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    plan = body["contextHeatmapPlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["sideEffects"]["usageStatsWrite"] is True
+    assert body["sideEffects"]["heatmapEntryWrite"] is True
+    assert body["sideEffects"]["memoryArchive"] is False
+    assert body["sideEffects"]["generation"] is False
+    assert plan["summary"]["chunkCount"] == 2
+    assert body["storedHeatmapEntries"][0]["id"].startswith("ctxheat_")
+
+    listed = run_async(cognix_routes.context_heatmap_entries(current_subject = "alice"))
+    assert listed["entries"][0]["chunkId"] == "doc-a"
+    assert listed["entries"][0]["bucket"] == "very_useful"
+    assert listed["usageStats"][0]["usageCount"] == 5
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "context_heatmap_plan_built"
+    assert log["metadata"]["heatmapGeneratorVersion"] == "cognix_context_heatmap_generator_v1"
+
+
 def test_intent_prediction_blueprint_declares_single_suggestion_and_no_preload():
     blueprint = cognix_intent_prediction.build_intent_prediction_blueprint()
 
@@ -4242,6 +4342,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-model-lifecycle",
         "cognix-optimization-engine",
         "cognix-prompt-compression",
+        "cognix-context-heatmap",
         "cognix-intent-prediction",
         "cognix-dynamic-ui",
         "cognix-background-agents",
@@ -4284,6 +4385,12 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "compression_evaluation" in modules["cognix-prompt-compression"]["capabilities"]
     assert "/api/cognix/prompt-compression/plan" in modules["cognix-prompt-compression"]["routes"]
     assert "/api/cognix/prompt-compression/contexts" in modules["cognix-prompt-compression"]["routes"]
+    assert modules["cognix-context-heatmap"]["dependencyState"]["ready"] is True
+    assert "context_usage_tracking" in modules["cognix-context-heatmap"]["capabilities"]
+    assert "context_heatmap" in modules["cognix-context-heatmap"]["capabilities"]
+    assert "memory_garbage_collection_planning" in modules["cognix-context-heatmap"]["capabilities"]
+    assert "/api/cognix/context/heatmap/plan" in modules["cognix-context-heatmap"]["routes"]
+    assert "/api/cognix/context/heatmap/entries" in modules["cognix-context-heatmap"]["routes"]
     assert modules["cognix-intent-prediction"]["dependencyState"]["ready"] is True
     assert "intent_prediction" in modules["cognix-intent-prediction"]["capabilities"]
     assert "preload_planning" in modules["cognix-intent-prediction"]["capabilities"]

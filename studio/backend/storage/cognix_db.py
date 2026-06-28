@@ -552,6 +552,47 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_compression_logs_context
             ON cognix_compression_logs(username, compressed_context_id, created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_context_usage_stats (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            project_id TEXT,
+            chunk_id TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            usage_count INTEGER NOT NULL DEFAULT 0,
+            response_count INTEGER NOT NULL DEFAULT 0,
+            citation_count INTEGER NOT NULL DEFAULT 0,
+            utility_score REAL NOT NULL DEFAULT 0,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(username, project_id, chunk_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_context_usage_stats_username_project
+            ON cognix_context_usage_stats(username, project_id, utility_score DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_context_heatmap_entries (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            project_id TEXT,
+            chunk_id TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            utility_score REAL NOT NULL DEFAULT 0,
+            bucket TEXT NOT NULL DEFAULT 'low_usage',
+            recommended_action TEXT NOT NULL DEFAULT 'review',
+            theme_token TEXT NOT NULL DEFAULT 'warning',
+            entry_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(username, project_id, chunk_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_context_heatmap_entries_project
+            ON cognix_context_heatmap_entries(username, project_id, bucket, utility_score DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_intent_predictions (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -3725,6 +3766,177 @@ def delete_compressed_context(username: str, context_id: str) -> bool:
         )
         conn.commit()
         return bool(cur.rowcount)
+    finally:
+        conn.close()
+
+
+def _hydrate_context_usage_stat(row: dict[str, Any]) -> dict[str, Any]:
+    row["metadata"] = _json_or_default(row.get("metadata_json"), {})
+    return row
+
+
+def _hydrate_context_heatmap_entry(row: dict[str, Any]) -> dict[str, Any]:
+    row["entry"] = _json_or_default(row.get("entry_json"), {})
+    return row
+
+
+def create_context_heatmap_entries(
+    username: str,
+    *,
+    plan: dict[str, Any],
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    now = _now()
+    normalized_project_id = project_id or plan.get("projectId")
+    entries = [entry for entry in plan.get("entries", []) if isinstance(entry, dict)]
+    conn = get_connection()
+    try:
+        for entry in entries:
+            chunk_id = str(entry.get("chunkId") or "unknown")[:180]
+            source_type = str(entry.get("sourceType") or "context")[:80]
+            source_id = str(entry.get("sourceId") or chunk_id)[:180]
+            conn.execute(
+                """
+                INSERT INTO cognix_context_usage_stats
+                    (
+                        id, username, project_id, chunk_id, source_type, source_id,
+                        usage_count, response_count, citation_count, utility_score,
+                        metadata_json, created_at, updated_at
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(username, project_id, chunk_id) DO UPDATE SET
+                    source_type = excluded.source_type,
+                    source_id = excluded.source_id,
+                    usage_count = excluded.usage_count,
+                    response_count = excluded.response_count,
+                    citation_count = excluded.citation_count,
+                    utility_score = excluded.utility_score,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    _new_id("ctxstat"),
+                    username,
+                    normalized_project_id,
+                    chunk_id,
+                    source_type,
+                    source_id,
+                    int(entry.get("usageCount") or 0),
+                    int(entry.get("responseCount") or 0),
+                    int(entry.get("citationCount") or 0),
+                    float(entry.get("utilityScore") or 0.0),
+                    json.dumps(
+                        {
+                            "signals": entry.get("signals") or {},
+                            "matchedObjectiveTerms": entry.get("matchedObjectiveTerms") or [],
+                            "usageTrackerVersion": plan.get("usageTrackerVersion"),
+                        },
+                        ensure_ascii = False,
+                    ),
+                    now,
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO cognix_context_heatmap_entries
+                    (
+                        id, username, project_id, chunk_id, source_type, source_id, title,
+                        utility_score, bucket, recommended_action, theme_token,
+                        entry_json, created_at, updated_at
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(username, project_id, chunk_id) DO UPDATE SET
+                    source_type = excluded.source_type,
+                    source_id = excluded.source_id,
+                    title = excluded.title,
+                    utility_score = excluded.utility_score,
+                    bucket = excluded.bucket,
+                    recommended_action = excluded.recommended_action,
+                    theme_token = excluded.theme_token,
+                    entry_json = excluded.entry_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    _new_id("ctxheat"),
+                    username,
+                    normalized_project_id,
+                    chunk_id,
+                    source_type,
+                    source_id,
+                    str(entry.get("title") or "")[:240],
+                    float(entry.get("utilityScore") or 0.0),
+                    str(entry.get("bucket") or "low_usage")[:80],
+                    str(entry.get("recommendedAction") or "review")[:80],
+                    str(entry.get("themeToken") or "warning")[:80],
+                    json.dumps(entry, ensure_ascii = False),
+                    now,
+                    now,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return {
+        "entries": list_context_heatmap_entries(username, project_id = normalized_project_id, limit = 300),
+        "usageStats": list_context_usage_stats(username, project_id = normalized_project_id, limit = 300),
+    }
+
+
+def list_context_usage_stats(username: str, *, project_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        safe_limit = min(max(int(limit or 100), 1), 500)
+        if project_id:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_context_usage_stats
+                WHERE username = ? AND project_id = ?
+                ORDER BY utility_score DESC, updated_at DESC
+                LIMIT ?
+                """,
+                (username, project_id, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_context_usage_stats
+                WHERE username = ?
+                ORDER BY utility_score DESC, updated_at DESC
+                LIMIT ?
+                """,
+                (username, safe_limit),
+            ).fetchall()
+        return [_hydrate_context_usage_stat(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def list_context_heatmap_entries(username: str, *, project_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        safe_limit = min(max(int(limit or 100), 1), 500)
+        if project_id:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_context_heatmap_entries
+                WHERE username = ? AND project_id = ?
+                ORDER BY utility_score DESC, updated_at DESC
+                LIMIT ?
+                """,
+                (username, project_id, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_context_heatmap_entries
+                WHERE username = ?
+                ORDER BY utility_score DESC, updated_at DESC
+                LIMIT ?
+                """,
+                (username, safe_limit),
+            ).fetchall()
+        return [_hydrate_context_heatmap_entry(row) for row in _rows_to_dicts(rows)]
     finally:
         conn.close()
 
