@@ -545,6 +545,25 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_background_job_logs_job
             ON cognix_background_job_logs(username, job_id, created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_project_timeline_events (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            project_id TEXT,
+            event_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            summary TEXT NOT NULL DEFAULT '',
+            source_type TEXT,
+            source_id TEXT,
+            importance TEXT NOT NULL DEFAULT 'normal',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_project_timeline_username_project
+            ON cognix_project_timeline_events(username, project_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_project_timeline_type
+            ON cognix_project_timeline_events(username, event_type, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_library_items (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -3133,6 +3152,93 @@ def list_background_jobs(username: str, *, limit: int = 100) -> list[dict[str, A
             (username, safe_limit),
         ).fetchall()
         return [_hydrate_background_job(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_timeline_event(row: dict[str, Any]) -> dict[str, Any]:
+    row["metadata"] = _json_or_default(row.get("metadata_json"), {})
+    return row
+
+
+def create_timeline_event(
+    username: str,
+    *,
+    plan: dict[str, Any],
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    event = plan.get("event") if isinstance(plan.get("event"), dict) else {}
+    event_id = _new_id("tl")
+    created_at = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_project_timeline_events
+                (
+                    id, username, project_id, event_type, title, summary,
+                    source_type, source_id, importance, metadata_json, created_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                username,
+                project_id or plan.get("projectId"),
+                str(event.get("eventType") or "architecture_decision")[:120],
+                str(event.get("title") or "Timeline event")[:240],
+                str(event.get("summary") or "")[:2000],
+                event.get("sourceType"),
+                event.get("sourceId"),
+                str(event.get("importance") or "normal")[:40],
+                json.dumps(event.get("metadata") or {}, ensure_ascii = False),
+                created_at,
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM cognix_project_timeline_events WHERE id = ? AND username = ?",
+            (event_id, username),
+        ).fetchone()
+        return _hydrate_timeline_event(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_timeline_events(
+    username: str,
+    *,
+    project_id: str | None = None,
+    event_type: str | None = None,
+    query: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 100), 1), 300)
+    clauses = ["username = ?"]
+    params: list[Any] = [username]
+    if project_id:
+        clauses.append("project_id = ?")
+        params.append(project_id)
+    if event_type:
+        clauses.append("event_type = ?")
+        params.append(event_type)
+    if query:
+        clauses.append("(LOWER(title) LIKE ? OR LOWER(summary) LIKE ?)")
+        needle = f"%{query.lower()}%"
+        params.extend([needle, needle])
+    params.append(safe_limit)
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM cognix_project_timeline_events
+            WHERE {' AND '.join(clauses)}
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_timeline_event(row) for row in _rows_to_dicts(rows)]
     finally:
         conn.close()
 

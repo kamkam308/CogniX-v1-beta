@@ -41,6 +41,7 @@ from core.cognix import response_reflection as cognix_response_reflection
 from core.cognix import runtime_adapter as cognix_runtime_adapter
 from core.cognix import skill_memory as cognix_skill_memory
 from core.cognix import thinking_status as cognix_thinking_status
+from core.cognix import timeline as cognix_timeline
 from core.cognix import tool_discovery as cognix_tool_discovery
 from core.cognix import tool_registry as cognix_tool_registry
 from core.cognix import workflow_recorder as cognix_workflow_recorder
@@ -2940,6 +2941,67 @@ def test_background_agent_endpoint_queues_planned_job_without_starting_worker():
     assert logs[0]["action"] == "background_agent_job_planned"
 
 
+def test_timeline_blueprint_declares_elegant_history_without_ui_mutation():
+    blueprint = cognix_timeline.build_timeline_blueprint()
+
+    assert blueprint["timelineVersion"] == "cognix_timeline_v1"
+    assert blueprint["eventClassifierVersion"] == "cognix_timeline_event_classifier_v1"
+    assert blueprint["displayContract"]["tabName"] == "Timeline"
+    assert blueprint["displayContract"]["elegantHistory"] is True
+    assert blueprint["displayContract"]["rawLogUi"] is False
+    assert blueprint["sideEffects"]["timelineWrite"] is False
+    assert blueprint["sideEffects"]["uiMutation"] is False
+    assert blueprint["sideEffects"]["generation"] is False
+
+
+def test_timeline_event_classifier_detects_core_event_types():
+    model = cognix_timeline.build_timeline_event_plan(
+        username = "alice",
+        title = "Modele Qwen choisi pour le projet",
+    )
+    error = cognix_timeline.build_timeline_event_plan(
+        username = "alice",
+        title = "Erreur critique pendant l'indexation",
+    )
+    training = cognix_timeline.build_timeline_event_plan(
+        username = "alice",
+        title = "Fine-tuning QLoRA lance",
+    )
+
+    assert model["event"]["eventType"] == "model_selected"
+    assert error["event"]["eventType"] == "critical_error"
+    assert training["event"]["eventType"] == "fine_tuning_started"
+    assert training["sideEffects"]["modelLoad"] is False
+
+
+def test_timeline_endpoint_stores_filters_searches_and_is_user_scoped():
+    seed_accounts()
+    body = run_async(
+        cognix_routes.create_timeline_event(
+            cognix_routes.TimelineEventRequest(
+                title = "Architecture backend validee",
+                summary = "Decision importante: routes natives et stockage SQLite.",
+                storeEvent = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    event_id = body["event"]["id"]
+    filtered = run_async(cognix_routes.timeline_events(event_type = "architecture_decision", current_subject = "alice"))
+    searched = run_async(cognix_routes.timeline_events(query = "sqlite", current_subject = "alice"))
+    bob_events = run_async(cognix_routes.timeline_events(current_subject = "bob"))
+
+    assert event_id.startswith("tl_")
+    assert body["sideEffects"]["timelineWrite"] is True
+    assert body["sideEffects"]["uiMutation"] is False
+    assert filtered["events"][0]["id"] == event_id
+    assert searched["events"][0]["id"] == event_id
+    assert bob_events["events"] == []
+
+    logs = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))["logs"]
+    assert logs[0]["action"] == "timeline_event_planned"
+
+
 def test_codex_pipeline_plans_required_gates_without_modifying_code():
     plan = cognix_codex_pipeline.build_codex_pipeline_plan(
         objective = "Ajoute un module CogniX Chemistry dans le code source",
@@ -3553,6 +3615,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-intent-prediction",
         "cognix-dynamic-ui",
         "cognix-background-agents",
+        "cognix-ai-timeline",
         "cognix-thinking-status",
         "cognix-response-reflection",
         "cognix-multi-draft-generation",
@@ -3607,6 +3670,11 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "agent_queue_contract" in modules["cognix-background-agents"]["capabilities"]
     assert "progress_tracking" in modules["cognix-background-agents"]["capabilities"]
     assert "/api/cognix/background-agents/job-plan" in modules["cognix-background-agents"]["routes"]
+    assert modules["cognix-ai-timeline"]["dependencyState"]["ready"] is True
+    assert "project_timeline_events" in modules["cognix-ai-timeline"]["capabilities"]
+    assert "timeline_event_classification" in modules["cognix-ai-timeline"]["capabilities"]
+    assert "timeline_search" in modules["cognix-ai-timeline"]["capabilities"]
+    assert "/api/cognix/timeline/events" in modules["cognix-ai-timeline"]["routes"]
     assert modules["cognix-thinking-status"]["activationState"] == "ready"
     assert "technical_redaction" in modules["cognix-thinking-status"]["capabilities"]
     assert "/api/cognix/thinking/plan" in modules["cognix-thinking-status"]["routes"]

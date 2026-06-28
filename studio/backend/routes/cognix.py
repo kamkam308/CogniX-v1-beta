@@ -50,6 +50,7 @@ from core.cognix import response_reflection as cognix_response_reflection
 from core.cognix import runtime_adapter as cognix_runtime_adapter
 from core.cognix import skill_memory as cognix_skill_memory
 from core.cognix import thinking_status as cognix_thinking_status
+from core.cognix import timeline as cognix_timeline
 from core.cognix import tool_discovery as cognix_tool_discovery
 from core.cognix import tool_registry as cognix_tool_registry
 from core.cognix import workflow_recorder as cognix_workflow_recorder
@@ -228,6 +229,19 @@ class BackgroundJobPlanRequest(BaseModel):
     priority: Literal["low", "normal", "high"] = "normal"
     night_mode: bool = Field(False, alias = "nightMode")
     enqueue_job: bool = Field(True, alias = "enqueueJob")
+
+
+class TimelineEventRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    event_type: str | None = Field(None, alias = "eventType", max_length = 120)
+    title: str = Field(..., min_length = 1, max_length = 240)
+    summary: str | None = Field(None, max_length = 2000)
+    source_type: str | None = Field(None, alias = "sourceType", max_length = 80)
+    source_id: str | None = Field(None, alias = "sourceId", max_length = 160)
+    metadata: dict[str, Any] | None = None
+    store_event: bool = Field(True, alias = "storeEvent")
 
 
 class ResearchIntegrationPlanRequest(BaseModel):
@@ -755,6 +769,9 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "job_plan_json": "jobPlanJson",
         "job_id": "jobId",
         "runner_type": "runnerType",
+        "event_type": "eventType",
+        "source_type": "sourceType",
+        "source_id": "sourceId",
     }
     for source, target in alias_map.items():
         if source in out:
@@ -4642,6 +4659,104 @@ async def background_agent_job(
             "modelLoad": False,
             "generation": False,
             "notificationSend": False,
+        },
+    }
+
+
+@router.get("/timeline/blueprint")
+async def timeline_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_timeline.build_timeline_blueprint()
+    return {
+        "username": current_subject,
+        "timelineBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_timeline.COGNIX_TIMELINE_VERSION,
+    }
+
+
+@router.post("/timeline/events")
+async def create_timeline_event(
+    payload: TimelineEventRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_timeline.build_timeline_event_plan(
+        username = current_subject,
+        title = payload.title,
+        summary = payload.summary,
+        project_id = payload.project_id,
+        event_type = payload.event_type,
+        source_type = payload.source_type,
+        source_id = payload.source_id,
+        metadata = payload.metadata,
+    )
+    event = (
+        cognix_db.create_timeline_event(
+            current_subject,
+            plan = plan,
+            project_id = payload.project_id,
+        )
+        if payload.store_event
+        else None
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "timelineWrite": event is not None,
+        "uiMutation": False,
+        "modelLoad": False,
+        "generation": False,
+        "toolExecution": False,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "timeline_event_planned",
+        resource_type = "cognix_timeline",
+        resource_id = str((event or {}).get("id") or payload.project_id or current_subject),
+        severity = "notice",
+        metadata = {
+            "timelineVersion": plan.get("timelineVersion"),
+            "eventClassifierVersion": plan.get("eventClassifierVersion"),
+            "eventType": plan.get("event", {}).get("eventType"),
+            "confidence": plan.get("classification", {}).get("confidence"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "timelineEventPlan": plan,
+        "event": _row(event) if event else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_timeline.COGNIX_TIMELINE_VERSION,
+    }
+
+
+@router.get("/timeline/events")
+async def timeline_events(
+    project_id: str | None = None,
+    event_type: str | None = None,
+    query: str | None = None,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if project_id:
+        _require_owned_project(project_id, current_subject)
+    return {
+        "events": _rows(
+            cognix_db.list_timeline_events(
+                current_subject,
+                project_id = project_id,
+                event_type = event_type,
+                query = query,
+            )
+        ),
+        "sideEffects": {
+            "timelineWrite": False,
+            "uiMutation": False,
+            "modelLoad": False,
+            "generation": False,
+            "toolExecution": False,
         },
     }
 

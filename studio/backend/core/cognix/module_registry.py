@@ -206,6 +206,28 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "dependencies": ["cognix-local-core", "cognix-worker-queue", "cognix-integrations"],
     },
     {
+        "id": "cognix-ai-timeline",
+        "displayName": "CogniX AI Timeline",
+        "editionTargets": ["free", "local", "developer", "business", "university", "enterprise"],
+        "status": "planned",
+        "capabilities": [
+            "project_timeline_events",
+            "timeline_event_classification",
+            "project_history_store",
+            "timeline_filtering",
+            "timeline_search",
+        ],
+        "routes": [
+            "/api/cognix/timeline/blueprint",
+            "/api/cognix/timeline/events",
+        ],
+        "permissions": ["authenticated"],
+        "tools": [],
+        "defaultModels": [],
+        "uiPanels": ["project-timeline", "project-settings"],
+        "dependencies": ["cognix-local-core", "cognix-projects"],
+    },
+    {
         "id": "cognix-thinking-status",
         "displayName": "CogniX Thinking Status",
         "editionTargets": ["free", "local", "developer", "business", "university", "enterprise"],
