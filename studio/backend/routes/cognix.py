@@ -24,6 +24,7 @@ from core.cognix import context_manager as cognix_context_manager
 from core.cognix import hardware as cognix_hardware
 from core.cognix import integration_manager as cognix_integration_manager
 from core.cognix import module_registry as cognix_module_registry
+from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import registry as cognix_registry
 from core.cognix import recommender as cognix_recommender
@@ -170,6 +171,12 @@ class RagPlanRequest(BaseModel):
     project_type: str | None = Field(None, max_length = 80)
     project_id: str | None = Field(None, max_length = 160)
     sources: list[dict[str, Any]] | None = None
+
+
+class OptimizationPlanRequest(BaseModel):
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    project_type: str | None = Field(None, max_length = 80)
+    project_id: str | None = Field(None, max_length = 160)
 
 
 class ToolActionPlanRequest(BaseModel):
@@ -1302,6 +1309,51 @@ async def rag_plan(
         "executionPolicy": plan["executionPolicy"],
         "auditLogId": audit.get("id"),
         "sideEffects": rag.get("sideEffects", {}),
+    }
+
+
+@router.post("/optimizations/plan")
+async def optimization_plan(
+    payload: OptimizationPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    runtime = _current_model_cache_runtime()
+    plan = cognix_orchestrator.build_execution_plan(
+        payload.objective,
+        current_subject = current_subject,
+        project_type = payload.project_type,
+        project_id = payload.project_id,
+        runtime_snapshot = runtime,
+        latest_benchmark_run = cognix_db.get_latest_benchmark_run(current_subject),
+        rag_available = _rag_available(),
+    )
+    optimization = plan["optimizationPlan"]
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "optimization_plan_built",
+        resource_type = "cognix_optimization_plan",
+        resource_id = str(payload.project_id or optimization.get("optimizationProfile") or "general"),
+        severity = "warning" if optimization.get("warnings") else "notice",
+        metadata = {
+            "optimizationPlannerVersion": optimization.get("plannerVersion"),
+            "optimizationProfile": optimization.get("optimizationProfile"),
+            "hardwareTier": optimization.get("hardwareTier"),
+            "runtimeType": optimization.get("runtimeType"),
+            "recommendedOptimizationIds": optimization.get("recommendedOptimizationIds", []),
+            "sideEffects": optimization.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "runtimeError": runtime.get("error"),
+        "classification": plan["classification"],
+        "taskStrategy": plan["taskStrategy"],
+        "optimizationPlan": optimization,
+        "executionPolicy": plan["executionPolicy"],
+        "auditLogId": audit.get("id"),
+        "sideEffects": optimization.get("sideEffects", {}),
+        "plannerVersion": cognix_optimization_planner.COGNIX_OPTIMIZATION_PLANNER_VERSION,
     }
 
 

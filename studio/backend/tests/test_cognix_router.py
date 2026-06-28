@@ -19,6 +19,7 @@ from core.cognix import context_manager as cognix_context_manager
 from core.cognix import decision_engine as cognix_decision_engine
 from core.cognix import integration_manager as cognix_integration_manager
 from core.cognix import module_registry as cognix_module_registry
+from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import tool_registry as cognix_tool_registry
 from core.cognix.router import classify_objective
@@ -233,9 +234,14 @@ def test_orchestrator_builds_dry_run_plan_without_loading(monkeypatch):
     assert plan["contextPlan"]["sideEffects"]["memoryWrite"] is False
     assert plan["executionStrategy"]["contextAssemblyStrategy"] == "memory_project_recent"
     assert plan["executionStrategy"]["rawHistoryAllowed"] is False
+    assert plan["optimizationPlan"]["plannerVersion"] == "cognix_optimization_planner_v1"
+    assert plan["optimizationPlan"]["optimizationProfile"] == "balanced"
+    assert plan["optimizationPlan"]["sideEffects"]["modelReconfiguration"] is False
+    assert plan["executionStrategy"]["optimizationProfile"] == "balanced"
     assert plan["executionStrategy"]["preloadAction"] == "would_preload"
     assert any(step["id"] == "plan_rag" for step in plan["steps"])
     assert any(step["id"] == "plan_context" for step in plan["steps"])
+    assert any(step["id"] == "plan_optimizations" for step in plan["steps"])
     assert any(step["id"] == "plan_preload" for step in plan["steps"])
     assert plan["fineTuningPlan"]["plannerVersion"] == "cognix_fine_tuning_planner_v1"
     assert plan["fineTuningPlan"]["recommendedPath"] == "no_fine_tuning_needed"
@@ -511,6 +517,72 @@ def test_context_plan_reserves_rag_and_caps_history():
     assert "compress_rag_chunks_with_citations" in plan["compression"]
     assert plan["sideEffects"]["ragRetrieval"] is False
     assert plan["sideEffects"]["memoryWrite"] is False
+
+
+def test_optimization_planner_recommends_memory_safe_profile_without_reconfiguration():
+    plan = cognix_optimization_planner.build_optimization_plan(
+        hardware = {
+            "deviceBackend": "cpu",
+            "memory": {"totalGb": 8.0, "availableGb": 3.5},
+            "gpu": {"available": False, "devices": []},
+        },
+        recommendation = {
+            "providerType": "ollama",
+            "memoryFit": {"level": "tight"},
+        },
+        cache = {"policy": {"tier": "small_local"}},
+        context_plan = {"tokenBudget": {"maxContextTokens": 1800}},
+        rag_plan = {"readyForRetrieval": False},
+        task_strategy = {"path": "expert_chat"},
+    )
+
+    assert plan["plannerVersion"] == "cognix_optimization_planner_v1"
+    assert plan["hardwareTier"] == "small_local"
+    assert plan["optimizationProfile"] == "memory_saver"
+    assert "quantization_profile" in plan["recommendedOptimizationIds"]
+    assert any(item["id"] == "single_resident_model" and item["status"] == "recommended" for item in plan["optimizations"])
+    assert plan["sideEffects"]["modelReconfiguration"] is False
+    assert plan["sideEffects"]["cacheMutation"] is False
+    assert plan["sideEffects"]["benchmarkRun"] is False
+
+
+def test_optimization_plan_endpoint_logs_dry_run_decision(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+
+    body = run_async(
+        cognix_routes.optimization_plan(
+            cognix_routes.OptimizationPlanRequest(
+                objective = "Optimise CogniX pour repondre vite sans consommer trop de RAM",
+                project_type = "general",
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    optimization = body["optimizationPlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_optimization_planner_v1"
+    assert optimization["optimizationProfile"] == "balanced"
+    assert optimization["sideEffects"]["modelLoad"] is False
+    assert optimization["sideEffects"]["modelReconfiguration"] is False
+    assert optimization["sideEffects"]["networkModelCall"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "optimization_plan_built"
+    assert log["metadata"]["optimizationPlannerVersion"] == "cognix_optimization_planner_v1"
+    assert log["metadata"]["sideEffects"]["modelReconfiguration"] is False
 
 
 def test_context_manager_builds_bounded_context_packet():

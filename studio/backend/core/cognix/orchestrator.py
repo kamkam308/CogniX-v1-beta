@@ -18,6 +18,7 @@ from core.cognix import context_manager as cognix_context_manager
 from core.cognix import decision_engine as cognix_decision_engine
 from core.cognix import fine_tuning_planner as cognix_fine_tuning_planner
 from core.cognix import hardware as cognix_hardware
+from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import preload_planner as cognix_preload_planner
 from core.cognix import rag_planner as cognix_rag_planner
 from core.cognix import recommender as cognix_recommender
@@ -84,6 +85,7 @@ def _warnings(
     task_strategy: dict[str, Any],
     rag_plan: dict[str, Any],
     context_plan: dict[str, Any],
+    optimization_plan: dict[str, Any],
     preload_plan: dict[str, Any],
     fine_tuning_plan: dict[str, Any],
 ) -> list[str]:
@@ -103,6 +105,9 @@ def _warnings(
         if isinstance(item, str) and item:
             warnings.append(item)
     for item in context_plan.get("warnings") or []:
+        if isinstance(item, str) and item:
+            warnings.append(item)
+    for item in optimization_plan.get("warnings") or []:
         if isinstance(item, str) and item:
             warnings.append(item)
     for item in preload_plan.get("warnings") or []:
@@ -129,6 +134,7 @@ def _steps(
     cache: dict[str, Any],
     rag_plan: dict[str, Any],
     context_plan: dict[str, Any],
+    optimization_plan: dict[str, Any],
     preload_plan: dict[str, Any],
     fine_tuning_plan: dict[str, Any],
     execution_policy: dict[str, Any],
@@ -188,6 +194,15 @@ def _steps(
             "detail": str(
                 context_plan.get("reason")
                 or "Contexte observe uniquement: aucune memoire ecrite ni retrieval execute."
+            ),
+        },
+        {
+            "id": "plan_optimizations",
+            "label": "Planifier optimisations",
+            "status": "complete",
+            "detail": str(
+                optimization_plan.get("reason")
+                or "Optimisations observees uniquement: aucune reconfiguration runtime."
             ),
         },
         {
@@ -286,6 +301,15 @@ def build_execution_plan(
         recommendation = recommendation,
         rag_plan = rag_plan,
     )
+    optimization_plan = cognix_optimization_planner.build_optimization_plan(
+        hardware = hardware,
+        recommendation = recommendation,
+        cache = cache,
+        context_plan = context_plan,
+        rag_plan = rag_plan,
+        task_strategy = task_strategy,
+        latest_benchmark_run = latest_benchmark_run,
+    )
     preload_plan = cognix_preload_planner.build_preload_plan(
         objective = objective,
         project_type = project_type,
@@ -338,6 +362,8 @@ def build_execution_plan(
         "contextAssemblyStrategy": context_plan.get("assemblyStrategy"),
         "maxContextTokens": context_plan.get("tokenBudget", {}).get("maxContextTokens"),
         "rawHistoryAllowed": context_plan.get("tokenBudget", {}).get("rawHistoryAllowed"),
+        "optimizationProfile": optimization_plan.get("optimizationProfile"),
+        "optimizationHardwareTier": optimization_plan.get("hardwareTier"),
         "fineTuningMethod": fine_tuning_plan.get("method", {}).get("type"),
         "fineTuningReadyToRequestApproval": fine_tuning_plan.get("approval", {}).get("readyToRequest"),
         "uses": task_strategy.get("uses"),
@@ -364,6 +390,7 @@ def build_execution_plan(
         "cache": cache,
         "ragPlan": rag_plan,
         "contextPlan": context_plan,
+        "optimizationPlan": optimization_plan,
         "preloadPlan": preload_plan,
         "fineTuningPlan": fine_tuning_plan,
         "taskStrategy": task_strategy,
@@ -376,6 +403,7 @@ def build_execution_plan(
             cache = cache,
             rag_plan = rag_plan,
             context_plan = context_plan,
+            optimization_plan = optimization_plan,
             preload_plan = preload_plan,
             fine_tuning_plan = fine_tuning_plan,
             execution_policy = execution_policy,
@@ -388,6 +416,7 @@ def build_execution_plan(
             task_strategy = task_strategy,
             rag_plan = rag_plan,
             context_plan = context_plan,
+            optimization_plan = optimization_plan,
             preload_plan = preload_plan,
             fine_tuning_plan = fine_tuning_plan,
         ),
@@ -400,6 +429,8 @@ def build_execution_plan(
             "ragRetrieval": False,
             "memoryWrite": False,
             "contextMutation": False,
+            "modelReconfiguration": False,
+            "benchmarkRun": False,
             "fineTuningJob": False,
             "codeModification": False,
             "cacheMode": "observe_only",
