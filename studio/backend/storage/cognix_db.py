@@ -651,6 +651,58 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_simulation_metrics_run
             ON cognix_simulation_metrics(username, run_id, created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_sandboxes (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            project_id TEXT,
+            target_type TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'planned',
+            badge_label TEXT NOT NULL DEFAULT 'Mode sandbox actif',
+            isolation_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_sandboxes_username_created
+            ON cognix_sandboxes(username, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_sandboxes_project
+            ON cognix_sandboxes(username, project_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_sandbox_runs (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            sandbox_id TEXT NOT NULL,
+            project_id TEXT,
+            target_type TEXT NOT NULL,
+            objective TEXT NOT NULL,
+            change_summary TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'planned_no_execution',
+            plan_json TEXT NOT NULL DEFAULT '{}',
+            pipeline_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_sandbox_runs_username_created
+            ON cognix_sandbox_runs(username, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_sandbox_runs_project
+            ON cognix_sandbox_runs(username, project_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_sandbox_runs_type
+            ON cognix_sandbox_runs(username, target_type, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_sandbox_reports (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            sandbox_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            risk_level TEXT NOT NULL DEFAULT 'low',
+            report_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_sandbox_reports_run
+            ON cognix_sandbox_reports(username, run_id, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_library_items (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -3848,6 +3900,169 @@ def list_simulation_runs(
             tuple(params),
         ).fetchall()
         return [_hydrate_simulation_run(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_sandbox(row: dict[str, Any]) -> dict[str, Any]:
+    row["isolation"] = _json_or_default(row.get("isolation_json"), {})
+    return row
+
+
+def _hydrate_sandbox_run(row: dict[str, Any]) -> dict[str, Any]:
+    row["plan"] = _json_or_default(row.get("plan_json"), {})
+    row["pipeline"] = _json_or_default(row.get("pipeline_json"), [])
+    return row
+
+
+def _hydrate_sandbox_report(row: dict[str, Any]) -> dict[str, Any]:
+    row["report"] = _json_or_default(row.get("report_json"), {})
+    return row
+
+
+def create_sandbox_run(
+    username: str,
+    *,
+    plan: dict[str, Any],
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    target = plan.get("target") if isinstance(plan.get("target"), dict) else {}
+    isolation = plan.get("isolation") if isinstance(plan.get("isolation"), dict) else {}
+    report = plan.get("report") if isinstance(plan.get("report"), dict) else {}
+    pipeline = plan.get("pipeline") if isinstance(plan.get("pipeline"), list) else []
+    sandbox_id = _new_id("sbx")
+    run_id = _new_id("srun")
+    report_id = _new_id("srep")
+    now = _now()
+    resolved_project_id = project_id or plan.get("projectId")
+    target_type = str(target.get("type") or "feature")[:80]
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_sandboxes
+                (id, username, project_id, target_type, status, badge_label, isolation_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'planned', 'Mode sandbox actif', ?, ?, ?)
+            """,
+            (
+                sandbox_id,
+                username,
+                resolved_project_id,
+                target_type,
+                json.dumps(isolation, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO cognix_sandbox_runs
+                (
+                    id, username, sandbox_id, project_id, target_type, objective,
+                    change_summary, status, plan_json, pipeline_json, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'planned_no_execution', ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                username,
+                sandbox_id,
+                resolved_project_id,
+                target_type,
+                str(target.get("objective") or "")[:4000],
+                str(target.get("changeSummary") or "")[:4000],
+                json.dumps(plan, ensure_ascii = False),
+                json.dumps(pipeline, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO cognix_sandbox_reports
+                (id, username, sandbox_id, run_id, risk_level, report_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                report_id,
+                username,
+                sandbox_id,
+                run_id,
+                str(report.get("riskLevel") or "low")[:40],
+                json.dumps(report, ensure_ascii = False),
+                now,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_sandbox_run(username, run_id) or {}
+
+
+def get_sandbox_run(username: str, run_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM cognix_sandbox_runs WHERE id = ? AND username = ?",
+            (run_id, username),
+        ).fetchone()
+        if row is None:
+            return None
+        run = _hydrate_sandbox_run(row_to_dict(row) or {})
+        sandbox_row = conn.execute(
+            "SELECT * FROM cognix_sandboxes WHERE id = ? AND username = ?",
+            (run.get("sandbox_id"), username),
+        ).fetchone()
+        report_row = conn.execute(
+            """
+            SELECT * FROM cognix_sandbox_reports
+            WHERE username = ? AND run_id = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (username, run_id),
+        ).fetchone()
+        run["sandbox"] = _hydrate_sandbox(row_to_dict(sandbox_row) or {}) if sandbox_row else None
+        run["reportRecord"] = _hydrate_sandbox_report(row_to_dict(report_row) or {}) if report_row else None
+        return run
+    finally:
+        conn.close()
+
+
+def list_sandbox_runs(
+    username: str,
+    *,
+    project_id: str | None = None,
+    target_type: str | None = None,
+    query: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 100), 1), 300)
+    clauses = ["username = ?"]
+    params: list[Any] = [username]
+    if project_id:
+        clauses.append("project_id = ?")
+        params.append(project_id)
+    if target_type:
+        clauses.append("target_type = ?")
+        params.append(target_type)
+    if query:
+        clauses.append("(LOWER(objective) LIKE ? OR LOWER(change_summary) LIKE ? OR LOWER(plan_json) LIKE ?)")
+        needle = f"%{query.lower()}%"
+        params.extend([needle, needle, needle])
+    params.append(safe_limit)
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM cognix_sandbox_runs
+            WHERE {' AND '.join(clauses)}
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_sandbox_run(row) for row in _rows_to_dicts(rows)]
     finally:
         conn.close()
 

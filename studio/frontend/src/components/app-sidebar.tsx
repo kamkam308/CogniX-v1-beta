@@ -303,7 +303,8 @@ export function AppSidebar() {
   const cloudTrainingUnlocked = usePlatformStore((s) => s.cloudTrainingUnlocked);
   const trainingCloudAvailable = usePlatformStore((s) => s.trainingCloudAvailable);
   const [developerOptions] = useDeveloperOptions();
-  const showTrainingTools = developerOptions.trainingTools || cloudTrainingUnlocked || trainingCloudAvailable;
+  const showTrainingTools =
+    developerOptions.trainingTools || trainingAccessible || cloudTrainingUnlocked || trainingCloudAvailable;
   // When Train/Export are greyed out (chat-only host), explain why on hover
   // instead of disabling them silently. mlx_unavailable is the common macOS case
   // after a reinstall/update dropped MLX and is recoverable via `unsloth studio update`.
@@ -1493,7 +1494,7 @@ export function AppSidebar() {
                   <div className="flex flex-col gap-px leading-tight group-data-[collapsible=icon]:hidden">
                     <span className="truncate font-heading text-[13.5px] tracking-[0.025em] dark:tracking-[0.04em] font-semibold text-nav-fg">{displayTitle}</span>
                     <span className="truncate text-[11.5px] tracking-nav text-muted-foreground">
-                      {displayTitle.trim().toLowerCase() === "kamil" ? "CEO" : "free"}
+                      {cloudTrainingUnlocked ? "CEO" : "free"}
                     </span>
                   </div>
                   {/* settings cog (replaces the up/down chevron) */}

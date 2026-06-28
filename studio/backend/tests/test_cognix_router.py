@@ -40,6 +40,7 @@ from core.cognix import rag_planner as cognix_rag_planner
 from core.cognix import research_watch as cognix_research_watch
 from core.cognix import response_reflection as cognix_response_reflection
 from core.cognix import runtime_adapter as cognix_runtime_adapter
+from core.cognix import sandbox as cognix_sandbox
 from core.cognix import skill_memory as cognix_skill_memory
 from core.cognix import simulation as cognix_simulation
 from core.cognix import thinking_status as cognix_thinking_status
@@ -3352,6 +3353,96 @@ def test_simulation_endpoint_stores_metrics_and_is_user_scoped():
     assert logs[0]["metadata"]["queueRequired"] is True
 
 
+def test_sandbox_blueprint_declares_isolation_without_execution():
+    blueprint = cognix_sandbox.build_sandbox_blueprint()
+
+    assert blueprint["sandboxManagerVersion"] == "cognix_sandbox_manager_v1"
+    assert blueprint["isolatedRuntimeVersion"] == "cognix_isolated_runtime_v1"
+    assert blueprint["experimentRunnerVersion"] == "cognix_experiment_runner_v1"
+    assert blueprint["rollbackServiceVersion"] == "cognix_rollback_service_v1"
+    assert blueprint["services"] == ["SandboxManager", "IsolatedRuntime", "ExperimentRunner", "RollbackService"]
+    assert "feature" in blueprint["targetTypes"]
+    assert "tool" in blueprint["targetTypes"]
+    assert blueprint["badge"]["label"] == "Mode sandbox actif"
+    assert blueprint["security"]["productionSecretsAccessible"] is False
+    assert blueprint["security"]["autoPromotionAllowed"] is False
+    assert blueprint["sideEffects"]["isolatedRuntimeStart"] is False
+    assert blueprint["sideEffects"]["experimentRun"] is False
+    assert blueprint["sideEffects"]["productionSecretRead"] is False
+    assert blueprint["sideEffects"]["promotion"] is False
+    assert blueprint["sideEffects"]["toolExecution"] is False
+
+
+def test_sandbox_plan_blocks_prod_secrets_and_prepares_rollback():
+    plan = cognix_sandbox.build_sandbox_plan(
+        username = "alice",
+        target_type = "tool",
+        objective = "Tester un nouvel outil API avant de l'activer dans CogniX.",
+        change_summary = "Le test touche un token secret et une base production.",
+        requested_checks = ["network policy", "rollback"],
+        duration_minutes = 45,
+        project_type = "developer",
+    )
+
+    assert plan["target"]["type"] == "tool"
+    assert plan["report"]["riskLevel"] == "high"
+    assert plan["report"]["summary"]["requiresHumanApproval"] is True
+    assert plan["isolation"]["productionSecretsAccessible"] is False
+    assert plan["isolation"]["productionDatabaseWritable"] is False
+    assert plan["rollbackPlan"]["deleteSandboxOnFailure"] is True
+    assert plan["rollbackPlan"]["productionRollbackWillExecuteNow"] is False
+    assert plan["queuePlan"]["jobType"] == "sandbox_experiment"
+    assert plan["queuePlan"]["willEnqueueNow"] is False
+    assert any(step["id"] == "copy_minimal_config" for step in plan["pipeline"])
+    assert any(item["id"] == "touchesSecrets" for item in plan["report"]["risks"])
+    assert plan["sideEffects"]["minimalConfigCopy"] is False
+    assert plan["sideEffects"]["experimentRun"] is False
+    assert plan["sideEffects"]["productionSecretRead"] is False
+    assert plan["sideEffects"]["networkCall"] is False
+    assert plan["sideEffects"]["fileWrite"] is False
+
+
+def test_sandbox_endpoint_stores_report_and_is_user_scoped():
+    seed_accounts()
+    body = run_async(
+        cognix_routes.create_sandbox_plan(
+            cognix_routes.SandboxPlanRequest(
+                targetType = "code_change",
+                objective = "Tester une modification backend CogniX sans casser l'app.",
+                changeSummary = "Patch sur route auth avec rollback obligatoire.",
+                requestedChecks = ["smoke", "security"],
+                storeRun = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    run_id = body["run"]["id"]
+    detail = run_async(cognix_routes.sandbox_run(run_id, current_subject = "alice"))
+    listed = run_async(cognix_routes.sandbox_runs(target_type = "code_change", query = "rollback", current_subject = "alice"))
+    bob_runs = run_async(cognix_routes.sandbox_runs(current_subject = "bob"))
+
+    assert run_id.startswith("srun_")
+    assert body["run"]["sandboxId"].startswith("sbx_")
+    assert body["sandboxPlan"]["report"]["badge"] == "Mode sandbox actif"
+    assert body["sideEffects"]["sandboxWrite"] is True
+    assert body["sideEffects"]["sandboxRunWrite"] is True
+    assert body["sideEffects"]["sandboxReportWrite"] is True
+    assert body["sideEffects"]["isolatedRuntimeStart"] is False
+    assert body["sideEffects"]["productionSecretRead"] is False
+    assert body["sideEffects"]["promotion"] is False
+    assert detail["run"]["id"] == run_id
+    assert detail["run"]["targetType"] == "code_change"
+    assert detail["run"]["sandbox"]["badgeLabel"] == "Mode sandbox actif"
+    assert detail["run"]["reportRecord"]["riskLevel"] in {"medium", "high"}
+    assert listed["runs"][0]["id"] == run_id
+    assert bob_runs["runs"] == []
+
+    logs = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))["logs"]
+    assert logs[0]["action"] == "sandbox_plan_built"
+    assert logs[0]["metadata"]["productionSecretsAccessible"] is False
+    assert logs[0]["metadata"]["sideEffects"]["experimentRun"] is False
+
+
 def test_codex_pipeline_plans_required_gates_without_modifying_code():
     plan = cognix_codex_pipeline.build_codex_pipeline_plan(
         objective = "Ajoute un module CogniX Chemistry dans le code source",
@@ -3469,6 +3560,7 @@ def test_worker_queue_registry_declares_cloud_training_without_execution():
 
     queues = {item["id"]: item for item in registry["queues"]}
     assert "simulation_run" in queues["local_probe"]["acceptedJobTypes"]
+    assert "sandbox_experiment" in queues["local_probe"]["acceptedJobTypes"]
     assert "cloud_training" in queues
     assert "cloud_training_job" in queues["cloud_training"]["acceptedJobTypes"]
     assert queues["cloud_training"]["requiresHumanConfirmation"] is True
@@ -4092,6 +4184,16 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/simulations/blueprint" in modules["cognix-ai-simulation"]["routes"]
     assert "/api/cognix/simulations/runs" in modules["cognix-ai-simulation"]["routes"]
     assert "/api/cognix/simulations/runs/{run_id}" in modules["cognix-ai-simulation"]["routes"]
+    assert modules["cognix-ai-sandbox"]["dependencyState"]["ready"] is True
+    assert "sandbox_manager" in modules["cognix-ai-sandbox"]["capabilities"]
+    assert "isolated_runtime" in modules["cognix-ai-sandbox"]["capabilities"]
+    assert "experiment_runner" in modules["cognix-ai-sandbox"]["capabilities"]
+    assert "rollback_service" in modules["cognix-ai-sandbox"]["capabilities"]
+    assert "secret_isolation" in modules["cognix-ai-sandbox"]["capabilities"]
+    assert "/api/cognix/sandbox/blueprint" in modules["cognix-ai-sandbox"]["routes"]
+    assert "/api/cognix/sandbox/plans" in modules["cognix-ai-sandbox"]["routes"]
+    assert "/api/cognix/sandbox/runs" in modules["cognix-ai-sandbox"]["routes"]
+    assert "/api/cognix/sandbox/runs/{run_id}" in modules["cognix-ai-sandbox"]["routes"]
     assert modules["cognix-ai-workflow-recorder"]["dependencyState"]["ready"] is True
     assert "workflow_recording" in modules["cognix-ai-workflow-recorder"]["capabilities"]
     assert "workflow_replay_planning" in modules["cognix-ai-workflow-recorder"]["capabilities"]

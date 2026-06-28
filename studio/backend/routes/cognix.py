@@ -49,6 +49,7 @@ from core.cognix import recommender as cognix_recommender
 from core.cognix import research_watch as cognix_research_watch
 from core.cognix import response_reflection as cognix_response_reflection
 from core.cognix import runtime_adapter as cognix_runtime_adapter
+from core.cognix import sandbox as cognix_sandbox
 from core.cognix import skill_memory as cognix_skill_memory
 from core.cognix import simulation as cognix_simulation
 from core.cognix import thinking_status as cognix_thinking_status
@@ -292,6 +293,19 @@ class SimulationRunRequest(BaseModel):
     constraints: list[str] = Field(default_factory = list, max_length = 20)
     project_id: str | None = Field(None, alias = "projectId", max_length = 160)
     project_type: str | None = Field(None, alias = "projectType", max_length = 120)
+    store_run: bool = Field(True, alias = "storeRun")
+
+
+class SandboxPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    target_type: str = Field("feature", alias = "targetType", max_length = 80)
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    change_summary: str = Field(..., alias = "changeSummary", min_length = 1, max_length = 4000)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    project_type: str | None = Field(None, alias = "projectType", max_length = 120)
+    requested_checks: list[str] = Field(default_factory = list, alias = "requestedChecks", max_length = 20)
+    duration_minutes: int = Field(30, alias = "durationMinutes", ge = 1, le = 1440)
     store_run: bool = Field(True, alias = "storeRun")
 
 
@@ -760,6 +774,11 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "duration_minutes": "durationMinutes",
         "metric_key": "metricKey",
         "metric_value": "metricValue",
+        "target_type": "targetType",
+        "change_summary": "changeSummary",
+        "sandbox_id": "sandboxId",
+        "badge_label": "badgeLabel",
+        "risk_level": "riskLevel",
         "scores_json": "scoresJson",
         "message_id": "messageId",
         "thread_id": "threadId",
@@ -858,6 +877,10 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         out["logs"] = [_row(item) if isinstance(item, dict) else item for item in out["logs"]]
     if isinstance(out.get("metrics"), list):
         out["metrics"] = [_row(item) if isinstance(item, dict) else item for item in out["metrics"]]
+    if isinstance(out.get("sandbox"), dict):
+        out["sandbox"] = _row(out["sandbox"])
+    if isinstance(out.get("reportRecord"), dict):
+        out["reportRecord"] = _row(out["reportRecord"])
     if isinstance(out.get("versions"), list):
         out["versions"] = [_row(item) if isinstance(item, dict) else item for item in out["versions"]]
     if isinstance(out.get("auditLogs"), list):
@@ -5343,6 +5366,156 @@ async def simulation_run(
             "syntheticAgentRun": False,
             "loadExecution": False,
             "reportWrite": False,
+            "modelLoad": False,
+            "generation": False,
+            "toolExecution": False,
+        },
+    }
+
+
+@router.get("/sandbox/blueprint")
+async def sandbox_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_sandbox.build_sandbox_blueprint()
+    return {
+        "username": current_subject,
+        "sandboxBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_sandbox.COGNIX_SANDBOX_MANAGER_VERSION,
+    }
+
+
+@router.post("/sandbox/plans")
+async def create_sandbox_plan(
+    payload: SandboxPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_sandbox.build_sandbox_plan(
+        username = current_subject,
+        target_type = payload.target_type,
+        objective = payload.objective,
+        change_summary = payload.change_summary,
+        project_id = payload.project_id,
+        project_type = payload.project_type,
+        requested_checks = payload.requested_checks,
+        duration_minutes = payload.duration_minutes,
+    )
+    run = (
+        cognix_db.create_sandbox_run(
+            current_subject,
+            plan = plan,
+            project_id = payload.project_id,
+        )
+        if payload.store_run
+        else None
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "sandboxWrite": run is not None,
+        "sandboxRunWrite": run is not None,
+        "sandboxReportWrite": run is not None,
+        "isolatedRuntimeStart": False,
+        "minimalConfigCopy": False,
+        "experimentRun": False,
+        "productionSecretRead": False,
+        "productionWrite": False,
+        "networkCall": False,
+        "fileWrite": False,
+        "rollbackExecute": False,
+        "promotion": False,
+        "modelLoad": False,
+        "generation": False,
+        "toolExecution": False,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "sandbox_plan_built",
+        resource_type = "cognix_sandbox",
+        resource_id = str((run or {}).get("sandbox_id") or payload.project_id or current_subject),
+        severity = "warning" if plan.get("report", {}).get("riskLevel") in {"medium", "high"} else "notice",
+        metadata = {
+            "sandboxManagerVersion": plan.get("sandboxManagerVersion"),
+            "targetType": plan.get("target", {}).get("type"),
+            "riskLevel": plan.get("report", {}).get("riskLevel"),
+            "requiresHumanApproval": plan.get("report", {}).get("summary", {}).get("requiresHumanApproval"),
+            "productionSecretsAccessible": plan.get("isolation", {}).get("productionSecretsAccessible"),
+            "queueRequired": plan.get("queuePlan", {}).get("queueRequired"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "sandboxPlan": plan,
+        "run": _row(run) if run else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_sandbox.COGNIX_SANDBOX_MANAGER_VERSION,
+    }
+
+
+@router.get("/sandbox/runs")
+async def sandbox_runs(
+    project_id: str | None = None,
+    target_type: str | None = None,
+    query: str | None = None,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if project_id:
+        _require_owned_project(project_id, current_subject)
+    return {
+        "runs": _rows(
+            cognix_db.list_sandbox_runs(
+                current_subject,
+                project_id = project_id,
+                target_type = cognix_sandbox.normalize_sandbox_target_type(target_type) if target_type else None,
+                query = query,
+            )
+        ),
+        "sideEffects": {
+            "sandboxWrite": False,
+            "sandboxRunWrite": False,
+            "sandboxReportWrite": False,
+            "isolatedRuntimeStart": False,
+            "minimalConfigCopy": False,
+            "experimentRun": False,
+            "productionSecretRead": False,
+            "productionWrite": False,
+            "networkCall": False,
+            "fileWrite": False,
+            "rollbackExecute": False,
+            "promotion": False,
+            "modelLoad": False,
+            "generation": False,
+            "toolExecution": False,
+        },
+    }
+
+
+@router.get("/sandbox/runs/{run_id}")
+async def sandbox_run(
+    run_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    run = cognix_db.get_sandbox_run(current_subject, run_id)
+    if run is None:
+        raise HTTPException(status_code = 404, detail = "Sandbox run not found")
+    return {
+        "run": _row(run),
+        "sideEffects": {
+            "sandboxWrite": False,
+            "sandboxRunWrite": False,
+            "sandboxReportWrite": False,
+            "isolatedRuntimeStart": False,
+            "minimalConfigCopy": False,
+            "experimentRun": False,
+            "productionSecretRead": False,
+            "productionWrite": False,
+            "networkCall": False,
+            "fileWrite": False,
+            "rollbackExecute": False,
+            "promotion": False,
             "modelLoad": False,
             "generation": False,
             "toolExecution": False,
