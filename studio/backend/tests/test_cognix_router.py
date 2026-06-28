@@ -1830,6 +1830,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "technology_watch" in modules["cognix-research-watch"]["capabilities"]
     assert "benchmark_gate" in modules["cognix-research-watch"]["capabilities"]
     assert "/api/cognix/research/integration-plan" in modules["cognix-research-watch"]["routes"]
+    assert "tool_permission_matrix" in modules["cognix-integrations"]["capabilities"]
+    assert "/api/cognix/tools/permission-matrix" in modules["cognix-integrations"]["routes"]
     assert "sso_planning" in modules["cognix-enterprise-foundation"]["capabilities"]
     assert "/api/cognix/governance/plan" in modules["cognix-enterprise-foundation"]["routes"]
     assert modules["cognix-deployment-manager"]["dependencyState"]["ready"] is True
@@ -1871,6 +1873,7 @@ def test_tool_registry_declares_permissions_and_guardrails():
     assert registry["summary"]["executionEnabled"] is False
     assert registry["globalPolicies"]["frontendDirectExecutionAllowed"] is False
     assert registry["globalPolicies"]["rateLimitsEnabled"] is True
+    assert registry["globalPolicies"]["permissionMatrixAvailable"] is True
     assert registry["sideEffects"]["toolExecution"] is False
 
     tools = {tool["id"]: tool for tool in registry["tools"]}
@@ -1890,6 +1893,62 @@ def test_tool_registry_declares_permissions_and_guardrails():
     kali_actions = {action["id"]: action for action in tools["kali-isolated"]["actions"]}
     assert kali_actions["active_test"]["sandboxRequired"] is True
     assert "admin" in kali_actions["active_test"]["permissions"]
+
+
+def test_tool_permission_matrix_summarizes_effective_permissions_without_execution():
+    matrix = cognix_tool_registry.build_tool_permission_matrix(
+        username = "alice",
+        is_admin = False,
+        has_developer_mode = True,
+        granted_permissions = {"github:read"},
+    )
+
+    assert matrix["registryVersion"] == "cognix_tool_registry_v1"
+    assert matrix["mode"] == "permission_matrix_dry_run"
+    assert matrix["summary"]["executionEnabled"] is False
+    assert matrix["policies"]["permissionSource"] == "cognix_user_permissions_plus_role"
+    assert matrix["sideEffects"]["permissionWrite"] is False
+    assert matrix["sideEffects"]["secretRead"] is False
+    assert matrix["sideEffects"]["toolExecution"] is False
+    assert "authenticated" in matrix["permissionContext"]["effectivePermissions"]
+    assert "developer_mode" in matrix["permissionContext"]["effectivePermissions"]
+    assert "github:read" in matrix["permissionContext"]["effectivePermissions"]
+
+    tools = {tool["id"]: tool for tool in matrix["tools"]}
+    codex_actions = {action["id"]: action for action in tools["codex-secure-agent"]["actions"]}
+    assert codex_actions["plan_feature"]["allowed"] is True
+    assert codex_actions["plan_feature"]["guardrails"]["frontendDirectExecutionAllowed"] is False
+    assert codex_actions["modify_code"]["allowed"] is True
+    assert codex_actions["modify_code"]["guardrails"]["sandboxRequired"] is True
+
+    github_actions = {action["id"]: action for action in tools["github"]["actions"]}
+    assert github_actions["read_repository"]["allowed"] is False
+    assert github_actions["read_repository"]["status"] == "connector_disabled"
+    assert github_actions["read_repository"]["missingPermissions"] == []
+    assert github_actions["merge_pull_request"]["guardrails"]["adminRequired"] is True
+    assert "admin" in github_actions["merge_pull_request"]["missingPermissions"]
+
+
+def test_tool_permission_matrix_endpoint_uses_database_permissions():
+    seed_accounts()
+    cognix_db.grant_user_permission(
+        "alice",
+        "github:read",
+        granted_by = storage.DEFAULT_ADMIN_USERNAME,
+    )
+
+    matrix = run_async(
+        cognix_routes.tool_permission_matrix(current_subject = "alice")
+    )
+
+    assert matrix["username"] == "alice"
+    assert matrix["mode"] == "permission_matrix_dry_run"
+    assert "github:read" in matrix["permissionContext"]["explicitPermissions"]
+    tools = {tool["id"]: tool for tool in matrix["tools"]}
+    github_actions = {action["id"]: action for action in tools["github"]["actions"]}
+    assert github_actions["read_repository"]["status"] == "connector_disabled"
+    assert github_actions["read_repository"]["missingPermissions"] == []
+    assert github_actions["read_repository"]["sideEffects"]["toolExecution"] is False
 
 
 def test_integration_manager_summarizes_connectors_without_secret_access():
@@ -2066,6 +2125,40 @@ def test_tool_plan_blocks_disabled_connectors_before_permissions():
     assert body["riskLevel"] == "medium"
     assert body["sideEffects"]["externalWrite"] is False
     assert "developer_mode" in body["missingPermissions"]
+
+
+def test_tool_plan_uses_database_permissions_for_connector_actions():
+    seed_accounts()
+    cognix_db.grant_user_permission(
+        "alice",
+        "github:read",
+        granted_by = storage.DEFAULT_ADMIN_USERNAME,
+    )
+
+    body = run_async(
+        cognix_routes.plan_tool_action(
+            cognix_routes.ToolActionPlanRequest(
+                tool_id = "github",
+                action_id = "read_repository",
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    assert body["allowed"] is False
+    assert body["status"] == "connector_disabled"
+    assert body["missingPermissions"] == []
+    assert "github:read" in body["permissionContext"]["explicitPermissions"]
+    assert body["guardrails"]["auditRequired"] is True
+    assert body["guardrails"]["frontendDirectExecutionAllowed"] is False
+    assert body["sideEffects"]["secretRead"] is False
+    assert body["sideEffects"]["toolExecution"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["action"] == "tool_action_planned"
+    assert log["metadata"]["missingPermissions"] == []
+    assert log["metadata"]["guardrails"]["frontendDirectExecutionAllowed"] is False
 
 
 def test_admin_permission_grant_and_revoke_affect_tool_planning():

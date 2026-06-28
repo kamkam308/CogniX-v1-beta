@@ -338,6 +338,138 @@ def _risk_at_least(risk: str, threshold: str) -> bool:
     return RISK_ORDER.get(risk, 0) >= RISK_ORDER.get(threshold, 0)
 
 
+def _permission_context(
+    *,
+    username: str,
+    is_admin: bool,
+    has_developer_mode: bool,
+    granted_permissions: set[str] | None,
+) -> dict[str, Any]:
+    explicit_permissions = sorted(
+        {
+            _normalize_permission(str(item))
+            for item in (granted_permissions or set())
+            if str(item or "").strip()
+        }
+    )
+    effective_permissions = set(explicit_permissions)
+    effective_permissions.add(IMPLICIT_AUTHENTICATED_PERMISSION)
+    if is_admin:
+        effective_permissions.add(ADMIN_PERMISSION)
+        effective_permissions.add(DEVELOPER_MODE_PERMISSION)
+    if has_developer_mode:
+        effective_permissions.add(DEVELOPER_MODE_PERMISSION)
+    return {
+        "username": username,
+        "isAdmin": bool(is_admin),
+        "developerMode": bool(is_admin or has_developer_mode),
+        "explicitPermissions": explicit_permissions,
+        "effectivePermissions": sorted(effective_permissions),
+        "derivedPermissions": sorted(
+            permission
+            for permission in effective_permissions
+            if permission not in set(explicit_permissions)
+        ),
+        "sideEffects": {
+            "permissionWrite": False,
+            "secretRead": False,
+            "toolExecution": False,
+        },
+    }
+
+
+def _permission_set_from_context(context: dict[str, Any]) -> set[str]:
+    return {
+        _normalize_permission(str(item))
+        for item in context.get("effectivePermissions", [])
+        if str(item or "").strip()
+    }
+
+
+def _action_decision(
+    *,
+    tool: dict[str, Any],
+    action: dict[str, Any],
+    permission_set: set[str],
+) -> dict[str, Any]:
+    required_permissions = [
+        _normalize_permission(str(item))
+        for item in action.get("permissions", [])
+        if str(item or "").strip()
+    ]
+    missing = [
+        permission for permission in required_permissions if permission not in permission_set
+    ]
+    enabled = bool(tool.get("enabled"))
+    risk_level = str(action.get("riskLevel") or "medium").lower()
+    mode = str(action.get("mode") or "read")
+    rate_limit_key = action.get("rateLimitKey")
+    requires_confirmation = bool(action.get("requiresConfirmation")) or _risk_at_least(risk_level, "medium")
+    admin_required = ADMIN_PERMISSION in required_permissions or _risk_at_least(risk_level, "critical")
+    allowed = enabled and not missing
+    status = "allowed" if allowed else ("connector_disabled" if not enabled else "missing_permission")
+    blockers: list[dict[str, Any]] = []
+    if not enabled:
+        blockers.append(
+            {
+                "id": "connector_disabled",
+                "reason": "Connector is declared in CogniX but not enabled.",
+            }
+        )
+    if missing:
+        blockers.append(
+            {
+                "id": "missing_permissions",
+                "reason": "User is missing required tool permissions.",
+                "permissions": missing,
+            }
+        )
+    return {
+        "allowed": allowed,
+        "status": status,
+        "reason": (
+            "Action allowed by CogniX guardrails."
+            if allowed
+            else (
+                "Connector is declared but not enabled yet."
+                if not enabled
+                else "User is missing required tool permissions."
+            )
+        ),
+        "mode": mode,
+        "riskLevel": risk_level,
+        "requiredPermissions": required_permissions,
+        "missingPermissions": missing,
+        "requiresConfirmation": requires_confirmation,
+        "auditRequired": bool(action.get("auditRequired", True)),
+        "sandboxRequired": bool(action.get("sandboxRequired")),
+        "rateLimitKey": rate_limit_key,
+        "rateLimitPolicy": rate_limit_policy_for_key(
+            str(rate_limit_key) if rate_limit_key else None
+        ),
+        "secretsRequired": bool(action.get("secretsRequired")),
+        "dataIsolation": tool.get("dataIsolation"),
+        "adminRequired": admin_required,
+        "guardrails": {
+            "humanConfirmationRequired": requires_confirmation,
+            "auditRequired": bool(action.get("auditRequired", True)),
+            "rateLimitRequired": bool(rate_limit_key),
+            "sandboxRequired": bool(action.get("sandboxRequired")),
+            "secretsStayServerSide": bool(action.get("secretsRequired")),
+            "adminRequired": admin_required,
+            "frontendDirectExecutionAllowed": False,
+        },
+        "blockers": blockers,
+        "sideEffects": {
+            "toolExecution": False,
+            "networkToolCall": False,
+            "externalWrite": False,
+            "secretRead": False,
+            "permissionWrite": False,
+        },
+    }
+
+
 def build_tool_registry() -> dict[str, Any]:
     tools = deepcopy(TOOL_MANIFESTS)
     action_count = sum(len(tool.get("actions") or []) for tool in tools)
@@ -364,9 +496,97 @@ def build_tool_registry() -> dict[str, Any]:
             "auditRequired": True,
             "rateLimitsEnabled": True,
             "secretsMustStayServerSide": True,
+            "permissionMatrixAvailable": True,
             "frontendDirectExecutionAllowed": False,
         },
         "sideEffects": {
+            "toolExecution": False,
+            "networkToolCall": False,
+            "externalWrite": False,
+        },
+    }
+
+
+def build_tool_permission_matrix(
+    *,
+    username: str,
+    is_admin: bool = False,
+    has_developer_mode: bool = False,
+    granted_permissions: set[str] | None = None,
+) -> dict[str, Any]:
+    context = _permission_context(
+        username = username,
+        is_admin = is_admin,
+        has_developer_mode = has_developer_mode,
+        granted_permissions = granted_permissions,
+    )
+    permission_set = _permission_set_from_context(context)
+    tools: list[dict[str, Any]] = []
+    allowed_count = 0
+    confirmation_count = 0
+    blocked_count = 0
+    high_risk_count = 0
+    for tool in TOOL_MANIFESTS:
+        actions: list[dict[str, Any]] = []
+        for action in tool.get("actions") or []:
+            decision = _action_decision(
+                tool = tool,
+                action = action,
+                permission_set = permission_set,
+            )
+            if decision["allowed"]:
+                allowed_count += 1
+            else:
+                blocked_count += 1
+            if decision["requiresConfirmation"]:
+                confirmation_count += 1
+            if _risk_at_least(str(decision["riskLevel"]), "high"):
+                high_risk_count += 1
+            actions.append(
+                {
+                    "id": action.get("id"),
+                    "label": action.get("label"),
+                    "connector": tool.get("connector"),
+                    **decision,
+                }
+            )
+        tools.append(
+            {
+                "id": tool.get("id"),
+                "name": tool.get("name"),
+                "category": tool.get("category"),
+                "enabled": bool(tool.get("enabled")),
+                "dataIsolation": tool.get("dataIsolation"),
+                "actions": actions,
+            }
+        )
+    return {
+        "registryVersion": TOOL_REGISTRY_VERSION,
+        "mode": "permission_matrix_dry_run",
+        "username": username,
+        "permissionContext": context,
+        "tools": tools,
+        "summary": {
+            "toolCount": len(tools),
+            "actionCount": allowed_count + blocked_count,
+            "allowedActionCount": allowed_count,
+            "blockedActionCount": blocked_count,
+            "confirmationRequiredCount": confirmation_count,
+            "highRiskActionCount": high_risk_count,
+            "executionEnabled": False,
+        },
+        "policies": {
+            "permissionSource": "cognix_user_permissions_plus_role",
+            "humanConfirmationForRiskAtLeast": "medium",
+            "adminOnlyForRiskAtLeast": "critical",
+            "auditRequired": True,
+            "rateLimitsEnabled": True,
+            "secretsMustStayServerSide": True,
+            "frontendDirectExecutionAllowed": False,
+        },
+        "sideEffects": {
+            "permissionWrite": False,
+            "secretRead": False,
             "toolExecution": False,
             "networkToolCall": False,
             "externalWrite": False,
@@ -419,31 +639,23 @@ def plan_tool_action(
                 "toolExecution": False,
                 "networkToolCall": False,
                 "externalWrite": False,
+                "secretRead": False,
+                "permissionWrite": False,
             },
         }
 
     tool, action = found
-    permission_set = {
-        _normalize_permission(item) for item in (granted_permissions or set()) if item
-    }
-    permission_set.add(IMPLICIT_AUTHENTICATED_PERMISSION)
-    if is_admin:
-        permission_set.add(ADMIN_PERMISSION)
-        permission_set.add(DEVELOPER_MODE_PERMISSION)
-    if has_developer_mode:
-        permission_set.add(DEVELOPER_MODE_PERMISSION)
-
-    required_permissions = [
-        _normalize_permission(item) for item in action.get("permissions", []) if item
-    ]
-    missing = [
-        permission for permission in required_permissions if permission not in permission_set
-    ]
-    enabled = bool(tool.get("enabled"))
-    allowed = enabled and not missing
-    risk_level = str(action.get("riskLevel") or "medium")
-    mode = str(action.get("mode") or "read")
-    rate_limit_key = action.get("rateLimitKey")
+    permission_context = _permission_context(
+        username = username,
+        is_admin = is_admin,
+        has_developer_mode = has_developer_mode,
+        granted_permissions = granted_permissions,
+    )
+    decision = _action_decision(
+        tool = tool,
+        action = action,
+        permission_set = _permission_set_from_context(permission_context),
+    )
     return {
         "registryVersion": TOOL_REGISTRY_VERSION,
         "username": username,
@@ -451,33 +663,6 @@ def plan_tool_action(
         "toolName": tool["name"],
         "actionId": action["id"],
         "actionLabel": action["label"],
-        "allowed": allowed,
-        "status": "allowed" if allowed else ("connector_disabled" if not enabled else "missing_permission"),
-        "reason": (
-            "Action allowed by CogniX guardrails."
-            if allowed
-            else (
-                "Connector is declared but not enabled yet."
-                if not enabled
-                else "User is missing required tool permissions."
-            )
-        ),
-        "mode": mode,
-        "riskLevel": risk_level,
-        "requiredPermissions": required_permissions,
-        "missingPermissions": missing,
-        "requiresConfirmation": bool(action.get("requiresConfirmation")),
-        "auditRequired": bool(action.get("auditRequired", True)),
-        "sandboxRequired": bool(action.get("sandboxRequired")),
-        "rateLimitKey": rate_limit_key,
-        "rateLimitPolicy": rate_limit_policy_for_key(
-            str(rate_limit_key) if rate_limit_key else None
-        ),
-        "secretsRequired": bool(action.get("secretsRequired")),
-        "dataIsolation": tool.get("dataIsolation"),
-        "sideEffects": {
-            "toolExecution": False,
-            "networkToolCall": False,
-            "externalWrite": False,
-        },
+        "permissionContext": permission_context,
+        **decision,
     }

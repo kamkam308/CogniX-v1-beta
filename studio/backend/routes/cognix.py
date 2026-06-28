@@ -1640,6 +1640,21 @@ async def tool_registry(current_subject: str = Depends(get_current_jwt_subject))
     }
 
 
+@router.get("/tools/permission-matrix")
+async def tool_permission_matrix(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    is_admin = auth_storage.is_admin(current_subject)
+    has_developer_mode = cognix_db.user_has_permission(
+        current_subject,
+        cognix_db.DEVELOPER_MODE_PERMISSION,
+    )
+    return cognix_tool_registry.build_tool_permission_matrix(
+        username = current_subject,
+        is_admin = is_admin,
+        has_developer_mode = has_developer_mode,
+        granted_permissions = _granted_permission_keys(current_subject),
+    )
+
+
 @router.get("/integrations/status")
 async def integrations_status(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
     is_admin = auth_storage.is_admin(current_subject)
@@ -1713,6 +1728,7 @@ async def plan_tool_action(
         username = current_subject,
         is_admin = is_admin,
         has_developer_mode = has_developer_mode,
+        granted_permissions = _granted_permission_keys(current_subject),
     )
     rate_limit = None
     rate_limit_policy = plan.get("rateLimitPolicy")
@@ -1753,6 +1769,7 @@ async def plan_tool_action(
             "status": plan.get("status"),
             "riskLevel": plan.get("riskLevel"),
             "requiresConfirmation": plan.get("requiresConfirmation"),
+            "guardrails": plan.get("guardrails", {}),
             "missingPermissions": plan.get("missingPermissions", []),
             "rateLimit": rate_limit,
             "sideEffects": plan.get("sideEffects", {}),
