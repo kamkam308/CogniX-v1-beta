@@ -11,10 +11,100 @@ from __future__ import annotations
 
 from typing import Any
 
+from core.cognix import tool_registry as cognix_tool_registry
+
 
 COGNIX_RAG_PLANNER_VERSION = "cognix_rag_planner_v1"
+COGNIX_RAG_SOURCE_REGISTRY_VERSION = "cognix_rag_source_registry_v1"
 
 SUPPORTED_SOURCE_TYPES = {"pdf", "docx", "txt", "md", "csv", "html", "url", "knowledge_base"}
+
+RAG_SOURCE_MANIFESTS: list[dict[str, Any]] = [
+    {
+        "id": "project_uploads",
+        "displayName": "Project uploads",
+        "status": "enabled",
+        "connector": "local",
+        "sourceTypes": ["pdf", "docx", "txt", "md", "csv", "html"],
+        "permissions": ["authenticated", "rag:write"],
+        "tools": [],
+        "requiresSecret": False,
+        "requiresNetwork": False,
+        "dataBoundary": "project",
+        "defaultChunking": {"maxChunkTokens": 900, "overlapTokens": 120},
+    },
+    {
+        "id": "project_memory",
+        "displayName": "Project memory",
+        "status": "enabled",
+        "connector": "internal",
+        "sourceTypes": ["knowledge_base", "md", "txt"],
+        "permissions": ["authenticated"],
+        "tools": [],
+        "requiresSecret": False,
+        "requiresNetwork": False,
+        "dataBoundary": "project",
+        "defaultChunking": {"maxChunkTokens": 700, "overlapTokens": 80},
+    },
+    {
+        "id": "google-drive",
+        "displayName": "Google Drive",
+        "status": "planned",
+        "connector": "google-drive",
+        "sourceTypes": ["pdf", "docx", "txt", "md", "csv"],
+        "permissions": ["authenticated", "drive:read", "rag:write"],
+        "tools": ["google-drive"],
+        "requiresSecret": True,
+        "requiresNetwork": True,
+        "dataBoundary": "user_connector",
+        "defaultChunking": {"maxChunkTokens": 850, "overlapTokens": 120},
+    },
+    {
+        "id": "notion",
+        "displayName": "Notion",
+        "status": "planned",
+        "connector": "notion",
+        "sourceTypes": ["knowledge_base", "md", "html"],
+        "permissions": ["authenticated", "notion:read", "rag:write"],
+        "tools": ["notion"],
+        "requiresSecret": True,
+        "requiresNetwork": True,
+        "dataBoundary": "user_connector",
+        "defaultChunking": {"maxChunkTokens": 800, "overlapTokens": 100},
+    },
+    {
+        "id": "web_url",
+        "displayName": "Web URL",
+        "status": "planned",
+        "connector": "web",
+        "sourceTypes": ["url", "html"],
+        "permissions": ["authenticated", "rag:write"],
+        "tools": [],
+        "requiresSecret": False,
+        "requiresNetwork": True,
+        "dataBoundary": "public_web",
+        "defaultChunking": {"maxChunkTokens": 750, "overlapTokens": 90},
+    },
+]
+
+SOURCE_CONNECTOR_ALIASES = {
+    "drive": "google-drive",
+    "google_drive": "google-drive",
+    "google-drive": "google-drive",
+    "gdrive": "google-drive",
+    "local": "project_uploads",
+    "file": "project_uploads",
+    "upload": "project_uploads",
+    "uploads": "project_uploads",
+    "project": "project_uploads",
+    "memory": "project_memory",
+    "knowledge_base": "project_memory",
+    "kb": "project_memory",
+    "notion": "notion",
+    "url": "web_url",
+    "web": "web_url",
+    "html": "web_url",
+}
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -33,6 +123,322 @@ def _as_int(value: Any, default: int = 0) -> int:
     except (TypeError, ValueError):
         return default
     return parsed if parsed >= 0 else default
+
+
+def _normalize_text(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _normalize_permission(permission: str) -> str:
+    return (permission or "").strip().lower()
+
+
+def _permission_set(
+    *,
+    is_admin: bool,
+    has_developer_mode: bool,
+    granted_permissions: set[str] | None,
+) -> set[str]:
+    permissions = {
+        _normalize_permission(item)
+        for item in (granted_permissions or set())
+        if item
+    }
+    permissions.add(cognix_tool_registry.IMPLICIT_AUTHENTICATED_PERMISSION)
+    if is_admin:
+        permissions.add(cognix_tool_registry.ADMIN_PERMISSION)
+        permissions.add(cognix_tool_registry.DEVELOPER_MODE_PERMISSION)
+    if has_developer_mode:
+        permissions.add(cognix_tool_registry.DEVELOPER_MODE_PERMISSION)
+    return permissions
+
+
+def _connector_by_id() -> dict[str, dict[str, Any]]:
+    return {str(item.get("id")): item for item in RAG_SOURCE_MANIFESTS}
+
+
+def _missing_permissions(required: list[str], permissions: set[str]) -> list[str]:
+    missing: list[str] = []
+    for item in required:
+        permission = _normalize_permission(str(item))
+        if permission and permission not in permissions:
+            missing.append(permission)
+    return sorted(set(missing))
+
+
+def _connector_id_for_source(source: dict[str, Any]) -> str:
+    explicit = (
+        source.get("sourceConnectorId")
+        or source.get("connectorId")
+        or source.get("connector")
+        or source.get("source")
+        or source.get("provider")
+    )
+    if explicit:
+        normalized = _normalize_text(explicit).replace(" ", "_")
+        return SOURCE_CONNECTOR_ALIASES.get(normalized, normalized)
+    source_type = _normalize_text(source.get("type") or source.get("kind"))
+    if source_type in {"url", "html"}:
+        return "web_url"
+    if source_type == "knowledge_base":
+        return "project_memory"
+    return "project_uploads"
+
+
+def _source_type(source: dict[str, Any]) -> str:
+    return _normalize_text(source.get("type") or source.get("kind") or "unknown")
+
+
+def _estimated_chunks(source: dict[str, Any], connector: dict[str, Any] | None) -> int:
+    explicit = _as_int(source.get("chunkCount") or source.get("numChunks"))
+    if explicit:
+        return explicit
+    estimated_tokens = _as_int(source.get("estimatedTokens"))
+    if estimated_tokens:
+        return max(1, (estimated_tokens + 599) // 600)
+    estimated_size_mb = _as_int(source.get("estimatedSizeMb") or source.get("sizeMb"))
+    if estimated_size_mb:
+        chunk_tokens = _as_int(_as_dict((connector or {}).get("defaultChunking")).get("maxChunkTokens"), 800)
+        return max(1, (estimated_size_mb * 320 + chunk_tokens - 1) // max(1, chunk_tokens))
+    return 0
+
+
+def _source_registry_record(manifest: dict[str, Any], permissions: set[str]) -> dict[str, Any]:
+    record = dict(manifest)
+    required = [str(item) for item in record.get("permissions") or []]
+    missing = _missing_permissions(required, permissions)
+    enabled = record.get("status") == "enabled"
+    record["missingPermissions"] = missing
+    record["allowedForPlanning"] = True
+    record["allowedForIndexing"] = enabled and not missing
+    record["requiresHumanConfirmation"] = bool(record.get("requiresNetwork") or record.get("requiresSecret"))
+    record["secretState"] = "required_unverified" if record.get("requiresSecret") else "not_required"
+    record["runtimeState"] = "ready" if record["allowedForIndexing"] else "planned" if not missing else "needs_permissions"
+    return record
+
+
+def build_rag_source_registry(
+    *,
+    username: str,
+    is_admin: bool = False,
+    has_developer_mode: bool = False,
+    granted_permissions: set[str] | None = None,
+) -> dict[str, Any]:
+    permissions = _permission_set(
+        is_admin = is_admin,
+        has_developer_mode = has_developer_mode,
+        granted_permissions = granted_permissions,
+    )
+    connectors = [_source_registry_record(item, permissions) for item in RAG_SOURCE_MANIFESTS]
+    return {
+        "registryVersion": COGNIX_RAG_SOURCE_REGISTRY_VERSION,
+        "plannerVersion": COGNIX_RAG_PLANNER_VERSION,
+        "mode": "declarative_dry_run",
+        "username": username,
+        "summary": {
+            "connectorCount": len(connectors),
+            "enabledCount": sum(1 for item in connectors if item.get("status") == "enabled"),
+            "plannedCount": sum(1 for item in connectors if item.get("status") == "planned"),
+            "readyForIndexingCount": sum(1 for item in connectors if item.get("allowedForIndexing")),
+        },
+        "policies": {
+            "sourceManifestsRequired": True,
+            "citationsRequired": True,
+            "rawContentLoggingAllowed": False,
+            "secretsStayServerSide": True,
+            "frontendDirectIndexingAllowed": False,
+            "sensitiveSourcesRequireExplicitPermission": True,
+        },
+        "sourceConnectors": connectors,
+        "sideEffects": {
+            "fileRead": False,
+            "networkRead": False,
+            "secretRead": False,
+            "embeddingGeneration": False,
+            "ragIndexing": False,
+            "vectorWrite": False,
+            "sourceMutation": False,
+            "modelLoad": False,
+        },
+    }
+
+
+def build_rag_indexing_plan(
+    *,
+    username: str,
+    project_id: str | None,
+    sources: list[dict[str, Any]] | None,
+    objective: str | None = None,
+    rag_available: bool | None = None,
+    is_admin: bool = False,
+    has_developer_mode: bool = False,
+    granted_permissions: set[str] | None = None,
+) -> dict[str, Any]:
+    registry = build_rag_source_registry(
+        username = username,
+        is_admin = is_admin,
+        has_developer_mode = has_developer_mode,
+        granted_permissions = granted_permissions,
+    )
+    permissions = _permission_set(
+        is_admin = is_admin,
+        has_developer_mode = has_developer_mode,
+        granted_permissions = granted_permissions,
+    )
+    connector_map = _connector_by_id()
+    normalized_sources = [item for item in _as_list(sources) if isinstance(item, dict)]
+    source_plans: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    ready_count = 0
+    blocked_count = 0
+    sensitive_count = 0
+    estimated_chunks = 0
+
+    for index, source in enumerate(normalized_sources):
+        source_id = str(source.get("id") or source.get("name") or f"source-{index + 1}")[:160]
+        source_name = str(source.get("name") or source_id)[:240]
+        source_type = _source_type(source)
+        connector_id = _connector_id_for_source(source)
+        connector = connector_map.get(connector_id)
+        source_sensitive = bool(source.get("containsSensitiveData") or source.get("sensitive"))
+        if source_sensitive:
+            sensitive_count += 1
+
+        unsupported_type = source_type not in SUPPORTED_SOURCE_TYPES
+        connector_missing = connector is None
+        connector_supports_type = False if connector_missing else source_type in set(connector.get("sourceTypes") or [])
+        required_permissions = [str(item) for item in (connector or {}).get("permissions") or ["authenticated"]]
+        missing = _missing_permissions(required_permissions, permissions)
+        if source_sensitive and not is_admin and "rag:sensitive" not in permissions:
+            missing = sorted(set(missing + ["rag:sensitive"]))
+
+        chunks = _estimated_chunks(source, connector)
+        estimated_chunks += chunks
+        if connector_missing:
+            status = "blocked_unknown_connector"
+        elif unsupported_type or not connector_supports_type:
+            status = "blocked_unsupported_source"
+        elif rag_available is False:
+            status = "blocked_rag_unavailable"
+        elif source.get("indexed") or source.get("isIndexed"):
+            status = "already_indexed"
+        elif missing:
+            status = "needs_permissions"
+        elif connector.get("status") != "enabled":
+            status = "planned_connector"
+        else:
+            status = "ready_to_index"
+
+        if status == "ready_to_index":
+            ready_count += 1
+        if status.startswith("blocked"):
+            blocked_count += 1
+
+        if missing:
+            warnings.append(f"Permissions manquantes pour {source_id}: {', '.join(missing)}")
+        if source_sensitive:
+            warnings.append(f"Source sensible declaree: {source_id}")
+        if status == "planned_connector":
+            warnings.append(f"Connecteur pas encore active pour {source_id}: {connector_id}")
+
+        source_plans.append(
+            {
+                "sourceId": source_id,
+                "sourceName": source_name,
+                "sourceType": source_type,
+                "connectorId": connector_id,
+                "status": status,
+                "readyToIndex": status == "ready_to_index",
+                "alreadyIndexed": bool(source.get("indexed") or source.get("isIndexed")),
+                "containsSensitiveData": source_sensitive,
+                "estimatedChunks": chunks,
+                "missingPermissions": missing,
+                "requiresHumanConfirmation": bool(
+                    source_sensitive or (connector or {}).get("requiresNetwork") or (connector or {}).get("requiresSecret")
+                ),
+                "chunking": _as_dict((connector or {}).get("defaultChunking")),
+                "checks": [
+                    {
+                        "id": "source_type_supported",
+                        "status": "blocked" if unsupported_type or not connector_supports_type else "complete",
+                    },
+                    {
+                        "id": "permissions_resolved",
+                        "status": "blocked" if missing else "complete",
+                    },
+                    {
+                        "id": "connector_ready",
+                        "status": "complete" if connector and connector.get("status") == "enabled" else "planned",
+                    },
+                    {
+                        "id": "dry_run_guard",
+                        "status": "complete",
+                    },
+                ],
+            }
+        )
+
+    if not normalized_sources:
+        warnings.append("Aucune source fournie pour le plan d'indexation RAG.")
+    if rag_available is False:
+        warnings.append("RAG backend indisponible: indexation impossible tant que le runtime RAG manque.")
+
+    status = "ready"
+    if not normalized_sources:
+        status = "missing_sources"
+    elif blocked_count:
+        status = "blocked"
+    elif ready_count == 0:
+        status = "planned"
+
+    return {
+        "plannerVersion": COGNIX_RAG_PLANNER_VERSION,
+        "sourceRegistryVersion": COGNIX_RAG_SOURCE_REGISTRY_VERSION,
+        "mode": "dry_run",
+        "username": username,
+        "projectId": project_id,
+        "objectiveExcerpt": " ".join((objective or "").split())[:500],
+        "ragAvailable": rag_available,
+        "status": status,
+        "readyToIndexCount": ready_count,
+        "requiresHumanConfirmation": sensitive_count > 0 or any(item.get("requiresHumanConfirmation") for item in source_plans),
+        "sourcePlans": source_plans,
+        "summary": {
+            "sourceCount": len(normalized_sources),
+            "readyToIndexCount": ready_count,
+            "blockedSourceCount": blocked_count,
+            "sensitiveSourceCount": sensitive_count,
+            "estimatedChunkCount": estimated_chunks,
+            "missingPermissionCount": sum(len(item.get("missingPermissions") or []) for item in source_plans),
+        },
+        "policies": registry["policies"],
+        "registry": registry,
+        "blockedActions": [
+            {
+                "id": "file_read",
+                "reason": "Aucun contenu source n'est lu pendant le plan d'indexation.",
+            },
+            {
+                "id": "embedding_generation",
+                "reason": "Aucun embedding n'est calcule pendant le plan d'indexation.",
+            },
+            {
+                "id": "vector_write",
+                "reason": "Aucun index vectoriel n'est modifie en dry-run.",
+            },
+        ],
+        "warnings": warnings,
+        "sideEffects": {
+            "fileRead": False,
+            "networkRead": False,
+            "secretRead": False,
+            "embeddingGeneration": False,
+            "ragIndexing": False,
+            "vectorWrite": False,
+            "sourceMutation": False,
+            "modelLoad": False,
+        },
+    }
 
 
 def _source_checks(sources: list[dict[str, Any]]) -> dict[str, Any]:

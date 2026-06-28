@@ -28,6 +28,7 @@ from core.cognix import onboarding as cognix_onboarding
 from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import project_experts as cognix_project_experts
+from core.cognix import rag_planner as cognix_rag_planner
 from core.cognix import research_watch as cognix_research_watch
 from core.cognix import runtime_adapter as cognix_runtime_adapter
 from core.cognix import thinking_status as cognix_thinking_status
@@ -541,6 +542,147 @@ def test_rag_plan_blocks_retrieval_when_sources_are_missing(monkeypatch):
         for item in plan["ragPlan"]["blockedActions"]
     )
     assert plan["ragPlan"]["sideEffects"]["retrievalQuery"] is False
+
+
+def test_rag_source_registry_declares_connectors_without_secret_or_network_access():
+    registry = cognix_rag_planner.build_rag_source_registry(
+        username = "alice",
+        granted_permissions = {"rag:write", "drive:read"},
+    )
+
+    assert registry["registryVersion"] == "cognix_rag_source_registry_v1"
+    assert registry["plannerVersion"] == "cognix_rag_planner_v1"
+    assert registry["mode"] == "declarative_dry_run"
+    assert registry["policies"]["sourceManifestsRequired"] is True
+    assert registry["policies"]["rawContentLoggingAllowed"] is False
+    assert registry["policies"]["frontendDirectIndexingAllowed"] is False
+    assert registry["sideEffects"]["fileRead"] is False
+    assert registry["sideEffects"]["networkRead"] is False
+    assert registry["sideEffects"]["secretRead"] is False
+    assert registry["sideEffects"]["ragIndexing"] is False
+
+    connectors = {item["id"]: item for item in registry["sourceConnectors"]}
+    assert connectors["project_uploads"]["allowedForIndexing"] is True
+    assert connectors["project_uploads"]["requiresSecret"] is False
+    assert "pdf" in connectors["project_uploads"]["sourceTypes"]
+    assert connectors["google-drive"]["status"] == "planned"
+    assert connectors["google-drive"]["requiresSecret"] is True
+    assert connectors["google-drive"]["requiresNetwork"] is True
+    assert connectors["google-drive"]["allowedForIndexing"] is False
+    assert "google-drive" in connectors["google-drive"]["tools"]
+
+
+def test_rag_source_registry_endpoint_logs_audited_dry_run():
+    seed_accounts()
+    cognix_db.grant_user_permission(
+        "alice",
+        "rag:write",
+        granted_by = storage.DEFAULT_ADMIN_USERNAME,
+    )
+
+    body = run_async(cognix_routes.rag_source_registry(current_subject = "alice"))
+
+    assert body["auditLogId"].startswith("aud_")
+    assert body["registry"]["registryVersion"] == "cognix_rag_source_registry_v1"
+    assert body["registry"]["summary"]["connectorCount"] >= 4
+    assert body["sideEffects"]["fileRead"] is False
+    assert body["sideEffects"]["secretRead"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "rag_source_registry_built"
+    assert log["resourceType"] == "cognix_rag_source_registry"
+    assert log["metadata"]["registryVersion"] == "cognix_rag_source_registry_v1"
+    assert log["metadata"]["sideEffects"]["ragIndexing"] is False
+
+
+def test_rag_indexing_plan_prepares_local_sources_without_indexing(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(cognix_routes, "_rag_available", lambda: True)
+    cognix_db.grant_user_permission(
+        "alice",
+        "rag:write",
+        granted_by = storage.DEFAULT_ADMIN_USERNAME,
+    )
+
+    body = run_async(
+        cognix_routes.rag_indexing_plan(
+            cognix_routes.RagIndexingPlanRequest(
+                objective = "Indexer mes PDF de cours avec citations",
+                project_id = "project-rag",
+                sources = [
+                    {
+                        "id": "course-pdf",
+                        "name": "Cours physique.pdf",
+                        "type": "pdf",
+                        "connector": "local",
+                        "estimatedSizeMb": 8,
+                    }
+                ],
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    plan = body["indexingPlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert plan["sourceRegistryVersion"] == "cognix_rag_source_registry_v1"
+    assert plan["status"] == "ready"
+    assert plan["readyToIndexCount"] == 1
+    assert plan["summary"]["sourceCount"] == 1
+    assert plan["sourcePlans"][0]["status"] == "ready_to_index"
+    assert plan["sourcePlans"][0]["missingPermissions"] == []
+    assert plan["sourcePlans"][0]["readyToIndex"] is True
+    assert any(item["id"] == "vector_write" for item in plan["blockedActions"])
+    assert plan["sideEffects"]["fileRead"] is False
+    assert plan["sideEffects"]["embeddingGeneration"] is False
+    assert plan["sideEffects"]["ragIndexing"] is False
+    assert plan["sideEffects"]["vectorWrite"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "rag_indexing_plan_built"
+    assert log["metadata"]["status"] == "ready"
+    assert log["metadata"]["sideEffects"]["vectorWrite"] is False
+
+
+def test_rag_indexing_plan_blocks_sensitive_sources_without_explicit_permission(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(cognix_routes, "_rag_available", lambda: True)
+    cognix_db.grant_user_permission(
+        "alice",
+        "rag:write",
+        granted_by = storage.DEFAULT_ADMIN_USERNAME,
+    )
+
+    body = run_async(
+        cognix_routes.rag_indexing_plan(
+            cognix_routes.RagIndexingPlanRequest(
+                project_id = "project-sensitive",
+                sources = [
+                    {
+                        "id": "hr-policy",
+                        "type": "pdf",
+                        "connector": "local",
+                        "containsSensitiveData": True,
+                    }
+                ],
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    plan = body["indexingPlan"]
+    assert plan["status"] == "planned"
+    assert plan["readyToIndexCount"] == 0
+    assert plan["summary"]["sensitiveSourceCount"] == 1
+    assert "rag:sensitive" in plan["sourcePlans"][0]["missingPermissions"]
+    assert plan["sourcePlans"][0]["requiresHumanConfirmation"] is True
+    assert plan["sideEffects"]["fileRead"] is False
+    assert plan["sideEffects"]["secretRead"] is False
+    assert plan["sideEffects"]["ragIndexing"] is False
 
 
 def test_fine_tuning_plan_defers_to_rag_for_document_objective(monkeypatch):
@@ -1832,6 +1974,10 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/memory/plan" in modules["cognix-memory-manager"]["routes"]
     assert modules["cognix-onboarding"]["activationState"] == "ready"
     assert modules["cognix-rag"]["dependencyState"]["ready"] is True
+    assert "rag_source_registry" in modules["cognix-rag"]["capabilities"]
+    assert "rag_indexing_planning" in modules["cognix-rag"]["capabilities"]
+    assert "/api/cognix/rag/sources" in modules["cognix-rag"]["routes"]
+    assert "/api/cognix/rag/indexing-plan" in modules["cognix-rag"]["routes"]
     assert "cloud_training_targets" in modules["cognix-fine-tuning"]["capabilities"]
     assert "technology_watch" in modules["cognix-research-watch"]["capabilities"]
     assert "benchmark_gate" in modules["cognix-research-watch"]["capabilities"]

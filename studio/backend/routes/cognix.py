@@ -34,6 +34,7 @@ from core.cognix import onboarding as cognix_onboarding
 from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import project_experts as cognix_project_experts
+from core.cognix import rag_planner as cognix_rag_planner
 from core.cognix import registry as cognix_registry
 from core.cognix import recommender as cognix_recommender
 from core.cognix import research_watch as cognix_research_watch
@@ -251,6 +252,12 @@ class FineTuningPlanRequest(BaseModel):
 class RagPlanRequest(BaseModel):
     objective: str = Field(..., min_length = 1, max_length = 4000)
     project_type: str | None = Field(None, max_length = 80)
+    project_id: str | None = Field(None, max_length = 160)
+    sources: list[dict[str, Any]] | None = None
+
+
+class RagIndexingPlanRequest(BaseModel):
+    objective: str | None = Field(None, max_length = 4000)
     project_id: str | None = Field(None, max_length = 160)
     sources: list[dict[str, Any]] | None = None
 
@@ -1990,6 +1997,89 @@ async def fine_tuning_plan(
         "executionPolicy": plan["executionPolicy"],
         "auditLogId": audit.get("id"),
         "sideEffects": tuning_plan.get("sideEffects", {}),
+    }
+
+
+@router.get("/rag/sources")
+async def rag_source_registry(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    is_admin = auth_storage.is_admin(current_subject)
+    has_developer_mode = cognix_db.user_has_permission(
+        current_subject,
+        cognix_db.DEVELOPER_MODE_PERMISSION,
+    )
+    registry = cognix_rag_planner.build_rag_source_registry(
+        username = current_subject,
+        is_admin = is_admin,
+        has_developer_mode = has_developer_mode,
+        granted_permissions = _granted_permission_keys(current_subject),
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "rag_source_registry_built",
+        resource_type = "cognix_rag_source_registry",
+        resource_id = str(registry.get("registryVersion")),
+        severity = "notice",
+        metadata = {
+            "registryVersion": registry.get("registryVersion"),
+            "plannerVersion": registry.get("plannerVersion"),
+            "connectorCount": registry.get("summary", {}).get("connectorCount"),
+            "readyForIndexingCount": registry.get("summary", {}).get("readyForIndexingCount"),
+            "sideEffects": registry.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "registry": registry,
+        "auditLogId": audit.get("id"),
+        "sideEffects": registry.get("sideEffects", {}),
+    }
+
+
+@router.post("/rag/indexing-plan")
+async def rag_indexing_plan(
+    payload: RagIndexingPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    is_admin = auth_storage.is_admin(current_subject)
+    has_developer_mode = cognix_db.user_has_permission(
+        current_subject,
+        cognix_db.DEVELOPER_MODE_PERMISSION,
+    )
+    plan = cognix_rag_planner.build_rag_indexing_plan(
+        username = current_subject,
+        project_id = payload.project_id,
+        sources = payload.sources or [],
+        objective = payload.objective,
+        rag_available = _rag_available(),
+        is_admin = is_admin,
+        has_developer_mode = has_developer_mode,
+        granted_permissions = _granted_permission_keys(current_subject),
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "rag_indexing_plan_built",
+        resource_type = "cognix_rag_indexing_plan",
+        resource_id = str(payload.project_id or "general"),
+        severity = "warning" if plan.get("status") in {"blocked", "missing_sources"} else "notice",
+        metadata = {
+            "plannerVersion": plan.get("plannerVersion"),
+            "sourceRegistryVersion": plan.get("sourceRegistryVersion"),
+            "status": plan.get("status"),
+            "sourceCount": plan.get("summary", {}).get("sourceCount"),
+            "readyToIndexCount": plan.get("summary", {}).get("readyToIndexCount"),
+            "blockedSourceCount": plan.get("summary", {}).get("blockedSourceCount"),
+            "missingPermissionCount": plan.get("summary", {}).get("missingPermissionCount"),
+            "requiresHumanConfirmation": plan.get("requiresHumanConfirmation"),
+            "sideEffects": plan.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "indexingPlan": plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": plan.get("sideEffects", {}),
     }
 
 
