@@ -35,6 +35,7 @@ from core.cognix import rag_planner as cognix_rag_planner
 from core.cognix import research_watch as cognix_research_watch
 from core.cognix import response_reflection as cognix_response_reflection
 from core.cognix import runtime_adapter as cognix_runtime_adapter
+from core.cognix import skill_memory as cognix_skill_memory
 from core.cognix import thinking_status as cognix_thinking_status
 from core.cognix import tool_discovery as cognix_tool_discovery
 from core.cognix import tool_registry as cognix_tool_registry
@@ -2333,6 +2334,168 @@ def test_context_graph_endpoint_stores_project_snapshot_and_audit():
     assert log["metadata"]["sideEffects"]["snapshotWrite"] is True
 
 
+def test_skill_memory_blueprint_declares_user_control_and_no_auto_approval():
+    blueprint = cognix_skill_memory.build_skill_memory_blueprint()
+
+    assert blueprint["skillMemoryVersion"] == "cognix_skill_memory_v1"
+    assert blueprint["preferenceExtractorVersion"] == "cognix_preference_extractor_v1"
+    assert blueprint["memoryApprovalVersion"] == "cognix_memory_approval_v1"
+    assert blueprint["contextInjectorVersion"] == "cognix_context_injector_v1"
+    assert blueprint["userControls"]["view"] is True
+    assert blueprint["userControls"]["edit"] is True
+    assert blueprint["userControls"]["delete"] is True
+    assert blueprint["userControls"]["disable"] is True
+    assert blueprint["userControls"]["export"] is True
+    assert blueprint["userControls"]["approveBeforeActivation"] is True
+    assert blueprint["privacyPolicy"]["automaticApprovalAllowed"] is False
+    assert blueprint["sideEffects"]["memoryCandidateWrite"] is False
+    assert blueprint["sideEffects"]["skillMemoryWrite"] is False
+    assert blueprint["sideEffects"]["preferenceWrite"] is False
+    assert blueprint["sideEffects"]["contextInjection"] is False
+    assert blueprint["sideEffects"]["generation"] is False
+
+
+def test_skill_memory_candidate_plan_extracts_preferences_without_writes():
+    plan = cognix_skill_memory.build_candidate_memory_plan(
+        username = "alice",
+        observations = [
+            (
+                "Kamil prefere Python pour prototyper, solutions locales, "
+                "architectures modulaires, securite, et veut devenir ingenieur IA."
+            )
+        ],
+        project_type = "ai",
+    )
+    candidates = {item["candidateKey"]: item for item in plan["candidates"]}
+
+    assert plan["mode"] == "candidate_memory_dry_run"
+    assert {"python_prototyping", "local_first", "modular_architecture", "ai_engineering_goal", "security_first"}.issubset(
+        candidates
+    )
+    assert candidates["python_prototyping"]["candidateType"] == "preference"
+    assert candidates["python_prototyping"]["requiresUserApproval"] is True
+    assert candidates["python_prototyping"]["canAutoApprove"] is False
+    assert plan["summary"]["automaticApprovalCount"] == 0
+    assert plan["sideEffects"]["memoryCandidateWrite"] is False
+    assert plan["sideEffects"]["skillMemoryWrite"] is False
+    assert plan["sideEffects"]["contextInjection"] is False
+    assert plan["sideEffects"]["generation"] is False
+
+
+def test_skill_memory_candidate_endpoint_approves_updates_exports_and_deletes():
+    seed_accounts()
+
+    body = run_async(
+        cognix_routes.skill_memory_candidates(
+            cognix_routes.SkillMemoryCandidateRequest(
+                observations = [
+                    (
+                        "Je prefere Python pour prototyper et les solutions locales. "
+                        "Je veux aussi une architecture modulaire et securisee."
+                    )
+                ],
+                storeCandidates = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    stored = body["storedCandidates"]
+    python_candidate = next(item for item in stored if item["candidateKey"] == "python_prototyping")
+    bob_candidates = run_async(cognix_routes.list_skill_memory_candidates(current_subject = "bob"))
+
+    assert body["auditLogId"].startswith("aud_")
+    assert body["sideEffects"]["memoryCandidateWrite"] is True
+    assert body["sideEffects"]["generation"] is False
+    assert bob_candidates["candidates"] == []
+
+    approved = run_async(
+        cognix_routes.approve_skill_memory_candidate(
+            python_candidate["id"],
+            cognix_routes.SkillMemoryDecisionRequest(value = "Kamil prefere Python pour les prototypes rapides."),
+            current_subject = "alice",
+        )
+    )
+    memory_id = approved["memory"]["id"]
+
+    assert memory_id.startswith("smem_")
+    assert approved["memory"]["status"] == "active"
+    assert approved["sideEffects"]["skillMemoryWrite"] is True
+    assert approved["sideEffects"]["preferenceWrite"] is True
+    assert any(item["preferenceKey"] == "python_prototyping" for item in approved["preferences"])
+
+    listed = run_async(cognix_routes.list_skill_memories(current_subject = "alice"))
+    assert [item["id"] for item in listed["skillMemories"]] == [memory_id]
+
+    updated = run_async(
+        cognix_routes.update_skill_memory(
+            memory_id,
+            cognix_routes.SkillMemoryUpdateRequest(
+                status = "disabled",
+                value = "Kamil prefere Python, mais la memoire est desactivee pour ce test.",
+            ),
+            current_subject = "alice",
+        )
+    )
+    active_after_disable = run_async(cognix_routes.list_skill_memories(current_subject = "alice"))
+    export = run_async(cognix_routes.export_skill_memories(current_subject = "alice"))
+    deleted = run_async(cognix_routes.delete_skill_memory(memory_id, current_subject = "alice"))
+    after_delete = run_async(cognix_routes.list_skill_memories(include_disabled = True, current_subject = "alice"))
+
+    assert updated["memory"]["status"] == "disabled"
+    assert active_after_disable["skillMemories"] == []
+    assert any(item["id"] == memory_id for item in export["memoryExport"]["skillMemories"])
+    assert deleted["deleted"] is True
+    assert deleted["sideEffects"]["generation"] is False
+    assert after_delete["skillMemories"] == []
+
+    logs = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))["logs"]
+    actions = {item["action"] for item in logs}
+    assert {
+        "skill_memory_candidates_built",
+        "skill_memory_candidate_approved",
+        "skill_memory_updated",
+        "skill_memory_exported",
+        "skill_memory_deleted",
+    }.issubset(actions)
+
+
+def test_skill_memory_injection_plan_selects_active_relevant_memories_without_injecting():
+    seed_accounts()
+    body = run_async(
+        cognix_routes.skill_memory_candidates(
+            cognix_routes.SkillMemoryCandidateRequest(
+                observations = ["Kamil prefere Python pour prototyper des outils IA locaux."],
+                storeCandidates = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    candidate_id = next(item["id"] for item in body["storedCandidates"] if item["candidateKey"] == "python_prototyping")
+    approved = run_async(
+        cognix_routes.approve_skill_memory_candidate(
+            candidate_id,
+            cognix_routes.SkillMemoryDecisionRequest(),
+            current_subject = "alice",
+        )
+    )
+    plan_body = run_async(
+        cognix_routes.skill_memory_injection_plan(
+            cognix_routes.SkillMemoryInjectionPlanRequest(objective = "Construire un prototype Python local"),
+            current_subject = "alice",
+        )
+    )
+    plan = plan_body["injectionPlan"]
+
+    assert approved["memory"]["id"] in plan["selectedMemoryIds"]
+    assert plan["summary"]["willInjectNow"] is False
+    assert plan_body["sideEffects"]["contextInjection"] is False
+    assert plan_body["sideEffects"]["generation"] is False
+    assert plan_body["auditLogId"].startswith("aud_")
+
+    logs = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))["logs"]
+    assert logs[0]["action"] == "skill_memory_injection_plan_built"
+
+
 def test_codex_pipeline_plans_required_gates_without_modifying_code():
     plan = cognix_codex_pipeline.build_codex_pipeline_plan(
         objective = "Ajoute un module CogniX Chemistry dans le code source",
@@ -2949,6 +3112,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-tool-discovery",
         "cognix-context-graph",
         "cognix-memory-manager",
+        "cognix-long-term-skill-memory",
         "cognix-onboarding",
         "cognix-rag",
         "cognix-fine-tuning",
@@ -3011,6 +3175,13 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert modules["cognix-memory-manager"]["activationState"] == "ready"
     assert "central_memory_layers" in modules["cognix-memory-manager"]["capabilities"]
     assert "/api/cognix/memory/plan" in modules["cognix-memory-manager"]["routes"]
+    assert modules["cognix-long-term-skill-memory"]["dependencyState"]["ready"] is True
+    assert "skill_memory_candidates" in modules["cognix-long-term-skill-memory"]["capabilities"]
+    assert "memory_approval_flow" in modules["cognix-long-term-skill-memory"]["capabilities"]
+    assert "context_injection_planning" in modules["cognix-long-term-skill-memory"]["capabilities"]
+    assert "/api/cognix/memory/skills/candidates" in modules["cognix-long-term-skill-memory"]["routes"]
+    assert "/api/cognix/memory/skills/export" in modules["cognix-long-term-skill-memory"]["routes"]
+    assert "/api/cognix/memory/skills/injection-plan" in modules["cognix-long-term-skill-memory"]["routes"]
     assert modules["cognix-onboarding"]["activationState"] == "ready"
     assert modules["cognix-rag"]["dependencyState"]["ready"] is True
     assert "rag_source_registry" in modules["cognix-rag"]["capabilities"]

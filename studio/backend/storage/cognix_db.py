@@ -274,6 +274,63 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
             updated_by TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS cognix_memory_candidates (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            project_id TEXT,
+            candidate_key TEXT NOT NULL,
+            candidate_type TEXT NOT NULL,
+            category TEXT NOT NULL,
+            label TEXT NOT NULL,
+            value TEXT NOT NULL,
+            evidence_excerpt TEXT NOT NULL DEFAULT '',
+            confidence REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'pending_validation',
+            candidate_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            decided_at TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_memory_candidates_username_status
+            ON cognix_memory_candidates(username, status, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_memory_candidates_project
+            ON cognix_memory_candidates(username, project_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_user_skill_memories (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            category TEXT NOT NULL,
+            label TEXT NOT NULL,
+            value TEXT NOT NULL,
+            confidence REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'active',
+            source_candidate_id TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_user_skill_memories_username_status
+            ON cognix_user_skill_memories(username, status, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_user_preferences (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            preference_key TEXT NOT NULL,
+            category TEXT NOT NULL,
+            value TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            source_candidate_id TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(username, preference_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_user_preferences_username_status
+            ON cognix_user_preferences(username, status, updated_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_library_items (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -1668,6 +1725,399 @@ def create_library_item(
         return item
     finally:
         conn.close()
+
+
+def _hydrate_memory_candidate(row: dict[str, Any]) -> dict[str, Any]:
+    row["candidate"] = _json_or_default(row.get("candidate_json"), {})
+    return row
+
+
+def create_memory_candidates(
+    username: str,
+    *,
+    plan: dict[str, Any],
+    project_id: str | None = None,
+) -> list[dict[str, Any]]:
+    candidates = [item for item in (plan.get("candidates") or []) if isinstance(item, dict)]
+    if not candidates:
+        return []
+    now = _now()
+    stored: list[dict[str, Any]] = []
+    conn = get_connection()
+    try:
+        for candidate in candidates:
+            candidate_id = _new_id("mcand")
+            conn.execute(
+                """
+                INSERT INTO cognix_memory_candidates
+                    (
+                        id, username, project_id, candidate_key, candidate_type,
+                        category, label, value, evidence_excerpt, confidence,
+                        status, candidate_json, created_at, updated_at
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_validation', ?, ?, ?)
+                """,
+                (
+                    candidate_id,
+                    username,
+                    project_id,
+                    str(candidate.get("candidateKey") or "")[:160],
+                    str(candidate.get("candidateType") or "preference")[:80],
+                    str(candidate.get("category") or "general")[:120],
+                    str(candidate.get("label") or "")[:240],
+                    str(candidate.get("value") or "")[:2000],
+                    str(candidate.get("evidenceExcerpt") or "")[:2000],
+                    float(candidate.get("confidence") or 0.0),
+                    json.dumps(candidate, ensure_ascii = False),
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute("SELECT * FROM cognix_memory_candidates WHERE id = ?", (candidate_id,)).fetchone()
+            stored.append(_hydrate_memory_candidate(row_to_dict(row) or {}))
+        conn.commit()
+        return stored
+    finally:
+        conn.close()
+
+
+def list_memory_candidates(
+    username: str,
+    *,
+    status: str | None = None,
+    include_decided: bool = True,
+    limit: int = 80,
+) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 80), 1), 200)
+    conn = get_connection()
+    try:
+        clauses = ["username = ?"]
+        params: list[Any] = [username]
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        elif not include_decided:
+            clauses.append("status = 'pending_validation'")
+        params.append(safe_limit)
+        rows = conn.execute(
+            f"""
+            SELECT * FROM cognix_memory_candidates
+            WHERE {' AND '.join(clauses)}
+            ORDER BY confidence DESC, created_at DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_memory_candidate(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_skill_memory(row: dict[str, Any]) -> dict[str, Any]:
+    row["metadata"] = _json_or_default(row.get("metadata_json"), {})
+    return row
+
+
+def _hydrate_user_preference(row: dict[str, Any]) -> dict[str, Any]:
+    row["metadata"] = _json_or_default(row.get("metadata_json"), {})
+    return row
+
+
+def list_skill_memories(
+    username: str,
+    *,
+    include_disabled: bool = False,
+    limit: int = 120,
+) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 120), 1), 300)
+    conn = get_connection()
+    try:
+        if include_disabled:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_user_skill_memories
+                WHERE username = ?
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (username, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_user_skill_memories
+                WHERE username = ? AND status = 'active'
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (username, safe_limit),
+            ).fetchall()
+        return [_hydrate_skill_memory(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def list_user_preferences(username: str, *, include_disabled: bool = False) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        if include_disabled:
+            rows = conn.execute(
+                "SELECT * FROM cognix_user_preferences WHERE username = ? ORDER BY updated_at DESC",
+                (username,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM cognix_user_preferences WHERE username = ? AND status = 'active' ORDER BY updated_at DESC",
+                (username,),
+            ).fetchall()
+        return [_hydrate_user_preference(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def approve_memory_candidate(
+    username: str,
+    candidate_id: str,
+    *,
+    label: str | None = None,
+    value: str | None = None,
+    category: str | None = None,
+) -> dict[str, Any] | None:
+    now = _now()
+    memory_id = _new_id("smem")
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM cognix_memory_candidates WHERE id = ? AND username = ?",
+            (candidate_id, username),
+        ).fetchone()
+        if row is None:
+            return None
+        candidate = row_to_dict(row) or {}
+        candidate_json = _json_or_default(candidate.get("candidate_json"), {})
+        final_label = (label or candidate.get("label") or "").strip()[:240]
+        final_value = (value or candidate.get("value") or "").strip()[:2000]
+        final_category = (category or candidate.get("category") or "general").strip()[:120]
+        metadata = {
+            "candidateRuleId": candidate.get("candidate_key"),
+            "candidateType": candidate.get("candidate_type"),
+            "projectId": candidate.get("project_id"),
+            "approvedFromCandidate": True,
+        }
+        conn.execute(
+            """
+            INSERT INTO cognix_user_skill_memories
+                (
+                    id, username, category, label, value, confidence, status,
+                    source_candidate_id, metadata_json, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+            """,
+            (
+                memory_id,
+                username,
+                final_category,
+                final_label,
+                final_value,
+                float(candidate.get("confidence") or 0.0),
+                candidate_id,
+                json.dumps(metadata, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        if str(candidate.get("candidate_type") or "") == "preference":
+            preference_key = str(candidate.get("candidate_key") or memory_id)[:160]
+            conn.execute(
+                """
+                INSERT INTO cognix_user_preferences
+                    (
+                        id, username, preference_key, category, value, status,
+                        source_candidate_id, metadata_json, created_at, updated_at
+                    )
+                VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+                ON CONFLICT(username, preference_key) DO UPDATE SET
+                    category = excluded.category,
+                    value = excluded.value,
+                    status = 'active',
+                    source_candidate_id = excluded.source_candidate_id,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    _new_id("pref"),
+                    username,
+                    preference_key,
+                    final_category,
+                    final_value,
+                    candidate_id,
+                    json.dumps({"sourceMemoryId": memory_id, **metadata}, ensure_ascii = False),
+                    now,
+                    now,
+                ),
+            )
+        conn.execute(
+            """
+            UPDATE cognix_memory_candidates
+            SET status = 'approved', updated_at = ?, decided_at = ?, candidate_json = ?
+            WHERE id = ? AND username = ?
+            """,
+            (
+                now,
+                now,
+                json.dumps({**candidate_json, "approvedMemoryId": memory_id}, ensure_ascii = False),
+                candidate_id,
+                username,
+            ),
+        )
+        conn.commit()
+        memory = _hydrate_skill_memory(
+            row_to_dict(conn.execute("SELECT * FROM cognix_user_skill_memories WHERE id = ?", (memory_id,)).fetchone()) or {}
+        )
+        candidate_row = _hydrate_memory_candidate(
+            row_to_dict(conn.execute("SELECT * FROM cognix_memory_candidates WHERE id = ?", (candidate_id,)).fetchone()) or {}
+        )
+        preferences = list_user_preferences(username, include_disabled = True)
+        return {"candidate": candidate_row, "memory": memory, "preferences": preferences}
+    finally:
+        conn.close()
+
+
+def reject_memory_candidate(username: str, candidate_id: str) -> dict[str, Any] | None:
+    now = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            UPDATE cognix_memory_candidates
+            SET status = 'rejected', updated_at = ?, decided_at = ?
+            WHERE id = ? AND username = ?
+            """,
+            (now, now, candidate_id, username),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM cognix_memory_candidates WHERE id = ? AND username = ?",
+            (candidate_id, username),
+        ).fetchone()
+        if row is None:
+            return None
+        return _hydrate_memory_candidate(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def update_skill_memory(
+    username: str,
+    memory_id: str,
+    *,
+    label: str | None = None,
+    value: str | None = None,
+    category: str | None = None,
+    status: str | None = None,
+) -> dict[str, Any] | None:
+    updates: list[str] = []
+    params: list[Any] = []
+    if label is not None:
+        updates.append("label = ?")
+        params.append(label.strip()[:240])
+    if value is not None:
+        updates.append("value = ?")
+        params.append(value.strip()[:2000])
+    if category is not None:
+        updates.append("category = ?")
+        params.append(category.strip()[:120])
+    if status is not None:
+        normalized_status = status.strip().lower()
+        if normalized_status not in {"active", "disabled"}:
+            raise ValueError("Unsupported memory status")
+        updates.append("status = ?")
+        params.append(normalized_status)
+    if not updates:
+        return None
+    updated_at = _now()
+    updates.append("updated_at = ?")
+    params.append(updated_at)
+    params.extend([memory_id, username])
+    conn = get_connection()
+    try:
+        conn.execute(
+            f"""
+            UPDATE cognix_user_skill_memories
+            SET {', '.join(updates)}
+            WHERE id = ? AND username = ?
+            """,
+            tuple(params),
+        )
+        row = conn.execute(
+            "SELECT * FROM cognix_user_skill_memories WHERE id = ? AND username = ?",
+            (memory_id, username),
+        ).fetchone()
+        if row is None:
+            conn.commit()
+            return None
+        memory = _hydrate_skill_memory(row_to_dict(row) or {})
+        source_candidate_id = memory.get("source_candidate_id")
+        if source_candidate_id:
+            preference_updates: list[str] = []
+            preference_params: list[Any] = []
+            if value is not None:
+                preference_updates.append("value = ?")
+                preference_params.append(str(memory.get("value") or "")[:2000])
+            if category is not None:
+                preference_updates.append("category = ?")
+                preference_params.append(str(memory.get("category") or "")[:120])
+            if status is not None:
+                preference_updates.append("status = ?")
+                preference_params.append(str(memory.get("status") or "active"))
+            if preference_updates:
+                preference_updates.append("updated_at = ?")
+                preference_params.extend([updated_at, username, source_candidate_id])
+                conn.execute(
+                    f"""
+                    UPDATE cognix_user_preferences
+                    SET {', '.join(preference_updates)}
+                    WHERE username = ? AND source_candidate_id = ?
+                    """,
+                    tuple(preference_params),
+                )
+        conn.commit()
+        return memory
+    finally:
+        conn.close()
+
+
+def delete_skill_memory(username: str, memory_id: str) -> bool:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT source_candidate_id FROM cognix_user_skill_memories WHERE id = ? AND username = ?",
+            (memory_id, username),
+        ).fetchone()
+        source_candidate_id = row["source_candidate_id"] if row is not None else None
+        cur = conn.execute(
+            "DELETE FROM cognix_user_skill_memories WHERE id = ? AND username = ?",
+            (memory_id, username),
+        )
+        if source_candidate_id:
+            conn.execute(
+                "UPDATE cognix_user_preferences SET status = 'disabled', updated_at = ? WHERE username = ? AND source_candidate_id = ?",
+                (_now(), username, source_candidate_id),
+            )
+        conn.commit()
+        return bool(cur.rowcount)
+    finally:
+        conn.close()
+
+
+def export_skill_memory_bundle(username: str) -> dict[str, Any]:
+    return {
+        "username": username,
+        "skillMemories": list_skill_memories(username, include_disabled = True),
+        "preferences": list_user_preferences(username, include_disabled = True),
+        "candidates": list_memory_candidates(username, include_decided = True, limit = 300),
+        "exportedAt": _now(),
+    }
 
 
 def _hydrate_response_evaluation(row: dict[str, Any]) -> dict[str, Any]:

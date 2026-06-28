@@ -44,6 +44,7 @@ from core.cognix import recommender as cognix_recommender
 from core.cognix import research_watch as cognix_research_watch
 from core.cognix import response_reflection as cognix_response_reflection
 from core.cognix import runtime_adapter as cognix_runtime_adapter
+from core.cognix import skill_memory as cognix_skill_memory
 from core.cognix import thinking_status as cognix_thinking_status
 from core.cognix import tool_discovery as cognix_tool_discovery
 from core.cognix import tool_registry as cognix_tool_registry
@@ -120,6 +121,39 @@ class MemoryPlanRequest(BaseModel):
     project_type: str | None = Field(None, alias = "projectType", max_length = 80)
     conversation_summary: str | None = Field(None, alias = "conversationSummary", max_length = 12000)
     recent_message_count: int = Field(0, alias = "recentMessageCount", ge = 0, le = 500)
+
+
+class SkillMemoryCandidateRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    observations: list[Any] = Field(default_factory = list)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    project_type: str | None = Field(None, alias = "projectType", max_length = 80)
+    store_candidates: bool = Field(True, alias = "storeCandidates")
+
+
+class SkillMemoryDecisionRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    label: str | None = Field(None, max_length = 240)
+    value: str | None = Field(None, max_length = 2000)
+    category: str | None = Field(None, max_length = 120)
+
+
+class SkillMemoryUpdateRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    label: str | None = Field(None, max_length = 240)
+    value: str | None = Field(None, max_length = 2000)
+    category: str | None = Field(None, max_length = 120)
+    status: Literal["active", "disabled"] | None = None
+
+
+class SkillMemoryInjectionPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str | None = Field(None, max_length = 4000)
+    max_memories: int = Field(5, alias = "maxMemories", ge = 1, le = 20)
 
 
 class ResearchIntegrationPlanRequest(BaseModel):
@@ -606,6 +640,12 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "source_node_key": "sourceNodeKey",
         "target_node_key": "targetNodeKey",
         "edge_type": "edgeType",
+        "candidate_key": "candidateKey",
+        "candidate_type": "candidateType",
+        "candidate_json": "candidateJson",
+        "evidence_excerpt": "evidenceExcerpt",
+        "source_candidate_id": "sourceCandidateId",
+        "preference_key": "preferenceKey",
     }
     for source, target in alias_map.items():
         if source in out:
@@ -3340,6 +3380,370 @@ async def memory_plan(
         "auditLogId": audit.get("id"),
         "sideEffects": plan.get("sideEffects", {}),
         "plannerVersion": cognix_memory_manager.COGNIX_MEMORY_MANAGER_VERSION,
+    }
+
+
+@router.get("/memory/skills/blueprint")
+async def skill_memory_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_skill_memory.build_skill_memory_blueprint()
+    return {
+        "username": current_subject,
+        "skillMemoryBlueprint": blueprint,
+        "plannerVersion": cognix_skill_memory.COGNIX_SKILL_MEMORY_VERSION,
+        "sideEffects": blueprint.get("sideEffects", {}),
+    }
+
+
+@router.post("/memory/skills/candidates")
+async def skill_memory_candidates(
+    payload: SkillMemoryCandidateRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    existing_memories = cognix_db.list_skill_memories(current_subject, include_disabled = True)
+    plan = cognix_skill_memory.build_candidate_memory_plan(
+        username = current_subject,
+        observations = payload.observations,
+        project_id = payload.project_id,
+        project_type = payload.project_type,
+        existing_memories = existing_memories,
+    )
+    stored_candidates = (
+        cognix_db.create_memory_candidates(
+            current_subject,
+            plan = plan,
+            project_id = payload.project_id,
+        )
+        if payload.store_candidates
+        else []
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "memoryCandidateWrite": bool(stored_candidates),
+        "auditWrite": True,
+        "skillMemoryWrite": False,
+        "preferenceWrite": False,
+        "contextInjection": False,
+        "modelLoad": False,
+        "generation": False,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "skill_memory_candidates_built",
+        resource_type = "cognix_skill_memory",
+        resource_id = str(payload.project_id or current_subject),
+        severity = "notice",
+        metadata = {
+            "skillMemoryVersion": plan.get("skillMemoryVersion"),
+            "preferenceExtractorVersion": plan.get("preferenceExtractorVersion"),
+            "candidateCount": plan.get("summary", {}).get("candidateCount", 0),
+            "storedCandidateCount": len(stored_candidates),
+            "requiresUserApproval": True,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "candidateMemoryPlan": plan,
+        "storedCandidates": _rows(stored_candidates),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_skill_memory.COGNIX_SKILL_MEMORY_VERSION,
+    }
+
+
+@router.get("/memory/skills/candidates")
+async def list_skill_memory_candidates(
+    status: str | None = None,
+    include_decided: bool = True,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    return {
+        "username": current_subject,
+        "candidates": _rows(
+            cognix_db.list_memory_candidates(
+                current_subject,
+                status = status,
+                include_decided = include_decided,
+            )
+        ),
+        "sideEffects": {
+            "memoryCandidateWrite": False,
+            "skillMemoryWrite": False,
+            "preferenceWrite": False,
+            "contextInjection": False,
+            "modelLoad": False,
+            "generation": False,
+        },
+    }
+
+
+@router.post("/memory/skills/candidates/{candidate_id}/approve")
+async def approve_skill_memory_candidate(
+    candidate_id: str,
+    payload: SkillMemoryDecisionRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    result = cognix_db.approve_memory_candidate(
+        current_subject,
+        candidate_id,
+        label = payload.label,
+        value = payload.value,
+        category = payload.category,
+    )
+    if result is None:
+        raise HTTPException(status_code = 404, detail = "Memory candidate not found")
+    preferences = result.get("preferences") or []
+    side_effects = {
+        "memoryCandidateWrite": True,
+        "skillMemoryWrite": True,
+        "preferenceWrite": bool(preferences),
+        "contextInjection": False,
+        "modelLoad": False,
+        "generation": False,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "skill_memory_candidate_approved",
+        resource_type = "cognix_skill_memory",
+        resource_id = str(result.get("memory", {}).get("id") or candidate_id),
+        severity = "notice",
+        metadata = {
+            "candidateId": candidate_id,
+            "candidateType": result.get("candidate", {}).get("candidate_type"),
+            "category": result.get("memory", {}).get("category"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "candidate": _row(result.get("candidate") or {}),
+        "memory": _row(result.get("memory") or {}),
+        "preferences": _rows(preferences),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_skill_memory.COGNIX_MEMORY_APPROVAL_VERSION,
+    }
+
+
+@router.post("/memory/skills/candidates/{candidate_id}/reject")
+async def reject_skill_memory_candidate(
+    candidate_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    candidate = cognix_db.reject_memory_candidate(current_subject, candidate_id)
+    if candidate is None:
+        raise HTTPException(status_code = 404, detail = "Memory candidate not found")
+    side_effects = {
+        "memoryCandidateWrite": True,
+        "skillMemoryWrite": False,
+        "preferenceWrite": False,
+        "contextInjection": False,
+        "modelLoad": False,
+        "generation": False,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "skill_memory_candidate_rejected",
+        resource_type = "cognix_skill_memory_candidate",
+        resource_id = candidate_id,
+        severity = "notice",
+        metadata = {
+            "candidateId": candidate_id,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "candidate": _row(candidate),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_skill_memory.COGNIX_MEMORY_APPROVAL_VERSION,
+    }
+
+
+@router.get("/memory/skills")
+async def list_skill_memories(
+    include_disabled: bool = False,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    return {
+        "username": current_subject,
+        "skillMemories": _rows(cognix_db.list_skill_memories(current_subject, include_disabled = include_disabled)),
+        "preferences": _rows(cognix_db.list_user_preferences(current_subject, include_disabled = include_disabled)),
+        "sideEffects": {
+            "skillMemoryWrite": False,
+            "preferenceWrite": False,
+            "contextInjection": False,
+            "modelLoad": False,
+            "generation": False,
+        },
+    }
+
+
+@router.get("/memory/skills/export")
+async def export_skill_memories(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    bundle = cognix_db.export_skill_memory_bundle(current_subject)
+    side_effects = {
+        "exportRead": True,
+        "memoryCandidateWrite": False,
+        "skillMemoryWrite": False,
+        "preferenceWrite": False,
+        "contextInjection": False,
+        "modelLoad": False,
+        "generation": False,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "skill_memory_exported",
+        resource_type = "cognix_skill_memory",
+        resource_id = current_subject,
+        severity = "notice",
+        metadata = {
+            "skillMemoryCount": len(bundle.get("skillMemories") or []),
+            "preferenceCount": len(bundle.get("preferences") or []),
+            "candidateCount": len(bundle.get("candidates") or []),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "memoryExport": {
+            **bundle,
+            "skillMemories": _rows(bundle.get("skillMemories") or []),
+            "preferences": _rows(bundle.get("preferences") or []),
+            "candidates": _rows(bundle.get("candidates") or []),
+        },
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_skill_memory.COGNIX_SKILL_MEMORY_VERSION,
+    }
+
+
+@router.patch("/memory/skills/{memory_id}")
+async def update_skill_memory(
+    memory_id: str,
+    payload: SkillMemoryUpdateRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    try:
+        memory = cognix_db.update_skill_memory(
+            current_subject,
+            memory_id,
+            label = payload.label,
+            value = payload.value,
+            category = payload.category,
+            status = payload.status,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from exc
+    if memory is None:
+        raise HTTPException(status_code = 404, detail = "Skill memory not found")
+    side_effects = {
+        "skillMemoryWrite": True,
+        "preferenceWrite": True,
+        "contextInjection": False,
+        "modelLoad": False,
+        "generation": False,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "skill_memory_updated",
+        resource_type = "cognix_skill_memory",
+        resource_id = memory_id,
+        severity = "notice",
+        metadata = {
+            "status": memory.get("status"),
+            "category": memory.get("category"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "memory": _row(memory),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_skill_memory.COGNIX_MEMORY_APPROVAL_VERSION,
+    }
+
+
+@router.delete("/memory/skills/{memory_id}")
+async def delete_skill_memory(
+    memory_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    deleted = cognix_db.delete_skill_memory(current_subject, memory_id)
+    if not deleted:
+        raise HTTPException(status_code = 404, detail = "Skill memory not found")
+    side_effects = {
+        "skillMemoryWrite": True,
+        "preferenceWrite": True,
+        "contextInjection": False,
+        "modelLoad": False,
+        "generation": False,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "skill_memory_deleted",
+        resource_type = "cognix_skill_memory",
+        resource_id = memory_id,
+        severity = "notice",
+        metadata = {
+            "memoryId": memory_id,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "deleted": True,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_skill_memory.COGNIX_MEMORY_APPROVAL_VERSION,
+    }
+
+
+@router.post("/memory/skills/injection-plan")
+async def skill_memory_injection_plan(
+    payload: SkillMemoryInjectionPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    active_memories = cognix_db.list_skill_memories(current_subject)
+    plan = cognix_skill_memory.build_context_injection_plan(
+        username = current_subject,
+        objective = payload.objective,
+        active_memories = active_memories,
+        max_memories = payload.max_memories,
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "memoryCandidateWrite": False,
+        "skillMemoryWrite": False,
+        "preferenceWrite": False,
+        "contextInjection": False,
+        "modelLoad": False,
+        "generation": False,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "skill_memory_injection_plan_built",
+        resource_type = "cognix_skill_memory",
+        resource_id = current_subject,
+        severity = "notice",
+        metadata = {
+            "contextInjectorVersion": plan.get("contextInjectorVersion"),
+            "selectedMemoryCount": plan.get("summary", {}).get("selectedMemoryCount", 0),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "injectionPlan": plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_skill_memory.COGNIX_CONTEXT_INJECTOR_VERSION,
     }
 
 
