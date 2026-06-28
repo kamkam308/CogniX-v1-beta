@@ -44,6 +44,7 @@ from core.cognix import module_registry as cognix_module_registry
 from core.cognix import onboarding as cognix_onboarding
 from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
+from core.cognix import persona_manager as cognix_persona_manager
 from core.cognix import project_experts as cognix_project_experts
 from core.cognix import prompt_compression as cognix_prompt_compression
 from core.cognix import quantization_advisor as cognix_quantization_advisor
@@ -577,6 +578,21 @@ class DatasetBuilderPlanRequest(BaseModel):
     store_dataset: bool = Field(True, alias = "storeDataset")
 
 
+class PersonaPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    name: str | None = Field(None, max_length = 180)
+    role: str | None = Field(None, max_length = 180)
+    tone: str | None = Field(None, max_length = 80)
+    level: str | None = Field(None, max_length = 80)
+    limits: list[str] | None = None
+    allowed_tools: list[str] | None = Field(None, alias = "allowedTools")
+    preferred_model: str | None = Field(None, alias = "preferredModel", max_length = 240)
+    memory_ids: list[str] | None = Field(None, alias = "memoryIds")
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    store_persona: bool = Field(True, alias = "storePersona")
+
+
 class RagPlanRequest(BaseModel):
     objective: str = Field(..., min_length = 1, max_length = 4000)
     project_type: str | None = Field(None, max_length = 80)
@@ -929,6 +945,15 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "quality_score": "qualityScore",
         "quality_label": "qualityLabel",
         "signals_json": "signalsJson",
+        "preferred_model": "preferredModel",
+        "config_json": "configJson",
+        "system_prompt": "systemPrompt",
+        "tool_permissions_json": "toolPermissionsJson",
+        "memory_scope_json": "memoryScopeJson",
+        "persona_id": "personaId",
+        "version_number": "versionNumber",
+        "template_version": "templateVersion",
+        "binding_json": "bindingJson",
         "selected_domain": "selectedDomain",
         "probabilities_json": "probabilitiesJson",
         "suggestion_json": "suggestionJson",
@@ -3369,6 +3394,130 @@ async def generated_datasets(
             "networkCall": False,
         },
         "plannerVersion": cognix_dataset_builder.COGNIX_DATASET_BUILDER_VERSION,
+    }
+
+
+@router.get("/personas/blueprint")
+async def persona_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_persona_manager.build_persona_blueprint()
+    return {
+        "username": current_subject,
+        "personaBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_persona_manager.COGNIX_PERSONA_MANAGER_VERSION,
+    }
+
+
+@router.post("/personas/plan")
+async def persona_plan(
+    payload: PersonaPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_persona_manager.build_persona_plan(
+        username = current_subject,
+        name = payload.name,
+        role = payload.role,
+        tone = payload.tone,
+        level = payload.level,
+        limits = payload.limits,
+        allowed_tools = payload.allowed_tools,
+        preferred_model = payload.preferred_model,
+        memory_ids = payload.memory_ids,
+        project_id = payload.project_id,
+        granted_permissions = _granted_permission_keys(current_subject),
+    )
+    stored_persona = (
+        cognix_db.create_persona(
+            current_subject,
+            plan = plan,
+            project_id = payload.project_id,
+        )
+        if payload.store_persona
+        else None
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "personaWrite": stored_persona is not None,
+        "personaVersionWrite": stored_persona is not None,
+        "projectBindingWrite": bool(stored_persona and payload.project_id),
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "persona_plan_built",
+        resource_type = "cognix_persona",
+        resource_id = str((stored_persona or {}).get("id") or plan.get("personaId") or current_subject),
+        severity = "warning" if plan.get("security", {}).get("blockedToolCount") else "notice",
+        metadata = {
+            "personaManagerVersion": plan.get("personaManagerVersion"),
+            "templateEngineVersion": plan.get("templateEngineVersion"),
+            "permissionBinderVersion": plan.get("permissionBinderVersion"),
+            "personaId": plan.get("personaId"),
+            "blockedToolCount": plan.get("security", {}).get("blockedToolCount"),
+            "allowedToolIds": plan.get("toolPermissions", {}).get("allowedToolIds", []),
+            "blockedToolIds": plan.get("toolPermissions", {}).get("blockedToolIds", []),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "personaPlan": plan,
+        "persona": _row(stored_persona) if stored_persona else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_persona_manager.COGNIX_PERSONA_MANAGER_VERSION,
+    }
+
+
+@router.get("/personas")
+async def personas(
+    project_id: str | None = None,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if project_id:
+        _require_owned_project(project_id, current_subject)
+    return {
+        "personas": _rows(cognix_db.list_personas(current_subject, project_id = project_id)),
+        "sideEffects": {
+            "personaWrite": False,
+            "personaVersionWrite": False,
+            "projectBindingWrite": False,
+            "permissionGrant": False,
+            "toolExecution": False,
+            "memoryRead": False,
+            "modelLoad": False,
+            "generation": False,
+            "networkCall": False,
+        },
+        "plannerVersion": cognix_persona_manager.COGNIX_PERSONA_MANAGER_VERSION,
+    }
+
+
+@router.get("/personas/{persona_id}")
+async def persona_detail(
+    persona_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    persona = cognix_db.get_persona(current_subject, persona_id)
+    if persona is None:
+        raise HTTPException(status_code = 404, detail = "Persona not found")
+    return {
+        "persona": _row(persona),
+        "sideEffects": {
+            "personaWrite": False,
+            "personaVersionWrite": False,
+            "projectBindingWrite": False,
+            "permissionGrant": False,
+            "toolExecution": False,
+            "memoryRead": False,
+            "modelLoad": False,
+            "generation": False,
+            "networkCall": False,
+        },
+        "plannerVersion": cognix_persona_manager.COGNIX_PERSONA_MANAGER_VERSION,
     }
 
 

@@ -37,6 +37,7 @@ from core.cognix import module_registry as cognix_module_registry
 from core.cognix import onboarding as cognix_onboarding
 from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
+from core.cognix import persona_manager as cognix_persona_manager
 from core.cognix import project_experts as cognix_project_experts
 from core.cognix import prompt_compression as cognix_prompt_compression
 from core.cognix import quantization_advisor as cognix_quantization_advisor
@@ -711,6 +712,78 @@ def test_dataset_builder_endpoint_stores_dataset_examples_and_audits():
     assert log["id"] == body["auditLogId"]
     assert log["action"] == "dataset_builder_plan_built"
     assert log["metadata"]["datasetBuilderVersion"] == "cognix_dataset_builder_v1"
+
+
+def test_persona_builder_binds_tools_to_existing_permissions_only():
+    plan = cognix_persona_manager.build_persona_plan(
+        username = "alice",
+        name = "Coach Python",
+        role = "Coach code",
+        tone = "technical",
+        level = "advanced",
+        limits = ["Ne jamais executer un outil sans permission."],
+        allowed_tools = ["memory_read", "github", "terminal"],
+        preferred_model = "qwen-local",
+        memory_ids = ["mem_style"],
+        granted_permissions = {"tools:github"},
+    )
+    tools = {item["toolId"]: item for item in plan["toolPermissions"]["tools"]}
+
+    assert plan["personaManagerVersion"] == "cognix_persona_manager_v1"
+    assert plan["templateEngineVersion"] == "cognix_persona_template_engine_v1"
+    assert plan["permissionBinderVersion"] == "cognix_persona_permission_binder_v1"
+    assert tools["memory_read"]["status"] == "allowed"
+    assert tools["github"]["status"] == "allowed"
+    assert tools["terminal"]["status"] == "blocked_missing_user_permission"
+    assert "terminal" in plan["toolPermissions"]["blockedToolIds"]
+    assert plan["memoryScope"]["scopeType"] == "selected_memories"
+    assert "ne peut jamais ignorer" in plan["systemPromptTemplate"]["content"]
+    assert plan["security"]["cannotBypassUserPermissions"] is True
+    assert plan["sideEffects"]["permissionGrant"] is False
+    assert plan["sideEffects"]["toolExecution"] is False
+    assert plan["sideEffects"]["generation"] is False
+
+
+def test_persona_endpoint_stores_versions_lists_detail_and_audits():
+    seed_accounts()
+    body = run_async(
+        cognix_routes.persona_plan(
+            cognix_routes.PersonaPlanRequest(
+                name = "Assistant business EBK",
+                role = "Assistant business",
+                tone = "direct",
+                level = "professional",
+                limits = ["Separer faits et hypotheses."],
+                allowedTools = ["memory_read", "github"],
+                preferredModel = "qwen-local",
+                memoryIds = ["mem_business"],
+                storePersona = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    persona = body["persona"]
+    assert body["auditLogId"].startswith("aud_")
+    assert persona["id"].startswith("pers_")
+    assert persona["versions"][0]["id"].startswith("pver_")
+    assert persona["toolPermissions"]["blockedToolIds"] == ["github"]
+    assert body["sideEffects"]["personaWrite"] is True
+    assert body["sideEffects"]["personaVersionWrite"] is True
+    assert body["sideEffects"]["permissionGrant"] is False
+    assert body["sideEffects"]["toolExecution"] is False
+    assert body["sideEffects"]["generation"] is False
+
+    listed = run_async(cognix_routes.personas(current_subject = "alice"))
+    detail = run_async(cognix_routes.persona_detail(persona["id"], current_subject = "alice"))
+    assert listed["personas"][0]["id"] == persona["id"]
+    assert detail["persona"]["id"] == persona["id"]
+    assert detail["persona"]["versions"][0]["templateVersion"] == "cognix_persona_template_engine_v1"
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "persona_plan_built"
+    assert log["metadata"]["blockedToolIds"] == ["github"]
 
 
 def test_rag_plan_endpoint_prepares_hybrid_retrieval_without_indexing(monkeypatch):
@@ -4444,6 +4517,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-onboarding",
         "cognix-rag",
         "cognix-dataset-builder",
+        "cognix-persona-builder",
         "cognix-fine-tuning",
         "cognix-worker-queue",
         "cognix-research-watch",
@@ -4595,6 +4669,12 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "dataset_quality_filter" in modules["cognix-dataset-builder"]["capabilities"]
     assert "/api/cognix/datasets/plan" in modules["cognix-dataset-builder"]["routes"]
     assert "/api/cognix/datasets" in modules["cognix-dataset-builder"]["routes"]
+    assert modules["cognix-persona-builder"]["dependencyState"]["ready"] is True
+    assert "persona_manager" in modules["cognix-persona-builder"]["capabilities"]
+    assert "persona_template_engine" in modules["cognix-persona-builder"]["capabilities"]
+    assert "persona_permission_binder" in modules["cognix-persona-builder"]["capabilities"]
+    assert "/api/cognix/personas/plan" in modules["cognix-persona-builder"]["routes"]
+    assert "/api/cognix/personas/{persona_id}" in modules["cognix-persona-builder"]["routes"]
     assert "worker_job_specs" in modules["cognix-worker-queue"]["capabilities"]
     assert "cloud_training_job_specs" in modules["cognix-worker-queue"]["capabilities"]
     assert "/api/cognix/workers/registry" in modules["cognix-worker-queue"]["routes"]

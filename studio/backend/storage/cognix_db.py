@@ -645,6 +645,55 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_dataset_quality_scores_dataset
             ON cognix_dataset_quality_scores(username, dataset_id, quality_score DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_personas (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            name TEXT NOT NULL,
+            role TEXT NOT NULL,
+            tone TEXT NOT NULL,
+            level TEXT NOT NULL,
+            preferred_model TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            config_json TEXT NOT NULL DEFAULT '{}',
+            system_prompt TEXT NOT NULL DEFAULT '',
+            tool_permissions_json TEXT NOT NULL DEFAULT '{}',
+            memory_scope_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_personas_username_created
+            ON cognix_personas(username, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_persona_versions (
+            id TEXT PRIMARY KEY,
+            persona_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            version_number INTEGER NOT NULL DEFAULT 1,
+            template_version TEXT NOT NULL,
+            config_json TEXT NOT NULL DEFAULT '{}',
+            system_prompt TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_persona_versions_persona
+            ON cognix_persona_versions(username, persona_id, version_number DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_persona_project_bindings (
+            id TEXT PRIMARY KEY,
+            persona_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            binding_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(username, persona_id, project_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_persona_project_bindings_project
+            ON cognix_persona_project_bindings(username, project_id, updated_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_intent_predictions (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -4164,6 +4213,196 @@ def get_generated_dataset(username: str, dataset_id: str) -> dict[str, Any] | No
         dataset["examples"] = [_hydrate_dataset_example(item) for item in _rows_to_dicts(example_rows)]
         dataset["qualityScores"] = [_hydrate_dataset_quality_score(item) for item in _rows_to_dicts(quality_rows)]
         return dataset
+    finally:
+        conn.close()
+
+
+def _hydrate_persona(row: dict[str, Any]) -> dict[str, Any]:
+    row["config"] = _json_or_default(row.get("config_json"), {})
+    row["toolPermissions"] = _json_or_default(row.get("tool_permissions_json"), {})
+    row["memoryScope"] = _json_or_default(row.get("memory_scope_json"), {})
+    return row
+
+
+def _hydrate_persona_version(row: dict[str, Any]) -> dict[str, Any]:
+    row["config"] = _json_or_default(row.get("config_json"), {})
+    return row
+
+
+def _hydrate_persona_project_binding(row: dict[str, Any]) -> dict[str, Any]:
+    row["binding"] = _json_or_default(row.get("binding_json"), {})
+    return row
+
+
+def create_persona(
+    username: str,
+    *,
+    plan: dict[str, Any],
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    now = _now()
+    persona_id = str(plan.get("personaId") or _new_id("pers"))[:160]
+    config = plan.get("config") if isinstance(plan.get("config"), dict) else {}
+    prompt_template = plan.get("systemPromptTemplate") if isinstance(plan.get("systemPromptTemplate"), dict) else {}
+    tool_permissions = plan.get("toolPermissions") if isinstance(plan.get("toolPermissions"), dict) else {}
+    memory_scope = plan.get("memoryScope") if isinstance(plan.get("memoryScope"), dict) else {}
+    binding_project_id = project_id or plan.get("projectBinding", {}).get("projectId") if isinstance(plan.get("projectBinding"), dict) else project_id
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT MAX(version_number) AS version_number FROM cognix_persona_versions WHERE username = ? AND persona_id = ?",
+            (username, persona_id),
+        ).fetchone()
+        version_number = int((row["version_number"] if row else 0) or 0) + 1
+        conn.execute(
+            """
+            INSERT INTO cognix_personas
+                (
+                    id, username, name, role, tone, level, preferred_model, status,
+                    config_json, system_prompt, tool_permissions_json,
+                    memory_scope_json, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                role = excluded.role,
+                tone = excluded.tone,
+                level = excluded.level,
+                preferred_model = excluded.preferred_model,
+                config_json = excluded.config_json,
+                system_prompt = excluded.system_prompt,
+                tool_permissions_json = excluded.tool_permissions_json,
+                memory_scope_json = excluded.memory_scope_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                persona_id,
+                username,
+                str(config.get("name") or "Persona CogniX")[:180],
+                str(config.get("role") or "Assistant CogniX")[:180],
+                str(config.get("tone") or "clear")[:80],
+                str(config.get("level") or "adaptive")[:80],
+                (str(config.get("preferredModel"))[:240] if config.get("preferredModel") else None),
+                json.dumps(config, ensure_ascii = False),
+                str(prompt_template.get("content") or ""),
+                json.dumps(tool_permissions, ensure_ascii = False),
+                json.dumps(memory_scope, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO cognix_persona_versions
+                (
+                    id, persona_id, username, version_number, template_version,
+                    config_json, system_prompt, created_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _new_id("pver"),
+                persona_id,
+                username,
+                version_number,
+                str(plan.get("templateEngineVersion") or "")[:120],
+                json.dumps(config, ensure_ascii = False),
+                str(prompt_template.get("content") or ""),
+                now,
+            ),
+        )
+        if binding_project_id:
+            binding = plan.get("projectBinding") if isinstance(plan.get("projectBinding"), dict) else {}
+            conn.execute(
+                """
+                INSERT INTO cognix_persona_project_bindings
+                    (
+                        id, persona_id, username, project_id, status,
+                        binding_json, created_at, updated_at
+                    )
+                VALUES (?, ?, ?, ?, 'active', ?, ?, ?)
+                ON CONFLICT(username, persona_id, project_id) DO UPDATE SET
+                    status = 'active',
+                    binding_json = excluded.binding_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    _new_id("pbind"),
+                    persona_id,
+                    username,
+                    str(binding_project_id)[:160],
+                    json.dumps(binding, ensure_ascii = False),
+                    now,
+                    now,
+                ),
+            )
+        conn.commit()
+        return get_persona(username, persona_id) or {}
+    finally:
+        conn.close()
+
+
+def list_personas(username: str, *, project_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        safe_limit = min(max(int(limit or 100), 1), 300)
+        if project_id:
+            rows = conn.execute(
+                """
+                SELECT p.*
+                FROM cognix_personas p
+                INNER JOIN cognix_persona_project_bindings b
+                    ON b.persona_id = p.id AND b.username = p.username
+                WHERE p.username = ? AND b.project_id = ? AND p.status = 'active'
+                ORDER BY p.updated_at DESC
+                LIMIT ?
+                """,
+                (username, project_id, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_personas
+                WHERE username = ? AND status = 'active'
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (username, safe_limit),
+            ).fetchall()
+        return [_hydrate_persona(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def get_persona(username: str, persona_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM cognix_personas WHERE id = ? AND username = ? AND status = 'active'",
+            (persona_id, username),
+        ).fetchone()
+        if row is None:
+            return None
+        persona = _hydrate_persona(row_to_dict(row) or {})
+        version_rows = conn.execute(
+            """
+            SELECT * FROM cognix_persona_versions
+            WHERE username = ? AND persona_id = ?
+            ORDER BY version_number DESC
+            """,
+            (username, persona_id),
+        ).fetchall()
+        binding_rows = conn.execute(
+            """
+            SELECT * FROM cognix_persona_project_bindings
+            WHERE username = ? AND persona_id = ? AND status = 'active'
+            ORDER BY updated_at DESC
+            """,
+            (username, persona_id),
+        ).fetchall()
+        persona["versions"] = [_hydrate_persona_version(item) for item in _rows_to_dicts(version_rows)]
+        persona["projectBindings"] = [_hydrate_persona_project_binding(item) for item in _rows_to_dicts(binding_rows)]
+        return persona
     finally:
         conn.close()
 
