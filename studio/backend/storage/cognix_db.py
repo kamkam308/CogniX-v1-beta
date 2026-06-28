@@ -397,6 +397,41 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_workflow_run_logs_run
             ON cognix_workflow_run_logs(username, run_id, created_at);
 
+        CREATE TABLE IF NOT EXISTS cognix_compressed_contexts (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            project_id TEXT,
+            context_hash TEXT NOT NULL,
+            objective_excerpt TEXT NOT NULL DEFAULT '',
+            original_token_count INTEGER NOT NULL DEFAULT 0,
+            compressed_token_count INTEGER NOT NULL DEFAULT 0,
+            reduction_ratio REAL NOT NULL DEFAULT 0,
+            compressed_context TEXT NOT NULL DEFAULT '',
+            ranking_json TEXT NOT NULL DEFAULT '[]',
+            evaluation_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_compressed_contexts_username_created
+            ON cognix_compressed_contexts(username, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_compressed_contexts_project
+            ON cognix_compressed_contexts(username, project_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_compression_logs (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            compressed_context_id TEXT,
+            event_type TEXT NOT NULL,
+            message TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_compression_logs_context
+            ON cognix_compression_logs(username, compressed_context_id, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_library_items (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -2507,6 +2542,149 @@ def export_workflow_bundle(username: str, workflow_id: str) -> dict[str, Any] | 
         "runs": list_workflow_runs(username, workflow_id, limit = 100),
         "exportedAt": _now(),
     }
+
+
+def _hydrate_compressed_context(row: dict[str, Any]) -> dict[str, Any]:
+    row["ranking"] = _json_or_default(row.get("ranking_json"), [])
+    row["evaluation"] = _json_or_default(row.get("evaluation_json"), {})
+    return row
+
+
+def _hydrate_compression_log(row: dict[str, Any]) -> dict[str, Any]:
+    row["metadata"] = _json_or_default(row.get("metadata_json"), {})
+    return row
+
+
+def create_compressed_context(
+    username: str,
+    *,
+    plan: dict[str, Any],
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    context_id = _new_id("cctx")
+    now = _now()
+    summary = plan.get("summary") if isinstance(plan.get("summary"), dict) else {}
+    evaluation = plan.get("evaluation") if isinstance(plan.get("evaluation"), dict) else {}
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_compressed_contexts
+                (
+                    id, username, project_id, context_hash, objective_excerpt,
+                    original_token_count, compressed_token_count, reduction_ratio,
+                    compressed_context, ranking_json, evaluation_json, status,
+                    created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+            """,
+            (
+                context_id,
+                username,
+                project_id or plan.get("projectId"),
+                str(plan.get("contextHash") or "")[:128],
+                str(plan.get("objective") or "")[:500],
+                int(summary.get("originalTokenCount") or evaluation.get("originalTokenCount") or 0),
+                int(summary.get("compressedTokenCount") or evaluation.get("compressedTokenCount") or 0),
+                float(summary.get("reductionRatio") or evaluation.get("reductionRatio") or 0.0),
+                str(plan.get("compressedContext") or ""),
+                json.dumps(plan.get("ranking") or [], ensure_ascii = False),
+                json.dumps(evaluation, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO cognix_compression_logs
+                (id, username, compressed_context_id, event_type, message, metadata_json, created_at)
+            VALUES (?, ?, ?, 'compression_plan_stored', ?, ?, ?)
+            """,
+            (
+                _new_id("clog"),
+                username,
+                context_id,
+                "Compressed context stored from deterministic prompt compression plan.",
+                json.dumps(
+                    {
+                        "promptCompressionVersion": plan.get("promptCompressionVersion"),
+                        "reductionRatio": summary.get("reductionRatio"),
+                        "lostInfoRisk": summary.get("lostInfoRisk"),
+                    },
+                    ensure_ascii = False,
+                ),
+                now,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_compressed_context(username, context_id) or {}
+
+
+def list_compressed_contexts(
+    username: str,
+    *,
+    include_deleted: bool = False,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 100), 1), 300)
+    conn = get_connection()
+    try:
+        clauses = ["username = ?"]
+        params: list[Any] = [username]
+        if not include_deleted:
+            clauses.append("status = 'active'")
+        params.append(safe_limit)
+        rows = conn.execute(
+            f"""
+            SELECT * FROM cognix_compressed_contexts
+            WHERE {' AND '.join(clauses)}
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_compressed_context(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def get_compressed_context(username: str, context_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM cognix_compressed_contexts WHERE id = ? AND username = ?",
+            (context_id, username),
+        ).fetchone()
+        if row is None:
+            return None
+        context = _hydrate_compressed_context(row_to_dict(row) or {})
+        log_rows = conn.execute(
+            """
+            SELECT * FROM cognix_compression_logs
+            WHERE username = ? AND compressed_context_id = ?
+            ORDER BY created_at DESC
+            """,
+            (username, context_id),
+        ).fetchall()
+        context["logs"] = [_hydrate_compression_log(item) for item in _rows_to_dicts(log_rows)]
+        return context
+    finally:
+        conn.close()
+
+
+def delete_compressed_context(username: str, context_id: str) -> bool:
+    conn = get_connection()
+    try:
+        cur = conn.execute(
+            "UPDATE cognix_compressed_contexts SET status = 'deleted', updated_at = ? WHERE id = ? AND username = ?",
+            (_now(), context_id, username),
+        )
+        conn.commit()
+        return bool(cur.rowcount)
+    finally:
+        conn.close()
 
 
 def _hydrate_response_evaluation(row: dict[str, Any]) -> dict[str, Any]:

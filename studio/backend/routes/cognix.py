@@ -38,6 +38,7 @@ from core.cognix import onboarding as cognix_onboarding
 from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import project_experts as cognix_project_experts
+from core.cognix import prompt_compression as cognix_prompt_compression
 from core.cognix import rag_planner as cognix_rag_planner
 from core.cognix import registry as cognix_registry
 from core.cognix import recommender as cognix_recommender
@@ -183,6 +184,16 @@ class WorkflowRunPlanRequest(BaseModel):
 
     run_mode: Literal["dry_run", "simulation"] = Field("dry_run", alias = "runMode")
     inputs: dict[str, Any] | None = None
+
+
+class PromptCompressionRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    context: str = Field(..., min_length = 1, max_length = 240000)
+    objective: str | None = Field(None, max_length = 4000)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    target_tokens: int = Field(500, alias = "targetTokens", ge = 64, le = 8000)
+    store_context: bool = Field(True, alias = "storeContext")
 
 
 class ResearchIntegrationPlanRequest(BaseModel):
@@ -687,6 +698,15 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "run_mode": "runMode",
         "run_plan_json": "runPlanJson",
         "step_id": "stepId",
+        "context_hash": "contextHash",
+        "objective_excerpt": "objectiveExcerpt",
+        "original_token_count": "originalTokenCount",
+        "compressed_token_count": "compressedTokenCount",
+        "reduction_ratio": "reductionRatio",
+        "compressed_context": "compressedContext",
+        "ranking_json": "rankingJson",
+        "event_type": "eventType",
+        "compressed_context_id": "compressedContextId",
     }
     for source, target in alias_map.items():
         if source in out:
@@ -4123,6 +4143,150 @@ async def workflow_runs(
             "modelLoad": False,
             "generation": False,
         },
+    }
+
+
+@router.get("/prompt-compression/blueprint")
+async def prompt_compression_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_prompt_compression.build_prompt_compression_blueprint()
+    return {
+        "username": current_subject,
+        "promptCompressionBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_prompt_compression.COGNIX_PROMPT_COMPRESSION_VERSION,
+    }
+
+
+@router.post("/prompt-compression/plan")
+async def prompt_compression_plan(
+    payload: PromptCompressionRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_prompt_compression.build_prompt_compression_plan(
+        username = current_subject,
+        context = payload.context,
+        objective = payload.objective,
+        target_tokens = payload.target_tokens,
+        project_id = payload.project_id,
+    )
+    stored_context = (
+        cognix_db.create_compressed_context(
+            current_subject,
+            plan = plan,
+            project_id = payload.project_id,
+        )
+        if payload.store_context
+        else None
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "compressionWrite": stored_context is not None,
+        "logWrite": stored_context is not None,
+        "modelLoad": False,
+        "generation": False,
+        "networkCall": False,
+        "promptMutation": False,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "prompt_compression_plan_built",
+        resource_type = "cognix_prompt_compression",
+        resource_id = str((stored_context or {}).get("id") or payload.project_id or current_subject),
+        severity = "notice",
+        metadata = {
+            "promptCompressionVersion": plan.get("promptCompressionVersion"),
+            "contextRankerVersion": plan.get("contextRankerVersion"),
+            "compressionEvaluatorVersion": plan.get("compressionEvaluatorVersion"),
+            "originalTokenCount": plan.get("summary", {}).get("originalTokenCount"),
+            "compressedTokenCount": plan.get("summary", {}).get("compressedTokenCount"),
+            "reductionRatio": plan.get("summary", {}).get("reductionRatio"),
+            "lostInfoRisk": plan.get("summary", {}).get("lostInfoRisk"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "compressionPlan": plan,
+        "compressedContext": _row(stored_context) if stored_context else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_prompt_compression.COGNIX_PROMPT_COMPRESSION_VERSION,
+    }
+
+
+@router.get("/prompt-compression/contexts")
+async def list_compressed_contexts(
+    include_deleted: bool = False,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    return {
+        "contexts": _rows(cognix_db.list_compressed_contexts(current_subject, include_deleted = include_deleted)),
+        "sideEffects": {
+            "compressionWrite": False,
+            "logWrite": False,
+            "modelLoad": False,
+            "generation": False,
+            "networkCall": False,
+            "promptMutation": False,
+        },
+    }
+
+
+@router.get("/prompt-compression/contexts/{context_id}")
+async def get_compressed_context(
+    context_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    context = cognix_db.get_compressed_context(current_subject, context_id)
+    if context is None:
+        raise HTTPException(status_code = 404, detail = "Compressed context not found")
+    return {
+        "compressedContext": _row(context),
+        "sideEffects": {
+            "compressionWrite": False,
+            "logWrite": False,
+            "modelLoad": False,
+            "generation": False,
+            "networkCall": False,
+            "promptMutation": False,
+        },
+    }
+
+
+@router.delete("/prompt-compression/contexts/{context_id}")
+async def delete_compressed_context(
+    context_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    deleted = cognix_db.delete_compressed_context(current_subject, context_id)
+    if not deleted:
+        raise HTTPException(status_code = 404, detail = "Compressed context not found")
+    side_effects = {
+        "compressionWrite": True,
+        "logWrite": False,
+        "modelLoad": False,
+        "generation": False,
+        "networkCall": False,
+        "promptMutation": False,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "prompt_compression_context_deleted",
+        resource_type = "cognix_prompt_compression",
+        resource_id = context_id,
+        severity = "notice",
+        metadata = {"contextId": context_id, "sideEffects": side_effects},
+    )
+    return {
+        "deleted": True,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_prompt_compression.COGNIX_PROMPT_COMPRESSION_VERSION,
     }
 
 

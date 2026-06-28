@@ -31,6 +31,7 @@ from core.cognix import onboarding as cognix_onboarding
 from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import project_experts as cognix_project_experts
+from core.cognix import prompt_compression as cognix_prompt_compression
 from core.cognix import rag_planner as cognix_rag_planner
 from core.cognix import research_watch as cognix_research_watch
 from core.cognix import response_reflection as cognix_response_reflection
@@ -2630,6 +2631,93 @@ def test_workflow_update_export_and_delete_are_user_scoped_and_audited():
     }.issubset(actions)
 
 
+def test_prompt_compression_blueprint_declares_badge_and_no_generation():
+    blueprint = cognix_prompt_compression.build_prompt_compression_blueprint()
+
+    assert blueprint["promptCompressionVersion"] == "cognix_prompt_compression_v1"
+    assert blueprint["contextRankerVersion"] == "cognix_context_ranker_v1"
+    assert blueprint["compressionEvaluatorVersion"] == "cognix_compression_evaluator_v1"
+    assert blueprint["display"]["badge"] == "Context optimized"
+    assert blueprint["display"]["badgeOnly"] is True
+    assert blueprint["policies"]["modelGenerationAllowed"] is False
+    assert blueprint["policies"]["frontendDirectCompressionWriteAllowed"] is False
+    assert blueprint["sideEffects"]["compressionWrite"] is False
+    assert blueprint["sideEffects"]["logWrite"] is False
+    assert blueprint["sideEffects"]["modelLoad"] is False
+    assert blueprint["sideEffects"]["generation"] is False
+    assert blueprint["sideEffects"]["promptMutation"] is False
+
+
+def test_prompt_compression_plan_reduces_tokens_and_preserves_objective_terms():
+    context = " ".join(
+        [
+            "Le projet RAG PDF doit indexer les documents et garder les citations.",
+            "Il faut extraire des QCM et une fiche de revision claire.",
+            "Phrase de bruit sur une preference visuelle sans lien direct.",
+            "Autre detail peu important sur la couleur de fond.",
+        ]
+        * 25
+    )
+    plan = cognix_prompt_compression.build_prompt_compression_plan(
+        username = "alice",
+        context = context,
+        objective = "RAG PDF QCM citations",
+        target_tokens = 90,
+    )
+
+    assert plan["promptCompressionVersion"] == "cognix_prompt_compression_v1"
+    assert plan["summary"]["compressedTokenCount"] < plan["summary"]["originalTokenCount"]
+    assert plan["summary"]["reductionRatio"] > 0
+    assert plan["summary"]["badge"] == "Context optimized"
+    assert plan["evaluation"]["retainedObjectiveRatio"] >= 0.45
+    assert plan["sideEffects"]["generation"] is False
+    assert plan["sideEffects"]["promptMutation"] is False
+
+
+def test_prompt_compression_endpoint_stores_lists_deletes_and_audits():
+    seed_accounts()
+    context = " ".join(
+        [
+            "Objectif important: compresser un contexte RAG PDF avec citations et QCM.",
+            "Decision: garder les sources, les tests et les contraintes de securite.",
+            "Bruit: phrase secondaire sans impact sur la reponse finale.",
+        ]
+        * 30
+    )
+    body = run_async(
+        cognix_routes.prompt_compression_plan(
+            cognix_routes.PromptCompressionRequest(
+                context = context,
+                objective = "RAG PDF citations QCM securite",
+                targetTokens = 120,
+                storeContext = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    context_id = body["compressedContext"]["id"]
+    listed = run_async(cognix_routes.list_compressed_contexts(current_subject = "alice"))
+    bob_listed = run_async(cognix_routes.list_compressed_contexts(current_subject = "bob"))
+    fetched = run_async(cognix_routes.get_compressed_context(context_id, current_subject = "alice"))
+    deleted = run_async(cognix_routes.delete_compressed_context(context_id, current_subject = "alice"))
+    after_delete = run_async(cognix_routes.list_compressed_contexts(current_subject = "alice"))
+
+    assert body["auditLogId"].startswith("aud_")
+    assert body["sideEffects"]["compressionWrite"] is True
+    assert body["sideEffects"]["generation"] is False
+    assert context_id.startswith("cctx_")
+    assert listed["contexts"][0]["id"] == context_id
+    assert bob_listed["contexts"] == []
+    assert fetched["compressedContext"]["logs"][0]["eventType"] == "compression_plan_stored"
+    assert deleted["deleted"] is True
+    assert deleted["sideEffects"]["promptMutation"] is False
+    assert after_delete["contexts"] == []
+
+    logs = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))["logs"]
+    actions = {item["action"] for item in logs}
+    assert {"prompt_compression_plan_built", "prompt_compression_context_deleted"}.issubset(actions)
+
+
 def test_codex_pipeline_plans_required_gates_without_modifying_code():
     plan = cognix_codex_pipeline.build_codex_pipeline_plan(
         objective = "Ajoute un module CogniX Chemistry dans le code source",
@@ -3239,6 +3327,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-local-core",
         "cognix-model-lifecycle",
         "cognix-optimization-engine",
+        "cognix-prompt-compression",
         "cognix-thinking-status",
         "cognix-response-reflection",
         "cognix-multi-draft-generation",
@@ -3271,6 +3360,12 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "benchmark_gated_experiments" in modules["cognix-optimization-engine"]["capabilities"]
     assert "/api/cognix/optimizations/capabilities" in modules["cognix-optimization-engine"]["routes"]
     assert "/api/cognix/optimizations/experiment-plan" in modules["cognix-optimization-engine"]["routes"]
+    assert modules["cognix-prompt-compression"]["dependencyState"]["ready"] is True
+    assert "prompt_compression" in modules["cognix-prompt-compression"]["capabilities"]
+    assert "importance_ranking" in modules["cognix-prompt-compression"]["capabilities"]
+    assert "compression_evaluation" in modules["cognix-prompt-compression"]["capabilities"]
+    assert "/api/cognix/prompt-compression/plan" in modules["cognix-prompt-compression"]["routes"]
+    assert "/api/cognix/prompt-compression/contexts" in modules["cognix-prompt-compression"]["routes"]
     assert modules["cognix-thinking-status"]["activationState"] == "ready"
     assert "technical_redaction" in modules["cognix-thinking-status"]["capabilities"]
     assert "/api/cognix/thinking/plan" in modules["cognix-thinking-status"]["routes"]
