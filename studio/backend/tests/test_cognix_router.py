@@ -17,6 +17,7 @@ from auth.authentication import get_current_jwt_subject
 from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import context_manager as cognix_context_manager
 from core.cognix import decision_engine as cognix_decision_engine
+from core.cognix import integration_manager as cognix_integration_manager
 from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import tool_registry as cognix_tool_registry
 from core.cognix.router import classify_objective
@@ -665,6 +666,57 @@ def test_tool_registry_declares_permissions_and_guardrails():
     kali_actions = {action["id"]: action for action in tools["kali-isolated"]["actions"]}
     assert kali_actions["active_test"]["sandboxRequired"] is True
     assert "admin" in kali_actions["active_test"]["permissions"]
+
+
+def test_integration_manager_summarizes_connectors_without_secret_access():
+    status = cognix_integration_manager.build_integration_status(
+        username = "alice",
+        is_admin = False,
+        has_developer_mode = True,
+        granted_permissions = {"github:read"},
+    )
+
+    assert status["integrationManagerVersion"] == "cognix_integration_manager_v1"
+    assert status["mode"] == "dry_run"
+    assert status["summary"]["directFrontendExecutionAllowed"] is False
+    assert status["policies"]["secretsStayServerSide"] is True
+    assert status["sideEffects"]["secretRead"] is False
+    assert status["sideEffects"]["toolExecution"] is False
+
+    integrations = {item["id"]: item for item in status["integrations"]}
+    assert integrations["github"]["status"] == "declared_disabled"
+    assert integrations["github"]["secretState"] == "required_unverified"
+    assert any(item["id"] == "configure_server_secret" for item in integrations["github"]["nextActions"])
+    assert integrations["codex-secure-agent"]["enabled"] is True
+
+
+def test_integration_plan_endpoint_writes_sanitized_audit_log():
+    seed_accounts()
+
+    body = run_async(
+        cognix_routes.plan_integration(
+            cognix_routes.IntegrationPlanRequest(tool_id = "github"),
+            current_subject = "alice",
+        )
+    )
+
+    assert body["auditLogId"].startswith("aud_")
+    assert body["integrationManagerVersion"] == "cognix_integration_manager_v1"
+    assert body["status"] == "declared_disabled"
+    assert body["allowedToActivate"] is False
+    assert body["sideEffects"]["secretRead"] is False
+    assert body["sideEffects"]["networkToolCall"] is False
+    assert any(item["id"] == "enable_connector" for item in body["nextActions"])
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "integration_plan_built"
+    assert log["resourceType"] == "cognix_integration"
+    assert log["metadata"]["integrationManagerVersion"] == "cognix_integration_manager_v1"
+    assert log["metadata"]["sideEffects"]["secretRead"] is False
+    assert "access_token" not in log["metadataJson"].lower()
+    assert "secret_value" not in log["metadataJson"].lower()
 
 
 def test_tool_plan_endpoint_allows_safe_declared_action_and_logs_audit():

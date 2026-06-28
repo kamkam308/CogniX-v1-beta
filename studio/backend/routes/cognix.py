@@ -22,6 +22,7 @@ from core.cognix import benchmark as cognix_benchmark
 from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import context_manager as cognix_context_manager
 from core.cognix import hardware as cognix_hardware
+from core.cognix import integration_manager as cognix_integration_manager
 from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import registry as cognix_registry
 from core.cognix import recommender as cognix_recommender
@@ -173,6 +174,10 @@ class RagPlanRequest(BaseModel):
 class ToolActionPlanRequest(BaseModel):
     tool_id: str = Field(..., min_length = 1, max_length = 120)
     action_id: str = Field(..., min_length = 1, max_length = 120)
+
+
+class IntegrationPlanRequest(BaseModel):
+    tool_id: str = Field(..., min_length = 1, max_length = 120)
 
 
 class BenchmarkRunRequest(BaseModel):
@@ -340,6 +345,15 @@ def _rag_available() -> bool | None:
         return bool(getattr(rag_db, "RAG_AVAILABLE", False))
     except Exception:
         return None
+
+
+def _granted_permission_keys(username: str) -> set[str]:
+    permissions: set[str] = set()
+    for item in cognix_db.list_user_permissions(username):
+        key = item.get("permission_key") or item.get("permissionKey")
+        if isinstance(key, str) and key.strip():
+            permissions.add(key.strip().lower())
+    return permissions
 
 
 def _rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -966,6 +980,63 @@ async def tool_registry(current_subject: str = Depends(get_current_jwt_subject))
         "username": current_subject,
         "registry": cognix_tool_registry.build_tool_registry(),
     }
+
+
+@router.get("/integrations/status")
+async def integrations_status(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    is_admin = auth_storage.is_admin(current_subject)
+    has_developer_mode = cognix_db.user_has_permission(
+        current_subject,
+        cognix_db.DEVELOPER_MODE_PERMISSION,
+    )
+    return cognix_integration_manager.build_integration_status(
+        username = current_subject,
+        is_admin = is_admin,
+        has_developer_mode = has_developer_mode,
+        granted_permissions = _granted_permission_keys(current_subject),
+    )
+
+
+@router.post("/integrations/plan")
+async def plan_integration(
+    payload: IntegrationPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    is_admin = auth_storage.is_admin(current_subject)
+    has_developer_mode = cognix_db.user_has_permission(
+        current_subject,
+        cognix_db.DEVELOPER_MODE_PERMISSION,
+    )
+    plan = cognix_integration_manager.build_integration_plan(
+        tool_id = payload.tool_id,
+        username = current_subject,
+        is_admin = is_admin,
+        has_developer_mode = has_developer_mode,
+        granted_permissions = _granted_permission_keys(current_subject),
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "integration_plan_built",
+        resource_type = "cognix_integration",
+        resource_id = str(payload.tool_id),
+        severity = "warning" if plan.get("humanApprovalRequired") else "notice",
+        metadata = {
+            "integrationManagerVersion": plan.get("integrationManagerVersion"),
+            "toolId": plan.get("toolId"),
+            "connector": plan.get("connector"),
+            "status": plan.get("status"),
+            "allowedToActivate": plan.get("allowedToActivate"),
+            "humanApprovalRequired": plan.get("humanApprovalRequired"),
+            "missingPermissions": plan.get("integration", {}).get("missingPermissions", []),
+            "nextActionIds": [
+                item.get("id") for item in plan.get("nextActions", []) if isinstance(item, dict)
+            ],
+            "sideEffects": plan.get("sideEffects", {}),
+        },
+    )
+    plan["auditLogId"] = audit.get("id")
+    return plan
 
 
 @router.post("/tools/plan")
