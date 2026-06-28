@@ -124,6 +124,28 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "dependencies": ["cognix-local-core", "cognix-model-lifecycle"],
     },
     {
+        "id": "cognix-response-reflection",
+        "displayName": "CogniX Response Reflection",
+        "editionTargets": ["free", "local", "developer", "business", "university", "enterprise"],
+        "status": "planned",
+        "capabilities": [
+            "response_quality_evaluation",
+            "confidence_scoring",
+            "verification_recommendation",
+            "reflection_logs",
+            "raw_reasoning_redaction",
+        ],
+        "routes": [
+            "/api/cognix/reflection/evaluate",
+            "/api/cognix/reflection/evaluations",
+        ],
+        "permissions": ["authenticated"],
+        "tools": [],
+        "defaultModels": [],
+        "uiPanels": ["chat"],
+        "dependencies": ["cognix-local-core", "cognix-thinking-status"],
+    },
+    {
         "id": "cognix-memory-manager",
         "displayName": "CogniX Memory Manager",
         "editionTargets": ["free", "local", "developer", "business", "university", "enterprise"],

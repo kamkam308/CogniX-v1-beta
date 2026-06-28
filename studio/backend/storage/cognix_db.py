@@ -290,6 +290,27 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_library_username_created
             ON cognix_library_items(username, created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_response_evaluations (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            message_id TEXT,
+            thread_id TEXT,
+            project_id TEXT,
+            model_id TEXT,
+            confidence_score REAL NOT NULL,
+            confidence_label TEXT NOT NULL,
+            verification_required INTEGER NOT NULL DEFAULT 0,
+            recommended_action TEXT NOT NULL,
+            issues_json TEXT NOT NULL DEFAULT '[]',
+            evaluation_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_response_eval_username_created
+            ON cognix_response_evaluations(username, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_response_eval_message
+            ON cognix_response_evaluations(username, message_id, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_scheduled_tasks (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -1464,6 +1485,103 @@ def create_library_item(
         item = row_to_dict(row) or {}
         item["metadata"] = _json_or_default(item.get("metadata_json"), {})
         return item
+    finally:
+        conn.close()
+
+
+def _hydrate_response_evaluation(row: dict[str, Any]) -> dict[str, Any]:
+    row["issues"] = _json_or_default(row.get("issues_json"), [])
+    row["evaluation"] = _json_or_default(row.get("evaluation_json"), {})
+    row["verification_required"] = bool(row.get("verification_required"))
+    return row
+
+
+def list_response_evaluations(
+    username: str,
+    *,
+    message_id: str | None = None,
+    limit: int = 80,
+) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 80), 1), 200)
+    conn = get_connection()
+    try:
+        if message_id:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_response_evaluations
+                WHERE username = ? AND message_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, message_id, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_response_evaluations
+                WHERE username = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, safe_limit),
+            ).fetchall()
+        return [_hydrate_response_evaluation(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def create_response_evaluation(
+    username: str,
+    *,
+    evaluation: dict[str, Any],
+    message_id: str | None = None,
+    thread_id: str | None = None,
+    project_id: str | None = None,
+    model_id: str | None = None,
+) -> dict[str, Any]:
+    created_at = _now()
+    evaluation_id = _new_id("rfl")
+    confidence = evaluation.get("confidence") if isinstance(evaluation.get("confidence"), dict) else {}
+    issues = evaluation.get("issues") if isinstance(evaluation.get("issues"), list) else []
+    score = float(confidence.get("score") or 0.0)
+    label = str(confidence.get("label") or "unknown")
+    verification_required = 1 if confidence.get("verificationRequired") else 0
+    recommended_action = str(confidence.get("recommendedAction") or "unknown")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_response_evaluations
+                (
+                    id, username, message_id, thread_id, project_id, model_id,
+                    confidence_score, confidence_label, verification_required,
+                    recommended_action, issues_json, evaluation_json, created_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                evaluation_id,
+                username,
+                message_id,
+                thread_id,
+                project_id,
+                model_id,
+                score,
+                label,
+                verification_required,
+                recommended_action,
+                json.dumps(issues, ensure_ascii = False),
+                json.dumps(evaluation, ensure_ascii = False),
+                created_at,
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM cognix_response_evaluations WHERE id = ?",
+            (evaluation_id,),
+        ).fetchone()
+        stored = row_to_dict(row) or {}
+        return _hydrate_response_evaluation(stored)
     finally:
         conn.close()
 

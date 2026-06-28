@@ -30,6 +30,7 @@ from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import project_experts as cognix_project_experts
 from core.cognix import rag_planner as cognix_rag_planner
 from core.cognix import research_watch as cognix_research_watch
+from core.cognix import response_reflection as cognix_response_reflection
 from core.cognix import runtime_adapter as cognix_runtime_adapter
 from core.cognix import thinking_status as cognix_thinking_status
 from core.cognix import tool_registry as cognix_tool_registry
@@ -1723,6 +1724,119 @@ def test_thinking_status_endpoint_logs_audited_visible_plan(monkeypatch):
     assert log["metadata"]["sideEffects"]["uiMutation"] is False
 
 
+def test_response_reflection_scores_reliable_answer_without_model_calls():
+    evaluation = cognix_response_reflection.build_response_reflection_evaluation(
+        prompt = "Explique pourquoi le RAG est preferable au fine-tuning pour un document de cours.",
+        response = (
+            "Le RAG est preferable quand l'objectif est d'utiliser des informations presentes "
+            "dans un document sans modifier le comportement du modele. Il garde les sources "
+            "separees, permet de citer les passages utiles et evite un entrainement inutile."
+        ),
+        response_sources = [{"id": "src_1", "title": "Cours IA"}],
+        requires_sources = True,
+        task_type = "rag",
+        model_id = "cognix-general",
+    )
+
+    assert evaluation["reflectionVersion"] == "cognix_response_reflection_v1"
+    assert evaluation["confidence"]["label"] == "high"
+    assert evaluation["confidence"]["verificationRequired"] is False
+    assert evaluation["confidence"]["recommendedAction"] == "accept"
+    assert evaluation["qualitySignals"]["sourceCount"] == 1
+    assert evaluation["policies"]["rawChainOfThoughtAllowed"] is False
+    assert evaluation["policies"]["frontendMustNotShowHiddenReasoning"] is True
+    assert evaluation["sideEffects"]["modelLoad"] is False
+    assert evaluation["sideEffects"]["generation"] is False
+    assert evaluation["sideEffects"]["networkModelCall"] is False
+    assert evaluation["sideEffects"]["rawReasoningExposure"] is False
+
+
+def test_response_reflection_flags_missing_sources_and_incomplete_answer():
+    evaluation = cognix_response_reflection.build_response_reflection_evaluation(
+        prompt = "Donne une reponse detaillee avec sources sur la securite des outils connectes.",
+        response = "C'est probablement securise.",
+        response_sources = [],
+        requires_sources = True,
+        task_type = "security",
+    )
+
+    issue_ids = {item["id"] for item in evaluation["issues"]}
+    assert evaluation["confidence"]["verificationRequired"] is True
+    assert evaluation["confidence"]["recommendedAction"] in {"verify_with_sources", "second_pass_recommended"}
+    assert "missing_sources" in issue_ids
+    assert "incomplete_response" in issue_ids
+    assert evaluation["userVisibleMetadata"]["showExpandableDetails"] is True
+    assert evaluation["sideEffects"]["toolExecution"] is False
+    assert evaluation["sideEffects"]["memoryWrite"] is False
+
+
+def test_response_reflection_endpoint_stores_evaluation_and_logs_audit():
+    seed_accounts()
+
+    body = run_async(
+        cognix_routes.response_reflection_evaluate(
+            cognix_routes.ResponseReflectionRequest(
+                prompt = "Resume ce document avec les sources principales.",
+                response = "Resume trop court.",
+                message_id = "msg_1",
+                thread_id = "thread_1",
+                project_id = None,
+                model_id = "cognix-general",
+                requires_sources = True,
+                response_sources = [],
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    reflection = body["responseReflection"]
+    record = body["record"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_response_reflection_v1"
+    assert reflection["confidence"]["verificationRequired"] is True
+    assert record["id"].startswith("rfl_")
+    assert record["messageId"] == "msg_1"
+    assert record["verificationRequired"] is True
+    assert body["sideEffects"]["modelLoad"] is False
+    assert body["sideEffects"]["generation"] is False
+    assert body["sideEffects"]["networkModelCall"] is False
+    assert body["sideEffects"]["evaluationWrite"] is True
+
+    evaluations = cognix_db.list_response_evaluations("alice", message_id = "msg_1")
+    assert len(evaluations) == 1
+    assert evaluations[0]["id"] == record["id"]
+    assert evaluations[0]["evaluation"]["reflectionVersion"] == "cognix_response_reflection_v1"
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "response_reflection_evaluated"
+    assert log["metadata"]["responseReflectionVersion"] == "cognix_response_reflection_v1"
+    assert log["metadata"]["verificationRequired"] is True
+    assert log["metadata"]["sideEffects"]["generation"] is False
+    assert log["metadata"]["storageSideEffects"]["evaluationWrite"] is True
+
+
+def test_response_reflection_list_endpoint_is_user_scoped():
+    seed_accounts()
+    alice_eval = cognix_response_reflection.build_response_reflection_evaluation(
+        prompt = "Explique CogniX.",
+        response = "CogniX orchestre les modeles, outils et memoire.",
+    )
+    bob_eval = cognix_response_reflection.build_response_reflection_evaluation(
+        prompt = "Explique CogniX.",
+        response = "CogniX est une plateforme IA modulaire.",
+    )
+    cognix_db.create_response_evaluation("alice", evaluation = alice_eval, message_id = "msg_alice")
+    cognix_db.create_response_evaluation("bob", evaluation = bob_eval, message_id = "msg_bob")
+
+    body = run_async(cognix_routes.response_reflection_evaluations(current_subject = "alice"))
+
+    assert body["username"] == "alice"
+    assert len(body["evaluations"]) == 1
+    assert body["evaluations"][0]["messageId"] == "msg_alice"
+
+
 def test_codex_pipeline_plans_required_gates_without_modifying_code():
     plan = cognix_codex_pipeline.build_codex_pipeline_plan(
         objective = "Ajoute un module CogniX Chemistry dans le code source",
@@ -2333,6 +2447,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-model-lifecycle",
         "cognix-optimization-engine",
         "cognix-thinking-status",
+        "cognix-response-reflection",
         "cognix-memory-manager",
         "cognix-onboarding",
         "cognix-rag",
@@ -2360,6 +2475,11 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert modules["cognix-thinking-status"]["activationState"] == "ready"
     assert "technical_redaction" in modules["cognix-thinking-status"]["capabilities"]
     assert "/api/cognix/thinking/plan" in modules["cognix-thinking-status"]["routes"]
+    assert modules["cognix-response-reflection"]["dependencyState"]["ready"] is True
+    assert "response_quality_evaluation" in modules["cognix-response-reflection"]["capabilities"]
+    assert "raw_reasoning_redaction" in modules["cognix-response-reflection"]["capabilities"]
+    assert "/api/cognix/reflection/evaluate" in modules["cognix-response-reflection"]["routes"]
+    assert "/api/cognix/reflection/evaluations" in modules["cognix-response-reflection"]["routes"]
     assert modules["cognix-memory-manager"]["activationState"] == "ready"
     assert "central_memory_layers" in modules["cognix-memory-manager"]["capabilities"]
     assert "/api/cognix/memory/plan" in modules["cognix-memory-manager"]["routes"]

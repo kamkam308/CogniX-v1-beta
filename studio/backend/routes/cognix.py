@@ -39,6 +39,7 @@ from core.cognix import rag_planner as cognix_rag_planner
 from core.cognix import registry as cognix_registry
 from core.cognix import recommender as cognix_recommender
 from core.cognix import research_watch as cognix_research_watch
+from core.cognix import response_reflection as cognix_response_reflection
 from core.cognix import runtime_adapter as cognix_runtime_adapter
 from core.cognix import thinking_status as cognix_thinking_status
 from core.cognix import tool_registry as cognix_tool_registry
@@ -170,6 +171,20 @@ class ThinkingStatusPlanRequest(BaseModel):
     project_id: str | None = Field(None, alias = "projectId", max_length = 160)
     project_type: str | None = Field(None, alias = "projectType", max_length = 80)
     audience: Literal["chat", "project", "onboarding"] = "chat"
+
+
+class ResponseReflectionRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    prompt: str = Field(..., min_length = 1, max_length = 120000)
+    response: str = Field("", max_length = 400000)
+    message_id: str | None = Field(None, alias = "messageId", max_length = 160)
+    thread_id: str | None = Field(None, alias = "threadId", max_length = 160)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    model_id: str | None = Field(None, alias = "modelId", max_length = 240)
+    task_type: str | None = Field(None, alias = "taskType", max_length = 80)
+    requires_sources: bool = Field(False, alias = "requiresSources")
+    response_sources: list[dict[str, Any]] | None = Field(None, alias = "responseSources")
 
 
 class ProjectDefaultModelRequest(BaseModel):
@@ -470,12 +485,22 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "needs_clarification": "needsClarification",
         "routing_mode": "routingMode",
         "scores_json": "scoresJson",
+        "message_id": "messageId",
+        "thread_id": "threadId",
+        "confidence_score": "confidenceScore",
+        "confidence_label": "confidenceLabel",
+        "verification_required": "verificationRequired",
+        "recommended_action": "recommendedAction",
+        "issues_json": "issuesJson",
+        "evaluation_json": "evaluationJson",
     }
     for source, target in alias_map.items():
         if source in out:
             out[target] = out[source]
     if "needsClarification" in out:
         out["needsClarification"] = bool(out["needsClarification"])
+    if "verificationRequired" in out:
+        out["verificationRequired"] = bool(out["verificationRequired"])
     return out
 
 
@@ -1375,6 +1400,79 @@ async def thinking_status_plan(
         "auditLogId": audit.get("id"),
         "sideEffects": thinking.get("sideEffects", {}),
         "plannerVersion": cognix_thinking_status.COGNIX_THINKING_STATUS_VERSION,
+    }
+
+
+@router.post("/reflection/evaluate")
+async def response_reflection_evaluate(
+    payload: ResponseReflectionRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    evaluation = cognix_response_reflection.build_response_reflection_evaluation(
+        prompt = payload.prompt,
+        response = payload.response,
+        response_sources = payload.response_sources,
+        requires_sources = payload.requires_sources,
+        task_type = payload.task_type,
+        model_id = payload.model_id,
+    )
+    record = cognix_db.create_response_evaluation(
+        current_subject,
+        evaluation = evaluation,
+        message_id = payload.message_id,
+        thread_id = payload.thread_id,
+        project_id = payload.project_id,
+        model_id = payload.model_id,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "response_reflection_evaluated",
+        resource_type = "cognix_response_evaluation",
+        resource_id = record.get("id"),
+        severity = "warning" if evaluation.get("confidence", {}).get("verificationRequired") else "notice",
+        metadata = {
+            "responseReflectionVersion": evaluation.get("reflectionVersion"),
+            "confidenceScore": evaluation.get("confidence", {}).get("score"),
+            "confidenceLabel": evaluation.get("confidence", {}).get("label"),
+            "verificationRequired": evaluation.get("confidence", {}).get("verificationRequired"),
+            "recommendedAction": evaluation.get("confidence", {}).get("recommendedAction"),
+            "issueIds": [str(item.get("id")) for item in evaluation.get("issues", []) if isinstance(item, dict)],
+            "messageId": payload.message_id,
+            "threadId": payload.thread_id,
+            "projectId": payload.project_id,
+            "sideEffects": evaluation.get("sideEffects", {}),
+            "storageSideEffects": {"evaluationWrite": True, "auditWrite": True},
+        },
+    )
+    return {
+        "username": current_subject,
+        "responseReflection": evaluation,
+        "record": _row(record),
+        "auditLogId": audit.get("id"),
+        "sideEffects": {
+            **evaluation.get("sideEffects", {}),
+            "evaluationWrite": True,
+            "auditWrite": True,
+        },
+        "plannerVersion": cognix_response_reflection.COGNIX_RESPONSE_REFLECTION_VERSION,
+    }
+
+
+@router.get("/reflection/evaluations")
+async def response_reflection_evaluations(
+    message_id: str | None = None,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    evaluations = cognix_db.list_response_evaluations(
+        current_subject,
+        message_id = message_id,
+    )
+    return {
+        "username": current_subject,
+        "evaluations": _rows(evaluations),
     }
 
 
