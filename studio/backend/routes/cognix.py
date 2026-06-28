@@ -31,6 +31,7 @@ from core.cognix import fine_tuning_planner as cognix_fine_tuning_planner
 from core.cognix import governance_manager as cognix_governance_manager
 from core.cognix import hardware as cognix_hardware
 from core.cognix import integration_manager as cognix_integration_manager
+from core.cognix import intent_prediction as cognix_intent_prediction
 from core.cognix import memory_manager as cognix_memory_manager
 from core.cognix import model_lifecycle as cognix_model_lifecycle
 from core.cognix import module_registry as cognix_module_registry
@@ -194,6 +195,16 @@ class PromptCompressionRequest(BaseModel):
     project_id: str | None = Field(None, alias = "projectId", max_length = 160)
     target_tokens: int = Field(500, alias = "targetTokens", ge = 64, le = 8000)
     store_context: bool = Field(True, alias = "storeContext")
+
+
+class IntentPredictionRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    project_type: str | None = Field(None, alias = "projectType", max_length = 120)
+    draft_text: str | None = Field(None, alias = "draftText", max_length = 12000)
+    recent_messages: list[Any] = Field(default_factory = list, alias = "recentMessages")
+    store_prediction: bool = Field(True, alias = "storePrediction")
 
 
 class ResearchIntegrationPlanRequest(BaseModel):
@@ -707,6 +718,12 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "ranking_json": "rankingJson",
         "event_type": "eventType",
         "compressed_context_id": "compressedContextId",
+        "selected_domain": "selectedDomain",
+        "probabilities_json": "probabilitiesJson",
+        "suggestion_json": "suggestionJson",
+        "preload_plan_json": "preloadPlanJson",
+        "prediction_id": "predictionId",
+        "target_model_id": "targetModelId",
     }
     for source, target in alias_map.items():
         if source in out:
@@ -4287,6 +4304,115 @@ async def delete_compressed_context(
         "auditLogId": audit.get("id"),
         "sideEffects": side_effects,
         "plannerVersion": cognix_prompt_compression.COGNIX_PROMPT_COMPRESSION_VERSION,
+    }
+
+
+@router.get("/intent/blueprint")
+async def intent_prediction_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_intent_prediction.build_intent_prediction_blueprint()
+    return {
+        "username": current_subject,
+        "intentPredictionBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_intent_prediction.COGNIX_INTENT_PREDICTION_VERSION,
+    }
+
+
+@router.post("/intent/predict")
+async def intent_predict(
+    payload: IntentPredictionRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    prediction = cognix_intent_prediction.build_intent_prediction(
+        username = current_subject,
+        project_type = payload.project_type,
+        draft_text = payload.draft_text,
+        recent_messages = payload.recent_messages,
+        project_id = payload.project_id,
+    )
+    input_excerpt = " ".join(
+        item
+        for item in [payload.project_type or "", payload.draft_text or ""]
+        if item
+    )[:1000]
+    stored_prediction = (
+        cognix_db.create_intent_prediction(
+            current_subject,
+            prediction = prediction,
+            project_id = payload.project_id,
+            input_excerpt = input_excerpt,
+        )
+        if payload.store_prediction
+        else None
+    )
+    side_effects = {
+        **prediction.get("sideEffects", {}),
+        "predictionWrite": stored_prediction is not None,
+        "preloadEventWrite": bool((stored_prediction or {}).get("preloadEvents")),
+        "modelLoad": False,
+        "modelUnload": False,
+        "generation": False,
+        "networkCall": False,
+        "uiSuggestion": False,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "intent_prediction_built",
+        resource_type = "cognix_intent_prediction",
+        resource_id = str((stored_prediction or {}).get("id") or payload.project_id or current_subject),
+        severity = "notice",
+        metadata = {
+            "intentPredictionVersion": prediction.get("intentPredictionVersion"),
+            "preloadSchedulerVersion": prediction.get("preloadSchedulerVersion"),
+            "selectedDomain": prediction.get("selectedDomain"),
+            "confidence": prediction.get("confidence"),
+            "suggestionCount": prediction.get("summary", {}).get("suggestionCount"),
+            "abruptDomainChange": prediction.get("summary", {}).get("abruptDomainChange"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "intentPrediction": prediction,
+        "storedPrediction": _row(stored_prediction) if stored_prediction else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_intent_prediction.COGNIX_INTENT_PREDICTION_VERSION,
+    }
+
+
+@router.get("/intent/predictions")
+async def intent_predictions(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    return {
+        "predictions": _rows(cognix_db.list_intent_predictions(current_subject)),
+        "sideEffects": {
+            "predictionWrite": False,
+            "preloadEventWrite": False,
+            "modelLoad": False,
+            "modelUnload": False,
+            "generation": False,
+            "networkCall": False,
+            "uiSuggestion": False,
+        },
+    }
+
+
+@router.get("/intent/preload-events")
+async def intent_preload_events(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    return {
+        "events": _rows(cognix_db.list_preload_events(current_subject)),
+        "sideEffects": {
+            "predictionWrite": False,
+            "preloadEventWrite": False,
+            "modelLoad": False,
+            "modelUnload": False,
+            "generation": False,
+            "networkCall": False,
+            "uiSuggestion": False,
+        },
     }
 
 

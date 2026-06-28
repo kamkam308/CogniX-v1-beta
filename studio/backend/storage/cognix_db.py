@@ -432,6 +432,40 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_compression_logs_context
             ON cognix_compression_logs(username, compressed_context_id, created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_intent_predictions (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            project_id TEXT,
+            project_type TEXT,
+            selected_domain TEXT NOT NULL,
+            confidence_score REAL NOT NULL DEFAULT 0,
+            input_excerpt TEXT NOT NULL DEFAULT '',
+            probabilities_json TEXT NOT NULL DEFAULT '[]',
+            suggestion_json TEXT NOT NULL DEFAULT '{}',
+            preload_plan_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_intent_predictions_username_created
+            ON cognix_intent_predictions(username, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_intent_predictions_project
+            ON cognix_intent_predictions(username, project_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_preload_events (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            prediction_id TEXT,
+            project_id TEXT,
+            event_type TEXT NOT NULL,
+            target_model_id TEXT,
+            status TEXT NOT NULL DEFAULT 'planned_no_execution',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_preload_events_username_created
+            ON cognix_preload_events(username, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_library_items (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -2683,6 +2717,141 @@ def delete_compressed_context(username: str, context_id: str) -> bool:
         )
         conn.commit()
         return bool(cur.rowcount)
+    finally:
+        conn.close()
+
+
+def _hydrate_intent_prediction(row: dict[str, Any]) -> dict[str, Any]:
+    row["domainProbabilities"] = _json_or_default(row.get("probabilities_json"), [])
+    row["suggestion"] = _json_or_default(row.get("suggestion_json"), {})
+    row["preloadPlan"] = _json_or_default(row.get("preload_plan_json"), {})
+    return row
+
+
+def _hydrate_preload_event(row: dict[str, Any]) -> dict[str, Any]:
+    row["metadata"] = _json_or_default(row.get("metadata_json"), {})
+    return row
+
+
+def create_intent_prediction(
+    username: str,
+    *,
+    prediction: dict[str, Any],
+    project_id: str | None = None,
+    input_excerpt: str | None = None,
+) -> dict[str, Any]:
+    prediction_id = _new_id("ipred")
+    now = _now()
+    suggestion = prediction.get("suggestion") if isinstance(prediction.get("suggestion"), dict) else {}
+    preload_plan = prediction.get("preloadPlan") if isinstance(prediction.get("preloadPlan"), dict) else {}
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_intent_predictions
+                (
+                    id, username, project_id, project_type, selected_domain,
+                    confidence_score, input_excerpt, probabilities_json,
+                    suggestion_json, preload_plan_json, created_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                prediction_id,
+                username,
+                project_id or prediction.get("projectId"),
+                prediction.get("projectType"),
+                str(prediction.get("selectedDomain") or "general")[:80],
+                float(prediction.get("confidence") or 0.0),
+                str(input_excerpt or "")[:1000],
+                json.dumps(prediction.get("domainProbabilities") or [], ensure_ascii = False),
+                json.dumps(suggestion, ensure_ascii = False),
+                json.dumps(preload_plan, ensure_ascii = False),
+                now,
+            ),
+        )
+        if preload_plan:
+            conn.execute(
+                """
+                INSERT INTO cognix_preload_events
+                    (
+                        id, username, prediction_id, project_id, event_type,
+                        target_model_id, status, metadata_json, created_at
+                    )
+                VALUES (?, ?, ?, ?, 'preload_plan_created', ?, 'planned_no_execution', ?, ?)
+                """,
+                (
+                    _new_id("pload"),
+                    username,
+                    prediction_id,
+                    project_id or prediction.get("projectId"),
+                    preload_plan.get("targetModelId"),
+                    json.dumps(preload_plan, ensure_ascii = False),
+                    now,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_intent_prediction(username, prediction_id) or {}
+
+
+def get_intent_prediction(username: str, prediction_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM cognix_intent_predictions WHERE id = ? AND username = ?",
+            (prediction_id, username),
+        ).fetchone()
+        if row is None:
+            return None
+        prediction = _hydrate_intent_prediction(row_to_dict(row) or {})
+        event_rows = conn.execute(
+            """
+            SELECT * FROM cognix_preload_events
+            WHERE username = ? AND prediction_id = ?
+            ORDER BY created_at DESC
+            """,
+            (username, prediction_id),
+        ).fetchall()
+        prediction["preloadEvents"] = [_hydrate_preload_event(item) for item in _rows_to_dicts(event_rows)]
+        return prediction
+    finally:
+        conn.close()
+
+
+def list_intent_predictions(username: str, *, limit: int = 100) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 100), 1), 300)
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM cognix_intent_predictions
+            WHERE username = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (username, safe_limit),
+        ).fetchall()
+        return [_hydrate_intent_prediction(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def list_preload_events(username: str, *, limit: int = 100) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 100), 1), 300)
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM cognix_preload_events
+            WHERE username = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (username, safe_limit),
+        ).fetchall()
+        return [_hydrate_preload_event(row) for row in _rows_to_dicts(rows)]
     finally:
         conn.close()
 

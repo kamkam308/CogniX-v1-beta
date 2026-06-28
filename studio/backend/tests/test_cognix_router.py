@@ -24,6 +24,7 @@ from core.cognix import draft_generation as cognix_draft_generation
 from core.cognix import decision_engine as cognix_decision_engine
 from core.cognix import governance_manager as cognix_governance_manager
 from core.cognix import integration_manager as cognix_integration_manager
+from core.cognix import intent_prediction as cognix_intent_prediction
 from core.cognix import memory_manager as cognix_memory_manager
 from core.cognix import model_lifecycle as cognix_model_lifecycle
 from core.cognix import module_registry as cognix_module_registry
@@ -2718,6 +2719,84 @@ def test_prompt_compression_endpoint_stores_lists_deletes_and_audits():
     assert {"prompt_compression_plan_built", "prompt_compression_context_deleted"}.issubset(actions)
 
 
+def test_intent_prediction_blueprint_declares_single_suggestion_and_no_preload():
+    blueprint = cognix_intent_prediction.build_intent_prediction_blueprint()
+
+    assert blueprint["intentPredictionVersion"] == "cognix_intent_prediction_v1"
+    assert blueprint["preloadSchedulerVersion"] == "cognix_preload_scheduler_v1"
+    assert blueprint["displayPolicy"]["mostlyInvisible"] is True
+    assert blueprint["displayPolicy"]["maxSuggestions"] == 1
+    assert blueprint["preloadPolicy"]["actualPreloadAllowedHere"] is False
+    assert blueprint["sideEffects"]["predictionWrite"] is False
+    assert blueprint["sideEffects"]["preloadEventWrite"] is False
+    assert blueprint["sideEffects"]["modelLoad"] is False
+    assert blueprint["sideEffects"]["modelUnload"] is False
+    assert blueprint["sideEffects"]["generation"] is False
+
+
+def test_intent_prediction_detects_code_maths_general_and_abrupt_domain_change():
+    code = cognix_intent_prediction.build_intent_prediction(
+        username = "alice",
+        project_type = "code",
+        draft_text = "corrige ce bug python et lance les tests",
+    )
+    maths = cognix_intent_prediction.build_intent_prediction(
+        username = "alice",
+        draft_text = "resous cette equation avec une integrale et une matrice",
+    )
+    general = cognix_intent_prediction.build_intent_prediction(
+        username = "alice",
+        draft_text = "bonjour peux-tu m'aider a organiser mes idees",
+    )
+    abrupt = cognix_intent_prediction.build_intent_prediction(
+        username = "alice",
+        project_type = "code",
+        draft_text = "calcule cette derivee et resous cette equation matricielle",
+    )
+
+    assert code["selectedDomain"] == "code"
+    assert code["suggestion"]["modelId"] == "cognix-code-local"
+    assert code["preloadPlan"]["willPreloadNow"] is False
+    assert maths["selectedDomain"] == "maths"
+    assert general["summary"]["suggestionCount"] <= 1
+    assert abrupt["selectedDomain"] == "maths"
+    assert abrupt["summary"]["abruptDomainChange"] is True
+    assert abrupt["sideEffects"]["modelLoad"] is False
+    assert abrupt["sideEffects"]["generation"] is False
+
+
+def test_intent_prediction_endpoint_stores_preload_event_without_loading():
+    seed_accounts()
+    body = run_async(
+        cognix_routes.intent_predict(
+            cognix_routes.IntentPredictionRequest(
+                projectType = "code",
+                draftText = "ajoute une route FastAPI et des tests python",
+                storePrediction = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    prediction_id = body["storedPrediction"]["id"]
+    listed = run_async(cognix_routes.intent_predictions(current_subject = "alice"))
+    events = run_async(cognix_routes.intent_preload_events(current_subject = "alice"))
+    bob_listed = run_async(cognix_routes.intent_predictions(current_subject = "bob"))
+
+    assert prediction_id.startswith("ipred_")
+    assert body["intentPrediction"]["selectedDomain"] == "code"
+    assert body["sideEffects"]["predictionWrite"] is True
+    assert body["sideEffects"]["preloadEventWrite"] is True
+    assert body["sideEffects"]["modelLoad"] is False
+    assert body["sideEffects"]["generation"] is False
+    assert listed["predictions"][0]["id"] == prediction_id
+    assert events["events"][0]["status"] == "planned_no_execution"
+    assert events["events"][0]["targetModelId"] == "cognix-code-local"
+    assert bob_listed["predictions"] == []
+
+    logs = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))["logs"]
+    assert logs[0]["action"] == "intent_prediction_built"
+
+
 def test_codex_pipeline_plans_required_gates_without_modifying_code():
     plan = cognix_codex_pipeline.build_codex_pipeline_plan(
         objective = "Ajoute un module CogniX Chemistry dans le code source",
@@ -3328,6 +3407,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-model-lifecycle",
         "cognix-optimization-engine",
         "cognix-prompt-compression",
+        "cognix-intent-prediction",
         "cognix-thinking-status",
         "cognix-response-reflection",
         "cognix-multi-draft-generation",
@@ -3366,6 +3446,12 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "compression_evaluation" in modules["cognix-prompt-compression"]["capabilities"]
     assert "/api/cognix/prompt-compression/plan" in modules["cognix-prompt-compression"]["routes"]
     assert "/api/cognix/prompt-compression/contexts" in modules["cognix-prompt-compression"]["routes"]
+    assert modules["cognix-intent-prediction"]["dependencyState"]["ready"] is True
+    assert "intent_prediction" in modules["cognix-intent-prediction"]["capabilities"]
+    assert "preload_planning" in modules["cognix-intent-prediction"]["capabilities"]
+    assert "single_useful_suggestion" in modules["cognix-intent-prediction"]["capabilities"]
+    assert "/api/cognix/intent/predict" in modules["cognix-intent-prediction"]["routes"]
+    assert "/api/cognix/intent/preload-events" in modules["cognix-intent-prediction"]["routes"]
     assert modules["cognix-thinking-status"]["activationState"] == "ready"
     assert "technical_redaction" in modules["cognix-thinking-status"]["capabilities"]
     assert "/api/cognix/thinking/plan" in modules["cognix-thinking-status"]["routes"]
