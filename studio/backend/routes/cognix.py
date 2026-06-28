@@ -163,6 +163,13 @@ class FineTuningPlanRequest(BaseModel):
     dataset: dict[str, Any] | None = None
 
 
+class RagPlanRequest(BaseModel):
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    project_type: str | None = Field(None, max_length = 80)
+    project_id: str | None = Field(None, max_length = 160)
+    sources: list[dict[str, Any]] | None = None
+
+
 class ToolActionPlanRequest(BaseModel):
     tool_id: str = Field(..., min_length = 1, max_length = 120)
     action_id: str = Field(..., min_length = 1, max_length = 120)
@@ -324,6 +331,15 @@ def _current_model_cache_runtime() -> dict[str, Any]:
             "loadingModels": [],
             "error": str(exc),
         }
+
+
+def _rag_available() -> bool | None:
+    try:
+        from storage import rag_db
+
+        return bool(getattr(rag_db, "RAG_AVAILABLE", False))
+    except Exception:
+        return None
 
 
 def _rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1128,6 +1144,52 @@ async def fine_tuning_plan(
         "executionPolicy": plan["executionPolicy"],
         "auditLogId": audit.get("id"),
         "sideEffects": tuning_plan.get("sideEffects", {}),
+    }
+
+
+@router.post("/rag/plan")
+async def rag_plan(
+    payload: RagPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    runtime = _current_model_cache_runtime()
+    plan = cognix_orchestrator.build_execution_plan(
+        payload.objective,
+        current_subject = current_subject,
+        project_type = payload.project_type,
+        project_id = payload.project_id,
+        runtime_snapshot = runtime,
+        latest_benchmark_run = cognix_db.get_latest_benchmark_run(current_subject),
+        rag_sources = payload.sources or [],
+        rag_available = _rag_available(),
+    )
+    rag = plan["ragPlan"]
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "rag_plan_built",
+        resource_type = "cognix_rag_plan",
+        resource_id = str(payload.project_id or rag.get("targetDomain") or "general"),
+        severity = "warning" if rag.get("recommendedPath") == "rag_first" and not rag.get("readyForRetrieval") else "notice",
+        metadata = {
+            "plannerVersion": rag.get("plannerVersion"),
+            "recommendedPath": rag.get("recommendedPath"),
+            "readyForRetrieval": rag.get("readyForRetrieval"),
+            "retrievalStrategy": rag.get("retrieval", {}).get("strategy"),
+            "sourceCount": rag.get("sourceReadiness", {}).get("sourceCount"),
+            "indexedSourceCount": rag.get("sourceReadiness", {}).get("indexedSourceCount"),
+            "sideEffects": rag.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "runtimeError": runtime.get("error"),
+        "classification": plan["classification"],
+        "taskStrategy": plan["taskStrategy"],
+        "ragPlan": rag,
+        "executionPolicy": plan["executionPolicy"],
+        "auditLogId": audit.get("id"),
+        "sideEffects": rag.get("sideEffects", {}),
     }
 
 

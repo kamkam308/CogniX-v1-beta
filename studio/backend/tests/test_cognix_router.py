@@ -222,7 +222,12 @@ def test_orchestrator_builds_dry_run_plan_without_loading(monkeypatch):
     assert plan["preloadPlan"]["plannerVersion"] == "cognix_preload_planner_v1"
     assert plan["preloadPlan"]["target"]["domain"] == "code"
     assert plan["preloadPlan"]["sideEffects"]["modelLoad"] is False
+    assert plan["ragPlan"]["plannerVersion"] == "cognix_rag_planner_v1"
+    assert plan["ragPlan"]["recommendedPath"] == "no_rag_needed"
+    assert plan["ragPlan"]["sideEffects"]["ragIndexing"] is False
+    assert plan["executionStrategy"]["ragReadyForRetrieval"] is False
     assert plan["executionStrategy"]["preloadAction"] == "would_preload"
+    assert any(step["id"] == "plan_rag" for step in plan["steps"])
     assert any(step["id"] == "plan_preload" for step in plan["steps"])
     assert plan["fineTuningPlan"]["plannerVersion"] == "cognix_fine_tuning_planner_v1"
     assert plan["fineTuningPlan"]["recommendedPath"] == "no_fine_tuning_needed"
@@ -336,6 +341,98 @@ def test_fine_tuning_plan_endpoint_prepares_qlora_without_training(monkeypatch):
     assert log["metadata"]["plannerVersion"] == "cognix_fine_tuning_planner_v1"
     assert log["metadata"]["method"] == "qlora"
     assert log["metadata"]["sideEffects"]["fineTuningJob"] is False
+
+
+def test_rag_plan_endpoint_prepares_hybrid_retrieval_without_indexing(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(cognix_routes, "_rag_available", lambda: True)
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+
+    body = run_async(
+        cognix_routes.rag_plan(
+            cognix_routes.RagPlanRequest(
+                objective = "Reponds a partir de mes PDF de cours avec sources",
+                project_type = "education",
+                project_id = "project-rag",
+                sources = [
+                    {
+                        "id": "doc-1",
+                        "type": "pdf",
+                        "indexed": True,
+                        "chunkCount": 42,
+                    }
+                ],
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    rag = body["ragPlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert rag["plannerVersion"] == "cognix_rag_planner_v1"
+    assert rag["recommendedPath"] == "rag_first"
+    assert rag["readyForRetrieval"] is True
+    assert rag["retrieval"]["strategy"] == "hybrid"
+    assert rag["retrieval"]["includeCitations"] is True
+    assert rag["contextBudget"]["rawHistoryAllowed"] is False
+    assert rag["sourceReadiness"]["indexedSourceCount"] == 1
+    assert rag["sideEffects"]["ragIndexing"] is False
+    assert rag["sideEffects"]["embeddingGeneration"] is False
+    assert rag["sideEffects"]["retrievalQuery"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "rag_plan_built"
+    assert log["metadata"]["plannerVersion"] == "cognix_rag_planner_v1"
+    assert log["metadata"]["readyForRetrieval"] is True
+    assert log["metadata"]["sideEffects"]["ragIndexing"] is False
+
+
+def test_rag_plan_blocks_retrieval_when_sources_are_missing(monkeypatch):
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+
+    plan = cognix_orchestrator.build_execution_plan(
+        "Reponds a partir de mes documents de cours",
+        current_subject = "alice",
+        project_type = "education",
+        runtime_snapshot = {
+            "runtimeType": "ollama",
+            "activeModel": None,
+            "loadedModels": [],
+            "loadingModels": [],
+        },
+        rag_sources = [],
+        rag_available = True,
+    )
+
+    assert plan["taskStrategy"]["path"] == "rag_first"
+    assert plan["ragPlan"]["recommendedPath"] == "rag_first"
+    assert plan["ragPlan"]["readyForRetrieval"] is False
+    assert plan["ragPlan"]["sourceReadiness"]["status"] == "missing"
+    assert any(
+        item["id"] == "retrieval_query"
+        for item in plan["ragPlan"]["blockedActions"]
+    )
+    assert plan["ragPlan"]["sideEffects"]["retrievalQuery"] is False
 
 
 def test_fine_tuning_plan_defers_to_rag_for_document_objective(monkeypatch):

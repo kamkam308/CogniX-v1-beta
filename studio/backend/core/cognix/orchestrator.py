@@ -18,6 +18,7 @@ from core.cognix import decision_engine as cognix_decision_engine
 from core.cognix import fine_tuning_planner as cognix_fine_tuning_planner
 from core.cognix import hardware as cognix_hardware
 from core.cognix import preload_planner as cognix_preload_planner
+from core.cognix import rag_planner as cognix_rag_planner
 from core.cognix import recommender as cognix_recommender
 from core.cognix import security_policy as cognix_security_policy
 from core.cognix.router import classify_objective
@@ -80,6 +81,7 @@ def _warnings(
     recommendation: dict[str, Any],
     cache: dict[str, Any],
     task_strategy: dict[str, Any],
+    rag_plan: dict[str, Any],
     preload_plan: dict[str, Any],
     fine_tuning_plan: dict[str, Any],
 ) -> list[str]:
@@ -93,6 +95,9 @@ def _warnings(
     if isinstance(next_action, dict) and str(next_action.get("type") or "").startswith("would_unload"):
         warnings.append(str(next_action.get("reason") or "Le cache local proposera une eviction."))
     for item in task_strategy.get("risks") or []:
+        if isinstance(item, str) and item:
+            warnings.append(item)
+    for item in rag_plan.get("warnings") or []:
         if isinstance(item, str) and item:
             warnings.append(item)
     for item in preload_plan.get("warnings") or []:
@@ -117,6 +122,7 @@ def _steps(
     task_strategy: dict[str, Any],
     recommendation: dict[str, Any],
     cache: dict[str, Any],
+    rag_plan: dict[str, Any],
     preload_plan: dict[str, Any],
     fine_tuning_plan: dict[str, Any],
     execution_policy: dict[str, Any],
@@ -158,6 +164,15 @@ def _steps(
             "detail": str(
                 cache_policy.get("reason")
                 or "Cache observe en mode lecture: aucune eviction automatique."
+            ),
+        },
+        {
+            "id": "plan_rag",
+            "label": "Planifier RAG",
+            "status": "complete",
+            "detail": str(
+                rag_plan.get("reason")
+                or "RAG observe uniquement: aucune indexation ni recherche."
             ),
         },
         {
@@ -214,6 +229,8 @@ def build_execution_plan(
     project_id: str | None = None,
     runtime_snapshot: dict[str, Any] | None = None,
     latest_benchmark_run: dict[str, Any] | None = None,
+    rag_sources: list[dict[str, Any]] | None = None,
+    rag_available: bool | None = None,
     fine_tuning_dataset: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     hardware = cognix_hardware.get_hardware_profile()
@@ -235,6 +252,15 @@ def build_execution_plan(
         loading_models = _runtime_snapshot_value(runtime_snapshot, "loadingModels", []),
         runtime_type = str(_runtime_snapshot_value(runtime_snapshot, "runtimeType", "unknown")),
         project_id = project_id,
+    )
+    rag_plan = cognix_rag_planner.build_rag_plan(
+        objective = objective,
+        project_id = project_id,
+        classification = classification,
+        task_strategy = task_strategy,
+        recommendation = recommendation,
+        sources = rag_sources,
+        rag_available = rag_available,
     )
     preload_plan = cognix_preload_planner.build_preload_plan(
         objective = objective,
@@ -283,6 +309,8 @@ def build_execution_plan(
         "securityRiskLevel": execution_policy.get("riskLevel"),
         "preloadAction": (preload_plan.get("actions") or [{}])[0].get("type"),
         "preloadTargetModelId": preload_plan.get("target", {}).get("modelId"),
+        "ragReadyForRetrieval": rag_plan.get("readyForRetrieval"),
+        "ragStrategy": rag_plan.get("retrieval", {}).get("strategy"),
         "fineTuningMethod": fine_tuning_plan.get("method", {}).get("type"),
         "fineTuningReadyToRequestApproval": fine_tuning_plan.get("approval", {}).get("readyToRequest"),
         "uses": task_strategy.get("uses"),
@@ -307,6 +335,7 @@ def build_execution_plan(
         "providers": recommendation_payload["providers"],
         "recommendation": recommendation,
         "cache": cache,
+        "ragPlan": rag_plan,
         "preloadPlan": preload_plan,
         "fineTuningPlan": fine_tuning_plan,
         "taskStrategy": task_strategy,
@@ -317,6 +346,7 @@ def build_execution_plan(
             task_strategy = task_strategy,
             recommendation = recommendation,
             cache = cache,
+            rag_plan = rag_plan,
             preload_plan = preload_plan,
             fine_tuning_plan = fine_tuning_plan,
             execution_policy = execution_policy,
@@ -327,6 +357,7 @@ def build_execution_plan(
             recommendation = recommendation,
             cache = cache,
             task_strategy = task_strategy,
+            rag_plan = rag_plan,
             preload_plan = preload_plan,
             fine_tuning_plan = fine_tuning_plan,
         ),
