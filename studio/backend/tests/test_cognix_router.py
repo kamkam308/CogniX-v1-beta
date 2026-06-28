@@ -19,6 +19,7 @@ from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import codex_pipeline as cognix_codex_pipeline
 from core.cognix import context_graph as cognix_context_graph
 from core.cognix import context_manager as cognix_context_manager
+from core.cognix import cost_optimizer as cognix_cost_optimizer
 from core.cognix import debate_orchestrator as cognix_debate_orchestrator
 from core.cognix import deployment_manager as cognix_deployment_manager
 from core.cognix import draft_generation as cognix_draft_generation
@@ -1204,6 +1205,97 @@ def test_adaptive_quantization_endpoint_stores_profile_and_logs_audit(monkeypatc
     assert log["action"] == "adaptive_quantization_plan_built"
     assert log["metadata"]["selectedQuantization"] == plan["selectedVariant"]["quantization"]
     assert log["metadata"]["sideEffects"]["modelLoad"] is False
+
+
+def test_cost_optimizer_blocks_generic_cloud_for_sensitive_data_without_provider_calls():
+    plan = cognix_cost_optimizer.build_cost_optimization_plan(
+        objective = "Analyser une base de donnees client avec token prive et logs production.",
+        hardware = stub_hardware_profile(),
+        project_type = "business",
+        priority = "privacy",
+        sensitivity_level = "confidential",
+        expected_input_tokens = 8000,
+        expected_output_tokens = 4000,
+    )
+    candidates = {item["providerId"]: item for item in plan["candidates"]}
+
+    assert plan["optimizerVersion"] == "cognix_cost_optimizer_v1"
+    assert plan["pricingStoreVersion"] == "cognix_provider_pricing_store_v1"
+    assert plan["executionPlannerVersion"] == "cognix_execution_planner_v1"
+    assert plan["privacyPolicyVersion"] == "cognix_privacy_policy_v1"
+    assert plan["policy"]["cloudBlockedBecauseSensitive"] is True
+    assert candidates["cloud-fast-api"]["status"] == "blocked"
+    assert "sensitive_cloud_requires_explicit_validation" in candidates["cloud-fast-api"]["blockedReasons"]
+    assert plan["decision"]["selectedExecutionTarget"] in {"enterprise_server", "local", "personal_server"}
+    assert plan["sideEffects"]["providerCall"] is False
+    assert plan["sideEffects"]["billingMutation"] is False
+    assert plan["sideEffects"]["generation"] is False
+
+
+def test_cost_optimizer_prefers_cloud_for_speed_when_data_is_not_sensitive_without_execution():
+    plan = cognix_cost_optimizer.build_cost_optimization_plan(
+        objective = "Repondre vite a une question publique de demonstration.",
+        hardware = stub_hardware_profile(),
+        project_type = "demo",
+        priority = "speed",
+        sensitivity_level = "public",
+        expected_input_tokens = 8000,
+        expected_output_tokens = 4000,
+        message_count = 3,
+    )
+
+    assert plan["decision"]["selectedProviderId"] == "cloud-fast-api"
+    assert plan["decision"]["selectedExecutionTarget"] == "cloud_api"
+    assert plan["decision"]["estimatedCostUsd"] == 0.02
+    assert plan["policy"]["cloudBlockedBecauseSensitive"] is False
+    assert any(item["providerId"] == "cloud-fast-api" and item["status"] == "candidate" for item in plan["displayOptions"])
+    assert plan["sideEffects"]["networkCall"] is False
+    assert plan["sideEffects"]["providerCall"] is False
+    assert plan["sideEffects"]["runtimeConfigWrite"] is False
+
+
+def test_cost_optimization_endpoint_stores_execution_cost_log_and_logs_audit(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_routes.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+
+    body = run_async(
+        cognix_routes.cost_optimization_plan(
+            cognix_routes.CostOptimizationPlanRequest(
+                objective = "Comparer local, cloud et serveur entreprise pour une base client confidentielle.",
+                project_type = "business",
+                priority = "privacy",
+                sensitivity_level = "confidential",
+                expected_input_tokens = 8000,
+                expected_output_tokens = 4000,
+                store_log = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    plan = body["costOptimizationPlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["costLog"]["id"].startswith("cost_")
+    assert body["costLog"]["selectedExecutionTarget"] == plan["decision"]["selectedExecutionTarget"]
+    assert plan["services"] == ["CostOptimizer", "ProviderPricingStore", "ExecutionPlanner"]
+    assert plan["policy"]["cloudBlockedBecauseSensitive"] is True
+    assert body["sideEffects"]["providerCall"] is False
+    assert body["sideEffects"]["billingMutation"] is False
+    assert body["sideEffects"]["executionCostLogWrite"] is True
+
+    logs = run_async(cognix_routes.execution_cost_logs(current_subject = "alice"))
+    assert logs["logs"][0]["id"] == body["costLog"]["id"]
+    assert logs["logs"][0]["decision"]["decision"]["selectedProviderId"] == plan["decision"]["selectedProviderId"]
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "cost_optimization_plan_built"
+    assert log["metadata"]["selectedProviderId"] == plan["decision"]["selectedProviderId"]
+    assert log["metadata"]["sideEffects"]["providerCall"] is False
 
 
 def test_runtime_adapter_registry_and_plan_select_ollama_without_side_effects():
@@ -4311,8 +4403,13 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "adaptive_quantization" in modules["cognix-optimization-engine"]["capabilities"]
     assert "quantization_advisor" in modules["cognix-optimization-engine"]["capabilities"]
     assert "model_variant_registry" in modules["cognix-optimization-engine"]["capabilities"]
+    assert "cost_optimizer" in modules["cognix-optimization-engine"]["capabilities"]
+    assert "provider_pricing_store" in modules["cognix-optimization-engine"]["capabilities"]
+    assert "privacy_aware_provider_selection" in modules["cognix-optimization-engine"]["capabilities"]
     assert "/api/cognix/quantization/plan" in modules["cognix-optimization-engine"]["routes"]
     assert "/api/cognix/quantization/variants" in modules["cognix-optimization-engine"]["routes"]
+    assert "/api/cognix/costs/plan" in modules["cognix-optimization-engine"]["routes"]
+    assert "/api/cognix/costs/providers" in modules["cognix-optimization-engine"]["routes"]
     assert "technology_watch" in modules["cognix-research-watch"]["capabilities"]
     assert "benchmark_gate" in modules["cognix-research-watch"]["capabilities"]
     assert "/api/cognix/research/integration-plan" in modules["cognix-research-watch"]["routes"]

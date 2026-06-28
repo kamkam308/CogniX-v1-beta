@@ -288,6 +288,42 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_quantization_profiles_project
             ON cognix_quantization_profiles(username, project_id, updated_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_provider_profiles (
+            id TEXT PRIMARY KEY,
+            provider_id TEXT NOT NULL UNIQUE,
+            display_name TEXT NOT NULL,
+            execution_target TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'available',
+            pricing_json TEXT NOT NULL DEFAULT '{}',
+            policy_json TEXT NOT NULL DEFAULT '{}',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_provider_profiles_target
+            ON cognix_provider_profiles(execution_target, status);
+
+        CREATE TABLE IF NOT EXISTS cognix_execution_cost_logs (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            project_id TEXT,
+            objective_excerpt TEXT NOT NULL,
+            selected_provider_id TEXT NOT NULL,
+            selected_execution_target TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'planned_no_execution',
+            estimated_cost_usd REAL NOT NULL DEFAULT 0,
+            estimated_latency_ms INTEGER NOT NULL DEFAULT 0,
+            sensitivity_level TEXT NOT NULL DEFAULT 'low',
+            decision_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_execution_cost_logs_username_created
+            ON cognix_execution_cost_logs(username, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_execution_cost_logs_project
+            ON cognix_execution_cost_logs(username, project_id, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_reports (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -2067,6 +2103,185 @@ def list_quantization_profiles(username: str, *, project_id: str | None = None, 
                 (username, normalized_limit),
             ).fetchall()
         return [_hydrate_quantization_profile(dict(row)) for row in rows]
+    finally:
+        conn.close()
+
+
+def _hydrate_provider_profile(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["pricing"] = _json_or_default(item.get("pricing_json"), {})
+    item["policy"] = _json_or_default(item.get("policy_json"), {})
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def upsert_provider_profiles(profiles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not profiles:
+        return []
+    now = _now()
+    conn = get_connection()
+    try:
+        for profile in profiles:
+            provider_id = str(profile.get("providerId") or profile.get("provider_id") or "unknown")[:160]
+            metadata = {
+                key: value
+                for key, value in profile.items()
+                if key not in {"pricing", "policy"}
+            }
+            conn.execute(
+                """
+                INSERT INTO cognix_provider_profiles
+                    (
+                        id,
+                        provider_id,
+                        display_name,
+                        execution_target,
+                        status,
+                        pricing_json,
+                        policy_json,
+                        metadata_json,
+                        created_at,
+                        updated_at
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(provider_id) DO UPDATE SET
+                    display_name = excluded.display_name,
+                    execution_target = excluded.execution_target,
+                    status = excluded.status,
+                    pricing_json = excluded.pricing_json,
+                    policy_json = excluded.policy_json,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    _new_id("prov"),
+                    provider_id,
+                    str(profile.get("displayName") or profile.get("label") or provider_id)[:240],
+                    str(profile.get("executionTarget") or "unknown")[:120],
+                    str(profile.get("status") or "available")[:80],
+                    json.dumps(profile.get("pricing") or {}, ensure_ascii = False),
+                    json.dumps(profile.get("policy") or {}, ensure_ascii = False),
+                    json.dumps(metadata, ensure_ascii = False),
+                    now,
+                    now,
+                ),
+            )
+        conn.commit()
+        provider_ids = sorted({str(item.get("providerId") or item.get("provider_id") or "unknown")[:160] for item in profiles})
+        placeholders = ",".join("?" for _ in provider_ids)
+        rows = conn.execute(
+            f"SELECT * FROM cognix_provider_profiles WHERE provider_id IN ({placeholders}) ORDER BY provider_id",
+            tuple(provider_ids),
+        ).fetchall()
+        return [_hydrate_provider_profile(dict(row)) for row in rows]
+    finally:
+        conn.close()
+
+
+def list_provider_profiles(limit: int = 100) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        normalized_limit = max(1, min(int(limit), 200))
+        rows = conn.execute(
+            """
+            SELECT * FROM cognix_provider_profiles
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (normalized_limit,),
+        ).fetchall()
+        return [_hydrate_provider_profile(dict(row)) for row in rows]
+    finally:
+        conn.close()
+
+
+def _hydrate_execution_cost_log(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["decision"] = _json_or_default(item.get("decision_json"), {})
+    return item
+
+
+def create_execution_cost_log(
+    username: str,
+    *,
+    plan: dict[str, Any],
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    created_at = _now()
+    log_id = _new_id("cost")
+    task = plan.get("task") if isinstance(plan.get("task"), dict) else {}
+    decision = plan.get("decision") if isinstance(plan.get("decision"), dict) else {}
+    sensitivity = plan.get("sensitivity") if isinstance(plan.get("sensitivity"), dict) else {}
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_execution_cost_logs
+                (
+                    id,
+                    username,
+                    project_id,
+                    objective_excerpt,
+                    selected_provider_id,
+                    selected_execution_target,
+                    status,
+                    estimated_cost_usd,
+                    estimated_latency_ms,
+                    sensitivity_level,
+                    decision_json,
+                    created_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, 'planned_no_execution', ?, ?, ?, ?, ?)
+            """,
+            (
+                log_id,
+                username,
+                project_id or task.get("projectId"),
+                str(task.get("objectiveExcerpt") or "")[:240],
+                str(decision.get("selectedProviderId") or "unknown")[:160],
+                str(decision.get("selectedExecutionTarget") or "unknown")[:120],
+                float(decision.get("estimatedCostUsd") or 0.0),
+                int(decision.get("estimatedLatencyMs") or 0),
+                str(sensitivity.get("level") or "low")[:80],
+                json.dumps(plan, ensure_ascii = False),
+                created_at,
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM cognix_execution_cost_logs WHERE id = ? AND username = ?",
+            (log_id, username),
+        ).fetchone()
+        return _hydrate_execution_cost_log(dict(row)) if row else {}
+    finally:
+        conn.close()
+
+
+def list_execution_cost_logs(username: str, *, project_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        normalized_limit = max(1, min(int(limit), 200))
+        if project_id:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_execution_cost_logs
+                WHERE username = ? AND project_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, project_id, normalized_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_execution_cost_logs
+                WHERE username = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, normalized_limit),
+            ).fetchall()
+        return [_hydrate_execution_cost_log(dict(row)) for row in rows]
     finally:
         conn.close()
 

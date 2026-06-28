@@ -24,6 +24,7 @@ from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import codex_pipeline as cognix_codex_pipeline
 from core.cognix import context_graph as cognix_context_graph
 from core.cognix import context_manager as cognix_context_manager
+from core.cognix import cost_optimizer as cognix_cost_optimizer
 from core.cognix import debate_orchestrator as cognix_debate_orchestrator
 from core.cognix import deployment_manager as cognix_deployment_manager
 from core.cognix import draft_generation as cognix_draft_generation
@@ -592,6 +593,24 @@ class QuantizationPlanRequest(BaseModel):
     store_profile: bool = Field(True, alias = "storeProfile")
 
 
+class CostOptimizationPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    project_type: str | None = Field(None, alias = "projectType", max_length = 80)
+    priority: str = Field("balanced", max_length = 80)
+    sensitivity_level: str | None = Field(None, alias = "sensitivityLevel", max_length = 80)
+    constraints: list[str] | None = None
+    expected_input_tokens: int | None = Field(None, alias = "expectedInputTokens")
+    expected_output_tokens: int | None = Field(None, alias = "expectedOutputTokens")
+    message_count: int | None = Field(None, alias = "messageCount")
+    budget_usd: float | None = Field(None, alias = "budgetUsd")
+    allow_cloud_when_sensitive: bool = Field(False, alias = "allowCloudWhenSensitive")
+    provider_profiles: list[dict[str, Any]] | None = Field(None, alias = "providerProfiles")
+    store_log: bool = Field(True, alias = "storeLog")
+
+
 class RuntimePlanRequest(BaseModel):
     objective: str = Field(..., min_length = 1, max_length = 4000)
     project_type: str | None = Field(None, max_length = 80)
@@ -794,6 +813,15 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "variant_id": "variantId",
         "selected_variant_id": "selectedVariantId",
         "quantization": "quantization",
+        "provider_id": "providerId",
+        "display_name": "displayName",
+        "execution_target": "executionTarget",
+        "selected_provider_id": "selectedProviderId",
+        "selected_execution_target": "selectedExecutionTarget",
+        "estimated_cost_usd": "estimatedCostUsd",
+        "estimated_latency_ms": "estimatedLatencyMs",
+        "sensitivity_level": "sensitivityLevel",
+        "decision_json": "decisionJson",
         "scores_json": "scoresJson",
         "message_id": "messageId",
         "thread_id": "threadId",
@@ -3527,6 +3555,140 @@ async def quantization_profiles(
             "profileWrite": False,
         },
         "plannerVersion": cognix_quantization_advisor.COGNIX_QUANTIZATION_ADVISOR_VERSION,
+    }
+
+
+@router.get("/costs/providers")
+async def cost_provider_profiles(
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    store = cognix_cost_optimizer.build_provider_pricing_store(
+        hardware = cognix_hardware.get_hardware_profile(),
+    )
+    stored_profiles = cognix_db.upsert_provider_profiles(store.get("profiles", []))
+    side_effects = {
+        **store.get("sideEffects", {}),
+        "providerProfileWrite": bool(stored_profiles),
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "provider_pricing_store_built",
+        resource_type = "cognix_provider_pricing_store",
+        resource_id = str(store.get("pricingStoreVersion")),
+        severity = "notice",
+        metadata = {
+            "pricingStoreVersion": store.get("pricingStoreVersion"),
+            "providerCount": store.get("providerCount"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "providerPricingStore": store,
+        "storedProviderProfiles": _rows(stored_profiles),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_cost_optimizer.COGNIX_COST_OPTIMIZER_VERSION,
+    }
+
+
+@router.post("/costs/plan")
+async def cost_optimization_plan(
+    payload: CostOptimizationPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_cost_optimizer.build_cost_optimization_plan(
+        objective = payload.objective,
+        hardware = cognix_hardware.get_hardware_profile(),
+        project_type = payload.project_type,
+        project_id = payload.project_id,
+        priority = payload.priority,
+        sensitivity_level = payload.sensitivity_level,
+        constraints = payload.constraints,
+        expected_input_tokens = payload.expected_input_tokens,
+        expected_output_tokens = payload.expected_output_tokens,
+        message_count = payload.message_count,
+        budget_usd = payload.budget_usd,
+        allow_cloud_when_sensitive = payload.allow_cloud_when_sensitive,
+        provider_profiles = payload.provider_profiles,
+    )
+    stored_profiles = cognix_db.upsert_provider_profiles(
+        plan.get("providerPricingStore", {}).get("profiles", [])
+    )
+    cost_log = (
+        cognix_db.create_execution_cost_log(
+            current_subject,
+            plan = plan,
+            project_id = payload.project_id,
+        )
+        if payload.store_log
+        else None
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "providerProfileWrite": bool(stored_profiles),
+        "executionCostLogWrite": cost_log is not None,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "cost_optimization_plan_built",
+        resource_type = "cognix_execution_cost_log",
+        resource_id = str((cost_log or {}).get("id") or payload.project_id or plan.get("decision", {}).get("selectedProviderId") or "cost_plan"),
+        severity = "warning" if plan.get("policy", {}).get("cloudBlockedBecauseSensitive") else "notice",
+        metadata = {
+            "optimizerVersion": plan.get("optimizerVersion"),
+            "pricingStoreVersion": plan.get("pricingStoreVersion"),
+            "executionPlannerVersion": plan.get("executionPlannerVersion"),
+            "privacyPolicyVersion": plan.get("privacyPolicyVersion"),
+            "priority": plan.get("priority"),
+            "selectedProviderId": plan.get("decision", {}).get("selectedProviderId"),
+            "selectedExecutionTarget": plan.get("decision", {}).get("selectedExecutionTarget"),
+            "estimatedCostUsd": plan.get("decision", {}).get("estimatedCostUsd"),
+            "cloudBlockedBecauseSensitive": plan.get("policy", {}).get("cloudBlockedBecauseSensitive"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "costOptimizationPlan": plan,
+        "costLog": _row(cost_log) if cost_log else None,
+        "storedProviderProfiles": _rows(stored_profiles),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_cost_optimizer.COGNIX_COST_OPTIMIZER_VERSION,
+    }
+
+
+@router.get("/costs/logs")
+async def execution_cost_logs(
+    project_id: str | None = None,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if project_id:
+        _require_owned_project(project_id, current_subject)
+    return {
+        "logs": _rows(
+            cognix_db.list_execution_cost_logs(
+                current_subject,
+                project_id = project_id,
+            )
+        ),
+        "sideEffects": {
+            "networkCall": False,
+            "providerCall": False,
+            "billingMutation": False,
+            "modelLoad": False,
+            "generation": False,
+            "runtimeConfigWrite": False,
+            "executionCostLogWrite": False,
+        },
+        "plannerVersion": cognix_cost_optimizer.COGNIX_COST_OPTIMIZER_VERSION,
     }
 
 
