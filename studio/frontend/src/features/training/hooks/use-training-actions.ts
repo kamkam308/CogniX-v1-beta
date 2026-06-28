@@ -2,7 +2,7 @@
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
 import { primeNativeNotificationPermission } from "@/lib/native-notifications";
-import { usePlatformStore } from "@/config/env";
+import { fetchDeviceType, usePlatformStore } from "@/config/env";
 import { confirmRemoteCodeIfNeeded } from "@/features/security";
 import { useCallback } from "react";
 import { toast } from "@/lib/toast";
@@ -60,6 +60,7 @@ export function useTrainingActions() {
       return false;
     }
 
+    await fetchDeviceType({ force: true }).catch(() => undefined);
     const platform = usePlatformStore.getState();
     const cloudOnlyTraining =
       platform.trainingCloudAvailable && !platform.trainingLocalAvailable;

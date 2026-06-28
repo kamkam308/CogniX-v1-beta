@@ -331,6 +331,55 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_user_preferences_username_status
             ON cognix_user_preferences(username, status, updated_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_memories (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            project_id TEXT,
+            category TEXT NOT NULL DEFAULT 'general',
+            title TEXT NOT NULL,
+            content TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'active',
+            sensitive INTEGER NOT NULL DEFAULT 0,
+            current_version INTEGER NOT NULL DEFAULT 1,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_memories_username_status
+            ON cognix_memories(username, status, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_memories_category
+            ON cognix_memories(username, category, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_memory_versions (
+            id TEXT PRIMARY KEY,
+            memory_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            version_number INTEGER NOT NULL,
+            category TEXT NOT NULL,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL DEFAULT '',
+            change_reason TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_memory_versions_memory
+            ON cognix_memory_versions(username, memory_id, version_number DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_memory_audit_logs (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            memory_id TEXT,
+            action TEXT NOT NULL,
+            actor_username TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_memory_audit_username_created
+            ON cognix_memory_audit_logs(username, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_workflows (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -2351,6 +2400,390 @@ def export_skill_memory_bundle(username: str) -> dict[str, Any]:
         "candidates": list_memory_candidates(username, include_decided = True, limit = 300),
         "exportedAt": _now(),
     }
+
+
+def _hydrate_live_memory(row: dict[str, Any]) -> dict[str, Any]:
+    row["metadata"] = _json_or_default(row.get("metadata_json"), {})
+    row["sensitive"] = bool(row.get("sensitive"))
+    return row
+
+
+def _hydrate_live_memory_version(row: dict[str, Any]) -> dict[str, Any]:
+    row["metadata"] = _json_or_default(row.get("metadata_json"), {})
+    return row
+
+
+def _hydrate_memory_audit_log(row: dict[str, Any]) -> dict[str, Any]:
+    row["metadata"] = _json_or_default(row.get("metadata_json"), {})
+    return row
+
+
+def _insert_memory_version(
+    conn: sqlite3.Connection,
+    *,
+    memory_id: str,
+    username: str,
+    version_number: int,
+    category: str,
+    title: str,
+    content: str,
+    change_reason: str,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO cognix_memory_versions
+            (
+                id, memory_id, username, version_number, category, title,
+                content, change_reason, metadata_json, created_at
+            )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            _new_id("mver"),
+            memory_id,
+            username,
+            version_number,
+            category,
+            title,
+            content,
+            change_reason,
+            json.dumps(metadata or {}, ensure_ascii = False),
+            _now(),
+        ),
+    )
+
+
+def _insert_memory_audit(
+    conn: sqlite3.Connection,
+    *,
+    username: str,
+    memory_id: str | None,
+    action: str,
+    actor_username: str,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO cognix_memory_audit_logs
+            (id, username, memory_id, action, actor_username, metadata_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            _new_id("maud"),
+            username,
+            memory_id,
+            action,
+            actor_username,
+            json.dumps(metadata or {}, ensure_ascii = False),
+            _now(),
+        ),
+    )
+
+
+def create_live_memory(username: str, *, plan: dict[str, Any], actor_username: str | None = None) -> dict[str, Any]:
+    memory = plan.get("memory") if isinstance(plan.get("memory"), dict) else {}
+    memory_id = _new_id("mem")
+    now = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_memories
+                (
+                    id, username, project_id, category, title, content, status,
+                    sensitive, current_version, metadata_json, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, 'active', ?, 1, ?, ?, ?)
+            """,
+            (
+                memory_id,
+                username,
+                plan.get("projectId"),
+                str(memory.get("category") or "general")[:80],
+                str(memory.get("title") or "Memoire")[:240],
+                str(memory.get("content") or "")[:120000],
+                1 if memory.get("sensitive") else 0,
+                json.dumps(memory.get("metadata") or {}, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        _insert_memory_version(
+            conn,
+            memory_id = memory_id,
+            username = username,
+            version_number = 1,
+            category = str(memory.get("category") or "general")[:80],
+            title = str(memory.get("title") or "Memoire")[:240],
+            content = str(memory.get("content") or "")[:120000],
+            change_reason = "initial_create",
+            metadata = memory.get("metadata") or {},
+        )
+        _insert_memory_audit(
+            conn,
+            username = username,
+            memory_id = memory_id,
+            action = "memory_created",
+            actor_username = actor_username or username,
+            metadata = {"memoryEditorVersion": plan.get("memoryEditorVersion")},
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_live_memory(username, memory_id) or {}
+
+
+def list_live_memories(
+    username: str,
+    *,
+    category: str | None = None,
+    query: str | None = None,
+    include_disabled: bool = False,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 100), 1), 300)
+    clauses = ["username = ?"]
+    params: list[Any] = [username]
+    if not include_disabled:
+        clauses.append("status = 'active'")
+    else:
+        clauses.append("status != 'deleted'")
+    if category:
+        clauses.append("category = ?")
+        params.append(category)
+    if query:
+        needle = f"%{query.lower()}%"
+        clauses.append("(LOWER(title) LIKE ? OR LOWER(content) LIKE ?)")
+        params.extend([needle, needle])
+    params.append(safe_limit)
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM cognix_memories
+            WHERE {' AND '.join(clauses)}
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_live_memory(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def get_live_memory(username: str, memory_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM cognix_memories WHERE id = ? AND username = ?",
+            (memory_id, username),
+        ).fetchone()
+        if row is None:
+            return None
+        memory = _hydrate_live_memory(row_to_dict(row) or {})
+        version_rows = conn.execute(
+            """
+            SELECT * FROM cognix_memory_versions
+            WHERE username = ? AND memory_id = ?
+            ORDER BY version_number DESC
+            """,
+            (username, memory_id),
+        ).fetchall()
+        audit_rows = conn.execute(
+            """
+            SELECT * FROM cognix_memory_audit_logs
+            WHERE username = ? AND memory_id = ?
+            ORDER BY created_at DESC
+            """,
+            (username, memory_id),
+        ).fetchall()
+        memory["versions"] = [_hydrate_live_memory_version(item) for item in _rows_to_dicts(version_rows)]
+        memory["auditLogs"] = [_hydrate_memory_audit_log(item) for item in _rows_to_dicts(audit_rows)]
+        return memory
+    finally:
+        conn.close()
+
+
+def update_live_memory(
+    username: str,
+    memory_id: str,
+    *,
+    actor_username: str | None = None,
+    title: str | None = None,
+    content: str | None = None,
+    category: str | None = None,
+    status: str | None = None,
+    reason: str | None = None,
+) -> dict[str, Any] | None:
+    existing = get_live_memory(username, memory_id)
+    if existing is None:
+        return None
+    final_title = title.strip()[:240] if title is not None else str(existing.get("title") or "")
+    final_content = content.strip()[:120000] if content is not None else str(existing.get("content") or "")
+    final_category = category.strip()[:80] if category is not None else str(existing.get("category") or "general")
+    final_status = status.strip().lower() if status is not None else str(existing.get("status") or "active")
+    if final_status not in {"active", "disabled", "deleted"}:
+        raise ValueError("Unsupported memory status")
+    next_version = int(existing.get("current_version") or 1) + 1
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            UPDATE cognix_memories
+            SET title = ?, content = ?, category = ?, status = ?, current_version = ?, updated_at = ?
+            WHERE id = ? AND username = ?
+            """,
+            (final_title, final_content, final_category, final_status, next_version, _now(), memory_id, username),
+        )
+        _insert_memory_version(
+            conn,
+            memory_id = memory_id,
+            username = username,
+            version_number = next_version,
+            category = final_category,
+            title = final_title,
+            content = final_content,
+            change_reason = (reason or "memory_updated")[:500],
+            metadata = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {},
+        )
+        _insert_memory_audit(
+            conn,
+            username = username,
+            memory_id = memory_id,
+            action = "memory_updated" if final_status == "active" else f"memory_{final_status}",
+            actor_username = actor_username or username,
+            metadata = {"nextVersion": next_version, "reason": reason},
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_live_memory(username, memory_id)
+
+
+def set_live_memory_status(
+    username: str,
+    memory_id: str,
+    *,
+    status: str,
+    actor_username: str | None = None,
+    reason: str | None = None,
+) -> dict[str, Any] | None:
+    return update_live_memory(
+        username,
+        memory_id,
+        actor_username = actor_username,
+        status = status,
+        reason = reason or f"memory_{status}",
+    )
+
+
+def merge_live_memories(
+    username: str,
+    *,
+    plan: dict[str, Any],
+    actor_username: str | None = None,
+    disable_sources: bool = False,
+) -> dict[str, Any]:
+    created = create_live_memory(username, plan = plan, actor_username = actor_username)
+    source_ids = [str(item) for item in plan.get("sourceMemoryIds") or []]
+    conn = get_connection()
+    try:
+        _insert_memory_audit(
+            conn,
+            username = username,
+            memory_id = created.get("id"),
+            action = "memory_merged",
+            actor_username = actor_username or username,
+            metadata = {"sourceMemoryIds": source_ids},
+        )
+        if disable_sources:
+            now = _now()
+            for source_id in source_ids:
+                source_row = conn.execute(
+                    "SELECT * FROM cognix_memories WHERE id = ? AND username = ?",
+                    (source_id, username),
+                ).fetchone()
+                if source_row is None:
+                    continue
+                source_memory = row_to_dict(source_row) or {}
+                next_version = int(source_memory.get("current_version") or 1) + 1
+                conn.execute(
+                    """
+                    UPDATE cognix_memories
+                    SET status = 'disabled', current_version = ?, updated_at = ?
+                    WHERE id = ? AND username = ?
+                    """,
+                    (next_version, now, source_id, username),
+                )
+                _insert_memory_version(
+                    conn,
+                    memory_id = source_id,
+                    username = username,
+                    version_number = next_version,
+                    category = str(source_memory.get("category") or "general")[:80],
+                    title = str(source_memory.get("title") or "Memoire")[:240],
+                    content = str(source_memory.get("content") or "")[:120000],
+                    change_reason = "memory_disabled_after_merge",
+                    metadata = _json_or_default(source_memory.get("metadata_json"), {}),
+                )
+                _insert_memory_audit(
+                    conn,
+                    username = username,
+                    memory_id = source_id,
+                    action = "memory_disabled_after_merge",
+                    actor_username = actor_username or username,
+                    metadata = {"mergedInto": created.get("id")},
+                )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_live_memory(username, str(created.get("id"))) or created
+
+
+def export_live_memory_bundle(username: str) -> dict[str, Any]:
+    conn = get_connection()
+    try:
+        versions = _rows_to_dicts(
+            conn.execute(
+                "SELECT * FROM cognix_memory_versions WHERE username = ? ORDER BY created_at DESC",
+                (username,),
+            ).fetchall()
+        )
+        audits = _rows_to_dicts(
+            conn.execute(
+                "SELECT * FROM cognix_memory_audit_logs WHERE username = ? ORDER BY created_at DESC",
+                (username,),
+            ).fetchall()
+        )
+        return {
+            "username": username,
+            "memories": list_live_memories(username, include_disabled = True, limit = 300),
+            "versions": [_hydrate_live_memory_version(item) for item in versions],
+            "auditLogs": [_hydrate_memory_audit_log(item) for item in audits],
+            "exportedAt": _now(),
+        }
+    finally:
+        conn.close()
+
+
+def list_live_memory_audit_logs(username: str, *, limit: int = 100) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 100), 1), 300)
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM cognix_memory_audit_logs
+            WHERE username = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (username, safe_limit),
+        ).fetchall()
+        return [_hydrate_memory_audit_log(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
 
 
 def _hydrate_workflow(row: dict[str, Any]) -> dict[str, Any]:

@@ -27,6 +27,7 @@ from core.cognix import dynamic_ui as cognix_dynamic_ui
 from core.cognix import governance_manager as cognix_governance_manager
 from core.cognix import integration_manager as cognix_integration_manager
 from core.cognix import intent_prediction as cognix_intent_prediction
+from core.cognix import memory_editor as cognix_memory_editor
 from core.cognix import memory_manager as cognix_memory_manager
 from core.cognix import model_lifecycle as cognix_model_lifecycle
 from core.cognix import module_registry as cognix_module_registry
@@ -2502,6 +2503,204 @@ def test_skill_memory_injection_plan_selects_active_relevant_memories_without_in
     assert logs[0]["action"] == "skill_memory_injection_plan_built"
 
 
+def test_live_memory_editor_blueprint_declares_versioned_user_controls():
+    blueprint = cognix_memory_editor.build_memory_editor_blueprint()
+
+    assert blueprint["memoryEditorVersion"] == "cognix_live_memory_editor_v1"
+    assert blueprint["memoryVersioningVersion"] == "cognix_memory_versioning_v1"
+    assert blueprint["memorySearchVersion"] == "cognix_memory_search_v1"
+    assert blueprint["services"] == ["MemoryEditorService", "MemoryVersioning", "MemorySearch"]
+    assert blueprint["userControls"]["view"] is True
+    assert blueprint["userControls"]["edit"] is True
+    assert blueprint["userControls"]["delete"] is True
+    assert blueprint["userControls"]["merge"] is True
+    assert blueprint["userControls"]["disable"] is True
+    assert blueprint["userControls"]["export"] is True
+    assert blueprint["versioningPolicy"]["newVersionOnEdit"] is True
+    assert blueprint["versioningPolicy"]["auditEveryMutation"] is True
+    assert blueprint["versioningPolicy"]["softDeleteKeepsAudit"] is True
+    assert blueprint["sensitiveMemoryPolicy"]["noSensitiveMemoryWithoutControl"] is True
+    assert blueprint["sideEffects"]["memoryWrite"] is False
+    assert blueprint["sideEffects"]["versionWrite"] is False
+    assert blueprint["sideEffects"]["auditWrite"] is False
+    assert blueprint["sideEffects"]["generation"] is False
+
+
+def test_live_memory_item_plan_blocks_sensitive_memory_without_control():
+    blocked = cognix_memory_editor.build_memory_item_plan(
+        username = "alice",
+        title = "Secret",
+        content = "Memoire sensible",
+        category = "competence",
+        sensitive = True,
+        confirmed_sensitive_control = False,
+    )
+    allowed = cognix_memory_editor.build_memory_item_plan(
+        username = "alice",
+        title = "Secret",
+        content = "Memoire sensible",
+        category = "competence",
+        sensitive = True,
+        confirmed_sensitive_control = True,
+    )
+
+    assert blocked["policy"]["blocked"] is True
+    assert blocked["memory"]["category"] == "skill"
+    assert allowed["policy"]["blocked"] is False
+    assert allowed["memory"]["sensitive"] is True
+
+
+def test_live_memory_editor_endpoint_versions_searches_exports_and_deletes():
+    seed_accounts()
+
+    with pytest.raises(HTTPException) as sensitive_error:
+        run_async(
+            cognix_routes.create_live_memory_item(
+                cognix_routes.LiveMemoryCreateRequest(
+                    title = "Token prive",
+                    content = "Ne pas enregistrer sans controle explicite.",
+                    sensitive = True,
+                ),
+                current_subject = "alice",
+            )
+        )
+    assert sensitive_error.value.status_code == 400
+
+    created = run_async(
+        cognix_routes.create_live_memory_item(
+            cognix_routes.LiveMemoryCreateRequest(
+                title = "Style de travail",
+                content = "Kamil prefere des changements natifs et permanents dans CogniX.",
+                category = "preference",
+                metadata = {"tag": "native"},
+            ),
+            current_subject = "alice",
+        )
+    )
+    memory_id = created["memory"]["id"]
+    bob_list = run_async(cognix_routes.list_live_memory_items(current_subject = "bob"))
+
+    assert memory_id.startswith("mem_")
+    assert created["memory"]["currentVersion"] == 1
+    assert created["memory"]["versions"][0]["versionNumber"] == 1
+    assert created["sideEffects"]["memoryWrite"] is True
+    assert created["sideEffects"]["versionWrite"] is True
+    assert created["sideEffects"]["generation"] is False
+    assert bob_list["items"] == []
+
+    updated = run_async(
+        cognix_routes.update_live_memory_item(
+            memory_id,
+            cognix_routes.LiveMemoryUpdateRequest(
+                content = "Kamil prefere des changements natifs, permanents, audites et testables.",
+                category = "organization",
+                reason = "precision utilisateur",
+            ),
+            current_subject = "alice",
+        )
+    )
+    listed = run_async(
+        cognix_routes.list_live_memory_items(
+            query = "audites",
+            category = "organization",
+            current_subject = "alice",
+        )
+    )
+    disabled = run_async(
+        cognix_routes.disable_live_memory_item(
+            memory_id,
+            cognix_routes.LiveMemoryStatusRequest(reason = "test disable"),
+            current_subject = "alice",
+        )
+    )
+    active_after_disable = run_async(cognix_routes.list_live_memory_items(current_subject = "alice"))
+    disabled_list = run_async(
+        cognix_routes.list_live_memory_items(include_disabled = True, current_subject = "alice")
+    )
+    exported = run_async(cognix_routes.export_live_memory_items(current_subject = "alice"))
+    audit_logs = run_async(cognix_routes.list_live_memory_audit_logs(current_subject = "alice"))
+    deleted = run_async(cognix_routes.delete_live_memory_item(memory_id, current_subject = "alice"))
+    after_delete = run_async(
+        cognix_routes.list_live_memory_items(include_disabled = True, current_subject = "alice")
+    )
+
+    assert updated["memory"]["currentVersion"] == 2
+    assert updated["memory"]["versions"][0]["versionNumber"] == 2
+    assert updated["memoryEditPlan"]["changes"] == ["content", "category"]
+    assert [item["id"] for item in listed["items"]] == [memory_id]
+    assert disabled["memory"]["status"] == "disabled"
+    assert disabled["memory"]["currentVersion"] == 3
+    assert active_after_disable["items"] == []
+    assert [item["id"] for item in disabled_list["items"]] == [memory_id]
+    assert any(item["id"] == memory_id for item in exported["memoryExport"]["memories"])
+    assert any(item["memoryId"] == memory_id for item in exported["memoryExport"]["versions"])
+    assert any(item["memoryId"] == memory_id for item in exported["memoryExport"]["auditLogs"])
+    assert any(item["action"] == "memory_disabled" for item in audit_logs["auditLogs"])
+    assert deleted["deleted"] is True
+    assert deleted["memory"]["status"] == "deleted"
+    assert after_delete["items"] == []
+
+    logs = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))["logs"]
+    actions = {item["action"] for item in logs}
+    assert {
+        "live_memory_created",
+        "live_memory_updated",
+        "live_memory_disabled",
+        "live_memory_exported",
+        "live_memory_deleted",
+    }.issubset(actions)
+
+
+def test_live_memory_merge_creates_new_memory_and_can_disable_sources():
+    seed_accounts()
+    first = run_async(
+        cognix_routes.create_live_memory_item(
+            cognix_routes.LiveMemoryCreateRequest(
+                title = "Preference code",
+                content = "Kamil veut des modules natifs.",
+                category = "preference",
+            ),
+            current_subject = "alice",
+        )
+    )
+    second = run_async(
+        cognix_routes.create_live_memory_item(
+            cognix_routes.LiveMemoryCreateRequest(
+                title = "Preference test",
+                content = "Kamil veut des tests avant de pousser.",
+                category = "preference",
+            ),
+            current_subject = "alice",
+        )
+    )
+    source_ids = [first["memory"]["id"], second["memory"]["id"]]
+    merged = run_async(
+        cognix_routes.merge_live_memory_items(
+            cognix_routes.LiveMemoryMergeRequest(
+                sourceIds = source_ids,
+                title = "Preferences CogniX",
+                disableSources = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    all_items = run_async(
+        cognix_routes.list_live_memory_items(include_disabled = True, current_subject = "alice")
+    )
+    by_id = {item["id"]: item for item in all_items["items"]}
+
+    assert merged["memory"]["id"].startswith("mem_")
+    assert merged["memory"]["content"] == "Kamil veut des modules natifs.\n\nKamil veut des tests avant de pousser."
+    assert merged["memory"]["metadata"]["mergedFrom"] == source_ids
+    assert merged["memoryMergePlan"]["summary"]["sourceCount"] == 2
+    assert merged["sideEffects"]["generation"] is False
+    assert by_id[source_ids[0]]["status"] == "disabled"
+    assert by_id[source_ids[1]]["status"] == "disabled"
+
+    logs = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))["logs"]
+    assert "live_memory_merged" in {item["action"] for item in logs}
+
+
 def test_workflow_recorder_blueprint_declares_no_execution_contract():
     blueprint = cognix_workflow_recorder.build_workflow_blueprint()
 
@@ -3721,6 +3920,16 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/memory/skills/candidates" in modules["cognix-long-term-skill-memory"]["routes"]
     assert "/api/cognix/memory/skills/export" in modules["cognix-long-term-skill-memory"]["routes"]
     assert "/api/cognix/memory/skills/injection-plan" in modules["cognix-long-term-skill-memory"]["routes"]
+    assert modules["cognix-live-memory-editing"]["dependencyState"]["ready"] is True
+    assert "live_memory_editor" in modules["cognix-live-memory-editing"]["capabilities"]
+    assert "memory_versioning" in modules["cognix-live-memory-editing"]["capabilities"]
+    assert "memory_search" in modules["cognix-live-memory-editing"]["capabilities"]
+    assert "memory_merge" in modules["cognix-live-memory-editing"]["capabilities"]
+    assert "sensitive_memory_controls" in modules["cognix-live-memory-editing"]["capabilities"]
+    assert "/api/cognix/memory/editor/blueprint" in modules["cognix-live-memory-editing"]["routes"]
+    assert "/api/cognix/memory/editor/items" in modules["cognix-live-memory-editing"]["routes"]
+    assert "/api/cognix/memory/editor/merge" in modules["cognix-live-memory-editing"]["routes"]
+    assert "/api/cognix/memory/editor/export" in modules["cognix-live-memory-editing"]["routes"]
     assert modules["cognix-ai-workflow-recorder"]["dependencyState"]["ready"] is True
     assert "workflow_recording" in modules["cognix-ai-workflow-recorder"]["capabilities"]
     assert "workflow_replay_planning" in modules["cognix-ai-workflow-recorder"]["capabilities"]

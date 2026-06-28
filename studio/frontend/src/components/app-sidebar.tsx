@@ -301,8 +301,9 @@ export function AppSidebar() {
   const chatOnlyReason = usePlatformStore((s) => s.chatOnlyReason);
   const trainingAccessible = usePlatformStore((s) => s.isTrainingAccessible());
   const cloudTrainingUnlocked = usePlatformStore((s) => s.cloudTrainingUnlocked);
+  const trainingCloudAvailable = usePlatformStore((s) => s.trainingCloudAvailable);
   const [developerOptions] = useDeveloperOptions();
-  const showTrainingTools = developerOptions.trainingTools || cloudTrainingUnlocked;
+  const showTrainingTools = developerOptions.trainingTools || cloudTrainingUnlocked || trainingCloudAvailable;
   // When Train/Export are greyed out (chat-only host), explain why on hover
   // instead of disabling them silently. mlx_unavailable is the common macOS case
   // after a reinstall/update dropped MLX and is recoverable via `unsloth studio update`.

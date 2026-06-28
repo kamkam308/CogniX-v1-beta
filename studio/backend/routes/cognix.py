@@ -35,6 +35,7 @@ from core.cognix import hardware as cognix_hardware
 from core.cognix import integration_manager as cognix_integration_manager
 from core.cognix import intent_prediction as cognix_intent_prediction
 from core.cognix import memory_manager as cognix_memory_manager
+from core.cognix import memory_editor as cognix_memory_editor
 from core.cognix import model_lifecycle as cognix_model_lifecycle
 from core.cognix import module_registry as cognix_module_registry
 from core.cognix import onboarding as cognix_onboarding
@@ -160,6 +161,42 @@ class SkillMemoryInjectionPlanRequest(BaseModel):
 
     objective: str | None = Field(None, max_length = 4000)
     max_memories: int = Field(5, alias = "maxMemories", ge = 1, le = 20)
+
+
+class LiveMemoryCreateRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    title: str = Field(..., min_length = 1, max_length = 240)
+    content: str = Field(..., min_length = 1, max_length = 120000)
+    category: str = Field("general", max_length = 80)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    sensitive: bool = False
+    confirmed_sensitive_control: bool = Field(False, alias = "confirmedSensitiveControl")
+    metadata: dict[str, Any] | None = None
+    store_memory: bool = Field(True, alias = "storeMemory")
+
+
+class LiveMemoryUpdateRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    title: str | None = Field(None, max_length = 240)
+    content: str | None = Field(None, max_length = 120000)
+    category: str | None = Field(None, max_length = 80)
+    reason: str | None = Field(None, max_length = 500)
+
+
+class LiveMemoryStatusRequest(BaseModel):
+    reason: str | None = Field(None, max_length = 500)
+
+
+class LiveMemoryMergeRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    source_ids: list[str] = Field(..., alias = "sourceIds", min_length = 2, max_length = 12)
+    title: str | None = Field(None, max_length = 240)
+    category: str | None = Field(None, max_length = 80)
+    disable_sources: bool = Field(False, alias = "disableSources")
+    metadata: dict[str, Any] | None = None
 
 
 class WorkflowRecordRequest(BaseModel):
@@ -733,6 +770,10 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "candidate_json": "candidateJson",
         "evidence_excerpt": "evidenceExcerpt",
         "source_candidate_id": "sourceCandidateId",
+        "memory_id": "memoryId",
+        "current_version": "currentVersion",
+        "version_number": "versionNumber",
+        "change_reason": "changeReason",
         "preference_key": "preferenceKey",
         "workflow_type": "workflowType",
         "share_status": "shareStatus",
@@ -788,6 +829,10 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         out["runs"] = [_row(item) if isinstance(item, dict) else item for item in out["runs"]]
     if isinstance(out.get("logs"), list):
         out["logs"] = [_row(item) if isinstance(item, dict) else item for item in out["logs"]]
+    if isinstance(out.get("versions"), list):
+        out["versions"] = [_row(item) if isinstance(item, dict) else item for item in out["versions"]]
+    if isinstance(out.get("auditLogs"), list):
+        out["auditLogs"] = [_row(item) if isinstance(item, dict) else item for item in out["auditLogs"]]
     return out
 
 
@@ -3876,6 +3921,387 @@ async def skill_memory_injection_plan(
         "auditLogId": audit.get("id"),
         "sideEffects": side_effects,
         "plannerVersion": cognix_skill_memory.COGNIX_CONTEXT_INJECTOR_VERSION,
+    }
+
+
+@router.get("/memory/editor/blueprint")
+async def live_memory_editor_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_memory_editor.build_memory_editor_blueprint()
+    return {
+        "username": current_subject,
+        "memoryEditorBlueprint": blueprint,
+        "plannerVersion": cognix_memory_editor.COGNIX_MEMORY_EDITOR_VERSION,
+        "sideEffects": blueprint.get("sideEffects", {}),
+    }
+
+
+@router.post("/memory/editor/items")
+async def create_live_memory_item(
+    payload: LiveMemoryCreateRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_memory_editor.build_memory_item_plan(
+        username = current_subject,
+        title = payload.title,
+        content = payload.content,
+        category = payload.category,
+        project_id = payload.project_id,
+        sensitive = payload.sensitive,
+        confirmed_sensitive_control = payload.confirmed_sensitive_control,
+        metadata = payload.metadata,
+    )
+    if plan.get("policy", {}).get("blocked"):
+        raise HTTPException(status_code = 400, detail = plan.get("policy", {}).get("reason") or "Memory blocked")
+    stored_memory = (
+        cognix_db.create_live_memory(current_subject, plan = plan, actor_username = current_subject)
+        if payload.store_memory
+        else None
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "memoryWrite": bool(stored_memory),
+        "versionWrite": bool(stored_memory),
+        "auditWrite": True,
+        "memoryDelete": False,
+        "modelLoad": False,
+        "generation": False,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "live_memory_created",
+        resource_type = "cognix_live_memory",
+        resource_id = str(stored_memory.get("id") if stored_memory else current_subject),
+        severity = "notice",
+        metadata = {
+            "memoryEditorVersion": plan.get("memoryEditorVersion"),
+            "category": plan.get("memory", {}).get("category"),
+            "sensitive": plan.get("memory", {}).get("sensitive"),
+            "stored": bool(stored_memory),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "memoryItemPlan": plan,
+        "memory": _row(stored_memory) if stored_memory else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_memory_editor.COGNIX_MEMORY_EDITOR_VERSION,
+    }
+
+
+@router.get("/memory/editor/items")
+async def list_live_memory_items(
+    category: str | None = None,
+    query: str | None = None,
+    include_disabled: bool = False,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    return {
+        "username": current_subject,
+        "items": _rows(
+            cognix_db.list_live_memories(
+                current_subject,
+                category = cognix_memory_editor.normalize_category(category) if category else None,
+                query = query,
+                include_disabled = include_disabled,
+            )
+        ),
+        "sideEffects": {
+            "memoryWrite": False,
+            "versionWrite": False,
+            "auditWrite": False,
+            "memoryDelete": False,
+            "modelLoad": False,
+            "generation": False,
+        },
+    }
+
+
+@router.get("/memory/editor/items/{memory_id}")
+async def get_live_memory_item(
+    memory_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    memory = cognix_db.get_live_memory(current_subject, memory_id)
+    if memory is None:
+        raise HTTPException(status_code = 404, detail = "Live memory not found")
+    return {
+        "username": current_subject,
+        "memory": _row(memory),
+        "sideEffects": {
+            "memoryWrite": False,
+            "versionWrite": False,
+            "auditWrite": False,
+            "memoryDelete": False,
+            "modelLoad": False,
+            "generation": False,
+        },
+    }
+
+
+@router.patch("/memory/editor/items/{memory_id}")
+async def update_live_memory_item(
+    memory_id: str,
+    payload: LiveMemoryUpdateRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    existing = cognix_db.get_live_memory(current_subject, memory_id)
+    if existing is None:
+        raise HTTPException(status_code = 404, detail = "Live memory not found")
+    plan = cognix_memory_editor.build_memory_edit_plan(
+        existing_memory = existing,
+        title = payload.title,
+        content = payload.content,
+        category = payload.category,
+        reason = payload.reason,
+    )
+    try:
+        memory = cognix_db.update_live_memory(
+            current_subject,
+            memory_id,
+            actor_username = current_subject,
+            title = payload.title,
+            content = payload.content,
+            category = cognix_memory_editor.normalize_category(payload.category) if payload.category else None,
+            reason = payload.reason,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from exc
+    if memory is None:
+        raise HTTPException(status_code = 404, detail = "Live memory not found")
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "memoryWrite": True,
+        "versionWrite": True,
+        "auditWrite": True,
+        "memoryDelete": False,
+        "modelLoad": False,
+        "generation": False,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "live_memory_updated",
+        resource_type = "cognix_live_memory",
+        resource_id = memory_id,
+        severity = "notice",
+        metadata = {
+            "changes": plan.get("changes", []),
+            "nextVersion": memory.get("current_version"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "memoryEditPlan": plan,
+        "memory": _row(memory),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_memory_editor.COGNIX_MEMORY_VERSIONING_VERSION,
+    }
+
+
+@router.post("/memory/editor/items/{memory_id}/disable")
+async def disable_live_memory_item(
+    memory_id: str,
+    payload: LiveMemoryStatusRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    memory = cognix_db.set_live_memory_status(
+        current_subject,
+        memory_id,
+        status = "disabled",
+        actor_username = current_subject,
+        reason = payload.reason or "memory_disabled",
+    )
+    if memory is None:
+        raise HTTPException(status_code = 404, detail = "Live memory not found")
+    side_effects = {
+        "memoryWrite": True,
+        "versionWrite": True,
+        "auditWrite": True,
+        "memoryDelete": False,
+        "modelLoad": False,
+        "generation": False,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "live_memory_disabled",
+        resource_type = "cognix_live_memory",
+        resource_id = memory_id,
+        severity = "notice",
+        metadata = {
+            "status": memory.get("status"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "memory": _row(memory),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_memory_editor.COGNIX_MEMORY_VERSIONING_VERSION,
+    }
+
+
+@router.delete("/memory/editor/items/{memory_id}")
+async def delete_live_memory_item(
+    memory_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    memory = cognix_db.set_live_memory_status(
+        current_subject,
+        memory_id,
+        status = "deleted",
+        actor_username = current_subject,
+        reason = "memory_deleted",
+    )
+    if memory is None:
+        raise HTTPException(status_code = 404, detail = "Live memory not found")
+    side_effects = {
+        "memoryWrite": True,
+        "versionWrite": True,
+        "auditWrite": True,
+        "memoryDelete": True,
+        "modelLoad": False,
+        "generation": False,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "live_memory_deleted",
+        resource_type = "cognix_live_memory",
+        resource_id = memory_id,
+        severity = "notice",
+        metadata = {
+            "softDelete": True,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "deleted": True,
+        "memory": _row(memory),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_memory_editor.COGNIX_MEMORY_VERSIONING_VERSION,
+    }
+
+
+@router.post("/memory/editor/merge")
+async def merge_live_memory_items(
+    payload: LiveMemoryMergeRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    source_ids = list(dict.fromkeys(str(item) for item in payload.source_ids if str(item).strip()))
+    if len(source_ids) < 2:
+        raise HTTPException(status_code = 400, detail = "At least two distinct memories are required")
+    source_memories: list[dict[str, Any]] = []
+    for memory_id in source_ids:
+        memory = cognix_db.get_live_memory(current_subject, memory_id)
+        if memory is None or memory.get("status") == "deleted":
+            raise HTTPException(status_code = 404, detail = f"Live memory not found: {memory_id}")
+        source_memories.append(memory)
+    plan = cognix_memory_editor.build_memory_merge_plan(
+        username = current_subject,
+        source_memories = source_memories,
+        title = payload.title,
+        category = payload.category,
+        metadata = payload.metadata,
+    )
+    memory = cognix_db.merge_live_memories(
+        current_subject,
+        plan = plan,
+        actor_username = current_subject,
+        disable_sources = payload.disable_sources,
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "memoryWrite": True,
+        "versionWrite": True,
+        "auditWrite": True,
+        "memoryDelete": False,
+        "modelLoad": False,
+        "generation": False,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "live_memory_merged",
+        resource_type = "cognix_live_memory",
+        resource_id = str(memory.get("id")),
+        severity = "notice",
+        metadata = {
+            "sourceMemoryIds": source_ids,
+            "disableSources": payload.disable_sources,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "memoryMergePlan": plan,
+        "memory": _row(memory),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_memory_editor.COGNIX_MEMORY_VERSIONING_VERSION,
+    }
+
+
+@router.get("/memory/editor/export")
+async def export_live_memory_items(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    bundle = cognix_db.export_live_memory_bundle(current_subject)
+    side_effects = {
+        "exportRead": True,
+        "memoryWrite": False,
+        "versionWrite": False,
+        "auditWrite": True,
+        "memoryDelete": False,
+        "modelLoad": False,
+        "generation": False,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "live_memory_exported",
+        resource_type = "cognix_live_memory",
+        resource_id = current_subject,
+        severity = "notice",
+        metadata = {
+            "memoryCount": len(bundle.get("memories") or []),
+            "versionCount": len(bundle.get("versions") or []),
+            "auditLogCount": len(bundle.get("auditLogs") or []),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "memoryExport": {
+            **bundle,
+            "memories": _rows(bundle.get("memories") or []),
+            "versions": _rows(bundle.get("versions") or []),
+            "auditLogs": _rows(bundle.get("auditLogs") or []),
+        },
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_memory_editor.COGNIX_MEMORY_SEARCH_VERSION,
+    }
+
+
+@router.get("/memory/editor/audit-logs")
+async def list_live_memory_audit_logs(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    return {
+        "username": current_subject,
+        "auditLogs": _rows(cognix_db.list_live_memory_audit_logs(current_subject)),
+        "sideEffects": {
+            "memoryWrite": False,
+            "versionWrite": False,
+            "auditWrite": False,
+            "memoryDelete": False,
+            "modelLoad": False,
+            "generation": False,
+        },
     }
 
 
