@@ -39,6 +39,7 @@ from core.cognix import onboarding as cognix_onboarding
 from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import persona_manager as cognix_persona_manager
+from core.cognix import performance_monitor as cognix_performance_monitor
 from core.cognix import plugin_marketplace as cognix_plugin_marketplace
 from core.cognix import project_dna as cognix_project_dna
 from core.cognix import project_experts as cognix_project_experts
@@ -1273,6 +1274,102 @@ def test_optimization_experiment_plan_endpoint_blocks_enablement_until_benchmark
     assert log["action"] == "optimization_experiment_plan_built"
     assert log["metadata"]["experimentPlanVersion"] == "cognix_optimization_experiment_plan_v1"
     assert "benchmark_baseline" in log["metadata"]["blockedGateIds"]
+
+
+def test_performance_monitor_collects_snapshot_without_execution_side_effects():
+    metrics = cognix_performance_monitor.collect_runtime_metrics(
+        username = "alice",
+        hardware = stub_gpu_hardware_profile(),
+        runtime_snapshot = {
+            "runtimeType": "ollama",
+            "activeModel": "qwen-4b",
+            "loadedModels": ["qwen-4b"],
+            "loadingModels": [],
+        },
+        inference_stats = {
+            "tokensPerSecond": 23.5,
+            "latencyMs": 180,
+            "loadTimeMs": 1200,
+            "estimatedCostUsd": 0,
+        },
+        latest_benchmark_run = {"id": "bench-1", "benchmark": {"estimatedTokensPerSecond": 19.0}},
+        project_id = "project-code",
+    )
+
+    assert metrics["performanceMonitorVersion"] == "cognix_performance_monitor_v1"
+    assert metrics["runtimeMetricsCollectorVersion"] == "cognix_runtime_metrics_collector_v1"
+    assert metrics["metricsStreamerVersion"] == "cognix_metrics_streamer_v1"
+    assert metrics["hardware"]["ram"]["totalGb"] == 32.0
+    assert metrics["hardware"]["gpu"]["available"] is True
+    assert metrics["inference"]["tokensPerSecond"] == 23.5
+    assert metrics["streamPlan"]["willOpenStreamNow"] is False
+    assert metrics["sideEffects"]["generation"] is False
+    assert metrics["sideEffects"]["benchmarkRun"] is False
+    assert metrics["sideEffects"]["gpuStressTest"] is False
+
+
+def test_performance_snapshot_endpoint_stores_metrics_and_logs_audit(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(cognix_routes.cognix_hardware, "get_hardware_profile", stub_gpu_hardware_profile)
+    monkeypatch.setattr(
+        cognix_routes,
+        "_current_model_cache_runtime",
+        lambda: {
+            "runtimeType": "ollama",
+            "activeModel": "qwen-4b",
+            "loadedModels": ["qwen-4b"],
+            "loadingModels": [],
+        },
+    )
+    cognix_db.create_benchmark_run(
+        "alice",
+        {
+            "mode": "quick",
+            "overallScore": 71.0,
+            "estimatedTokensPerSecond": 19.0,
+            "hardware": stub_gpu_hardware_profile(),
+        },
+    )
+
+    body = run_async(
+        cognix_routes.performance_snapshot(
+            cognix_routes.PerformanceSnapshotRequest(
+                modelId = "qwen-4b",
+                inferenceStats = {
+                    "tokensPerSecond": 24.0,
+                    "latencyMs": 165,
+                    "loadTimeMs": 900,
+                    "estimatedCostUsd": 0,
+                },
+                storeMetric = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_performance_monitor_v1"
+    assert body["storedMetric"]["modelId"] == "qwen-4b"
+    assert body["storedMetric"]["tokensPerSecond"] == 24.0
+    assert body["sideEffects"]["metricsWrite"] is True
+    assert body["sideEffects"]["generation"] is False
+    assert body["sideEffects"]["benchmarkRun"] is False
+
+    metrics = run_async(cognix_routes.performance_metrics(current_subject = "alice"))
+    logs = run_async(cognix_routes.performance_logs(current_subject = "alice"))
+    assert metrics["metrics"][0]["id"] == body["storedMetric"]["id"]
+    assert logs["logs"][0]["eventType"] == "runtime_metric_snapshot"
+
+    stream = run_async(cognix_routes.performance_stream_plan(developer_mode = True, current_subject = "alice"))
+    assert stream["metricsStreamPlan"]["displayMode"] == "developer_overlay"
+    assert stream["metricsStreamPlan"]["willOpenStreamNow"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "performance_snapshot_collected"
+    assert log["metadata"]["sideEffects"]["metricsWrite"] is True
+    assert log["metadata"]["sideEffects"]["gpuStressTest"] is False
 
 
 def test_adaptive_quantization_recommends_memory_safe_variant_without_model_mutation():
@@ -4742,6 +4839,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-model-lifecycle",
         "cognix-model-translator",
         "cognix-optimization-engine",
+        "cognix-performance-monitor",
         "cognix-prompt-compression",
         "cognix-context-heatmap",
         "cognix-intent-prediction",
@@ -4795,6 +4893,12 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "benchmark_gated_experiments" in modules["cognix-optimization-engine"]["capabilities"]
     assert "/api/cognix/optimizations/capabilities" in modules["cognix-optimization-engine"]["routes"]
     assert "/api/cognix/optimizations/experiment-plan" in modules["cognix-optimization-engine"]["routes"]
+    assert modules["cognix-performance-monitor"]["dependencyState"]["ready"] is True
+    assert "runtime_metrics" in modules["cognix-performance-monitor"]["capabilities"]
+    assert "metrics_streaming" in modules["cognix-performance-monitor"]["capabilities"]
+    assert "model_performance_logs" in modules["cognix-performance-monitor"]["capabilities"]
+    assert "/api/cognix/performance/snapshot" in modules["cognix-performance-monitor"]["routes"]
+    assert "/api/cognix/performance/logs" in modules["cognix-performance-monitor"]["routes"]
     assert modules["cognix-prompt-compression"]["dependencyState"]["ready"] is True
     assert "prompt_compression" in modules["cognix-prompt-compression"]["capabilities"]
     assert "importance_ranking" in modules["cognix-prompt-compression"]["capabilities"]

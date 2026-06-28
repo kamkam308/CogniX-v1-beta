@@ -46,6 +46,7 @@ from core.cognix import onboarding as cognix_onboarding
 from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import persona_manager as cognix_persona_manager
+from core.cognix import performance_monitor as cognix_performance_monitor
 from core.cognix import plugin_marketplace as cognix_plugin_marketplace
 from core.cognix import project_dna as cognix_project_dna
 from core.cognix import project_experts as cognix_project_experts
@@ -764,6 +765,16 @@ class BenchmarkRunRequest(BaseModel):
     include_disk: bool = Field(True, alias = "includeDisk")
 
 
+class PerformanceSnapshotRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    model_id: str | None = Field(None, alias = "modelId", max_length = 240)
+    runtime_snapshot: dict[str, Any] | None = Field(None, alias = "runtimeSnapshot")
+    inference_stats: dict[str, Any] | None = Field(None, alias = "inferenceStats")
+    store_metric: bool = Field(True, alias = "storeMetric")
+
+
 class NewsRefreshRequest(BaseModel):
     topic: str = Field("intelligence artificielle", min_length = 1, max_length = 120)
 
@@ -875,6 +886,15 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "estimated_tokens_per_second": "estimatedTokensPerSecond",
         "hardware_json": "hardwareJson",
         "benchmark_json": "benchmarkJson",
+        "runtime_type": "runtimeType",
+        "ram_used_percent": "ramUsedPercent",
+        "cpu_used_percent": "cpuUsedPercent",
+        "gpu_available": "gpuAvailable",
+        "tokens_per_second": "tokensPerSecond",
+        "latency_ms": "latencyMs",
+        "load_time_ms": "loadTimeMs",
+        "estimated_cost_usd": "estimatedCostUsd",
+        "metrics_json": "metricsJson",
         "needs_clarification": "needsClarification",
         "routing_mode": "routingMode",
         "simulation_type": "simulationType",
@@ -1038,6 +1058,8 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         out["verificationRequired"] = bool(out["verificationRequired"])
     if "ignored" in out:
         out["ignored"] = bool(out["ignored"])
+    if "gpuAvailable" in out:
+        out["gpuAvailable"] = bool(out["gpuAvailable"])
     if isinstance(out.get("steps"), list):
         out["steps"] = [_row(item) if isinstance(item, dict) else item for item in out["steps"]]
     if isinstance(out.get("runs"), list):
@@ -1713,6 +1735,121 @@ async def benchmark_runs(current_subject: str = Depends(get_current_jwt_subject)
         "username": current_subject,
         "runs": _rows(cognix_db.list_benchmark_runs(username = current_subject, limit = 50)),
     }
+
+
+@router.get("/performance/blueprint")
+async def performance_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_performance_monitor.build_performance_monitor_blueprint()
+    return {
+        "username": current_subject,
+        "performanceBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_performance_monitor.COGNIX_PERFORMANCE_MONITOR_VERSION,
+    }
+
+
+@router.post("/performance/snapshot")
+async def performance_snapshot(
+    payload: PerformanceSnapshotRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    runtime = payload.runtime_snapshot or _current_model_cache_runtime()
+    metrics = cognix_performance_monitor.collect_runtime_metrics(
+        username = current_subject,
+        hardware = cognix_hardware.get_hardware_profile(),
+        runtime_snapshot = runtime,
+        inference_stats = payload.inference_stats,
+        latest_benchmark_run = cognix_db.get_latest_benchmark_run(current_subject),
+        project_id = payload.project_id,
+        model_id = payload.model_id,
+    )
+    stored_metric = (
+        cognix_db.create_runtime_metric(
+            current_subject,
+            metrics = metrics,
+            project_id = payload.project_id,
+        )
+        if payload.store_metric
+        else None
+    )
+    side_effects = {
+        **metrics.get("sideEffects", {}),
+        "metricsWrite": stored_metric is not None,
+        "performanceLogWrite": stored_metric is not None,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "performance_snapshot_collected",
+        resource_type = "cognix_performance_monitor",
+        resource_id = str((stored_metric or {}).get("id") or metrics.get("modelId") or "runtime"),
+        severity = "notice",
+        metadata = {
+            "performanceMonitorVersion": metrics.get("performanceMonitorVersion"),
+            "runtimeMetricsCollectorVersion": metrics.get("runtimeMetricsCollectorVersion"),
+            "metricsStreamerVersion": metrics.get("metricsStreamerVersion"),
+            "modelId": metrics.get("modelId"),
+            "runtimeType": metrics.get("runtime", {}).get("runtimeType"),
+            "tokensPerSecond": metrics.get("inference", {}).get("tokensPerSecond"),
+            "latencyMs": metrics.get("inference", {}).get("latencyMs"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "runtimeMetrics": metrics,
+        "storedMetric": _row(stored_metric) if stored_metric else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_performance_monitor.COGNIX_PERFORMANCE_MONITOR_VERSION,
+    }
+
+
+@router.get("/performance/stream-plan")
+async def performance_stream_plan(
+    project_id: str | None = None,
+    developer_mode: bool = False,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if project_id:
+        _require_owned_project(project_id, current_subject)
+    plan = cognix_performance_monitor.build_metrics_stream_plan(
+        project_id = project_id,
+        developer_mode = developer_mode,
+    )
+    return {
+        "username": current_subject,
+        "metricsStreamPlan": plan,
+        "sideEffects": plan.get("sideEffects", {}),
+        "plannerVersion": cognix_performance_monitor.COGNIX_METRICS_STREAMER_VERSION,
+    }
+
+
+@router.get("/performance/metrics")
+async def performance_metrics(
+    project_id: str | None = None,
+    limit: int = 100,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if project_id:
+        _require_owned_project(project_id, current_subject)
+    metrics = cognix_db.list_runtime_metrics(current_subject, project_id = project_id, limit = limit)
+    return {"username": current_subject, "metrics": _rows(metrics), "count": len(metrics)}
+
+
+@router.get("/performance/logs")
+async def performance_logs(
+    project_id: str | None = None,
+    limit: int = 100,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if project_id:
+        _require_owned_project(project_id, current_subject)
+    logs = cognix_db.list_model_performance_logs(current_subject, project_id = project_id, limit = limit)
+    return {"username": current_subject, "logs": _rows(logs), "count": len(logs)}
 
 
 @router.get("/models/recommendation")

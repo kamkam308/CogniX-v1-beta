@@ -253,6 +253,45 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_benchmark_runs_created
             ON cognix_benchmark_runs(created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_runtime_metrics (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            project_id TEXT,
+            model_id TEXT,
+            runtime_type TEXT NOT NULL DEFAULT 'unknown',
+            ram_used_percent REAL,
+            cpu_used_percent REAL,
+            gpu_available INTEGER NOT NULL DEFAULT 0,
+            tokens_per_second REAL,
+            latency_ms REAL,
+            load_time_ms REAL,
+            estimated_cost_usd REAL NOT NULL DEFAULT 0,
+            metrics_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_runtime_metrics_username_created
+            ON cognix_runtime_metrics(username, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_runtime_metrics_project
+            ON cognix_runtime_metrics(username, project_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_model_performance_logs (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            model_id TEXT,
+            project_id TEXT,
+            event_type TEXT NOT NULL,
+            tokens_per_second REAL,
+            latency_ms REAL,
+            load_time_ms REAL,
+            estimated_cost_usd REAL NOT NULL DEFAULT 0,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_model_performance_logs_username_created
+            ON cognix_model_performance_logs(username, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_model_variants (
             id TEXT PRIMARY KEY,
             model_id TEXT NOT NULL,
@@ -2254,6 +2293,153 @@ def get_latest_benchmark_run(username: str) -> dict[str, Any] | None:
         if row is None:
             return None
         return _benchmark_row(dict(row))
+    finally:
+        conn.close()
+
+
+def _hydrate_runtime_metric(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["metrics"] = _json_or_default(item.get("metrics_json"), {})
+    return item
+
+
+def _hydrate_model_performance_log(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def create_runtime_metric(username: str, *, metrics: dict[str, Any], project_id: str | None = None) -> dict[str, Any]:
+    created_at = _now()
+    metric_id = _new_id("rtm")
+    runtime = metrics.get("runtime") if isinstance(metrics.get("runtime"), dict) else {}
+    hardware = metrics.get("hardware") if isinstance(metrics.get("hardware"), dict) else {}
+    ram = hardware.get("ram") if isinstance(hardware.get("ram"), dict) else {}
+    cpu = hardware.get("cpu") if isinstance(hardware.get("cpu"), dict) else {}
+    gpu = hardware.get("gpu") if isinstance(hardware.get("gpu"), dict) else {}
+    inference = metrics.get("inference") if isinstance(metrics.get("inference"), dict) else {}
+    model_id = metrics.get("modelId")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_runtime_metrics
+                (
+                    id, username, project_id, model_id, runtime_type,
+                    ram_used_percent, cpu_used_percent, gpu_available,
+                    tokens_per_second, latency_ms, load_time_ms,
+                    estimated_cost_usd, metrics_json, created_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                metric_id,
+                username,
+                project_id or metrics.get("projectId"),
+                str(model_id)[:240] if model_id else None,
+                str(runtime.get("runtimeType") or "unknown")[:80],
+                ram.get("usedPercent"),
+                cpu.get("usagePercent"),
+                1 if gpu.get("available") else 0,
+                inference.get("tokensPerSecond"),
+                inference.get("latencyMs"),
+                inference.get("loadTimeMs"),
+                float(inference.get("estimatedCostUsd") or 0.0),
+                json.dumps(metrics, ensure_ascii = False),
+                created_at,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO cognix_model_performance_logs
+                (
+                    id, username, model_id, project_id, event_type,
+                    tokens_per_second, latency_ms, load_time_ms,
+                    estimated_cost_usd, metadata_json, created_at
+                )
+            VALUES (?, ?, ?, ?, 'runtime_metric_snapshot', ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _new_id("mplog"),
+                username,
+                str(model_id)[:240] if model_id else None,
+                project_id or metrics.get("projectId"),
+                inference.get("tokensPerSecond"),
+                inference.get("latencyMs"),
+                inference.get("loadTimeMs"),
+                float(inference.get("estimatedCostUsd") or 0.0),
+                json.dumps(
+                    {
+                        "performanceMonitorVersion": metrics.get("performanceMonitorVersion"),
+                        "runtimeType": runtime.get("runtimeType"),
+                        "sideEffects": metrics.get("sideEffects", {}),
+                    },
+                    ensure_ascii = False,
+                ),
+                created_at,
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM cognix_runtime_metrics WHERE id = ?", (metric_id,)).fetchone()
+        return _hydrate_runtime_metric(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_runtime_metrics(username: str, *, project_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(int(limit), 300))
+    conn = get_connection()
+    try:
+        if project_id:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_runtime_metrics
+                WHERE username = ? AND project_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, project_id, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_runtime_metrics
+                WHERE username = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, safe_limit),
+            ).fetchall()
+        return [_hydrate_runtime_metric(row_to_dict(row) or {}) for row in rows]
+    finally:
+        conn.close()
+
+
+def list_model_performance_logs(username: str, *, project_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(int(limit), 300))
+    conn = get_connection()
+    try:
+        if project_id:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_model_performance_logs
+                WHERE username = ? AND project_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, project_id, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_model_performance_logs
+                WHERE username = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, safe_limit),
+            ).fetchall()
+        return [_hydrate_model_performance_log(row_to_dict(row) or {}) for row in rows]
     finally:
         conn.close()
 
