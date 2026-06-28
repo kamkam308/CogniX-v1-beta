@@ -930,6 +930,123 @@ def test_optimization_plan_endpoint_logs_dry_run_decision(monkeypatch):
     assert log["metadata"]["sideEffects"]["modelReconfiguration"] is False
 
 
+def test_optimization_capability_registry_declares_benchmark_gated_features_without_mutation():
+    hardware = stub_hardware_profile()
+    registry = cognix_optimization_planner.build_optimization_capability_registry(
+        hardware = hardware,
+        recommendation = stub_recommendation(hardware)["recommendation"],
+        latest_benchmark_run = None,
+    )
+
+    assert registry["registryVersion"] == "cognix_optimization_capability_registry_v1"
+    assert registry["mode"] == "dry_run"
+    assert registry["policies"]["benchmarkRequiredBeforeEnable"] is True
+    assert registry["policies"]["frontendDirectOptimizationMutationAllowed"] is False
+    assert registry["sideEffects"]["runtimeConfigWrite"] is False
+    assert registry["sideEffects"]["benchmarkRun"] is False
+    assert registry["sideEffects"]["cacheMutation"] is False
+
+    capabilities = {item["id"]: item for item in registry["capabilities"]}
+    assert "semantic_cache" in capabilities
+    assert "kv_cache_eviction" in capabilities
+    assert "flash_attention" in capabilities
+    assert capabilities["semantic_cache"]["benchmarkGate"]["status"] == "required"
+    assert capabilities["semantic_cache"]["activationPolicy"]["automaticEnableAllowed"] is False
+    assert capabilities["kv_cache_eviction"]["sideEffects"]["cacheMutation"] is False
+
+
+def test_optimization_experiment_plan_requires_benchmark_before_enablement():
+    hardware = stub_hardware_profile()
+    plan = cognix_optimization_planner.build_optimization_experiment_plan(
+        objective = "Tester semantic cache et kv cache eviction",
+        hardware = hardware,
+        recommendation = stub_recommendation(hardware)["recommendation"],
+        latest_benchmark_run = None,
+        requested_optimizations = ["semantic_cache", "kv_cache_policy"],
+    )
+
+    assert plan["experimentPlanVersion"] == "cognix_optimization_experiment_plan_v1"
+    assert plan["mode"] == "dry_run"
+    assert plan["selectedOptimizationIds"] == ["semantic_cache", "kv_cache_eviction"]
+    assert "benchmark_baseline" in plan["summary"]["blockedGateIds"]
+    assert all(ticket["status"] == "blocked_by_gates" for ticket in plan["tickets"])
+    assert all(ticket["willEnableRuntime"] is False for ticket in plan["tickets"])
+    assert all(ticket["willRunBenchmark"] is False for ticket in plan["tickets"])
+    assert plan["sideEffects"]["runtimeConfigWrite"] is False
+    assert plan["sideEffects"]["cacheMutation"] is False
+    assert plan["sideEffects"]["generation"] is False
+
+
+def test_optimization_capability_registry_endpoint_logs_audit_without_mutation(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_routes.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_routes.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+
+    body = run_async(cognix_routes.optimization_capabilities(current_subject = "alice"))
+
+    registry = body["registry"]
+    assert body["auditLogId"].startswith("aud_")
+    assert registry["registryVersion"] == "cognix_optimization_capability_registry_v1"
+    assert body["sideEffects"]["runtimeConfigWrite"] is False
+    assert body["sideEffects"]["benchmarkRun"] is False
+    assert body["sideEffects"]["cacheMutation"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "optimization_capability_registry_built"
+    assert log["metadata"]["registryVersion"] == "cognix_optimization_capability_registry_v1"
+    assert log["metadata"]["sideEffects"]["runtimeConfigWrite"] is False
+
+
+def test_optimization_experiment_plan_endpoint_blocks_enablement_until_benchmark(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_routes.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_routes.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+
+    body = run_async(
+        cognix_routes.optimization_experiment_plan(
+            cognix_routes.OptimizationExperimentPlanRequest(
+                objective = "Valider semantic cache et policy KV avant activation",
+                requested_optimizations = ["semantic_cache", "kv_cache_policy"],
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    plan = body["optimizationExperimentPlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert plan["experimentPlanVersion"] == "cognix_optimization_experiment_plan_v1"
+    assert plan["selectedOptimizationIds"] == ["semantic_cache", "kv_cache_eviction"]
+    assert "benchmark_baseline" in plan["summary"]["blockedGateIds"]
+    assert body["sideEffects"]["runtimeConfigWrite"] is False
+    assert body["sideEffects"]["cacheMutation"] is False
+    assert body["sideEffects"]["generation"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "optimization_experiment_plan_built"
+    assert log["metadata"]["experimentPlanVersion"] == "cognix_optimization_experiment_plan_v1"
+    assert "benchmark_baseline" in log["metadata"]["blockedGateIds"]
+
+
 def test_runtime_adapter_registry_and_plan_select_ollama_without_side_effects():
     registry = cognix_runtime_adapter.build_runtime_adapter_registry()
 
@@ -2211,9 +2328,22 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert registry["sideEffects"]["secretRead"] is False
 
     modules = {item["id"]: item for item in registry["modules"]}
-    assert {"cognix-local-core", "cognix-model-lifecycle", "cognix-thinking-status", "cognix-memory-manager", "cognix-onboarding", "cognix-rag", "cognix-fine-tuning", "cognix-worker-queue", "cognix-research-watch", "cognix-integrations", "cognix-codex-secure-agent", "cognix-enterprise-foundation", "cognix-deployment-manager"}.issubset(
-        modules
-    )
+    assert {
+        "cognix-local-core",
+        "cognix-model-lifecycle",
+        "cognix-optimization-engine",
+        "cognix-thinking-status",
+        "cognix-memory-manager",
+        "cognix-onboarding",
+        "cognix-rag",
+        "cognix-fine-tuning",
+        "cognix-worker-queue",
+        "cognix-research-watch",
+        "cognix-integrations",
+        "cognix-codex-secure-agent",
+        "cognix-enterprise-foundation",
+        "cognix-deployment-manager",
+    }.issubset(modules)
     assert modules["cognix-local-core"]["activationState"] == "ready"
     assert "module_manifest_registry" in modules["cognix-local-core"]["capabilities"]
     assert "/api/cognix/modules/manifests" in modules["cognix-local-core"]["routes"]
@@ -2222,6 +2352,11 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "cache_load_planning" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "/api/cognix/models/lifecycle-plan" in modules["cognix-model-lifecycle"]["routes"]
     assert "/api/cognix/models/cache/load-plan" in modules["cognix-model-lifecycle"]["routes"]
+    assert modules["cognix-optimization-engine"]["dependencyState"]["ready"] is True
+    assert "optimization_capability_registry" in modules["cognix-optimization-engine"]["capabilities"]
+    assert "benchmark_gated_experiments" in modules["cognix-optimization-engine"]["capabilities"]
+    assert "/api/cognix/optimizations/capabilities" in modules["cognix-optimization-engine"]["routes"]
+    assert "/api/cognix/optimizations/experiment-plan" in modules["cognix-optimization-engine"]["routes"]
     assert modules["cognix-thinking-status"]["activationState"] == "ready"
     assert "technical_redaction" in modules["cognix-thinking-status"]["capabilities"]
     assert "/api/cognix/thinking/plan" in modules["cognix-thinking-status"]["routes"]

@@ -279,6 +279,15 @@ class OptimizationPlanRequest(BaseModel):
     project_id: str | None = Field(None, max_length = 160)
 
 
+class OptimizationExperimentPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    project_type: str | None = Field(None, max_length = 80)
+    project_id: str | None = Field(None, max_length = 160)
+    requested_optimizations: list[str] | None = Field(None, alias = "requestedOptimizations")
+
+
 class RuntimePlanRequest(BaseModel):
     objective: str = Field(..., min_length = 1, max_length = 4000)
     project_type: str | None = Field(None, max_length = 80)
@@ -2324,6 +2333,46 @@ async def rag_plan(
     }
 
 
+@router.get("/optimizations/capabilities")
+async def optimization_capabilities(
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    hardware = cognix_hardware.get_hardware_profile()
+    latest_benchmark = cognix_db.get_latest_benchmark_run(current_subject)
+    recommendation_payload = cognix_recommender.build_model_recommendation(
+        hardware,
+        latest_benchmark_run = latest_benchmark,
+    )
+    registry = cognix_optimization_planner.build_optimization_capability_registry(
+        hardware = hardware,
+        recommendation = recommendation_payload["recommendation"],
+        latest_benchmark_run = latest_benchmark,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "optimization_capability_registry_built",
+        resource_type = "cognix_optimization_capability_registry",
+        resource_id = str(registry.get("registryVersion")),
+        severity = "notice",
+        metadata = {
+            "registryVersion": registry.get("registryVersion"),
+            "plannerVersion": registry.get("plannerVersion"),
+            "hardwareTier": registry.get("hardwareTier"),
+            "runtimeType": registry.get("runtimeType"),
+            "compatibleCount": registry.get("summary", {}).get("compatibleCount"),
+            "benchmarkReady": registry.get("benchmarkReady"),
+            "sideEffects": registry.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "registry": registry,
+        "auditLogId": audit.get("id"),
+        "sideEffects": registry.get("sideEffects", {}),
+    }
+
+
 @router.post("/optimizations/plan")
 async def optimization_plan(
     payload: OptimizationPlanRequest,
@@ -2365,6 +2414,50 @@ async def optimization_plan(
         "executionPolicy": plan["executionPolicy"],
         "auditLogId": audit.get("id"),
         "sideEffects": optimization.get("sideEffects", {}),
+        "plannerVersion": cognix_optimization_planner.COGNIX_OPTIMIZATION_PLANNER_VERSION,
+    }
+
+
+@router.post("/optimizations/experiment-plan")
+async def optimization_experiment_plan(
+    payload: OptimizationExperimentPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    hardware = cognix_hardware.get_hardware_profile()
+    latest_benchmark = cognix_db.get_latest_benchmark_run(current_subject)
+    recommendation_payload = cognix_recommender.build_model_recommendation(
+        hardware,
+        latest_benchmark_run = latest_benchmark,
+    )
+    plan = cognix_optimization_planner.build_optimization_experiment_plan(
+        objective = payload.objective,
+        hardware = hardware,
+        recommendation = recommendation_payload["recommendation"],
+        latest_benchmark_run = latest_benchmark,
+        requested_optimizations = payload.requested_optimizations,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "optimization_experiment_plan_built",
+        resource_type = "cognix_optimization_experiment_plan",
+        resource_id = str(payload.project_id or plan.get("experimentPlanVersion") or "general"),
+        severity = "warning" if plan.get("summary", {}).get("blockedTicketCount") else "notice",
+        metadata = {
+            "experimentPlanVersion": plan.get("experimentPlanVersion"),
+            "registryVersion": plan.get("registryVersion"),
+            "hardwareTier": plan.get("hardwareTier"),
+            "runtimeType": plan.get("runtimeType"),
+            "ticketCount": plan.get("summary", {}).get("ticketCount"),
+            "blockedGateIds": plan.get("summary", {}).get("blockedGateIds"),
+            "sideEffects": plan.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "optimizationExperimentPlan": plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": plan.get("sideEffects", {}),
         "plannerVersion": cognix_optimization_planner.COGNIX_OPTIMIZATION_PLANNER_VERSION,
     }
 
