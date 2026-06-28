@@ -150,6 +150,12 @@ class OrchestratorPlanRequest(BaseModel):
     project_id: str | None = Field(None, max_length = 160)
 
 
+class PreloadPlanRequest(BaseModel):
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    project_type: str | None = Field(None, max_length = 80)
+    project_id: str | None = Field(None, max_length = 160)
+
+
 class ToolActionPlanRequest(BaseModel):
     tool_id: str = Field(..., min_length = 1, max_length = 120)
     action_id: str = Field(..., min_length = 1, max_length = 120)
@@ -1024,6 +1030,52 @@ async def model_cache_state(
         "hardware": hardware,
         "runtimeError": runtime.get("error"),
         "cache": cache,
+    }
+
+
+@router.post("/models/preload-plan")
+async def model_preload_plan(
+    payload: PreloadPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    runtime = _current_model_cache_runtime()
+    plan = cognix_orchestrator.build_execution_plan(
+        payload.objective,
+        current_subject = current_subject,
+        project_type = payload.project_type,
+        project_id = payload.project_id,
+        runtime_snapshot = runtime,
+        latest_benchmark_run = cognix_db.get_latest_benchmark_run(current_subject),
+    )
+    preload_plan = plan["preloadPlan"]
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "preload_plan_built",
+        resource_type = "cognix_preload_plan",
+        resource_id = str(preload_plan.get("target", {}).get("modelId") or "none"),
+        severity = "notice",
+        metadata = {
+            "plannerVersion": preload_plan.get("plannerVersion"),
+            "domain": preload_plan.get("target", {}).get("domain"),
+            "modelRole": preload_plan.get("target", {}).get("modelRole"),
+            "actionTypes": [
+                item.get("type")
+                for item in preload_plan.get("actions", [])
+                if isinstance(item, dict)
+            ],
+            "sideEffects": preload_plan.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "runtimeError": runtime.get("error"),
+        "classification": plan["classification"],
+        "taskStrategy": plan["taskStrategy"],
+        "cache": plan["cache"],
+        "preloadPlan": preload_plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": preload_plan.get("sideEffects", {}),
     }
 
 

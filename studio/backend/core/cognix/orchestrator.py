@@ -16,6 +16,7 @@ from typing import Any
 from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import decision_engine as cognix_decision_engine
 from core.cognix import hardware as cognix_hardware
+from core.cognix import preload_planner as cognix_preload_planner
 from core.cognix import recommender as cognix_recommender
 from core.cognix import security_policy as cognix_security_policy
 from core.cognix.router import classify_objective
@@ -78,6 +79,7 @@ def _warnings(
     recommendation: dict[str, Any],
     cache: dict[str, Any],
     task_strategy: dict[str, Any],
+    preload_plan: dict[str, Any],
 ) -> list[str]:
     warnings: list[str] = []
     if classification.get("needsClarification"):
@@ -89,6 +91,9 @@ def _warnings(
     if isinstance(next_action, dict) and str(next_action.get("type") or "").startswith("would_unload"):
         warnings.append(str(next_action.get("reason") or "Le cache local proposera une eviction."))
     for item in task_strategy.get("risks") or []:
+        if isinstance(item, str) and item:
+            warnings.append(item)
+    for item in preload_plan.get("warnings") or []:
         if isinstance(item, str) and item:
             warnings.append(item)
 
@@ -107,6 +112,7 @@ def _steps(
     task_strategy: dict[str, Any],
     recommendation: dict[str, Any],
     cache: dict[str, Any],
+    preload_plan: dict[str, Any],
     execution_policy: dict[str, Any],
     status: str,
 ) -> list[dict[str, Any]]:
@@ -146,6 +152,15 @@ def _steps(
             "detail": str(
                 cache_policy.get("reason")
                 or "Cache observe en mode lecture: aucune eviction automatique."
+            ),
+        },
+        {
+            "id": "plan_preload",
+            "label": "Planifier le prechargement",
+            "status": "complete",
+            "detail": str(
+                preload_plan.get("reason")
+                or "Prechargement observe uniquement: aucun modele charge."
             ),
         },
         {
@@ -205,6 +220,16 @@ def build_execution_plan(
         runtime_type = str(_runtime_snapshot_value(runtime_snapshot, "runtimeType", "unknown")),
         project_id = project_id,
     )
+    preload_plan = cognix_preload_planner.build_preload_plan(
+        objective = objective,
+        project_type = project_type,
+        project_id = project_id,
+        classification = classification,
+        task_strategy = task_strategy,
+        recommendation = recommendation,
+        cache = cache,
+        latest_benchmark_run = latest_benchmark_run,
+    )
     status = _execution_status(
         classification = classification,
         recommendation = recommendation,
@@ -231,6 +256,8 @@ def build_execution_plan(
         "requiresHumanConfirmation": task_strategy.get("requiresHumanConfirmation"),
         "automaticExecutionAllowed": execution_policy.get("automaticExecutionAllowed"),
         "securityRiskLevel": execution_policy.get("riskLevel"),
+        "preloadAction": (preload_plan.get("actions") or [{}])[0].get("type"),
+        "preloadTargetModelId": preload_plan.get("target", {}).get("modelId"),
         "uses": task_strategy.get("uses"),
         "requiresModelLoad": not bool(cache.get("runtime", {}).get("activeModel")),
         "willLoadModel": False,
@@ -253,6 +280,7 @@ def build_execution_plan(
         "providers": recommendation_payload["providers"],
         "recommendation": recommendation,
         "cache": cache,
+        "preloadPlan": preload_plan,
         "taskStrategy": task_strategy,
         "executionPolicy": execution_policy,
         "executionStrategy": execution_strategy,
@@ -261,6 +289,7 @@ def build_execution_plan(
             task_strategy = task_strategy,
             recommendation = recommendation,
             cache = cache,
+            preload_plan = preload_plan,
             execution_policy = execution_policy,
             status = status,
         ),
@@ -269,6 +298,7 @@ def build_execution_plan(
             recommendation = recommendation,
             cache = cache,
             task_strategy = task_strategy,
+            preload_plan = preload_plan,
         ),
         "sideEffects": {
             "modelLoad": False,

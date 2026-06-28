@@ -198,6 +198,11 @@ def test_orchestrator_builds_dry_run_plan_without_loading(monkeypatch):
     assert plan["taskStrategy"]["path"] == "codex_guarded_pipeline"
     assert plan["executionStrategy"]["recommendedPath"] == "codex_guarded_pipeline"
     assert plan["executionStrategy"]["primaryCapability"] == "codex_secure_agent"
+    assert plan["preloadPlan"]["plannerVersion"] == "cognix_preload_planner_v1"
+    assert plan["preloadPlan"]["target"]["domain"] == "code"
+    assert plan["preloadPlan"]["sideEffects"]["modelLoad"] is False
+    assert plan["executionStrategy"]["preloadAction"] == "would_preload"
+    assert any(step["id"] == "plan_preload" for step in plan["steps"])
     assert plan["executionStrategy"]["automaticExecutionAllowed"] is False
     assert plan["executionStrategy"]["securityRiskLevel"] == "high"
     assert plan["executionPolicy"]["policyVersion"] == "cognix_security_policy_v1"
@@ -652,6 +657,8 @@ def test_orchestrator_plan_endpoint_logs_dry_run_decision(monkeypatch):
     assert body["classification"]["selectedDomain"] == "code"
     assert body["taskStrategy"]["path"] == "codex_guarded_pipeline"
     assert body["taskStrategy"]["sideEffects"]["codeModification"] is False
+    assert body["preloadPlan"]["plannerVersion"] == "cognix_preload_planner_v1"
+    assert body["preloadPlan"]["sideEffects"]["modelLoad"] is False
     assert body["executionStrategy"]["willLoadModel"] is False
     assert body["sideEffects"]["networkModelCall"] is False
 
