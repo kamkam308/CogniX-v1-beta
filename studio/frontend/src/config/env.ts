@@ -27,8 +27,12 @@ interface PlatformState {
   cloudflareUrl: string | null;
   serverUrl: string | null;
   secure: boolean;
+  cloudTrainingUnlocked: boolean;
+  cloudTrainingProviders: string[];
+  trainingAccess: "local" | "cloud_ceo" | string;
   fetched: boolean;
   isChatOnly: () => boolean;
+  isTrainingAccessible: () => boolean;
 }
 
 // Client-side fallback when backend isn't ready yet.
@@ -50,8 +54,12 @@ export const usePlatformStore = create<PlatformState>()((_, get) => ({
   cloudflareUrl: null,
   serverUrl: null,
   secure: false,
+  cloudTrainingUnlocked: false,
+  cloudTrainingProviders: [],
+  trainingAccess: "local",
   fetched: false,
   isChatOnly: () => get().chatOnly,
+  isTrainingAccessible: () => !get().chatOnly || get().cloudTrainingUnlocked,
 }));
 
 // `force` re-reads /api/health even if cached, to pick up a late-arriving tunnel URL.
@@ -80,10 +88,16 @@ export async function fetchDeviceType(options?: {
         cloudflare_url?: string | null;
         server_url?: string | null;
         secure?: boolean;
+        cloud_training_unlocked?: boolean;
+        cloud_training_providers?: string[];
+        training_access?: string;
       };
       const deviceType = data.device_type ?? detectLocalPlatform();
       const chatOnly = data.chat_only ?? false;
       const chatOnlyReason = data.chat_only_reason ?? null;
+      const cloudTrainingProviders = Array.isArray(data.cloud_training_providers)
+        ? data.cloud_training_providers.filter((item): item is string => typeof item === "string")
+        : [];
       // Cache only a server-reported platform. Unauthenticated responses fall
       // back to the browser platform, which can differ from the host (WSL,
       // SSH); keeping fetched=false retries once a token exists.
@@ -94,6 +108,9 @@ export async function fetchDeviceType(options?: {
         cloudflareUrl: data.cloudflare_url ?? null,
         serverUrl: data.server_url ?? null,
         secure: data.secure ?? false,
+        cloudTrainingUnlocked: data.cloud_training_unlocked === true,
+        cloudTrainingProviders,
+        trainingAccess: data.training_access ?? "local",
         fetched: data.device_type !== undefined,
       });
       return deviceType;
@@ -104,7 +121,14 @@ export async function fetchDeviceType(options?: {
     // call retries against the backend.
     const deviceType = detectLocalPlatform();
     const chatOnly = deviceType === "mac";
-    usePlatformStore.setState({ deviceType, chatOnly, fetched: false });
+    usePlatformStore.setState({
+      deviceType,
+      chatOnly,
+      cloudTrainingUnlocked: false,
+      cloudTrainingProviders: [],
+      trainingAccess: "local",
+      fetched: false,
+    });
     return deviceType;
   }
 

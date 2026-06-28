@@ -12,6 +12,8 @@ from pathlib import Path as _Path
 import asyncio
 from dataclasses import asdict
 
+from auth import storage as auth_storage
+
 # Suppress C-level dependency warnings globally
 os.environ["PYTHONWARNINGS"] = "ignore"
 
@@ -1471,12 +1473,21 @@ async def health_check(request: Request):
     if not subject:
         return base
 
+    profile = auth_storage.get_user_profile(subject) or {}
+    plan = str(profile.get("plan") or "").casefold()
+    cloud_training_unlocked = (
+        _hw_module.CHAT_ONLY
+        and (plan == "ceo" or auth_storage.is_admin(subject))
+    )
     platform_map = {"darwin": "mac", "win32": "windows", "linux": "linux"}
     device_type = platform_map.get(sys.platform, sys.platform)
     return {
         **base,
         # Why chat_only is set. This fingerprints the host, so keep it authed.
         "chat_only_reason": getattr(_hw_module, "CHAT_ONLY_REASON", None),
+        "cloud_training_unlocked": cloud_training_unlocked,
+        "cloud_training_providers": ["google_colab", "kaggle", "cloud_gpu"],
+        "training_access": "cloud_ceo" if cloud_training_unlocked else "local",
         "version": UNSLOTH_VERSION,
         "studio_version": STUDIO_VERSION,
         "device_type": device_type,

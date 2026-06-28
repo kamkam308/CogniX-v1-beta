@@ -299,7 +299,10 @@ export function AppSidebar() {
 
   const chatOnly = usePlatformStore((s) => s.isChatOnly());
   const chatOnlyReason = usePlatformStore((s) => s.chatOnlyReason);
+  const trainingAccessible = usePlatformStore((s) => s.isTrainingAccessible());
+  const cloudTrainingUnlocked = usePlatformStore((s) => s.cloudTrainingUnlocked);
   const [developerOptions] = useDeveloperOptions();
+  const showTrainingTools = developerOptions.trainingTools || cloudTrainingUnlocked;
   // When Train/Export are greyed out (chat-only host), explain why on hover
   // instead of disabling them silently. mlx_unavailable is the common macOS case
   // after a reinstall/update dropped MLX and is recoverable via `unsloth studio update`.
@@ -310,8 +313,11 @@ export function AppSidebar() {
       : chatOnlyReason === "intel_mac"
         ? "Training needs Apple Silicon or a GPU. Intel Macs are chat-only."
         : chatOnlyReason === "no_gpu"
-          ? "Training needs an NVIDIA or AMD GPU."
+          ? "Local training needs an NVIDIA or AMD GPU."
           : undefined;
+  const trainingDisabledHint = trainingAccessible
+    ? undefined
+    : trainExportDisabledHint;
 
   // The backend MLX self-heal (utils/mlx_repair) can reinstall MLX in the
   // background and flip chat_only false without a restart. The platform store
@@ -418,11 +424,11 @@ export function AppSidebar() {
   // falling back to chat recents when there are no runs yet.
   const trainingRecentsRoute = isStudioRoute || isRecipesRoute || isExportRoute;
   const { items: runItems } = useTrainingHistorySidebarItems(
-    !chatOnly && trainingRecentsRoute,
+    trainingAccessible && trainingRecentsRoute,
   );
   const showTrainingRecents =
-    developerOptions.trainingTools &&
-    !chatOnly &&
+    showTrainingTools &&
+    trainingAccessible &&
     trainingRecentsRoute &&
     runItems.length > 0;
   const activeJobId = useTrainingRuntimeStore((s) => s.jobId);
@@ -1175,18 +1181,18 @@ export function AppSidebar() {
                   closeMobileIfOpen();
                 }}
               />
-              {developerOptions.trainingTools && (
+              {showTrainingTools && (
               <NavItem
                 icon={TestTubeOutlineIcon}
                 label={t("shell.navigation.train")}
                 active={
                   pathname === "/studio" || pathname.startsWith("/studio/")
                 }
-                disabled={chatOnly}
-                tooltip={trainExportDisabledHint}
+                disabled={!trainingAccessible}
+                tooltip={trainingDisabledHint}
                 spinner={trainingInProgress}
                 onClick={() => {
-                  if (chatOnly) return;
+                  if (!trainingAccessible) return;
                   navigate({ to: "/studio" });
                   closeMobileIfOpen();
                 }}
@@ -1197,7 +1203,7 @@ export function AppSidebar() {
           </SidebarGroupContent>
         </SidebarGroup>
 
-        {developerOptions.trainingTools && (
+        {showTrainingTools && (
         <Collapsible open={trainOpen} onOpenChange={setTrainOpen} asChild>
           <SidebarGroup data-tour="navbar" className="group-data-[collapsible=icon]:hidden px-0 py-0">
             <SidebarGroupLabel className={cn("sidebar-sticky-label sidebar-sticky-label-following", scrolled && "is-scrolled")} asChild>
@@ -1213,11 +1219,11 @@ export function AppSidebar() {
                     icon={TestTubeOutlineIcon}
                     label={t("shell.navigation.train")}
                     active={pathname === "/studio" || pathname.startsWith("/studio/")}
-                    disabled={chatOnly}
-                    tooltip={trainExportDisabledHint}
+                    disabled={!trainingAccessible}
+                    tooltip={trainingDisabledHint}
                     spinner={trainingInProgress}
                     onClick={() => {
-                      if (chatOnly) return;
+                      if (!trainingAccessible) return;
                       navigate({ to: "/studio" });
                       closeMobileIfOpen();
                     }}

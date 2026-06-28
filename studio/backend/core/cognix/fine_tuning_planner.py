@@ -16,6 +16,29 @@ COGNIX_FINE_TUNING_PLANNER_VERSION = "cognix_fine_tuning_planner_v1"
 
 SUPPORTED_DATASET_FORMATS = {"jsonl", "csv", "parquet", "hf_dataset", "folder"}
 LICENSE_WARNING_VALUES = {"unknown", "unverified", "restricted", "proprietary"}
+CLOUD_TRAINING_TARGETS: list[dict[str, Any]] = [
+    {
+        "id": "google_colab",
+        "label": "Google Colab",
+        "access": "external_notebook",
+        "bestFor": ["quick_prototype", "notebook_export", "single_gpu"],
+        "requires": ["notebook_export", "dataset_access_plan", "secret_review"],
+    },
+    {
+        "id": "kaggle",
+        "label": "Kaggle",
+        "access": "external_notebook",
+        "bestFor": ["dataset_hosted_training", "reproducible_notebook"],
+        "requires": ["notebook_export", "dataset_terms_review", "secret_review"],
+    },
+    {
+        "id": "cloud_gpu",
+        "label": "Cloud GPU",
+        "access": "managed_cloud_runner",
+        "bestFor": ["larger_jobs", "repeatable_training", "long_running_runs"],
+        "requires": ["provider_credentials", "budget_limit", "artifact_sync"],
+    },
+]
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -55,7 +78,11 @@ def _gpu_summary(hardware: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _hardware_tier(hardware: dict[str, Any]) -> dict[str, Any]:
+def _is_ceo_plan(user_plan: str | None) -> bool:
+    return str(user_plan or "").strip().casefold() == "ceo"
+
+
+def _hardware_tier(hardware: dict[str, Any], *, user_plan: str | None = None) -> dict[str, Any]:
     memory = _as_dict(hardware.get("memory"))
     total_gb = _as_float(memory.get("totalGb")) or 0.0
     available_gb = _as_float(memory.get("availableGb")) or 0.0
@@ -71,6 +98,14 @@ def _hardware_tier(hardware: dict[str, Any]) -> dict[str, Any]:
             "tier": "qlora_ready",
             "method": "qlora",
             "reason": "VRAM moyenne: QLoRA recommande pour limiter la memoire.",
+        }
+    if _is_ceo_plan(user_plan):
+        return {
+            "tier": "cloud_training_ready",
+            "method": "cloud_qlora",
+            "reason": "Compte CEO: training cloud autorise meme sans GPU local AMD/NVIDIA.",
+            "cloudEligible": True,
+            "localGpuRequired": False,
         }
     if total_gb >= 32 and available_gb >= 16:
         return {
@@ -188,6 +223,7 @@ def _time_estimate_hours(
         "lora": 1.0,
         "qlora": 1.35,
         "qlora_cpu_experimental": 5.5,
+        "cloud_qlora": 1.1,
     }.get(method, 2.0)
     if hardware_tier.get("tier") == "training_ready":
         multiplier *= 0.8
@@ -212,8 +248,9 @@ def build_fine_tuning_plan(
     hardware: dict[str, Any],
     dataset: dict[str, Any] | None = None,
     latest_benchmark_run: dict[str, Any] | None = None,
+    user_plan: str | None = None,
 ) -> dict[str, Any]:
-    hardware_tier = _hardware_tier(hardware)
+    hardware_tier = _hardware_tier(hardware, user_plan = user_plan)
     dataset_result = _dataset_checks(dataset)
     path = _recommended_path(task_strategy)
     method = str(hardware_tier["method"])
@@ -231,6 +268,10 @@ def build_fine_tuning_plan(
         {
             "id": "fine_tuning_job",
             "reason": "Aucun entrainement n'est lance pendant la planification CogniX.",
+        },
+        {
+            "id": "cloud_training_job",
+            "reason": "Aucun job cloud Kaggle/Colab/GPU n'est lance sans executor et confirmation explicites.",
         },
         {
             "id": "dataset_import",
@@ -261,8 +302,10 @@ def build_fine_tuning_plan(
     ready_to_request_approval = (
         path == "guided_fine_tuning"
         and bool(dataset_result.get("ready"))
-        and method in {"lora", "qlora", "qlora_cpu_experimental"}
+        and method in {"lora", "qlora", "qlora_cpu_experimental", "cloud_qlora"}
     )
+    cloud_targets = [dict(item) for item in CLOUD_TRAINING_TARGETS]
+    recommended_cloud_target = "google_colab" if method == "cloud_qlora" else None
 
     return {
         "plannerVersion": COGNIX_FINE_TUNING_PLANNER_VERSION,
@@ -282,9 +325,12 @@ def build_fine_tuning_plan(
                 "lora": "LoRA local",
                 "qlora": "QLoRA local",
                 "qlora_cpu_experimental": "QLoRA CPU experimental",
+                "cloud_qlora": "QLoRA cloud",
                 "none": "Aucun fine-tuning recommande",
             }.get(method, method),
             "requiresGpu": method in {"lora", "qlora"},
+            "requiresLocalGpu": method in {"lora", "qlora"},
+            "requiresCloudCompute": method == "cloud_qlora",
             "estimatedHours": estimated_hours,
         },
         "hardwareFit": {
@@ -292,11 +338,18 @@ def build_fine_tuning_plan(
             "gpu": _gpu_summary(hardware),
             "memory": _as_dict(hardware.get("memory")),
         },
+        "resourceTargetPlan": {
+            "recommendedTargetId": recommended_cloud_target or "local",
+            "cloudTrainingAllowed": method == "cloud_qlora",
+            "localGpuBypassAllowed": method == "cloud_qlora",
+            "availableTargets": cloud_targets if method == "cloud_qlora" else [],
+            "requiresHumanConfirmation": method == "cloud_qlora",
+        },
         "dataset": dataset_result,
         "approval": {
             "required": path == "guided_fine_tuning",
             "readyToRequest": ready_to_request_approval,
-            "requiredBefore": ["dataset_import", "fine_tuning_job", "model_registration"],
+            "requiredBefore": ["dataset_import", "fine_tuning_job", "cloud_training_job", "model_registration"],
         },
         "blockedActions": blocked_actions,
         "warnings": warnings,
@@ -313,6 +366,8 @@ def build_fine_tuning_plan(
             "networkModelCall": False,
             "datasetImport": False,
             "fineTuningJob": False,
+            "cloudTrainingJob": False,
+            "cloudCredentialRead": False,
             "adapterWrite": False,
             "modelRegistration": False,
         },

@@ -28,6 +28,7 @@ from core.cognix import onboarding as cognix_onboarding
 from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import project_experts as cognix_project_experts
+from core.cognix import research_watch as cognix_research_watch
 from core.cognix import runtime_adapter as cognix_runtime_adapter
 from core.cognix import thinking_status as cognix_thinking_status
 from core.cognix import tool_registry as cognix_tool_registry
@@ -393,6 +394,61 @@ def test_fine_tuning_plan_endpoint_prepares_qlora_without_training(monkeypatch):
     assert log["metadata"]["plannerVersion"] == "cognix_fine_tuning_planner_v1"
     assert log["metadata"]["method"] == "qlora"
     assert log["metadata"]["sideEffects"]["fineTuningJob"] is False
+
+
+def test_fine_tuning_plan_allows_ceo_cloud_training_without_local_gpu(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+
+    body = run_async(
+        cognix_routes.fine_tuning_plan(
+            cognix_routes.FineTuningPlanRequest(
+                objective = "Je veux fine-tuning LoRA pour specialiser CogniX sur mon style",
+                project_type = "education",
+                dataset = {
+                    "format": "jsonl",
+                    "sampleCount": 1200,
+                    "estimatedTokens": 500000,
+                    "duplicateRatio": 0.01,
+                    "invalidRows": 0,
+                    "averageResponseTokens": 42,
+                    "license": "mit",
+                    "containsSensitiveData": False,
+                },
+            ),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+
+    plan = body["fineTuningPlan"]
+    assert plan["recommendedPath"] == "guided_fine_tuning"
+    assert plan["method"]["type"] == "cloud_qlora"
+    assert plan["method"]["requiresLocalGpu"] is False
+    assert plan["method"]["requiresCloudCompute"] is True
+    assert plan["hardwareFit"]["tier"] == "cloud_training_ready"
+    assert plan["resourceTargetPlan"]["recommendedTargetId"] == "google_colab"
+    assert plan["resourceTargetPlan"]["localGpuBypassAllowed"] is True
+    assert {"google_colab", "kaggle", "cloud_gpu"}.issubset(
+        {item["id"] for item in plan["resourceTargetPlan"]["availableTargets"]}
+    )
+    assert plan["approval"]["readyToRequest"] is True
+    assert plan["sideEffects"]["cloudTrainingJob"] is False
+    assert plan["sideEffects"]["cloudCredentialRead"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["metadata"]["method"] == "cloud_qlora"
+    assert log["metadata"]["resourceTarget"] == "google_colab"
+    assert log["metadata"]["sideEffects"]["cloudTrainingJob"] is False
 
 
 def test_rag_plan_endpoint_prepares_hybrid_retrieval_without_indexing(monkeypatch):
@@ -1547,6 +1603,76 @@ def test_memory_plan_endpoint_logs_audited_dry_run(monkeypatch):
     assert log["metadata"]["sideEffects"]["memoryWrite"] is False
 
 
+def test_research_watch_registry_and_plan_require_benchmark_evidence():
+    registry = cognix_research_watch.build_research_watch_registry()
+    plan = cognix_research_watch.build_research_integration_plan(
+        objective = "Evaluer speculative decoding pour reduire la latence CogniX",
+        technique_name = "Speculative decoding",
+        source_name = "DeepSeek",
+        category = "inference_optimization",
+        claimed_benefit = "latence plus faible et vitesse plus haute",
+        target_module = "cognix-runtime-adapter",
+        risk_tolerance = "low",
+        hardware = stub_hardware_profile(),
+        latest_benchmark_run = None,
+        recommendation = {"providerType": "ollama"},
+    )
+
+    assert registry["researchWatchVersion"] == "cognix_research_watch_v1"
+    assert "DeepSeek" in registry["summary"]["watchedLabs"]
+    assert registry["policies"]["hypeOnlyAdoptionAllowed"] is False
+    assert registry["sideEffects"]["networkResearch"] is False
+    assert plan["researchWatchVersion"] == "cognix_research_watch_v1"
+    assert plan["mode"] == "dry_run"
+    assert plan["source"]["id"] == "deepseek"
+    assert plan["category"]["id"] == "inference_optimization"
+    assert plan["recommendedAction"] == "benchmark_required"
+    assert "benchmark_before_after" in plan["blockedGateIds"]
+    assert "speed" in plan["measurableGains"]
+    assert plan["benchmarkPolicy"]["benchmarkRunWillStart"] is False
+    assert plan["hypeFilter"]["hypeOnlyAdoptionAllowed"] is False
+    assert plan["sideEffects"]["benchmarkRun"] is False
+    assert plan["sideEffects"]["modelLoad"] is False
+
+
+def test_research_integration_endpoint_logs_audited_dry_run(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(cognix_routes.cognix_hardware, "get_hardware_profile", stub_hardware_profile)
+    monkeypatch.setattr(cognix_routes.cognix_recommender, "build_model_recommendation", stub_recommendation)
+
+    body = run_async(
+        cognix_routes.research_integration_plan(
+            cognix_routes.ResearchIntegrationPlanRequest(
+                objective = "Tester prompt caching pour eviter de recalculer le meme contexte",
+                techniqueName = "Prompt caching",
+                sourceName = "Google DeepMind",
+                category = "inference_optimization",
+                claimedBenefit = "moins de latence et plus de stabilite",
+                targetModule = "cognix-optimization-planner",
+                riskTolerance = "low",
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    plan = body["researchIntegrationPlan"]
+    assert body["plannerVersion"] == "cognix_research_watch_v1"
+    assert body["auditLogId"].startswith("aud_")
+    assert plan["recommendedAction"] == "benchmark_required"
+    assert plan["experimentalModulePolicy"]["directProductionActivationAllowed"] is False
+    assert plan["sideEffects"]["networkResearch"] is False
+    assert plan["sideEffects"]["codeModification"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "research_integration_plan_built"
+    assert log["resourceType"] == "cognix_research_watch"
+    assert log["metadata"]["researchWatchVersion"] == "cognix_research_watch_v1"
+    assert log["metadata"]["recommendedAction"] == "benchmark_required"
+    assert log["metadata"]["sideEffects"]["networkResearch"] is False
+
+
 def test_context_manager_builds_bounded_context_packet():
     packet = cognix_context_manager.build_context_packet(
         current_subject = "alice",
@@ -1685,7 +1811,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert registry["sideEffects"]["uiMutation"] is False
 
     modules = {item["id"]: item for item in registry["modules"]}
-    assert {"cognix-local-core", "cognix-model-lifecycle", "cognix-thinking-status", "cognix-memory-manager", "cognix-onboarding", "cognix-rag", "cognix-integrations", "cognix-codex-secure-agent", "cognix-enterprise-foundation", "cognix-deployment-manager"}.issubset(
+    assert {"cognix-local-core", "cognix-model-lifecycle", "cognix-thinking-status", "cognix-memory-manager", "cognix-onboarding", "cognix-rag", "cognix-fine-tuning", "cognix-research-watch", "cognix-integrations", "cognix-codex-secure-agent", "cognix-enterprise-foundation", "cognix-deployment-manager"}.issubset(
         modules
     )
     assert modules["cognix-local-core"]["activationState"] == "ready"
@@ -1700,6 +1826,10 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/memory/plan" in modules["cognix-memory-manager"]["routes"]
     assert modules["cognix-onboarding"]["activationState"] == "ready"
     assert modules["cognix-rag"]["dependencyState"]["ready"] is True
+    assert "cloud_training_targets" in modules["cognix-fine-tuning"]["capabilities"]
+    assert "technology_watch" in modules["cognix-research-watch"]["capabilities"]
+    assert "benchmark_gate" in modules["cognix-research-watch"]["capabilities"]
+    assert "/api/cognix/research/integration-plan" in modules["cognix-research-watch"]["routes"]
     assert "sso_planning" in modules["cognix-enterprise-foundation"]["capabilities"]
     assert "/api/cognix/governance/plan" in modules["cognix-enterprise-foundation"]["routes"]
     assert modules["cognix-deployment-manager"]["dependencyState"]["ready"] is True

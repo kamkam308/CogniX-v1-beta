@@ -80,8 +80,9 @@ const CHAT_ONLY_ALLOWED = new Set([
   "/change-password",
 ]);
 
-function isChatOnlyAllowed(pathname: string): boolean {
+function isChatOnlyAllowed(pathname: string, trainingAccessible = false): boolean {
   if (CHAT_ONLY_ALLOWED.has(pathname)) return true;
+  if (trainingAccessible && (pathname === "/studio" || pathname.startsWith("/studio/"))) return true;
   if (pathname === "/data-recipes" || pathname.startsWith("/data-recipes/")) return true;
   return false;
 }
@@ -91,8 +92,9 @@ export const Route = createRootRoute({
     // Fetch platform info before the chat-only guard. fetchDeviceType caches,
     // so later navigations are instant.
     await fetchDeviceType();
-    const chatOnly = usePlatformStore.getState().isChatOnly();
-    if (chatOnly && !isChatOnlyAllowed(location.pathname)) {
+    const platform = usePlatformStore.getState();
+    const chatOnly = platform.isChatOnly();
+    if (chatOnly && !isChatOnlyAllowed(location.pathname, platform.isTrainingAccessible())) {
       throw redirect({ to: "/chat" });
     }
   },

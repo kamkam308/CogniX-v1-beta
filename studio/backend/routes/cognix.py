@@ -36,6 +36,7 @@ from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import project_experts as cognix_project_experts
 from core.cognix import registry as cognix_registry
 from core.cognix import recommender as cognix_recommender
+from core.cognix import research_watch as cognix_research_watch
 from core.cognix import runtime_adapter as cognix_runtime_adapter
 from core.cognix import thinking_status as cognix_thinking_status
 from core.cognix import tool_registry as cognix_tool_registry
@@ -95,6 +96,18 @@ class MemoryPlanRequest(BaseModel):
     project_type: str | None = Field(None, alias = "projectType", max_length = 80)
     conversation_summary: str | None = Field(None, alias = "conversationSummary", max_length = 12000)
     recent_message_count: int = Field(0, alias = "recentMessageCount", ge = 0, le = 500)
+
+
+class ResearchIntegrationPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    technique_name: str | None = Field(None, alias = "techniqueName", max_length = 240)
+    source_name: str | None = Field(None, alias = "sourceName", max_length = 240)
+    category: str | None = Field(None, max_length = 120)
+    claimed_benefit: str | None = Field(None, alias = "claimedBenefit", max_length = 1000)
+    target_module: str | None = Field(None, alias = "targetModule", max_length = 160)
+    risk_tolerance: str | None = Field(None, alias = "riskTolerance", max_length = 80)
 
 
 class LibraryItemRequest(BaseModel):
@@ -1824,6 +1837,7 @@ async def fine_tuning_plan(
     current_subject: str = Depends(get_current_jwt_subject),
 ) -> dict[str, Any]:
     runtime = _current_model_cache_runtime()
+    user_profile = auth_storage.get_user_profile(current_subject) or {}
     plan = cognix_orchestrator.build_execution_plan(
         payload.objective,
         current_subject = current_subject,
@@ -1832,6 +1846,7 @@ async def fine_tuning_plan(
         runtime_snapshot = runtime,
         latest_benchmark_run = cognix_db.get_latest_benchmark_run(current_subject),
         fine_tuning_dataset = payload.dataset,
+        user_plan = str(user_profile.get("plan") or ""),
     )
     tuning_plan = plan["fineTuningPlan"]
     audit = cognix_db.create_audit_log(
@@ -1846,6 +1861,7 @@ async def fine_tuning_plan(
             "recommendedPath": tuning_plan.get("recommendedPath"),
             "targetDomain": tuning_plan.get("targetDomain"),
             "method": tuning_plan.get("method", {}).get("type"),
+            "resourceTarget": tuning_plan.get("resourceTargetPlan", {}).get("recommendedTargetId"),
             "datasetStatus": tuning_plan.get("dataset", {}).get("status"),
             "approval": tuning_plan.get("approval", {}),
             "sideEffects": tuning_plan.get("sideEffects", {}),
@@ -2201,6 +2217,67 @@ async def memory_plan(
         "auditLogId": audit.get("id"),
         "sideEffects": plan.get("sideEffects", {}),
         "plannerVersion": cognix_memory_manager.COGNIX_MEMORY_MANAGER_VERSION,
+    }
+
+
+@router.get("/research/watch-registry")
+async def research_watch_registry(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    return {
+        "username": current_subject,
+        "registry": cognix_research_watch.build_research_watch_registry(),
+        "plannerVersion": cognix_research_watch.COGNIX_RESEARCH_WATCH_VERSION,
+    }
+
+
+@router.post("/research/integration-plan")
+async def research_integration_plan(
+    payload: ResearchIntegrationPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    hardware = cognix_hardware.get_hardware_profile()
+    latest_benchmark = cognix_db.get_latest_benchmark_run(current_subject)
+    recommendation_payload = cognix_recommender.build_model_recommendation(
+        hardware,
+        latest_benchmark_run = latest_benchmark,
+    )
+    plan = cognix_research_watch.build_research_integration_plan(
+        objective = payload.objective,
+        technique_name = payload.technique_name,
+        source_name = payload.source_name,
+        category = payload.category,
+        claimed_benefit = payload.claimed_benefit,
+        target_module = payload.target_module,
+        risk_tolerance = payload.risk_tolerance,
+        hardware = hardware,
+        latest_benchmark_run = latest_benchmark,
+        recommendation = recommendation_payload["recommendation"],
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "research_integration_plan_built",
+        resource_type = "cognix_research_watch",
+        resource_id = str(plan.get("request", {}).get("techniqueName") or plan.get("source", {}).get("id") or "research-watch"),
+        severity = "warning" if plan.get("warnings") else "notice",
+        metadata = {
+            "researchWatchVersion": plan.get("researchWatchVersion"),
+            "sourceId": plan.get("source", {}).get("id"),
+            "categoryId": plan.get("category", {}).get("id"),
+            "recommendedAction": plan.get("recommendedAction"),
+            "integrationPhase": plan.get("integrationPhase"),
+            "blockedGateIds": plan.get("blockedGateIds", []),
+            "sideEffects": plan.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "hardware": hardware,
+        "latestBenchmark": latest_benchmark,
+        "recommendation": recommendation_payload["recommendation"],
+        "researchIntegrationPlan": plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": plan.get("sideEffects", {}),
+        "plannerVersion": cognix_research_watch.COGNIX_RESEARCH_WATCH_VERSION,
     }
 
 

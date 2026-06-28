@@ -322,6 +322,7 @@ def build_execution_plan(
     rag_sources: list[dict[str, Any]] | None = None,
     rag_available: bool | None = None,
     fine_tuning_dataset: dict[str, Any] | None = None,
+    user_plan: str | None = None,
 ) -> dict[str, Any]:
     hardware = cognix_hardware.get_hardware_profile()
     recommendation_payload = cognix_recommender.build_model_recommendation(
@@ -378,6 +379,7 @@ def build_execution_plan(
         hardware = hardware,
         dataset = fine_tuning_dataset,
         latest_benchmark_run = latest_benchmark_run,
+        user_plan = user_plan,
     )
     runtime_adapter_plan = cognix_runtime_adapter.build_runtime_adapter_plan(
         recommendation = recommendation,
