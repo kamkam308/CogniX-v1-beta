@@ -17,6 +17,7 @@ from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import decision_engine as cognix_decision_engine
 from core.cognix import hardware as cognix_hardware
 from core.cognix import recommender as cognix_recommender
+from core.cognix import security_policy as cognix_security_policy
 from core.cognix.router import classify_objective
 
 
@@ -106,6 +107,7 @@ def _steps(
     task_strategy: dict[str, Any],
     recommendation: dict[str, Any],
     cache: dict[str, Any],
+    execution_policy: dict[str, Any],
     status: str,
 ) -> list[dict[str, Any]]:
     cache_policy = cache.get("policy") if isinstance(cache, dict) else {}
@@ -144,6 +146,15 @@ def _steps(
             "detail": str(
                 cache_policy.get("reason")
                 or "Cache observe en mode lecture: aucune eviction automatique."
+            ),
+        },
+        {
+            "id": "apply_execution_policy",
+            "label": "Appliquer les garde-fous",
+            "status": "complete",
+            "detail": str(
+                execution_policy.get("reason")
+                or "Politique CogniX active en mode planification securisee."
             ),
         },
         {
@@ -198,6 +209,12 @@ def build_execution_plan(
         classification = classification,
         recommendation = recommendation,
     )
+    execution_policy = cognix_security_policy.build_execution_policy(
+        task_strategy = task_strategy,
+        recommendation = recommendation,
+        cache = cache,
+        classification = classification,
+    )
 
     execution_strategy = {
         "status": status,
@@ -212,6 +229,8 @@ def build_execution_plan(
         "recommendedPath": task_strategy.get("path"),
         "primaryCapability": task_strategy.get("primaryCapability"),
         "requiresHumanConfirmation": task_strategy.get("requiresHumanConfirmation"),
+        "automaticExecutionAllowed": execution_policy.get("automaticExecutionAllowed"),
+        "securityRiskLevel": execution_policy.get("riskLevel"),
         "uses": task_strategy.get("uses"),
         "requiresModelLoad": not bool(cache.get("runtime", {}).get("activeModel")),
         "willLoadModel": False,
@@ -235,12 +254,14 @@ def build_execution_plan(
         "recommendation": recommendation,
         "cache": cache,
         "taskStrategy": task_strategy,
+        "executionPolicy": execution_policy,
         "executionStrategy": execution_strategy,
         "steps": _steps(
             classification = classification,
             task_strategy = task_strategy,
             recommendation = recommendation,
             cache = cache,
+            execution_policy = execution_policy,
             status = status,
         ),
         "warnings": _warnings(

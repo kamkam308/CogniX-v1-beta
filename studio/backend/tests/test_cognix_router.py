@@ -198,13 +198,57 @@ def test_orchestrator_builds_dry_run_plan_without_loading(monkeypatch):
     assert plan["taskStrategy"]["path"] == "codex_guarded_pipeline"
     assert plan["executionStrategy"]["recommendedPath"] == "codex_guarded_pipeline"
     assert plan["executionStrategy"]["primaryCapability"] == "codex_secure_agent"
+    assert plan["executionStrategy"]["automaticExecutionAllowed"] is False
+    assert plan["executionStrategy"]["securityRiskLevel"] == "high"
+    assert plan["executionPolicy"]["policyVersion"] == "cognix_security_policy_v1"
+    assert plan["executionPolicy"]["automaticExecutionAllowed"] is False
+    assert plan["executionPolicy"]["requiresHumanConfirmation"] is True
+    assert plan["executionPolicy"]["guardrails"]["frontendDirectModelCallAllowed"] is False
+    assert plan["executionPolicy"]["guardrails"]["sandboxRequired"] is True
+    assert plan["executionPolicy"]["deniedSideEffects"]["codeModification"] is True
     assert plan["executionStrategy"]["willLoadModel"] is False
     assert plan["executionStrategy"]["willGenerate"] is False
     assert plan["sideEffects"]["modelLoad"] is False
     assert plan["sideEffects"]["generation"] is False
     assert plan["sideEffects"]["codeModification"] is False
+    assert any(step["id"] == "apply_execution_policy" for step in plan["steps"])
     assert any(step["id"] == "dry_run_guard" for step in plan["steps"])
     assert any(step["id"] == "choose_task_strategy" for step in plan["steps"])
+
+
+def test_orchestrator_policy_blocks_tool_execution(monkeypatch):
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+
+    plan = cognix_orchestrator.build_execution_plan(
+        "Prepare un brouillon Gmail pour mon equipe",
+        current_subject = "alice",
+        project_type = "business",
+        runtime_snapshot = {
+            "runtimeType": "ollama",
+            "activeModel": "huihui_ai/qwen3-vl-abliterated:4b-instruct",
+            "loadedModels": ["huihui_ai/qwen3-vl-abliterated:4b-instruct"],
+            "loadingModels": [],
+        },
+    )
+
+    blocked_ids = {item["id"] for item in plan["executionPolicy"]["blockedActions"]}
+    assert plan["taskStrategy"]["path"] == "tool_plan"
+    assert plan["executionPolicy"]["riskLevel"] == "medium"
+    assert plan["executionPolicy"]["requiresRateLimit"] is True
+    assert plan["executionPolicy"]["guardrails"]["frontendDirectToolExecutionAllowed"] is False
+    assert plan["executionPolicy"]["deniedSideEffects"]["toolExecution"] is True
+    assert "tool_execution" in blocked_ids
+    assert plan["executionStrategy"]["requiresModelLoad"] is False
+    assert plan["executionStrategy"]["willGenerate"] is False
 
 
 def test_context_manager_builds_bounded_context_packet():
