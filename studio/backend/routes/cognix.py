@@ -27,6 +27,7 @@ from core.cognix import debate_orchestrator as cognix_debate_orchestrator
 from core.cognix import deployment_manager as cognix_deployment_manager
 from core.cognix import draft_generation as cognix_draft_generation
 from core.cognix import decision_engine as cognix_decision_engine
+from core.cognix import dynamic_ui as cognix_dynamic_ui
 from core.cognix import fine_tuning_planner as cognix_fine_tuning_planner
 from core.cognix import governance_manager as cognix_governance_manager
 from core.cognix import hardware as cognix_hardware
@@ -205,6 +206,16 @@ class IntentPredictionRequest(BaseModel):
     draft_text: str | None = Field(None, alias = "draftText", max_length = 12000)
     recent_messages: list[Any] = Field(default_factory = list, alias = "recentMessages")
     store_prediction: bool = Field(True, alias = "storePrediction")
+
+
+class DynamicUIProfileRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    project_type: str | None = Field(None, alias = "projectType", max_length = 120)
+    viewport: Literal["desktop", "mobile"] = "desktop"
+    theme: Literal["dark", "light"] = "dark"
+    store_profile: bool = Field(True, alias = "storeProfile")
 
 
 class ResearchIntegrationPlanRequest(BaseModel):
@@ -724,6 +735,9 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "preload_plan_json": "preloadPlanJson",
         "prediction_id": "predictionId",
         "target_model_id": "targetModelId",
+        "profile_key": "profileKey",
+        "profile_json": "profileJson",
+        "value_json": "valueJson",
     }
     for source, target in alias_map.items():
         if source in out:
@@ -4412,6 +4426,92 @@ async def intent_preload_events(current_subject: str = Depends(get_current_jwt_s
             "generation": False,
             "networkCall": False,
             "uiSuggestion": False,
+        },
+    }
+
+
+@router.get("/dynamic-ui/blueprint")
+async def dynamic_ui_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_dynamic_ui.build_dynamic_ui_blueprint()
+    return {
+        "username": current_subject,
+        "dynamicUiBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_dynamic_ui.COGNIX_DYNAMIC_UI_VERSION,
+    }
+
+
+@router.post("/dynamic-ui/profile")
+async def dynamic_ui_profile(
+    payload: DynamicUIProfileRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    profile = cognix_dynamic_ui.build_project_ui_profile(
+        username = current_subject,
+        project_type = payload.project_type,
+        project_id = payload.project_id,
+        viewport = payload.viewport,
+        theme = payload.theme,
+    )
+    stored_profile = (
+        cognix_db.create_project_ui_profile(
+            current_subject,
+            profile = profile,
+            project_id = payload.project_id,
+        )
+        if payload.store_profile
+        else None
+    )
+    side_effects = {
+        **profile.get("sideEffects", {}),
+        "profileWrite": stored_profile is not None,
+        "uiMutation": False,
+        "routeMutation": False,
+        "themeMutation": False,
+        "toolExecution": False,
+        "modelLoad": False,
+        "generation": False,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "dynamic_ui_profile_built",
+        resource_type = "cognix_dynamic_ui",
+        resource_id = str((stored_profile or {}).get("id") or payload.project_id or current_subject),
+        severity = "notice",
+        metadata = {
+            "dynamicUiVersion": profile.get("dynamicUiVersion"),
+            "layoutProfileVersion": profile.get("layoutProfileVersion"),
+            "projectType": profile.get("projectType"),
+            "viewport": profile.get("viewport"),
+            "theme": profile.get("theme"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "uiProfile": profile,
+        "storedProfile": _row(stored_profile) if stored_profile else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_dynamic_ui.COGNIX_DYNAMIC_UI_VERSION,
+    }
+
+
+@router.get("/dynamic-ui/profiles")
+async def dynamic_ui_profiles(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    return {
+        "profiles": _rows(cognix_db.list_project_ui_profiles(current_subject)),
+        "sideEffects": {
+            "profileWrite": False,
+            "uiMutation": False,
+            "routeMutation": False,
+            "themeMutation": False,
+            "toolExecution": False,
+            "modelLoad": False,
+            "generation": False,
         },
     }
 

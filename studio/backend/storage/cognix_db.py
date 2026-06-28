@@ -466,6 +466,39 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_preload_events_username_created
             ON cognix_preload_events(username, created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_project_ui_profiles (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            project_id TEXT,
+            project_type TEXT NOT NULL,
+            profile_key TEXT NOT NULL,
+            viewport TEXT NOT NULL DEFAULT 'desktop',
+            theme TEXT NOT NULL DEFAULT 'dark',
+            profile_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_project_ui_profiles_username_created
+            ON cognix_project_ui_profiles(username, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_project_ui_profiles_project
+            ON cognix_project_ui_profiles(username, project_id, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_user_layout_preferences (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            preference_key TEXT NOT NULL,
+            value_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(username, preference_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_user_layout_preferences_username
+            ON cognix_user_layout_preferences(username, updated_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_library_items (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -2852,6 +2885,81 @@ def list_preload_events(username: str, *, limit: int = 100) -> list[dict[str, An
             (username, safe_limit),
         ).fetchall()
         return [_hydrate_preload_event(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_project_ui_profile(row: dict[str, Any]) -> dict[str, Any]:
+    row["profile"] = _json_or_default(row.get("profile_json"), {})
+    return row
+
+
+def create_project_ui_profile(
+    username: str,
+    *,
+    profile: dict[str, Any],
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    profile_id = _new_id("uiprof")
+    now = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_project_ui_profiles
+                (
+                    id, username, project_id, project_type, profile_key, viewport,
+                    theme, profile_json, status, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+            """,
+            (
+                profile_id,
+                username,
+                project_id or profile.get("projectId"),
+                str(profile.get("projectType") or "general")[:120],
+                str(profile.get("profileKey") or "general")[:120],
+                str(profile.get("viewport") or "desktop")[:40],
+                str(profile.get("theme") or "dark")[:40],
+                json.dumps(profile, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_project_ui_profile(username, profile_id) or {}
+
+
+def get_project_ui_profile(username: str, profile_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM cognix_project_ui_profiles WHERE id = ? AND username = ?",
+            (profile_id, username),
+        ).fetchone()
+        if row is None:
+            return None
+        return _hydrate_project_ui_profile(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_project_ui_profiles(username: str, *, limit: int = 100) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 100), 1), 300)
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM cognix_project_ui_profiles
+            WHERE username = ? AND status = 'active'
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (username, safe_limit),
+        ).fetchall()
+        return [_hydrate_project_ui_profile(row) for row in _rows_to_dicts(rows)]
     finally:
         conn.close()
 

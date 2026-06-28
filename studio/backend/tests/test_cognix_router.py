@@ -22,6 +22,7 @@ from core.cognix import debate_orchestrator as cognix_debate_orchestrator
 from core.cognix import deployment_manager as cognix_deployment_manager
 from core.cognix import draft_generation as cognix_draft_generation
 from core.cognix import decision_engine as cognix_decision_engine
+from core.cognix import dynamic_ui as cognix_dynamic_ui
 from core.cognix import governance_manager as cognix_governance_manager
 from core.cognix import integration_manager as cognix_integration_manager
 from core.cognix import intent_prediction as cognix_intent_prediction
@@ -2797,6 +2798,76 @@ def test_intent_prediction_endpoint_stores_preload_event_without_loading():
     assert logs[0]["action"] == "intent_prediction_built"
 
 
+def test_dynamic_ui_blueprint_preserves_design_system_without_mutation():
+    blueprint = cognix_dynamic_ui.build_dynamic_ui_blueprint()
+
+    assert blueprint["dynamicUiVersion"] == "cognix_dynamic_ui_v1"
+    assert blueprint["layoutProfileVersion"] == "cognix_ui_layout_profile_v1"
+    assert blueprint["designContract"]["sameDesignSystem"] is True
+    assert blueprint["designContract"]["sameTypography"] is True
+    assert blueprint["designContract"]["sameNavigationLogic"] is True
+    assert blueprint["designContract"]["noVisualRupture"] is True
+    assert blueprint["sideEffects"]["profileWrite"] is False
+    assert blueprint["sideEffects"]["uiMutation"] is False
+    assert blueprint["sideEffects"]["routeMutation"] is False
+    assert blueprint["sideEffects"]["themeMutation"] is False
+    assert blueprint["sideEffects"]["generation"] is False
+
+
+def test_dynamic_ui_profiles_cover_project_types_mobile_desktop_and_themes():
+    code = cognix_dynamic_ui.build_project_ui_profile(
+        username = "alice",
+        project_type = "code",
+        viewport = "desktop",
+        theme = "dark",
+    )
+    physics_mobile = cognix_dynamic_ui.build_project_ui_profile(
+        username = "alice",
+        project_type = "physique",
+        viewport = "mobile",
+        theme = "light",
+    )
+
+    assert code["projectType"] == "code"
+    assert {"files", "editor", "terminal"}.issubset(set(code["activePanels"]))
+    assert code["summary"]["darkModeCompatible"] is True
+    assert physics_mobile["projectType"] == "physics"
+    assert physics_mobile["viewport"] == "mobile"
+    assert "overflow-menu" in physics_mobile["activePanels"]
+    assert physics_mobile["summary"]["mobileOptimized"] is True
+    assert physics_mobile["designContract"]["sameDesignSystem"] is True
+    assert physics_mobile["sideEffects"]["uiMutation"] is False
+
+
+def test_dynamic_ui_profile_endpoint_stores_profile_without_changing_ui():
+    seed_accounts()
+    body = run_async(
+        cognix_routes.dynamic_ui_profile(
+            cognix_routes.DynamicUIProfileRequest(
+                projectType = "business",
+                viewport = "desktop",
+                theme = "dark",
+                storeProfile = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    profile_id = body["storedProfile"]["id"]
+    listed = run_async(cognix_routes.dynamic_ui_profiles(current_subject = "alice"))
+    bob_listed = run_async(cognix_routes.dynamic_ui_profiles(current_subject = "bob"))
+
+    assert profile_id.startswith("uiprof_")
+    assert body["uiProfile"]["projectType"] == "business"
+    assert body["sideEffects"]["profileWrite"] is True
+    assert body["sideEffects"]["uiMutation"] is False
+    assert body["sideEffects"]["themeMutation"] is False
+    assert listed["profiles"][0]["id"] == profile_id
+    assert bob_listed["profiles"] == []
+
+    logs = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))["logs"]
+    assert logs[0]["action"] == "dynamic_ui_profile_built"
+
+
 def test_codex_pipeline_plans_required_gates_without_modifying_code():
     plan = cognix_codex_pipeline.build_codex_pipeline_plan(
         objective = "Ajoute un module CogniX Chemistry dans le code source",
@@ -3408,6 +3479,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-optimization-engine",
         "cognix-prompt-compression",
         "cognix-intent-prediction",
+        "cognix-dynamic-ui",
         "cognix-thinking-status",
         "cognix-response-reflection",
         "cognix-multi-draft-generation",
@@ -3452,6 +3524,11 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "single_useful_suggestion" in modules["cognix-intent-prediction"]["capabilities"]
     assert "/api/cognix/intent/predict" in modules["cognix-intent-prediction"]["routes"]
     assert "/api/cognix/intent/preload-events" in modules["cognix-intent-prediction"]["routes"]
+    assert modules["cognix-dynamic-ui"]["dependencyState"]["ready"] is True
+    assert "ui_layout_profiles" in modules["cognix-dynamic-ui"]["capabilities"]
+    assert "adaptive_panels" in modules["cognix-dynamic-ui"]["capabilities"]
+    assert "theme_safe_layout_planning" in modules["cognix-dynamic-ui"]["capabilities"]
+    assert "/api/cognix/dynamic-ui/profile" in modules["cognix-dynamic-ui"]["routes"]
     assert modules["cognix-thinking-status"]["activationState"] == "ready"
     assert "technical_redaction" in modules["cognix-thinking-status"]["capabilities"]
     assert "/api/cognix/thinking/plan" in modules["cognix-thinking-status"]["routes"]
