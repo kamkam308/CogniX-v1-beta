@@ -25,6 +25,7 @@ from core.cognix import context_manager as cognix_context_manager
 from core.cognix import hardware as cognix_hardware
 from core.cognix import integration_manager as cognix_integration_manager
 from core.cognix import module_registry as cognix_module_registry
+from core.cognix import onboarding as cognix_onboarding
 from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import registry as cognix_registry
@@ -148,6 +149,16 @@ class AgentRunRequest(BaseModel):
 class RouterClassifyRequest(BaseModel):
     objective: str = Field(..., min_length = 1, max_length = 4000)
     project_type: str | None = Field(None, max_length = 80)
+
+
+class OnboardingPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    purpose: str | None = Field(None, max_length = 120)
+    level: str | None = Field(None, max_length = 80)
+    execution_target: str | None = Field(None, alias = "executionTarget", max_length = 120)
+    priorities: list[str] | None = None
+    project_type: str | None = Field(None, alias = "projectType", max_length = 80)
 
 
 class OrchestratorPlanRequest(BaseModel):
@@ -998,6 +1009,62 @@ async def model_recommendation(current_subject: str = Depends(get_current_jwt_su
         "hardware": hardware,
         "latestBenchmark": latest_benchmark,
         **recommendation,
+    }
+
+
+@router.post("/onboarding/plan")
+async def onboarding_plan(
+    payload: OnboardingPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    hardware = cognix_hardware.get_hardware_profile()
+    latest_benchmark = cognix_db.get_latest_benchmark_run(current_subject)
+    recommendation_payload = cognix_recommender.build_model_recommendation(
+        hardware,
+        latest_benchmark_run = latest_benchmark,
+    )
+    plan = cognix_onboarding.build_onboarding_plan(
+        username = current_subject,
+        hardware = hardware,
+        recommendation = recommendation_payload["recommendation"],
+        purpose = payload.purpose,
+        level = payload.level,
+        execution_target = payload.execution_target,
+        priorities = payload.priorities,
+        project_type = payload.project_type,
+        latest_benchmark_run = latest_benchmark,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "onboarding_plan_built",
+        resource_type = "cognix_onboarding",
+        resource_id = str(plan.get("recommendedPack", {}).get("id") or "starter-pack"),
+        severity = "warning" if plan.get("warnings") else "notice",
+        metadata = {
+            "onboardingVersion": plan.get("onboardingVersion"),
+            "purpose": plan.get("profile", {}).get("purpose"),
+            "executionTarget": plan.get("profile", {}).get("executionTarget"),
+            "hardwareTier": plan.get("hardwareSummary", {}).get("tier"),
+            "recommendedEdition": plan.get("recommendedEdition"),
+            "modelIds": [
+                item.get("id")
+                for item in plan.get("recommendedPack", {}).get("models", [])
+                if isinstance(item, dict)
+            ],
+            "moduleIds": plan.get("recommendedPack", {}).get("modules", []),
+            "sideEffects": plan.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "hardware": hardware,
+        "latestBenchmark": latest_benchmark,
+        "recommendation": recommendation_payload["recommendation"],
+        "onboardingPlan": plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": plan.get("sideEffects", {}),
+        "plannerVersion": cognix_onboarding.COGNIX_ONBOARDING_VERSION,
     }
 
 

@@ -20,6 +20,7 @@ from core.cognix import context_manager as cognix_context_manager
 from core.cognix import decision_engine as cognix_decision_engine
 from core.cognix import integration_manager as cognix_integration_manager
 from core.cognix import module_registry as cognix_module_registry
+from core.cognix import onboarding as cognix_onboarding
 from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import runtime_adapter as cognix_runtime_adapter
@@ -670,6 +671,81 @@ def test_runtime_adapter_plan_endpoint_logs_audited_dry_run(monkeypatch):
     assert log["metadata"]["sideEffects"]["runtimeMutation"] is False
 
 
+def test_onboarding_planner_recommends_small_local_pack_without_side_effects():
+    plan = cognix_onboarding.build_onboarding_plan(
+        username = "alice",
+        hardware = stub_hardware_profile(),
+        recommendation = stub_recommendation(stub_hardware_profile())["recommendation"],
+        purpose = "developpement",
+        level = "intermediaire",
+        execution_target = "local",
+        priorities = ["confidentialite", "faible consommation"],
+        project_type = None,
+        latest_benchmark_run = None,
+    )
+
+    model_ids = {item["id"] for item in plan["recommendedPack"]["models"]}
+    assert plan["onboardingVersion"] == "cognix_onboarding_v1"
+    assert plan["profile"]["purpose"] == "development"
+    assert plan["recommendedEdition"] == "developer"
+    assert plan["hardwareSummary"]["tier"] == "balanced_local"
+    assert "cognix-general-3b-q4" in model_ids
+    assert "cognix-code-4b-q4" in model_ids
+    assert "cognix-onboarding" in plan["recommendedPack"]["modules"]
+    assert "cognix-codex-secure-agent" in plan["recommendedPack"]["modules"]
+    assert any(item["id"] == "glm-700b" for item in plan["recommendedPack"]["blockedModels"])
+    assert any(item["id"] == "run_local_benchmark" for item in plan["firstSteps"])
+    assert plan["benchmark"]["recommendedBeforeExecution"] is True
+    assert plan["sideEffects"]["profileWrite"] is False
+    assert plan["sideEffects"]["modelDownload"] is False
+    assert plan["sideEffects"]["modelLoad"] is False
+    assert plan["sideEffects"]["generation"] is False
+
+
+def test_onboarding_plan_endpoint_logs_audited_dry_run(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_routes.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_routes.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+
+    body = run_async(
+        cognix_routes.onboarding_plan(
+            cognix_routes.OnboardingPlanRequest(
+                purpose = "education",
+                level = "debutant",
+                executionTarget = "local",
+                priorities = ["hors_ligne", "qualite"],
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    plan = body["onboardingPlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_onboarding_v1"
+    assert plan["profile"]["purpose"] == "education"
+    assert plan["recommendedEdition"] == "university"
+    assert "cognix-rag" in plan["recommendedPack"]["modules"]
+    assert plan["sideEffects"]["settingsWrite"] is False
+    assert plan["sideEffects"]["benchmarkRun"] is False
+    assert plan["sideEffects"]["ragIndexing"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "onboarding_plan_built"
+    assert log["metadata"]["onboardingVersion"] == "cognix_onboarding_v1"
+    assert log["metadata"]["purpose"] == "education"
+    assert log["metadata"]["sideEffects"]["modelDownload"] is False
+
+
 def test_codex_pipeline_plans_required_gates_without_modifying_code():
     plan = cognix_codex_pipeline.build_codex_pipeline_plan(
         objective = "Ajoute un module CogniX Chemistry dans le code source",
@@ -953,10 +1029,11 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert registry["sideEffects"]["uiMutation"] is False
 
     modules = {item["id"]: item for item in registry["modules"]}
-    assert {"cognix-local-core", "cognix-rag", "cognix-integrations", "cognix-codex-secure-agent"}.issubset(
+    assert {"cognix-local-core", "cognix-onboarding", "cognix-rag", "cognix-integrations", "cognix-codex-secure-agent"}.issubset(
         modules
     )
     assert modules["cognix-local-core"]["activationState"] == "ready"
+    assert modules["cognix-onboarding"]["activationState"] == "ready"
     assert modules["cognix-rag"]["dependencyState"]["ready"] is True
     assert "cognix-integrations" in modules["cognix-codex-secure-agent"]["dependencyState"]["dependencies"]
 
