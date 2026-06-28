@@ -26,6 +26,7 @@ from core.cognix import debate_orchestrator as cognix_debate_orchestrator
 from core.cognix import deployment_manager as cognix_deployment_manager
 from core.cognix import draft_generation as cognix_draft_generation
 from core.cognix import decision_engine as cognix_decision_engine
+from core.cognix import decision_explainer as cognix_decision_explainer
 from core.cognix import dynamic_ui as cognix_dynamic_ui
 from core.cognix import governance_manager as cognix_governance_manager
 from core.cognix import integration_manager as cognix_integration_manager
@@ -1370,6 +1371,99 @@ def test_performance_snapshot_endpoint_stores_metrics_and_logs_audit(monkeypatch
     assert log["action"] == "performance_snapshot_collected"
     assert log["metadata"]["sideEffects"]["metricsWrite"] is True
     assert log["metadata"]["sideEffects"]["gpuStressTest"] is False
+
+
+def test_decision_explainer_builds_reason_codes_without_generation():
+    explanation = cognix_decision_explainer.build_decision_explanation(
+        decision = {
+            "selectedDomain": "rag",
+            "recommendedPath": "rag_first",
+            "providerType": "ollama",
+            "modelId": "qwen-4b",
+            "status": "ready",
+            "confidence": 0.84,
+            "sideEffects": {
+                "modelLoad": False,
+                "generation": False,
+                "networkModelCall": False,
+                "toolExecution": False,
+            },
+        },
+        source_type = "orchestrator_log",
+        source_id = "orl-test",
+        question = "Pourquoi RAG plutot que fine-tuning ?",
+        objective_excerpt = "Repondre a partir de ce PDF.",
+    )
+
+    assert explanation["explanationGeneratorVersion"] == "cognix_explanation_generator_v1"
+    assert explanation["routerDecisionExplainerVersion"] == "cognix_router_decision_explainer_v1"
+    assert explanation["trace"]["recommendedPath"] == "rag_first"
+    assert any(reason["code"] == "strategy_rag_first" for reason in explanation["reasonCodes"])
+    assert explanation["display"]["rawReasoningVisible"] is False
+    assert explanation["sideEffects"]["generation"] is False
+    assert explanation["sideEffects"]["rawReasoningExposure"] is False
+
+
+def test_decision_explanation_endpoint_stores_reasons_and_audit(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+    plan = run_async(
+        cognix_routes.orchestrator_plan(
+            cognix_routes.OrchestratorPlanRequest(
+                objective = "Reponds a partir de ce PDF de cours avec sources",
+                project_type = "research",
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    body = run_async(
+        cognix_routes.explain_decision(
+            cognix_routes.DecisionExplainRequest(
+                sourceType = "orchestrator_log",
+                sourceId = plan["orchestratorLogId"],
+                question = "Pourquoi RAG plutot que fine-tuning ?",
+                storeDecision = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    explanation = body["decisionExplanation"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_explanation_generator_v1"
+    assert explanation["trace"]["recommendedPath"] == "rag_first"
+    assert explanation["display"]["rawReasoningVisible"] is False
+    assert body["sideEffects"]["generation"] is False
+    assert body["sideEffects"]["decisionWrite"] is True
+    assert body["sideEffects"]["reasonWrite"] is True
+    assert body["storedDecision"]["id"].startswith("sdec_")
+    assert any(reason["reasonCode"] == "strategy_rag_first" for reason in body["storedDecision"]["reasons"])
+
+    listed = run_async(cognix_routes.list_decisions(current_subject = "alice"))
+    read_back = run_async(
+        cognix_routes.get_decision(body["storedDecision"]["id"], current_subject = "alice")
+    )
+    assert listed["count"] == 1
+    assert listed["decisions"][0]["id"] == body["storedDecision"]["id"]
+    assert read_back["decision"]["explanation"]["summary"] == explanation["summary"]
+    assert read_back["decision"]["reasons"][0]["reasonCode"]
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "decision_explanation_built"
+    assert log["metadata"]["sourceType"] == "orchestrator_log"
+    assert log["metadata"]["sideEffects"]["rawReasoningExposure"] is False
 
 
 def test_adaptive_quantization_recommends_memory_safe_variant_without_model_mutation():
@@ -4840,6 +4934,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-model-translator",
         "cognix-optimization-engine",
         "cognix-performance-monitor",
+        "cognix-explain-decisions",
         "cognix-prompt-compression",
         "cognix-context-heatmap",
         "cognix-intent-prediction",
@@ -4899,6 +4994,12 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "model_performance_logs" in modules["cognix-performance-monitor"]["capabilities"]
     assert "/api/cognix/performance/snapshot" in modules["cognix-performance-monitor"]["routes"]
     assert "/api/cognix/performance/logs" in modules["cognix-performance-monitor"]["routes"]
+    assert modules["cognix-explain-decisions"]["dependencyState"]["ready"] is True
+    assert "decision_logs" in modules["cognix-explain-decisions"]["capabilities"]
+    assert "reason_codes" in modules["cognix-explain-decisions"]["capabilities"]
+    assert "router_decision_explanations" in modules["cognix-explain-decisions"]["capabilities"]
+    assert "/api/cognix/decisions/explain" in modules["cognix-explain-decisions"]["routes"]
+    assert "/api/cognix/decisions/{decision_id}" in modules["cognix-explain-decisions"]["routes"]
     assert modules["cognix-prompt-compression"]["dependencyState"]["ready"] is True
     assert "prompt_compression" in modules["cognix-prompt-compression"]["capabilities"]
     assert "importance_ranking" in modules["cognix-prompt-compression"]["capabilities"]

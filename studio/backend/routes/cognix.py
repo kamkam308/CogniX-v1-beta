@@ -31,6 +31,7 @@ from core.cognix import debate_orchestrator as cognix_debate_orchestrator
 from core.cognix import deployment_manager as cognix_deployment_manager
 from core.cognix import draft_generation as cognix_draft_generation
 from core.cognix import decision_engine as cognix_decision_engine
+from core.cognix import decision_explainer as cognix_decision_explainer
 from core.cognix import dynamic_ui as cognix_dynamic_ui
 from core.cognix import fine_tuning_planner as cognix_fine_tuning_planner
 from core.cognix import governance_manager as cognix_governance_manager
@@ -775,6 +776,17 @@ class PerformanceSnapshotRequest(BaseModel):
     store_metric: bool = Field(True, alias = "storeMetric")
 
 
+class DecisionExplainRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    source_type: Literal["orchestrator_log", "router_log", "manual"] = Field("manual", alias = "sourceType")
+    source_id: str | None = Field(None, alias = "sourceId", max_length = 160)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    question: str | None = Field(None, max_length = 500)
+    decision: dict[str, Any] | None = None
+    store_decision: bool = Field(True, alias = "storeDecision")
+
+
 class NewsRefreshRequest(BaseModel):
     topic: str = Field("intelligence artificielle", min_length = 1, max_length = 120)
 
@@ -887,6 +899,12 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "hardware_json": "hardwareJson",
         "benchmark_json": "benchmarkJson",
         "runtime_type": "runtimeType",
+        "source_type": "sourceType",
+        "source_id": "sourceId",
+        "decision_type": "decisionType",
+        "explanation_json": "explanationJson",
+        "reason_code": "reasonCode",
+        "evidence_json": "evidenceJson",
         "ram_used_percent": "ramUsedPercent",
         "cpu_used_percent": "cpuUsedPercent",
         "gpu_available": "gpuAvailable",
@@ -1068,6 +1086,8 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         out["logs"] = [_row(item) if isinstance(item, dict) else item for item in out["logs"]]
     if isinstance(out.get("metrics"), list):
         out["metrics"] = [_row(item) if isinstance(item, dict) else item for item in out["metrics"]]
+    if isinstance(out.get("reasons"), list):
+        out["reasons"] = [_row(item) if isinstance(item, dict) else item for item in out["reasons"]]
     if isinstance(out.get("permissions"), list):
         out["permissions"] = [_row(item) if isinstance(item, dict) else item for item in out["permissions"]]
     if isinstance(out.get("reviews"), list):
@@ -1850,6 +1870,155 @@ async def performance_logs(
         _require_owned_project(project_id, current_subject)
     logs = cognix_db.list_model_performance_logs(current_subject, project_id = project_id, limit = limit)
     return {"username": current_subject, "logs": _rows(logs), "count": len(logs)}
+
+
+def _router_log_decision(log: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "selectedDomain": log.get("selected_domain") or log.get("selectedDomain"),
+        "modelLabel": log.get("model_label") or log.get("modelLabel"),
+        "confidence": log.get("confidence"),
+        "routingMode": log.get("routing_mode") or log.get("routingMode"),
+        "needsClarification": bool(log.get("needs_clarification") or log.get("needsClarification")),
+        "scores": log.get("scores") or log.get("scores_json") or log.get("scoresJson"),
+        "recommendedPath": "expert_chat",
+        "primaryCapability": "model_router",
+        "status": "ready",
+        "sideEffects": {
+            "modelLoad": False,
+            "generation": False,
+            "networkModelCall": False,
+            "toolExecution": False,
+        },
+    }
+
+
+def _source_decision_for_explanation(
+    *,
+    payload: DecisionExplainRequest,
+    current_subject: str,
+) -> tuple[dict[str, Any], dict[str, Any] | None, str, str | None, str | None]:
+    if payload.decision:
+        return payload.decision, None, payload.source_type, payload.source_id, None
+    if not payload.source_id:
+        raise HTTPException(
+            status_code = status.HTTP_400_BAD_REQUEST,
+            detail = "decision or sourceId is required",
+        )
+
+    if payload.source_type == "orchestrator_log":
+        for log in cognix_db.list_orchestrator_logs(current_subject, limit = 500):
+            if log.get("id") == payload.source_id:
+                return (
+                    log.get("decision") if isinstance(log.get("decision"), dict) else {},
+                    log,
+                    "orchestrator_log",
+                    payload.source_id,
+                    log.get("objective_excerpt") or log.get("objectiveExcerpt"),
+                )
+    elif payload.source_type == "router_log":
+        for log in cognix_db.list_router_logs(current_subject, limit = 500):
+            if log.get("id") == payload.source_id:
+                return _router_log_decision(log), log, "router_log", payload.source_id, log.get("objective_excerpt")
+
+    raise HTTPException(
+        status_code = status.HTTP_404_NOT_FOUND,
+        detail = "Decision source not found",
+    )
+
+
+@router.get("/decisions/blueprint")
+async def decision_explainer_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_decision_explainer.build_decision_explainer_blueprint()
+    return {
+        "username": current_subject,
+        "decisionExplainerBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_decision_explainer.COGNIX_EXPLANATION_GENERATOR_VERSION,
+    }
+
+
+@router.post("/decisions/explain")
+async def explain_decision(
+    payload: DecisionExplainRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    decision, source_log, source_type, source_id, objective_excerpt = _source_decision_for_explanation(
+        payload = payload,
+        current_subject = current_subject,
+    )
+    explanation = cognix_decision_explainer.build_decision_explanation(
+        decision = decision,
+        source_type = source_type,
+        source_id = source_id,
+        question = payload.question,
+        objective_excerpt = objective_excerpt,
+    )
+    stored_decision = (
+        cognix_db.create_system_decision(
+            current_subject,
+            explanation = explanation,
+            decision = decision,
+            source_type = source_type,
+            source_id = source_id,
+            project_id = payload.project_id or (source_log or {}).get("project_id"),
+        )
+        if payload.store_decision
+        else None
+    )
+    side_effects = {
+        **explanation.get("sideEffects", {}),
+        "decisionWrite": stored_decision is not None,
+        "reasonWrite": stored_decision is not None,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "decision_explanation_built",
+        resource_type = "cognix_system_decision",
+        resource_id = str((stored_decision or {}).get("id") or source_id or "manual"),
+        severity = "notice",
+        metadata = {
+            "sourceType": source_type,
+            "sourceId": source_id,
+            "decisionType": explanation.get("decisionType"),
+            "reasonCodeCount": len(explanation.get("reasonCodes") or []),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "decisionExplanation": explanation,
+        "storedDecision": _row(stored_decision) if stored_decision else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_decision_explainer.COGNIX_EXPLANATION_GENERATOR_VERSION,
+    }
+
+
+@router.get("/decisions")
+async def list_decisions(
+    project_id: str | None = None,
+    limit: int = 100,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if project_id:
+        _require_owned_project(project_id, current_subject)
+    decisions = cognix_db.list_system_decisions(current_subject, project_id = project_id, limit = limit)
+    return {"username": current_subject, "decisions": _rows(decisions), "count": len(decisions)}
+
+
+@router.get("/decisions/{decision_id}")
+async def get_decision(
+    decision_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    decision = cognix_db.get_system_decision(current_subject, decision_id)
+    if not decision:
+        raise HTTPException(status_code = status.HTTP_404_NOT_FOUND, detail = "Decision not found")
+    return {"username": current_subject, "decision": _row(decision)}
 
 
 @router.get("/models/recommendation")

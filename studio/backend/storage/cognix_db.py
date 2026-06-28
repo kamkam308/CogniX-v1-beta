@@ -237,6 +237,43 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_orchestrator_logs_path
             ON cognix_orchestrator_logs(recommended_path, created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_system_decisions (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            source_id TEXT,
+            project_id TEXT,
+            decision_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            explanation_json TEXT NOT NULL DEFAULT '{}',
+            decision_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_system_decisions_username_created
+            ON cognix_system_decisions(username, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_system_decisions_source
+            ON cognix_system_decisions(username, source_type, source_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_system_decisions_project
+            ON cognix_system_decisions(username, project_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_decision_reasons (
+            id TEXT PRIMARY KEY,
+            decision_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            reason_code TEXT NOT NULL,
+            label TEXT NOT NULL,
+            detail TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_decision_reasons_decision
+            ON cognix_decision_reasons(decision_id, created_at ASC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_decision_reasons_username_code
+            ON cognix_decision_reasons(username, reason_code, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_benchmark_runs (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -2197,6 +2234,166 @@ def list_orchestrator_logs(username: str | None = None, limit: int = 200) -> lis
         for log in logs:
             log["decision"] = _json_or_default(log.get("decision_json"), {})
         return logs
+    finally:
+        conn.close()
+
+
+def _hydrate_decision_reason(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["evidence"] = _json_or_default(item.get("evidence_json"), {})
+    return item
+
+
+def _hydrate_system_decision(row: dict[str, Any], reasons: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    item = dict(row)
+    item["explanation"] = _json_or_default(item.get("explanation_json"), {})
+    item["decision"] = _json_or_default(item.get("decision_json"), {})
+    item["reasons"] = reasons or []
+    return item
+
+
+def _decision_reasons_for_ids(conn: sqlite3.Connection, decision_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+    if not decision_ids:
+        return {}
+    placeholders = ", ".join("?" for _ in decision_ids)
+    rows = conn.execute(
+        f"""
+        SELECT * FROM cognix_decision_reasons
+        WHERE decision_id IN ({placeholders})
+        ORDER BY created_at ASC
+        """,
+        decision_ids,
+    ).fetchall()
+    grouped: dict[str, list[dict[str, Any]]] = {decision_id: [] for decision_id in decision_ids}
+    for row in rows:
+        item = _hydrate_decision_reason(row_to_dict(row) or {})
+        grouped.setdefault(str(item.get("decision_id") or ""), []).append(item)
+    return grouped
+
+
+def create_system_decision(
+    username: str,
+    *,
+    explanation: dict[str, Any],
+    decision: dict[str, Any] | None = None,
+    source_type: str | None = None,
+    source_id: str | None = None,
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    created_at = _now()
+    decision_id = _new_id("sdec")
+    reasons = [
+        item for item in explanation.get("reasonCodes", [])
+        if isinstance(item, dict)
+    ]
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_system_decisions
+                (
+                    id, username, source_type, source_id, project_id,
+                    decision_type, title, summary,
+                    explanation_json, decision_json, created_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                decision_id,
+                username,
+                str(source_type or explanation.get("sourceType") or "manual")[:80],
+                str(source_id or explanation.get("sourceId") or "")[:160] or None,
+                project_id,
+                str(explanation.get("decisionType") or "router_orchestrator_decision")[:160],
+                str(explanation.get("title") or "Pourquoi cette decision ?")[:240],
+                str(explanation.get("summary") or "")[:2000],
+                json.dumps(explanation, ensure_ascii = False),
+                json.dumps(decision or {}, ensure_ascii = False),
+                created_at,
+            ),
+        )
+        for reason in reasons:
+            conn.execute(
+                """
+                INSERT INTO cognix_decision_reasons
+                    (
+                        id, decision_id, username, reason_code,
+                        label, detail, evidence_json, created_at
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _new_id("drea"),
+                    decision_id,
+                    username,
+                    str(reason.get("code") or "unspecified")[:160],
+                    str(reason.get("label") or reason.get("code") or "Decision reason")[:240],
+                    str(reason.get("detail") or "")[:4000],
+                    json.dumps(reason.get("evidence") or {}, ensure_ascii = False),
+                    created_at,
+                ),
+            )
+        conn.commit()
+        row = conn.execute("SELECT * FROM cognix_system_decisions WHERE id = ?", (decision_id,)).fetchone()
+        reason_map = _decision_reasons_for_ids(conn, [decision_id])
+        return _hydrate_system_decision(row_to_dict(row) or {}, reason_map.get(decision_id, []))
+    finally:
+        conn.close()
+
+
+def list_system_decisions(
+    username: str,
+    *,
+    project_id: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(int(limit), 300))
+    conn = get_connection()
+    try:
+        if project_id:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_system_decisions
+                WHERE username = ? AND project_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, project_id, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_system_decisions
+                WHERE username = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, safe_limit),
+            ).fetchall()
+        items = _rows_to_dicts(rows)
+        reason_map = _decision_reasons_for_ids(conn, [str(item.get("id")) for item in items])
+        return [
+            _hydrate_system_decision(item, reason_map.get(str(item.get("id")), []))
+            for item in items
+        ]
+    finally:
+        conn.close()
+
+
+def get_system_decision(username: str, decision_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT * FROM cognix_system_decisions
+            WHERE username = ? AND id = ?
+            """,
+            (username, decision_id),
+        ).fetchone()
+        if row is None:
+            return None
+        reason_map = _decision_reasons_for_ids(conn, [decision_id])
+        return _hydrate_system_decision(row_to_dict(row) or {}, reason_map.get(decision_id, []))
     finally:
         conn.close()
 
