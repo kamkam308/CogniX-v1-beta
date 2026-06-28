@@ -39,6 +39,7 @@ from core.cognix import skill_memory as cognix_skill_memory
 from core.cognix import thinking_status as cognix_thinking_status
 from core.cognix import tool_discovery as cognix_tool_discovery
 from core.cognix import tool_registry as cognix_tool_registry
+from core.cognix import workflow_recorder as cognix_workflow_recorder
 from core.cognix import worker_queue as cognix_worker_queue
 from core.cognix.router import classify_objective
 from routes import auth as auth_routes
@@ -2496,6 +2497,139 @@ def test_skill_memory_injection_plan_selects_active_relevant_memories_without_in
     assert logs[0]["action"] == "skill_memory_injection_plan_built"
 
 
+def test_workflow_recorder_blueprint_declares_no_execution_contract():
+    blueprint = cognix_workflow_recorder.build_workflow_blueprint()
+
+    assert blueprint["workflowRecorderVersion"] == "cognix_workflow_recorder_v1"
+    assert blueprint["workflowRunnerVersion"] == "cognix_workflow_runner_v1"
+    assert blueprint["workflowTemplateManagerVersion"] == "cognix_workflow_template_manager_v1"
+    assert blueprint["userControls"]["record"] is True
+    assert blueprint["userControls"]["replay"] is True
+    assert blueprint["userControls"]["edit"] is True
+    assert blueprint["userControls"]["share"] is True
+    assert blueprint["userControls"]["export"] is True
+    assert blueprint["runnerPolicy"]["dryRunByDefault"] is True
+    assert blueprint["runnerPolicy"]["executeWithoutUserConfirmation"] is False
+    assert blueprint["runnerPolicy"]["frontendDirectToolExecutionAllowed"] is False
+    assert blueprint["runnerPolicy"]["frontendDirectModelCallAllowed"] is False
+    assert blueprint["sideEffects"]["workflowWrite"] is False
+    assert blueprint["sideEffects"]["workflowRunWrite"] is False
+    assert blueprint["sideEffects"]["toolExecution"] is False
+    assert blueprint["sideEffects"]["modelLoad"] is False
+    assert blueprint["sideEffects"]["generation"] is False
+
+
+def test_workflow_templates_cover_rag_fine_tuning_code_and_document():
+    registry = cognix_workflow_recorder.build_workflow_template_registry()
+    templates = {item["workflowType"]: item for item in registry["templates"]}
+
+    assert registry["workflowTemplateManagerVersion"] == "cognix_workflow_template_manager_v1"
+    assert {"rag", "fine_tuning", "code", "document"}.issubset(templates)
+    assert any(step["stepType"] == "tool_call" for step in templates["rag"]["steps"])
+    assert any(step["stepType"] == "model_call" for step in templates["fine_tuning"]["steps"])
+    assert any(step["stepType"] == "tool_call" for step in templates["code"]["steps"])
+    assert any(step["stepType"] == "export" for step in templates["document"]["steps"])
+    assert registry["sideEffects"]["toolExecution"] is False
+    assert registry["sideEffects"]["generation"] is False
+
+
+def test_workflow_record_endpoint_stores_steps_and_run_plan_without_execution():
+    seed_accounts()
+
+    body = run_async(
+        cognix_routes.record_workflow(
+            cognix_routes.WorkflowRecordRequest(
+                title = "Pipeline PDF vers fiche",
+                objective = "Importer PDF, indexer, resumer, extraire QCM et exporter.",
+                workflowType = "rag",
+                steps = [
+                    {"stepType": "user_action", "label": "Importer PDF", "parameters": {"kind": "pdf"}},
+                    {"stepType": "tool_call", "label": "Indexer", "toolName": "rag-indexer"},
+                    {"stepType": "model_call", "label": "Resumer", "modelId": "cognix-general-small"},
+                    {"stepType": "export", "label": "Exporter fiche"},
+                ],
+                storeWorkflow = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    workflow = body["workflow"]
+    workflow_id = workflow["id"]
+    bob_workflows = run_async(cognix_routes.list_workflows(current_subject = "bob"))
+    fetched = run_async(cognix_routes.get_workflow(workflow_id, current_subject = "alice"))["workflow"]
+    run_body = run_async(
+        cognix_routes.workflow_run_plan(
+            workflow_id,
+            cognix_routes.WorkflowRunPlanRequest(runMode = "dry_run", inputs = {"document": "cours.pdf"}),
+            current_subject = "alice",
+        )
+    )
+    runs = run_async(cognix_routes.workflow_runs(workflow_id, current_subject = "alice"))
+
+    assert body["auditLogId"].startswith("aud_")
+    assert body["sideEffects"]["workflowWrite"] is True
+    assert body["sideEffects"]["toolExecution"] is False
+    assert workflow["workflowType"] == "rag"
+    assert fetched["stepCount"] == 4
+    assert fetched["steps"][1]["toolName"] == "rag-indexer"
+    assert bob_workflows["workflows"] == []
+    assert run_body["run"]["id"].startswith("wrun_")
+    assert run_body["runPlan"]["summary"]["willExecuteNow"] is False
+    assert run_body["runPlan"]["orderedSteps"][1]["willExecuteNow"] is False
+    assert run_body["sideEffects"]["workflowRunWrite"] is True
+    assert run_body["sideEffects"]["toolExecution"] is False
+    assert run_body["sideEffects"]["generation"] is False
+    assert len(run_body["run"]["logs"]) == 4
+    assert len(runs["runs"]) == 1
+
+    logs = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))["logs"]
+    actions = {item["action"] for item in logs}
+    assert "workflow_run_plan_built" in actions
+
+
+def test_workflow_update_export_and_delete_are_user_scoped_and_audited():
+    seed_accounts()
+    created = run_async(
+        cognix_routes.record_workflow(
+            cognix_routes.WorkflowRecordRequest(
+                title = "Workflow code",
+                workflowType = "code",
+                storeWorkflow = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    workflow_id = created["workflow"]["id"]
+
+    updated = run_async(
+        cognix_routes.update_workflow(
+            workflow_id,
+            cognix_routes.WorkflowUpdateRequest(title = "Workflow code partage", shareStatus = "shared"),
+            current_subject = "alice",
+        )
+    )
+    export = run_async(cognix_routes.export_workflow(workflow_id, current_subject = "alice"))
+    deleted = run_async(cognix_routes.delete_workflow(workflow_id, current_subject = "alice"))
+    after_delete = run_async(cognix_routes.list_workflows(include_disabled = True, current_subject = "alice"))
+
+    assert updated["workflow"]["title"] == "Workflow code partage"
+    assert updated["workflow"]["shareStatus"] == "shared"
+    assert export["workflowExport"]["workflow"]["id"] == workflow_id
+    assert export["sideEffects"]["toolExecution"] is False
+    assert deleted["deleted"] is True
+    assert deleted["sideEffects"]["generation"] is False
+    assert after_delete["workflows"] == []
+
+    logs = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))["logs"]
+    actions = {item["action"] for item in logs}
+    assert {
+        "workflow_recording_built",
+        "workflow_updated",
+        "workflow_exported",
+        "workflow_deleted",
+    }.issubset(actions)
+
+
 def test_codex_pipeline_plans_required_gates_without_modifying_code():
     plan = cognix_codex_pipeline.build_codex_pipeline_plan(
         objective = "Ajoute un module CogniX Chemistry dans le code source",
@@ -3113,6 +3247,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-context-graph",
         "cognix-memory-manager",
         "cognix-long-term-skill-memory",
+        "cognix-ai-workflow-recorder",
         "cognix-onboarding",
         "cognix-rag",
         "cognix-fine-tuning",
@@ -3182,6 +3317,12 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/memory/skills/candidates" in modules["cognix-long-term-skill-memory"]["routes"]
     assert "/api/cognix/memory/skills/export" in modules["cognix-long-term-skill-memory"]["routes"]
     assert "/api/cognix/memory/skills/injection-plan" in modules["cognix-long-term-skill-memory"]["routes"]
+    assert modules["cognix-ai-workflow-recorder"]["dependencyState"]["ready"] is True
+    assert "workflow_recording" in modules["cognix-ai-workflow-recorder"]["capabilities"]
+    assert "workflow_replay_planning" in modules["cognix-ai-workflow-recorder"]["capabilities"]
+    assert "workflow_template_registry" in modules["cognix-ai-workflow-recorder"]["capabilities"]
+    assert "/api/cognix/workflows/record" in modules["cognix-ai-workflow-recorder"]["routes"]
+    assert "/api/cognix/workflows/{workflow_id}/run-plan" in modules["cognix-ai-workflow-recorder"]["routes"]
     assert modules["cognix-onboarding"]["activationState"] == "ready"
     assert modules["cognix-rag"]["dependencyState"]["ready"] is True
     assert "rag_source_registry" in modules["cognix-rag"]["capabilities"]

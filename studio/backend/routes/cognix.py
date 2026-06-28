@@ -48,6 +48,7 @@ from core.cognix import skill_memory as cognix_skill_memory
 from core.cognix import thinking_status as cognix_thinking_status
 from core.cognix import tool_discovery as cognix_tool_discovery
 from core.cognix import tool_registry as cognix_tool_registry
+from core.cognix import workflow_recorder as cognix_workflow_recorder
 from core.cognix import worker_queue as cognix_worker_queue
 from core.cognix.router import classify_objective
 from core.cognix.strategy import build_strategy
@@ -154,6 +155,34 @@ class SkillMemoryInjectionPlanRequest(BaseModel):
 
     objective: str | None = Field(None, max_length = 4000)
     max_memories: int = Field(5, alias = "maxMemories", ge = 1, le = 20)
+
+
+class WorkflowRecordRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    title: str | None = Field(None, max_length = 240)
+    objective: str | None = Field(None, max_length = 4000)
+    workflow_type: str | None = Field(None, alias = "workflowType", max_length = 120)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    steps: list[dict[str, Any]] = Field(default_factory = list)
+    metadata: dict[str, Any] | None = None
+    store_workflow: bool = Field(True, alias = "storeWorkflow")
+
+
+class WorkflowUpdateRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    title: str | None = Field(None, max_length = 240)
+    objective: str | None = Field(None, max_length = 4000)
+    status: Literal["active", "disabled", "archived"] | None = None
+    share_status: Literal["private", "shared"] | None = Field(None, alias = "shareStatus")
+
+
+class WorkflowRunPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    run_mode: Literal["dry_run", "simulation"] = Field("dry_run", alias = "runMode")
+    inputs: dict[str, Any] | None = None
 
 
 class ResearchIntegrationPlanRequest(BaseModel):
@@ -646,6 +675,18 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "evidence_excerpt": "evidenceExcerpt",
         "source_candidate_id": "sourceCandidateId",
         "preference_key": "preferenceKey",
+        "workflow_type": "workflowType",
+        "share_status": "shareStatus",
+        "step_index": "stepIndex",
+        "step_type": "stepType",
+        "tool_name": "toolName",
+        "output_summary": "outputSummary",
+        "parameters_json": "parametersJson",
+        "step_json": "stepJson",
+        "workflow_id": "workflowId",
+        "run_mode": "runMode",
+        "run_plan_json": "runPlanJson",
+        "step_id": "stepId",
     }
     for source, target in alias_map.items():
         if source in out:
@@ -656,6 +697,10 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         out["verificationRequired"] = bool(out["verificationRequired"])
     if "ignored" in out:
         out["ignored"] = bool(out["ignored"])
+    if isinstance(out.get("steps"), list):
+        out["steps"] = [_row(item) if isinstance(item, dict) else item for item in out["steps"]]
+    if isinstance(out.get("logs"), list):
+        out["logs"] = [_row(item) if isinstance(item, dict) else item for item in out["logs"]]
     return out
 
 
@@ -3744,6 +3789,340 @@ async def skill_memory_injection_plan(
         "auditLogId": audit.get("id"),
         "sideEffects": side_effects,
         "plannerVersion": cognix_skill_memory.COGNIX_CONTEXT_INJECTOR_VERSION,
+    }
+
+
+@router.get("/workflows/blueprint")
+async def workflow_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_workflow_recorder.build_workflow_blueprint()
+    return {
+        "username": current_subject,
+        "workflowBlueprint": blueprint,
+        "plannerVersion": cognix_workflow_recorder.COGNIX_WORKFLOW_RECORDER_VERSION,
+        "sideEffects": blueprint.get("sideEffects", {}),
+    }
+
+
+@router.get("/workflows/templates")
+async def workflow_templates(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    registry = cognix_workflow_recorder.build_workflow_template_registry()
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "workflow_template_registry_built",
+        resource_type = "cognix_workflow",
+        resource_id = current_subject,
+        severity = "notice",
+        metadata = {
+            "workflowTemplateManagerVersion": registry.get("workflowTemplateManagerVersion"),
+            "templateCount": registry.get("summary", {}).get("templateCount", 0),
+            "sideEffects": registry.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "templateRegistry": registry,
+        "auditLogId": audit.get("id"),
+        "sideEffects": registry.get("sideEffects", {}),
+        "plannerVersion": cognix_workflow_recorder.COGNIX_WORKFLOW_TEMPLATE_MANAGER_VERSION,
+    }
+
+
+@router.post("/workflows/record")
+async def record_workflow(
+    payload: WorkflowRecordRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_workflow_recorder.build_workflow_recording_plan(
+        username = current_subject,
+        title = payload.title,
+        objective = payload.objective,
+        workflow_type = payload.workflow_type,
+        steps = payload.steps,
+        project_id = payload.project_id,
+        metadata = payload.metadata,
+    )
+    workflow = (
+        cognix_db.create_workflow_from_plan(
+            current_subject,
+            plan = plan,
+            project_id = payload.project_id,
+        )
+        if payload.store_workflow
+        else None
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "workflowWrite": workflow is not None,
+        "workflowRunWrite": False,
+        "toolExecution": False,
+        "modelLoad": False,
+        "generation": False,
+        "exportWrite": False,
+        "networkCall": False,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "workflow_recording_built",
+        resource_type = "cognix_workflow",
+        resource_id = str((workflow or {}).get("id") or payload.project_id or current_subject),
+        severity = "notice",
+        metadata = {
+            "workflowRecorderVersion": plan.get("workflowRecorderVersion"),
+            "workflowType": plan.get("workflow", {}).get("workflowType"),
+            "stepCount": plan.get("summary", {}).get("stepCount", 0),
+            "stored": workflow is not None,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "recordingPlan": plan,
+        "workflow": _row(workflow) if workflow else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_workflow_recorder.COGNIX_WORKFLOW_RECORDER_VERSION,
+    }
+
+
+@router.get("/workflows")
+async def list_workflows(
+    include_disabled: bool = False,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    return {
+        "username": current_subject,
+        "workflows": _rows(cognix_db.list_workflows(current_subject, include_disabled = include_disabled)),
+        "sideEffects": {
+            "workflowWrite": False,
+            "workflowRunWrite": False,
+            "toolExecution": False,
+            "modelLoad": False,
+            "generation": False,
+        },
+    }
+
+
+@router.get("/workflows/{workflow_id}")
+async def get_workflow(
+    workflow_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    workflow = cognix_db.get_workflow(current_subject, workflow_id)
+    if workflow is None:
+        raise HTTPException(status_code = 404, detail = "Workflow not found")
+    return {
+        "workflow": _row(workflow),
+        "sideEffects": {
+            "workflowWrite": False,
+            "workflowRunWrite": False,
+            "toolExecution": False,
+            "modelLoad": False,
+            "generation": False,
+        },
+    }
+
+
+@router.patch("/workflows/{workflow_id}")
+async def update_workflow(
+    workflow_id: str,
+    payload: WorkflowUpdateRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    try:
+        workflow = cognix_db.update_workflow(
+            current_subject,
+            workflow_id,
+            title = payload.title,
+            objective = payload.objective,
+            status = payload.status,
+            share_status = payload.share_status,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from exc
+    if workflow is None:
+        raise HTTPException(status_code = 404, detail = "Workflow not found")
+    side_effects = {
+        "workflowWrite": True,
+        "workflowRunWrite": False,
+        "toolExecution": False,
+        "modelLoad": False,
+        "generation": False,
+        "exportWrite": False,
+        "networkCall": False,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "workflow_updated",
+        resource_type = "cognix_workflow",
+        resource_id = workflow_id,
+        severity = "notice",
+        metadata = {
+            "status": workflow.get("status"),
+            "shareStatus": workflow.get("share_status"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "workflow": _row(workflow),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_workflow_recorder.COGNIX_WORKFLOW_RECORDER_VERSION,
+    }
+
+
+@router.delete("/workflows/{workflow_id}")
+async def delete_workflow(
+    workflow_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    deleted = cognix_db.delete_workflow(current_subject, workflow_id)
+    if not deleted:
+        raise HTTPException(status_code = 404, detail = "Workflow not found")
+    side_effects = {
+        "workflowWrite": True,
+        "workflowRunWrite": True,
+        "toolExecution": False,
+        "modelLoad": False,
+        "generation": False,
+        "exportWrite": False,
+        "networkCall": False,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "workflow_deleted",
+        resource_type = "cognix_workflow",
+        resource_id = workflow_id,
+        severity = "notice",
+        metadata = {"workflowId": workflow_id, "sideEffects": side_effects},
+    )
+    return {
+        "deleted": True,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_workflow_recorder.COGNIX_WORKFLOW_RECORDER_VERSION,
+    }
+
+
+@router.get("/workflows/{workflow_id}/export")
+async def export_workflow(
+    workflow_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    bundle = cognix_db.export_workflow_bundle(current_subject, workflow_id)
+    if bundle is None:
+        raise HTTPException(status_code = 404, detail = "Workflow not found")
+    side_effects = {
+        "workflowWrite": False,
+        "workflowRunWrite": False,
+        "toolExecution": False,
+        "modelLoad": False,
+        "generation": False,
+        "exportWrite": False,
+        "networkCall": False,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "workflow_exported",
+        resource_type = "cognix_workflow",
+        resource_id = workflow_id,
+        severity = "notice",
+        metadata = {
+            "workflowId": workflow_id,
+            "runCount": len(bundle.get("runs") or []),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "workflowExport": {
+            **bundle,
+            "workflow": _row(bundle.get("workflow") or {}),
+            "runs": _rows(bundle.get("runs") or []),
+        },
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_workflow_recorder.COGNIX_WORKFLOW_RECORDER_VERSION,
+    }
+
+
+@router.post("/workflows/{workflow_id}/run-plan")
+async def workflow_run_plan(
+    workflow_id: str,
+    payload: WorkflowRunPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    workflow = cognix_db.get_workflow(current_subject, workflow_id)
+    if workflow is None:
+        raise HTTPException(status_code = 404, detail = "Workflow not found")
+    plan = cognix_workflow_recorder.build_workflow_run_plan(
+        username = current_subject,
+        workflow = workflow,
+        steps = workflow.get("steps") or [],
+        run_mode = payload.run_mode,
+        inputs = payload.inputs,
+    )
+    run = cognix_db.create_workflow_run_plan_record(
+        current_subject,
+        workflow_id = workflow_id,
+        plan = plan,
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "workflowWrite": False,
+        "workflowRunWrite": True,
+        "toolExecution": False,
+        "modelLoad": False,
+        "generation": False,
+        "exportWrite": False,
+        "networkCall": False,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "workflow_run_plan_built",
+        resource_type = "cognix_workflow_run",
+        resource_id = str(run.get("id") or workflow_id),
+        severity = "notice",
+        metadata = {
+            "workflowId": workflow_id,
+            "workflowRunnerVersion": plan.get("workflowRunnerVersion"),
+            "stepCount": plan.get("summary", {}).get("stepCount", 0),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "runPlan": plan,
+        "run": _row(run),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_workflow_recorder.COGNIX_WORKFLOW_RUNNER_VERSION,
+    }
+
+
+@router.get("/workflows/{workflow_id}/runs")
+async def workflow_runs(
+    workflow_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if cognix_db.get_workflow(current_subject, workflow_id) is None:
+        raise HTTPException(status_code = 404, detail = "Workflow not found")
+    return {
+        "runs": _rows(cognix_db.list_workflow_runs(current_subject, workflow_id)),
+        "sideEffects": {
+            "workflowWrite": False,
+            "workflowRunWrite": False,
+            "toolExecution": False,
+            "modelLoad": False,
+            "generation": False,
+        },
     }
 
 

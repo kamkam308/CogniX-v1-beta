@@ -331,6 +331,72 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_user_preferences_username_status
             ON cognix_user_preferences(username, status, updated_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_workflows (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            project_id TEXT,
+            title TEXT NOT NULL,
+            objective TEXT NOT NULL DEFAULT '',
+            workflow_type TEXT NOT NULL DEFAULT 'custom',
+            status TEXT NOT NULL DEFAULT 'active',
+            share_status TEXT NOT NULL DEFAULT 'private',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_workflows_username_status
+            ON cognix_workflows(username, status, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_workflows_project
+            ON cognix_workflows(username, project_id, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_workflow_steps (
+            id TEXT PRIMARY KEY,
+            workflow_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            step_index INTEGER NOT NULL,
+            step_type TEXT NOT NULL,
+            label TEXT NOT NULL,
+            tool_name TEXT,
+            model_id TEXT,
+            parameters_json TEXT NOT NULL DEFAULT '{}',
+            output_summary TEXT NOT NULL DEFAULT '',
+            step_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_workflow_steps_workflow
+            ON cognix_workflow_steps(username, workflow_id, step_index);
+
+        CREATE TABLE IF NOT EXISTS cognix_workflow_runs (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            workflow_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'planned',
+            run_mode TEXT NOT NULL DEFAULT 'dry_run',
+            run_plan_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_workflow_runs_workflow
+            ON cognix_workflow_runs(username, workflow_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_workflow_run_logs (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            workflow_id TEXT NOT NULL,
+            step_id TEXT,
+            level TEXT NOT NULL DEFAULT 'info',
+            message TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_workflow_run_logs_run
+            ON cognix_workflow_run_logs(username, run_id, created_at);
+
         CREATE TABLE IF NOT EXISTS cognix_library_items (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -2116,6 +2182,329 @@ def export_skill_memory_bundle(username: str) -> dict[str, Any]:
         "skillMemories": list_skill_memories(username, include_disabled = True),
         "preferences": list_user_preferences(username, include_disabled = True),
         "candidates": list_memory_candidates(username, include_decided = True, limit = 300),
+        "exportedAt": _now(),
+    }
+
+
+def _hydrate_workflow(row: dict[str, Any]) -> dict[str, Any]:
+    row["metadata"] = _json_or_default(row.get("metadata_json"), {})
+    return row
+
+
+def _hydrate_workflow_step(row: dict[str, Any]) -> dict[str, Any]:
+    row["parameters"] = _json_or_default(row.get("parameters_json"), {})
+    row["step"] = _json_or_default(row.get("step_json"), {})
+    return row
+
+
+def _hydrate_workflow_run(row: dict[str, Any]) -> dict[str, Any]:
+    row["runPlan"] = _json_or_default(row.get("run_plan_json"), {})
+    return row
+
+
+def _hydrate_workflow_run_log(row: dict[str, Any]) -> dict[str, Any]:
+    row["metadata"] = _json_or_default(row.get("metadata_json"), {})
+    return row
+
+
+def create_workflow_from_plan(
+    username: str,
+    *,
+    plan: dict[str, Any],
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    workflow = plan.get("workflow") if isinstance(plan.get("workflow"), dict) else {}
+    steps = [item for item in (plan.get("steps") or []) if isinstance(item, dict)]
+    workflow_id = _new_id("wf")
+    now = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_workflows
+                (
+                    id, username, project_id, title, objective, workflow_type,
+                    status, share_status, metadata_json, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+            """,
+            (
+                workflow_id,
+                username,
+                project_id or workflow.get("projectId"),
+                str(workflow.get("title") or "Workflow CogniX")[:240],
+                str(workflow.get("objective") or "")[:4000],
+                str(workflow.get("workflowType") or "custom")[:120],
+                str(workflow.get("shareStatus") or "private")[:40],
+                json.dumps(workflow.get("metadata") or {}, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        for index, step in enumerate(steps):
+            step_id = _new_id("wstep")
+            conn.execute(
+                """
+                INSERT INTO cognix_workflow_steps
+                    (
+                        id, workflow_id, username, step_index, step_type, label,
+                        tool_name, model_id, parameters_json, output_summary,
+                        step_json, created_at
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    step_id,
+                    workflow_id,
+                    username,
+                    int(step.get("stepIndex", index)),
+                    str(step.get("stepType") or "user_action")[:80],
+                    str(step.get("label") or f"Step {index + 1}")[:240],
+                    step.get("toolName"),
+                    step.get("modelId"),
+                    json.dumps(step.get("parameters") or {}, ensure_ascii = False),
+                    str(step.get("outputSummary") or "")[:2000],
+                    json.dumps(step, ensure_ascii = False),
+                    now,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_workflow(username, workflow_id) or {}
+
+
+def list_workflows(
+    username: str,
+    *,
+    include_disabled: bool = False,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 100), 1), 300)
+    conn = get_connection()
+    try:
+        clauses = ["username = ?"]
+        params: list[Any] = [username]
+        if not include_disabled:
+            clauses.append("status = 'active'")
+        params.append(safe_limit)
+        rows = conn.execute(
+            f"""
+            SELECT * FROM cognix_workflows
+            WHERE {' AND '.join(clauses)}
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        workflows = [_hydrate_workflow(row) for row in _rows_to_dicts(rows)]
+        for workflow in workflows:
+            count_row = conn.execute(
+                "SELECT COUNT(*) AS count FROM cognix_workflow_steps WHERE username = ? AND workflow_id = ?",
+                (username, workflow.get("id")),
+            ).fetchone()
+            workflow["stepCount"] = int(count_row["count"] if count_row is not None else 0)
+        return workflows
+    finally:
+        conn.close()
+
+
+def get_workflow(username: str, workflow_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        workflow_row = conn.execute(
+            "SELECT * FROM cognix_workflows WHERE id = ? AND username = ?",
+            (workflow_id, username),
+        ).fetchone()
+        if workflow_row is None:
+            return None
+        workflow = _hydrate_workflow(row_to_dict(workflow_row) or {})
+        step_rows = conn.execute(
+            """
+            SELECT * FROM cognix_workflow_steps
+            WHERE workflow_id = ? AND username = ?
+            ORDER BY step_index ASC
+            """,
+            (workflow_id, username),
+        ).fetchall()
+        workflow["steps"] = [_hydrate_workflow_step(row) for row in _rows_to_dicts(step_rows)]
+        workflow["stepCount"] = len(workflow["steps"])
+        return workflow
+    finally:
+        conn.close()
+
+
+def update_workflow(
+    username: str,
+    workflow_id: str,
+    *,
+    title: str | None = None,
+    objective: str | None = None,
+    status: str | None = None,
+    share_status: str | None = None,
+) -> dict[str, Any] | None:
+    updates: list[str] = []
+    params: list[Any] = []
+    if title is not None:
+        updates.append("title = ?")
+        params.append(title.strip()[:240])
+    if objective is not None:
+        updates.append("objective = ?")
+        params.append(objective.strip()[:4000])
+    if status is not None:
+        normalized_status = status.strip().lower()
+        if normalized_status not in {"active", "disabled", "archived"}:
+            raise ValueError("Unsupported workflow status")
+        updates.append("status = ?")
+        params.append(normalized_status)
+    if share_status is not None:
+        normalized_share = share_status.strip().lower()
+        if normalized_share not in {"private", "shared"}:
+            raise ValueError("Unsupported workflow share status")
+        updates.append("share_status = ?")
+        params.append(normalized_share)
+    if not updates:
+        return None
+    updates.append("updated_at = ?")
+    params.append(_now())
+    params.extend([workflow_id, username])
+    conn = get_connection()
+    try:
+        conn.execute(
+            f"""
+            UPDATE cognix_workflows
+            SET {', '.join(updates)}
+            WHERE id = ? AND username = ?
+            """,
+            tuple(params),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_workflow(username, workflow_id)
+
+
+def delete_workflow(username: str, workflow_id: str) -> bool:
+    conn = get_connection()
+    try:
+        run_rows = conn.execute(
+            "SELECT id FROM cognix_workflow_runs WHERE workflow_id = ? AND username = ?",
+            (workflow_id, username),
+        ).fetchall()
+        run_ids = [row["id"] for row in run_rows]
+        for run_id in run_ids:
+            conn.execute(
+                "DELETE FROM cognix_workflow_run_logs WHERE run_id = ? AND username = ?",
+                (run_id, username),
+            )
+        conn.execute(
+            "DELETE FROM cognix_workflow_runs WHERE workflow_id = ? AND username = ?",
+            (workflow_id, username),
+        )
+        conn.execute(
+            "DELETE FROM cognix_workflow_steps WHERE workflow_id = ? AND username = ?",
+            (workflow_id, username),
+        )
+        cur = conn.execute(
+            "DELETE FROM cognix_workflows WHERE id = ? AND username = ?",
+            (workflow_id, username),
+        )
+        conn.commit()
+        return bool(cur.rowcount)
+    finally:
+        conn.close()
+
+
+def create_workflow_run_plan_record(
+    username: str,
+    *,
+    workflow_id: str,
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    run_id = _new_id("wrun")
+    now = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_workflow_runs
+                (id, username, workflow_id, status, run_mode, run_plan_json, created_at, updated_at)
+            VALUES (?, ?, ?, 'planned', ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                username,
+                workflow_id,
+                str(plan.get("runMode") or "dry_run")[:80],
+                json.dumps(plan, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        for planned_step in plan.get("orderedSteps") or []:
+            conn.execute(
+                """
+                INSERT INTO cognix_workflow_run_logs
+                    (id, run_id, username, workflow_id, step_id, level, message, metadata_json, created_at)
+                VALUES (?, ?, ?, ?, ?, 'info', ?, ?, ?)
+                """,
+                (
+                    _new_id("wlog"),
+                    run_id,
+                    username,
+                    workflow_id,
+                    planned_step.get("stepId"),
+                    "Replay planned only; execution is blocked until explicit confirmation.",
+                    json.dumps(planned_step, ensure_ascii = False),
+                    now,
+                ),
+            )
+        conn.commit()
+        run_row = conn.execute(
+            "SELECT * FROM cognix_workflow_runs WHERE id = ? AND username = ?",
+            (run_id, username),
+        ).fetchone()
+        log_rows = conn.execute(
+            """
+            SELECT * FROM cognix_workflow_run_logs
+            WHERE run_id = ? AND username = ?
+            ORDER BY created_at ASC
+            """,
+            (run_id, username),
+        ).fetchall()
+        run = _hydrate_workflow_run(row_to_dict(run_row) or {})
+        run["logs"] = [_hydrate_workflow_run_log(row) for row in _rows_to_dicts(log_rows)]
+        return run
+    finally:
+        conn.close()
+
+
+def list_workflow_runs(username: str, workflow_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 50), 1), 200)
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM cognix_workflow_runs
+            WHERE username = ? AND workflow_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (username, workflow_id, safe_limit),
+        ).fetchall()
+        return [_hydrate_workflow_run(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def export_workflow_bundle(username: str, workflow_id: str) -> dict[str, Any] | None:
+    workflow = get_workflow(username, workflow_id)
+    if workflow is None:
+        return None
+    return {
+        "username": username,
+        "workflow": workflow,
+        "runs": list_workflow_runs(username, workflow_id, limit = 100),
         "exportedAt": _now(),
     }
 
