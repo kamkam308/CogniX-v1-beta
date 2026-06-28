@@ -30,6 +30,7 @@ from core.cognix import module_registry as cognix_module_registry
 from core.cognix import onboarding as cognix_onboarding
 from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
+from core.cognix import project_experts as cognix_project_experts
 from core.cognix import registry as cognix_registry
 from core.cognix import recommender as cognix_recommender
 from core.cognix import runtime_adapter as cognix_runtime_adapter
@@ -127,6 +128,13 @@ class ProjectDefaultModelRequest(BaseModel):
     label: str = Field(..., min_length = 1, max_length = 240)
     provider_type: str | None = Field(None, alias = "providerType", max_length = 80)
     provider_id: str | None = Field(None, alias = "providerId", max_length = 160)
+
+
+class ProjectExpertPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    project_type: str | None = Field(None, alias = "projectType", max_length = 80)
 
 
 class ProjectShareCreateRequest(BaseModel):
@@ -2127,6 +2135,14 @@ async def my_project_model_defaults(current_subject: str = Depends(get_current_j
     return {"defaults": _rows(cognix_db.list_project_model_defaults(current_subject))}
 
 
+@router.get("/project-experts/registry")
+async def project_expert_registry(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    return {
+        "username": current_subject,
+        "registry": cognix_project_experts.build_project_expert_registry(),
+    }
+
+
 @router.get("/projects/{project_id}/default-model")
 async def get_project_default_model(
     project_id: str,
@@ -2166,6 +2182,71 @@ async def delete_project_default_model(
     _require_owned_project(project_id, current_subject)
     cognix_db.delete_project_model_default(current_subject, project_id)
     return {"ok": True}
+
+
+@router.post("/projects/{project_id}/expert-plan")
+async def project_expert_plan(
+    project_id: str,
+    payload: ProjectExpertPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    project = _require_owned_project(project_id, current_subject)
+    runtime = _current_model_cache_runtime()
+    default_model = cognix_db.get_project_model_default(project_id, current_subject)
+    plan = cognix_orchestrator.build_execution_plan(
+        payload.objective,
+        current_subject = current_subject,
+        project_type = payload.project_type,
+        project_id = project_id,
+        runtime_snapshot = runtime,
+        latest_benchmark_run = cognix_db.get_latest_benchmark_run(current_subject),
+        rag_available = _rag_available(),
+    )
+    expert_plan = cognix_project_experts.build_project_expert_plan(
+        objective = payload.objective,
+        project_id = project_id,
+        project_type = payload.project_type,
+        project_default_model = default_model,
+        classification = plan["classification"],
+        recommendation = plan["recommendation"],
+        preload_plan = plan["preloadPlan"],
+        rag_plan = plan["ragPlan"],
+        context_plan = plan["contextPlan"],
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "project_expert_plan_built",
+        resource_type = "cognix_project_expert",
+        resource_id = project_id,
+        severity = "warning" if expert_plan.get("warnings") else "notice",
+        metadata = {
+            "projectExpertsVersion": expert_plan.get("projectExpertsVersion"),
+            "projectId": project_id,
+            "projectType": expert_plan.get("projectType"),
+            "primaryExpertId": expert_plan.get("primaryExpert", {}).get("expertId"),
+            "primaryDomain": expert_plan.get("primaryExpert", {}).get("domain"),
+            "selectedModelId": expert_plan.get("primaryExpert", {}).get("selectedModel", {}).get("modelId"),
+            "selectionSource": expert_plan.get("selectionSource"),
+            "secondaryExpertIds": [
+                item.get("expertId") for item in expert_plan.get("secondaryExperts", []) if isinstance(item, dict)
+            ],
+            "sideEffects": expert_plan.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "project": _row(project),
+        "defaultModel": _row(default_model) if default_model else None,
+        "runtimeError": runtime.get("error"),
+        "classification": plan["classification"],
+        "taskStrategy": plan["taskStrategy"],
+        "projectExpertPlan": expert_plan,
+        "executionPolicy": plan["executionPolicy"],
+        "auditLogId": audit.get("id"),
+        "sideEffects": expert_plan.get("sideEffects", {}),
+        "plannerVersion": cognix_project_experts.COGNIX_PROJECT_EXPERTS_VERSION,
+    }
 
 
 @router.get("/project-shares")

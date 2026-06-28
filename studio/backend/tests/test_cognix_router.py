@@ -25,6 +25,7 @@ from core.cognix import module_registry as cognix_module_registry
 from core.cognix import onboarding as cognix_onboarding
 from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
+from core.cognix import project_experts as cognix_project_experts
 from core.cognix import runtime_adapter as cognix_runtime_adapter
 from core.cognix import tool_registry as cognix_tool_registry
 from core.cognix import worker_queue as cognix_worker_queue
@@ -231,6 +232,15 @@ def test_orchestrator_builds_dry_run_plan_without_loading(monkeypatch):
     assert plan["preloadPlan"]["plannerVersion"] == "cognix_preload_planner_v1"
     assert plan["preloadPlan"]["target"]["domain"] == "code"
     assert plan["preloadPlan"]["sideEffects"]["modelLoad"] is False
+    assert plan["projectExpertPlan"]["projectExpertsVersion"] == "cognix_project_experts_v1"
+    assert plan["projectExpertPlan"]["primaryExpert"]["expertId"] == "cognix-code"
+    assert plan["projectExpertPlan"]["primaryExpert"]["selectedModel"]["source"] == "expert_profile"
+    assert plan["projectExpertPlan"]["generalistVerifier"]["enabled"] is True
+    assert plan["projectExpertPlan"]["executionContract"]["frontendDirectModelCallAllowed"] is False
+    assert plan["projectExpertPlan"]["sideEffects"]["modelLoad"] is False
+    assert plan["projectExpertPlan"]["sideEffects"]["projectMutation"] is False
+    assert plan["executionStrategy"]["projectExpertId"] == "cognix-code"
+    assert plan["executionStrategy"]["projectExpertDomain"] == "code"
     assert plan["ragPlan"]["plannerVersion"] == "cognix_rag_planner_v1"
     assert plan["ragPlan"]["recommendedPath"] == "no_rag_needed"
     assert plan["ragPlan"]["sideEffects"]["ragIndexing"] is False
@@ -928,6 +938,124 @@ def test_governance_plan_endpoint_requires_admin_and_logs_audited_dry_run():
     assert log["metadata"]["edition"] == "business"
     assert log["metadata"]["ssoProviderId"] == "microsoft_entra_id"
     assert log["metadata"]["sideEffects"]["organizationWrite"] is False
+
+
+def test_project_experts_plan_specialized_project_without_loading():
+    registry = cognix_project_experts.build_project_expert_registry()
+    assert registry["projectExpertsVersion"] == "cognix_project_experts_v1"
+    assert registry["globalPolicies"]["specializedProjectsPreferPrimaryExpert"] is True
+    assert registry["globalPolicies"]["fallbackToGeneralist"] is True
+    assert registry["sideEffects"]["modelLoad"] is False
+
+    plan = cognix_project_experts.build_project_expert_plan(
+        objective = "Corrige ce bug TypeScript dans mon API",
+        project_id = "project-code",
+        project_type = "code",
+        project_default_model = {
+            "model_id": "huihui_ai/qwen3-vl-abliterated:4b-instruct",
+            "label": "Qwen 4B local via Ollama",
+            "provider_type": "ollama",
+            "provider_id": "ollama-local",
+        },
+        classification = {"selectedDomain": "code", "scores": {"code": 0.91}, "needsClarification": False},
+        recommendation = stub_recommendation(stub_hardware_profile())["recommendation"],
+        preload_plan = {
+            "target": {"modelId": "huihui_ai/qwen3-vl-abliterated:4b-instruct", "priority": 85},
+            "actions": [{"type": "would_preload", "reason": "Projet code actif."}],
+        },
+        rag_plan = {"recommendedPath": "no_rag_needed", "retrieval": {"strategy": "none"}},
+        context_plan = {
+            "assemblyStrategy": "memory_project_recent",
+            "tokenBudget": {"maxContextTokens": 4096, "rawHistoryAllowed": False},
+        },
+    )
+
+    assert plan["projectExpertsVersion"] == "cognix_project_experts_v1"
+    assert plan["projectMode"] == "specialized_project"
+    assert plan["selectionSource"] == "project_type"
+    assert plan["primaryExpert"]["expertId"] == "cognix-code"
+    assert plan["primaryExpert"]["selectedModel"]["source"] == "project_default_model"
+    assert plan["primaryExpert"]["selectedModel"]["modelId"] == "huihui_ai/qwen3-vl-abliterated:4b-instruct"
+    assert plan["generalistVerifier"]["enabled"] is True
+    assert any(item["expertId"] == "cognix-general" for item in plan["secondaryExperts"])
+    assert plan["projectMemoryPlan"]["projectMemoryRequired"] is True
+    assert plan["projectMemoryPlan"]["rawHistoryAllowed"] is False
+    assert plan["preloadIntent"]["willPreload"] is False
+    assert plan["executionContract"]["routingMode"] == "direct_expert_for_specialized_project"
+    assert plan["executionContract"]["willLoadModel"] is False
+    assert plan["sideEffects"]["modelLoad"] is False
+    assert plan["sideEffects"]["defaultModelWrite"] is False
+    assert plan["sideEffects"]["projectMutation"] is False
+
+
+def test_project_expert_plan_endpoint_uses_project_default_and_logs_audit(monkeypatch):
+    seed_accounts()
+    now_ms = int(time.time() * 1000)
+    studio_db_storage.upsert_chat_project(
+        {
+            "id": "project-code",
+            "name": "Code API",
+            "instructions": "Utilise les tests et garde les changements natifs.",
+            "archived": False,
+            "createdAt": now_ms,
+            "updatedAt": now_ms,
+        },
+        owner_username = "alice",
+    )
+    cognix_db.set_project_model_default(
+        "alice",
+        "project-code",
+        "huihui_ai/qwen3-vl-abliterated:4b-instruct",
+        "Qwen 4B local via Ollama",
+        provider_type = "ollama",
+        provider_id = "ollama-local",
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+    monkeypatch.setattr(
+        cognix_routes,
+        "_current_model_cache_runtime",
+        lambda: {"runtimeType": "dry_run", "activeModel": None, "loadedModels": [], "loadingModels": []},
+    )
+
+    body = run_async(
+        cognix_routes.project_expert_plan(
+            "project-code",
+            cognix_routes.ProjectExpertPlanRequest(
+                objective = "Corrige ce bug Python dans mon backend",
+                projectType = "code",
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    expert_plan = body["projectExpertPlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_project_experts_v1"
+    assert body["defaultModel"]["modelId"] == "huihui_ai/qwen3-vl-abliterated:4b-instruct"
+    assert expert_plan["primaryExpert"]["expertId"] == "cognix-code"
+    assert expert_plan["primaryExpert"]["selectedModel"]["source"] == "project_default_model"
+    assert expert_plan["sideEffects"]["modelLoad"] is False
+    assert expert_plan["sideEffects"]["projectMutation"] is False
+    assert expert_plan["sideEffects"]["cacheMutation"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "project_expert_plan_built"
+    assert log["resourceType"] == "cognix_project_expert"
+    assert log["metadata"]["projectExpertsVersion"] == "cognix_project_experts_v1"
+    assert log["metadata"]["primaryExpertId"] == "cognix-code"
+    assert log["metadata"]["selectedModelId"] == "huihui_ai/qwen3-vl-abliterated:4b-instruct"
+    assert log["metadata"]["sideEffects"]["modelLoad"] is False
 
 
 def test_codex_pipeline_plans_required_gates_without_modifying_code():

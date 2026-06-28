@@ -21,6 +21,7 @@ from core.cognix import fine_tuning_planner as cognix_fine_tuning_planner
 from core.cognix import hardware as cognix_hardware
 from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import preload_planner as cognix_preload_planner
+from core.cognix import project_experts as cognix_project_experts
 from core.cognix import rag_planner as cognix_rag_planner
 from core.cognix import recommender as cognix_recommender
 from core.cognix import runtime_adapter as cognix_runtime_adapter
@@ -92,6 +93,7 @@ def _warnings(
     optimization_plan: dict[str, Any],
     runtime_adapter_plan: dict[str, Any],
     preload_plan: dict[str, Any],
+    project_expert_plan: dict[str, Any],
     fine_tuning_plan: dict[str, Any],
     worker_queue_plan: dict[str, Any],
 ) -> list[str]:
@@ -125,6 +127,9 @@ def _warnings(
     for item in preload_plan.get("warnings") or []:
         if isinstance(item, str) and item:
             warnings.append(item)
+    for item in project_expert_plan.get("warnings") or []:
+        if isinstance(item, str) and item:
+            warnings.append(item)
     for item in fine_tuning_plan.get("warnings") or []:
         if isinstance(item, str) and item:
             warnings.append(item)
@@ -153,6 +158,7 @@ def _steps(
     optimization_plan: dict[str, Any],
     runtime_adapter_plan: dict[str, Any],
     preload_plan: dict[str, Any],
+    project_expert_plan: dict[str, Any],
     fine_tuning_plan: dict[str, Any],
     worker_queue_plan: dict[str, Any],
     execution_policy: dict[str, Any],
@@ -248,6 +254,15 @@ def _steps(
             "detail": str(
                 preload_plan.get("reason")
                 or "Prechargement observe uniquement: aucun modele charge."
+            ),
+        },
+        {
+            "id": "plan_project_expert",
+            "label": "Planifier l'expert projet",
+            "status": "complete",
+            "detail": str(
+                project_expert_plan.get("reason")
+                or "Expert projet observe uniquement: aucun modele charge."
             ),
         },
         {
@@ -382,6 +397,17 @@ def build_execution_plan(
         cache = cache,
         latest_benchmark_run = latest_benchmark_run,
     )
+    project_expert_plan = cognix_project_experts.build_project_expert_plan(
+        objective = objective,
+        project_id = project_id,
+        project_type = project_type,
+        project_default_model = None,
+        classification = classification,
+        recommendation = recommendation,
+        preload_plan = preload_plan,
+        rag_plan = rag_plan,
+        context_plan = context_plan,
+    )
     status = _execution_status(
         classification = classification,
         recommendation = recommendation,
@@ -429,6 +455,15 @@ def build_execution_plan(
         "securityRiskLevel": execution_policy.get("riskLevel"),
         "preloadAction": (preload_plan.get("actions") or [{}])[0].get("type"),
         "preloadTargetModelId": preload_plan.get("target", {}).get("modelId"),
+        "projectExpertId": project_expert_plan.get("primaryExpert", {}).get("expertId"),
+        "projectExpertDomain": project_expert_plan.get("primaryExpert", {}).get("domain"),
+        "projectExpertModelId": project_expert_plan.get("primaryExpert", {}).get("selectedModel", {}).get("modelId"),
+        "secondaryExpertIds": [
+            item.get("expertId")
+            for item in project_expert_plan.get("secondaryExperts", [])
+            if isinstance(item, dict)
+        ],
+        "generalistVerifierEnabled": project_expert_plan.get("generalistVerifier", {}).get("enabled"),
         "ragReadyForRetrieval": rag_plan.get("readyForRetrieval"),
         "ragStrategy": rag_plan.get("retrieval", {}).get("strategy"),
         "contextAssemblyStrategy": context_plan.get("assemblyStrategy"),
@@ -473,6 +508,7 @@ def build_execution_plan(
         "optimizationPlan": optimization_plan,
         "runtimeAdapterPlan": runtime_adapter_plan,
         "preloadPlan": preload_plan,
+        "projectExpertPlan": project_expert_plan,
         "fineTuningPlan": fine_tuning_plan,
         "workerQueuePlan": worker_queue_plan,
         "taskStrategy": task_strategy,
@@ -489,6 +525,7 @@ def build_execution_plan(
             optimization_plan = optimization_plan,
             runtime_adapter_plan = runtime_adapter_plan,
             preload_plan = preload_plan,
+            project_expert_plan = project_expert_plan,
             fine_tuning_plan = fine_tuning_plan,
             worker_queue_plan = worker_queue_plan,
             execution_policy = execution_policy,
@@ -505,6 +542,7 @@ def build_execution_plan(
             optimization_plan = optimization_plan,
             runtime_adapter_plan = runtime_adapter_plan,
             preload_plan = preload_plan,
+            project_expert_plan = project_expert_plan,
             fine_tuning_plan = fine_tuning_plan,
             worker_queue_plan = worker_queue_plan,
         ),
@@ -521,6 +559,8 @@ def build_execution_plan(
             "runtimeMutation": False,
             "serverStart": False,
             "benchmarkRun": False,
+            "projectMutation": False,
+            "defaultModelWrite": False,
             "fineTuningJob": False,
             "jobEnqueue": False,
             "workerStart": False,
