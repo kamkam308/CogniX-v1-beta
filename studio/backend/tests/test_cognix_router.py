@@ -21,6 +21,7 @@ from core.cognix import deployment_manager as cognix_deployment_manager
 from core.cognix import decision_engine as cognix_decision_engine
 from core.cognix import governance_manager as cognix_governance_manager
 from core.cognix import integration_manager as cognix_integration_manager
+from core.cognix import memory_manager as cognix_memory_manager
 from core.cognix import model_lifecycle as cognix_model_lifecycle
 from core.cognix import module_registry as cognix_module_registry
 from core.cognix import onboarding as cognix_onboarding
@@ -1443,6 +1444,109 @@ def test_worker_queue_endpoint_logs_audited_dry_run(monkeypatch):
     assert log["metadata"]["sideEffects"]["jobEnqueue"] is False
 
 
+def test_memory_manager_plans_central_layers_without_writes():
+    context_plan = cognix_context_manager.build_context_plan(
+        current_subject = "alice",
+        objective = "Resume mes documents de cours",
+        user_memory = {"content": "Reponds en francais et sois pedagogique."},
+        project = {"id": "project-cours", "name": "Cours", "instructions": "Cite les sources."},
+        project_id = "project-cours",
+        task_strategy = {"path": "rag_first"},
+        recommendation = {"memoryFit": {"level": "ok"}},
+    )
+    plan = cognix_memory_manager.build_memory_plan(
+        username = "alice",
+        objective = "Resume mes documents de cours",
+        project_id = "project-cours",
+        project_type = "education",
+        user_memory = {"content": "Reponds en francais et sois pedagogique."},
+        project = {"id": "project-cours", "name": "Cours", "instructions": "Cite les sources."},
+        conversation_summary = "",
+        recent_message_count = 12,
+        library_items = [{"id": "lib_1", "kind": "document", "name": "cours.pdf"}],
+        hardware = stub_hardware_profile(),
+        latest_benchmark_run = {"id": "bench_1", "benchmark": {"benchmarkVersion": "cognix_benchmark_v1"}},
+        classification = {"selectedDomain": "education", "needsClarification": False},
+        task_strategy = {"path": "rag_first"},
+        context_plan = context_plan,
+    )
+
+    assert plan["memoryManagerVersion"] == "cognix_memory_manager_v1"
+    assert plan["mode"] == "dry_run"
+    assert plan["targetDomain"] == "education"
+    assert {"user_memory", "project_memory", "document_memory", "technical_memory"}.issubset(
+        set(plan["readyLayerIds"])
+    )
+    assert "conversation_summary" in plan["requiredLayerIds"]
+    assert plan["privacyPlan"]["rawHistoryAllowed"] is False
+    assert plan["privacyPlan"]["memoryScopesIsolated"] is True
+    assert any(item["id"] == "summarize_conversation" and item["recommended"] for item in plan["capturePlan"])
+    assert plan["sideEffects"]["memoryWrite"] is False
+    assert plan["sideEffects"]["summaryWrite"] is False
+    assert plan["sideEffects"]["documentRetrieval"] is False
+    assert plan["sideEffects"]["modelLoad"] is False
+
+
+def test_memory_plan_endpoint_logs_audited_dry_run(monkeypatch):
+    seed_accounts()
+    now_ms = int(time.time() * 1000)
+    studio_db_storage.upsert_chat_project(
+        {
+            "id": "project-memory",
+            "name": "Cours IA",
+            "instructions": "Garde les citations et separe les hypotheses.",
+            "archived": False,
+            "createdAt": now_ms,
+            "updatedAt": now_ms,
+        },
+        owner_username = "alice",
+    )
+    cognix_db.update_context_memory(
+        "alice",
+        "Prefere les explications courtes avec exemples.",
+        "alice",
+    )
+    cognix_db.create_library_item(
+        "alice",
+        kind = "document",
+        name = "cours.pdf",
+        source = "upload",
+        metadata = {"subject": "ia"},
+    )
+    monkeypatch.setattr(cognix_routes.cognix_hardware, "get_hardware_profile", stub_hardware_profile)
+    monkeypatch.setattr(cognix_routes.cognix_recommender, "build_model_recommendation", stub_recommendation)
+
+    body = run_async(
+        cognix_routes.memory_plan(
+            cognix_routes.MemoryPlanRequest(
+                objective = "Je veux repondre a partir de mes PDF de cours",
+                projectId = "project-memory",
+                projectType = "education",
+                recentMessageCount = 14,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    plan = body["memoryPlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_memory_manager_v1"
+    assert "user_memory" in plan["readyLayerIds"]
+    assert "project_memory" in plan["readyLayerIds"]
+    assert plan["contextBridge"]["rawHistoryAllowed"] is False
+    assert plan["sideEffects"]["memoryWrite"] is False
+    assert plan["sideEffects"]["documentRetrieval"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "memory_plan_built"
+    assert log["resourceType"] == "cognix_memory"
+    assert log["metadata"]["memoryManagerVersion"] == "cognix_memory_manager_v1"
+    assert "technical_memory" in log["metadata"]["requiredLayerIds"]
+    assert log["metadata"]["sideEffects"]["memoryWrite"] is False
+
+
 def test_context_manager_builds_bounded_context_packet():
     packet = cognix_context_manager.build_context_packet(
         current_subject = "alice",
@@ -1581,7 +1685,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert registry["sideEffects"]["uiMutation"] is False
 
     modules = {item["id"]: item for item in registry["modules"]}
-    assert {"cognix-local-core", "cognix-model-lifecycle", "cognix-thinking-status", "cognix-onboarding", "cognix-rag", "cognix-integrations", "cognix-codex-secure-agent", "cognix-enterprise-foundation", "cognix-deployment-manager"}.issubset(
+    assert {"cognix-local-core", "cognix-model-lifecycle", "cognix-thinking-status", "cognix-memory-manager", "cognix-onboarding", "cognix-rag", "cognix-integrations", "cognix-codex-secure-agent", "cognix-enterprise-foundation", "cognix-deployment-manager"}.issubset(
         modules
     )
     assert modules["cognix-local-core"]["activationState"] == "ready"
@@ -1591,6 +1695,9 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert modules["cognix-thinking-status"]["activationState"] == "ready"
     assert "technical_redaction" in modules["cognix-thinking-status"]["capabilities"]
     assert "/api/cognix/thinking/plan" in modules["cognix-thinking-status"]["routes"]
+    assert modules["cognix-memory-manager"]["activationState"] == "ready"
+    assert "central_memory_layers" in modules["cognix-memory-manager"]["capabilities"]
+    assert "/api/cognix/memory/plan" in modules["cognix-memory-manager"]["routes"]
     assert modules["cognix-onboarding"]["activationState"] == "ready"
     assert modules["cognix-rag"]["dependencyState"]["ready"] is True
     assert "sso_planning" in modules["cognix-enterprise-foundation"]["capabilities"]

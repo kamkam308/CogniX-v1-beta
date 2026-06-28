@@ -57,6 +57,19 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "dependencies": ["cognix-local-core", "cognix-model-lifecycle"],
     },
     {
+        "id": "cognix-memory-manager",
+        "displayName": "CogniX Memory Manager",
+        "editionTargets": ["free", "local", "developer", "business", "university", "enterprise"],
+        "status": "enabled",
+        "capabilities": ["central_memory_layers", "memory_policy", "conversation_summarization_planning", "document_memory_planning"],
+        "routes": ["/api/cognix/memory/blueprint", "/api/cognix/memory/plan", "/api/cognix/context/pack"],
+        "permissions": ["authenticated"],
+        "tools": [],
+        "defaultModels": [],
+        "uiPanels": ["chat", "project-settings"],
+        "dependencies": ["cognix-local-core", "cognix-thinking-status"],
+    },
+    {
         "id": "cognix-projects",
         "displayName": "CogniX Projects",
         "editionTargets": ["free", "developer", "business", "university"],
@@ -67,7 +80,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "tools": [],
         "defaultModels": ["cognix-code-small", "cognix-math-small", "cognix-physics-small"],
         "uiPanels": ["project-sidebar", "project-settings"],
-        "dependencies": ["cognix-local-core", "cognix-model-lifecycle", "cognix-thinking-status"],
+        "dependencies": ["cognix-local-core", "cognix-model-lifecycle", "cognix-thinking-status", "cognix-memory-manager"],
     },
     {
         "id": "cognix-onboarding",
@@ -80,7 +93,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "tools": [],
         "defaultModels": ["cognix-general-small"],
         "uiPanels": ["onboarding"],
-        "dependencies": ["cognix-local-core", "cognix-projects"],
+        "dependencies": ["cognix-local-core", "cognix-projects", "cognix-memory-manager"],
     },
     {
         "id": "cognix-rag",

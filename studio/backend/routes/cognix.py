@@ -23,9 +23,11 @@ from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import codex_pipeline as cognix_codex_pipeline
 from core.cognix import context_manager as cognix_context_manager
 from core.cognix import deployment_manager as cognix_deployment_manager
+from core.cognix import decision_engine as cognix_decision_engine
 from core.cognix import governance_manager as cognix_governance_manager
 from core.cognix import hardware as cognix_hardware
 from core.cognix import integration_manager as cognix_integration_manager
+from core.cognix import memory_manager as cognix_memory_manager
 from core.cognix import model_lifecycle as cognix_model_lifecycle
 from core.cognix import module_registry as cognix_module_registry
 from core.cognix import onboarding as cognix_onboarding
@@ -83,6 +85,16 @@ class ContextMemoryRequest(BaseModel):
 class ContextPackRequest(BaseModel):
     objective: str | None = Field(None, max_length = 4000)
     project_id: str | None = Field(None, max_length = 160)
+
+
+class MemoryPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str | None = Field(None, max_length = 4000)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    project_type: str | None = Field(None, alias = "projectType", max_length = 80)
+    conversation_summary: str | None = Field(None, alias = "conversationSummary", max_length = 12000)
+    recent_message_count: int = Field(0, alias = "recentMessageCount", ge = 0, le = 500)
 
 
 class LibraryItemRequest(BaseModel):
@@ -2089,6 +2101,107 @@ async def update_my_context_memory(
 ) -> dict[str, Any]:
     memory = cognix_db.update_context_memory(current_subject, payload.content, current_subject)
     return {"memory": _row(memory)}
+
+
+@router.get("/memory/blueprint")
+async def memory_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    return {
+        "username": current_subject,
+        "blueprint": cognix_memory_manager.build_memory_blueprint(),
+        "plannerVersion": cognix_memory_manager.COGNIX_MEMORY_MANAGER_VERSION,
+    }
+
+
+@router.post("/memory/plan")
+async def memory_plan(
+    payload: MemoryPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    warnings: list[str] = []
+    project: dict[str, Any] | None = None
+    if payload.project_id:
+        project = get_chat_project(
+            payload.project_id,
+            owner_username = current_subject,
+            include_all = False,
+        )
+        if project is None or project.get("archived"):
+            raise HTTPException(status_code = 404, detail = "Project not found")
+
+    hardware = cognix_hardware.get_hardware_profile()
+    latest_benchmark = cognix_db.get_latest_benchmark_run(current_subject)
+    recommendation_payload = cognix_recommender.build_model_recommendation(
+        hardware,
+        latest_benchmark_run = latest_benchmark,
+    )
+    classification = classify_objective(payload.objective or payload.project_type or "general")
+    task_strategy = cognix_decision_engine.build_task_strategy(
+        payload.objective or payload.project_type or "general",
+        classification = classification,
+    )
+    user_memory = cognix_db.get_context_memory(current_subject)
+    library_items = _rows(cognix_db.list_library_items(current_subject))
+    context_plan = cognix_context_manager.build_context_plan(
+        current_subject = current_subject,
+        objective = payload.objective,
+        project_id = payload.project_id,
+        classification = classification,
+        task_strategy = task_strategy,
+        recommendation = recommendation_payload["recommendation"],
+        user_memory = user_memory,
+        project = project,
+        conversation_summary = payload.conversation_summary,
+        recent_messages = [{} for _ in range(payload.recent_message_count)],
+        warnings = warnings,
+    )
+    plan = cognix_memory_manager.build_memory_plan(
+        username = current_subject,
+        objective = payload.objective,
+        project_id = payload.project_id,
+        project_type = payload.project_type,
+        user_memory = user_memory,
+        project = project,
+        conversation_summary = payload.conversation_summary,
+        recent_message_count = payload.recent_message_count,
+        library_items = library_items,
+        hardware = hardware,
+        latest_benchmark_run = latest_benchmark,
+        classification = classification,
+        task_strategy = task_strategy,
+        context_plan = context_plan,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "memory_plan_built",
+        resource_type = "cognix_memory",
+        resource_id = str(payload.project_id or current_subject),
+        severity = "warning" if plan.get("warnings") else "notice",
+        metadata = {
+            "memoryManagerVersion": plan.get("memoryManagerVersion"),
+            "projectId": payload.project_id,
+            "projectType": payload.project_type,
+            "targetDomain": plan.get("targetDomain"),
+            "readyLayerIds": plan.get("readyLayerIds", []),
+            "requiredLayerIds": plan.get("requiredLayerIds", []),
+            "captureActionIds": [
+                item.get("id") for item in plan.get("capturePlan", []) if isinstance(item, dict)
+            ],
+            "sideEffects": plan.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "hardware": hardware,
+        "latestBenchmark": latest_benchmark,
+        "classification": classification,
+        "taskStrategy": task_strategy,
+        "contextPlan": context_plan,
+        "memoryPlan": plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": plan.get("sideEffects", {}),
+        "plannerVersion": cognix_memory_manager.COGNIX_MEMORY_MANAGER_VERSION,
+    }
 
 
 @router.post("/context/pack")
