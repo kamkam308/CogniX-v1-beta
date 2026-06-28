@@ -438,6 +438,60 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_tool_recommendations_project
             ON cognix_tool_recommendations(username, project_id, created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_context_graph_snapshots (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            project_id TEXT,
+            title TEXT NOT NULL,
+            graph_json TEXT NOT NULL DEFAULT '{}',
+            node_count INTEGER NOT NULL DEFAULT 0,
+            edge_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_context_graph_snapshots_username_created
+            ON cognix_context_graph_snapshots(username, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_context_graph_snapshots_project
+            ON cognix_context_graph_snapshots(username, project_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_context_nodes (
+            id TEXT PRIMARY KEY,
+            snapshot_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            project_id TEXT,
+            node_key TEXT NOT NULL,
+            node_type TEXT NOT NULL,
+            label TEXT NOT NULL,
+            source TEXT NOT NULL,
+            weight REAL NOT NULL DEFAULT 1,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_context_nodes_snapshot
+            ON cognix_context_nodes(snapshot_id, node_type);
+        CREATE INDEX IF NOT EXISTS idx_cognix_context_nodes_project
+            ON cognix_context_nodes(username, project_id, node_type);
+
+        CREATE TABLE IF NOT EXISTS cognix_context_edges (
+            id TEXT PRIMARY KEY,
+            snapshot_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            project_id TEXT,
+            source_node_key TEXT NOT NULL,
+            target_node_key TEXT NOT NULL,
+            edge_type TEXT NOT NULL,
+            label TEXT NOT NULL,
+            weight REAL NOT NULL DEFAULT 1,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_context_edges_snapshot
+            ON cognix_context_edges(snapshot_id, edge_type);
+        CREATE INDEX IF NOT EXISTS idx_cognix_context_edges_project
+            ON cognix_context_edges(username, project_id, edge_type);
+
         CREATE TABLE IF NOT EXISTS cognix_scheduled_tasks (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -2219,6 +2273,178 @@ def ignore_tool_recommendation(username: str, recommendation_id: str) -> dict[st
         if row is None:
             return None
         return _hydrate_tool_recommendation(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def _hydrate_context_graph_snapshot(row: dict[str, Any]) -> dict[str, Any]:
+    row["graph"] = _json_or_default(row.get("graph_json"), {})
+    return row
+
+
+def create_context_graph_snapshot(
+    username: str,
+    *,
+    graph: dict[str, Any],
+    project_id: str | None = None,
+    title: str | None = None,
+) -> dict[str, Any]:
+    now = _now()
+    snapshot_id = _new_id("cgraph")
+    nodes = [
+        item
+        for item in (graph.get("nodes") or [])
+        if isinstance(item, dict)
+    ]
+    edges = [
+        item
+        for item in (graph.get("edges") or [])
+        if isinstance(item, dict)
+    ]
+    snapshot_title = (title or graph.get("projectName") or project_id or "Context Graph").strip()[:240]
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_context_graph_snapshots
+                (id, username, project_id, title, graph_json, node_count, edge_count, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                snapshot_id,
+                username,
+                project_id,
+                snapshot_title,
+                json.dumps(graph, ensure_ascii = False),
+                len(nodes),
+                len(edges),
+                now,
+            ),
+        )
+        for node in nodes:
+            conn.execute(
+                """
+                INSERT INTO cognix_context_nodes
+                    (
+                        id, snapshot_id, username, project_id, node_key, node_type,
+                        label, source, weight, metadata_json, created_at
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _new_id("cnode"),
+                    snapshot_id,
+                    username,
+                    project_id,
+                    str(node.get("id") or "")[:180],
+                    str(node.get("type") or "unknown")[:80],
+                    str(node.get("label") or "")[:240],
+                    str(node.get("source") or "unknown")[:120],
+                    float(node.get("weight") or 0.0),
+                    json.dumps(node.get("metadata") or {}, ensure_ascii = False),
+                    now,
+                ),
+            )
+        for edge in edges:
+            conn.execute(
+                """
+                INSERT INTO cognix_context_edges
+                    (
+                        id, snapshot_id, username, project_id, source_node_key,
+                        target_node_key, edge_type, label, weight, metadata_json,
+                        created_at
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _new_id("cedge"),
+                    snapshot_id,
+                    username,
+                    project_id,
+                    str(edge.get("source") or "")[:180],
+                    str(edge.get("target") or "")[:180],
+                    str(edge.get("type") or "related_to")[:80],
+                    str(edge.get("label") or "")[:240],
+                    float(edge.get("weight") or 0.0),
+                    json.dumps(edge.get("metadata") or {}, ensure_ascii = False),
+                    now,
+                ),
+            )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM cognix_context_graph_snapshots WHERE id = ?",
+            (snapshot_id,),
+        ).fetchone()
+        return _hydrate_context_graph_snapshot(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_context_graph_snapshots(
+    username: str,
+    *,
+    project_id: str | None = None,
+    limit: int = 40,
+) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 40), 1), 120)
+    conn = get_connection()
+    try:
+        if project_id:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_context_graph_snapshots
+                WHERE username = ? AND project_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, project_id, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_context_graph_snapshots
+                WHERE username = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, safe_limit),
+            ).fetchall()
+        return [_hydrate_context_graph_snapshot(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def get_context_graph_snapshot(username: str, snapshot_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM cognix_context_graph_snapshots WHERE id = ? AND username = ?",
+            (snapshot_id, username),
+        ).fetchone()
+        if row is None:
+            return None
+        snapshot = _hydrate_context_graph_snapshot(row_to_dict(row) or {})
+        snapshot["nodes"] = _rows_to_dicts(
+            conn.execute(
+                """
+                SELECT * FROM cognix_context_nodes
+                WHERE snapshot_id = ? AND username = ?
+                ORDER BY node_type ASC, label ASC
+                """,
+                (snapshot_id, username),
+            ).fetchall()
+        )
+        snapshot["edges"] = _rows_to_dicts(
+            conn.execute(
+                """
+                SELECT * FROM cognix_context_edges
+                WHERE snapshot_id = ? AND username = ?
+                ORDER BY edge_type ASC, label ASC
+                """,
+                (snapshot_id, username),
+            ).fetchall()
+        )
+        return snapshot
     finally:
         conn.close()
 

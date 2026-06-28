@@ -21,6 +21,7 @@ from auth.authentication import get_current_jwt_subject
 from core.cognix import benchmark as cognix_benchmark
 from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import codex_pipeline as cognix_codex_pipeline
+from core.cognix import context_graph as cognix_context_graph
 from core.cognix import context_manager as cognix_context_manager
 from core.cognix import debate_orchestrator as cognix_debate_orchestrator
 from core.cognix import deployment_manager as cognix_deployment_manager
@@ -92,6 +93,23 @@ class ContextMemoryRequest(BaseModel):
 class ContextPackRequest(BaseModel):
     objective: str | None = Field(None, max_length = 4000)
     project_id: str | None = Field(None, max_length = 160)
+
+
+class ContextGraphBuildRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    project_name: str | None = Field(None, alias = "projectName", max_length = 240)
+    project_type: str | None = Field(None, alias = "projectType", max_length = 80)
+    messages: list[dict[str, Any]] | None = None
+    documents: list[dict[str, Any]] | None = None
+    files: list[Any] | None = None
+    decisions: list[Any] | None = None
+    tasks: list[Any] | None = None
+    models: list[Any] | None = None
+    tools: list[Any] | None = None
+    include_project_threads: bool = Field(True, alias = "includeProjectThreads")
+    store_snapshot: bool = Field(True, alias = "storeSnapshot")
 
 
 class MemoryPlanRequest(BaseModel):
@@ -579,6 +597,15 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "tool_name": "toolName",
         "need_id": "needId",
         "recommendation_json": "recommendationJson",
+        "snapshot_id": "snapshotId",
+        "graph_json": "graphJson",
+        "node_count": "nodeCount",
+        "edge_count": "edgeCount",
+        "node_key": "nodeKey",
+        "node_type": "nodeType",
+        "source_node_key": "sourceNodeKey",
+        "target_node_key": "targetNodeKey",
+        "edge_type": "edgeType",
     }
     for source, target in alias_map.items():
         if source in out:
@@ -3423,6 +3450,118 @@ async def build_context_pack(
     )
     packet["auditLogId"] = audit.get("id")
     return packet
+
+
+@router.get("/context/graph/blueprint")
+async def context_graph_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_context_graph.build_context_graph_blueprint()
+    return {
+        "username": current_subject,
+        "contextGraphBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+    }
+
+
+@router.post("/context/graph/build")
+async def build_context_graph(
+    payload: ContextGraphBuildRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    project: dict[str, Any] | None = None
+    warnings: list[str] = []
+    messages = list(payload.messages or [])
+    if payload.project_id:
+        project = _require_owned_project(payload.project_id, current_subject)
+        if payload.include_project_threads:
+            threads = list_chat_threads(
+                project_id = payload.project_id,
+                include_archived = False,
+                owner_username = current_subject,
+                include_all = False,
+            )[:20]
+            thread_messages = list_chat_messages_for_threads([str(thread.get("id")) for thread in threads if thread.get("id")])
+            messages.extend(thread_messages[-120:])
+    project_name = payload.project_name
+    project_type = payload.project_type
+    if project:
+        project_name = project_name or str(project.get("name") or project.get("title") or "")
+        project_type = project_type or str(project.get("type") or project.get("project_type") or project.get("projectType") or "")
+    graph = cognix_context_graph.build_context_graph_snapshot(
+        username = current_subject,
+        project_id = payload.project_id,
+        project_name = project_name,
+        project_type = project_type,
+        messages = messages,
+        documents = payload.documents,
+        files = payload.files,
+        decisions = payload.decisions,
+        tasks = payload.tasks,
+        models = payload.models,
+        tools = payload.tools,
+    )
+    stored_snapshot = (
+        cognix_db.create_context_graph_snapshot(
+            current_subject,
+            graph = graph,
+            project_id = payload.project_id,
+            title = project_name,
+        )
+        if payload.store_snapshot
+        else None
+    )
+    side_effects = {
+        **graph.get("sideEffects", {}),
+        "snapshotWrite": bool(stored_snapshot),
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "context_graph_built",
+        resource_type = "cognix_context_graph_snapshot" if stored_snapshot else "cognix_context_graph_plan",
+        resource_id = str((stored_snapshot or {}).get("id") or payload.project_id or "general"),
+        severity = "notice",
+        metadata = {
+            "contextGraphVersion": graph.get("contextGraphVersion"),
+            "projectId": payload.project_id,
+            "nodeCount": graph.get("summary", {}).get("nodeCount"),
+            "edgeCount": graph.get("summary", {}).get("edgeCount"),
+            "storedSnapshot": bool(stored_snapshot),
+            "warnings": warnings,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "contextGraph": graph,
+        "snapshot": _row(stored_snapshot) if stored_snapshot else None,
+        "auditLogId": audit.get("id"),
+        "warnings": warnings,
+        "sideEffects": side_effects,
+    }
+
+
+@router.get("/context/graph/snapshots")
+async def context_graph_snapshots(
+    project_id: str | None = None,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if project_id:
+        _require_owned_project(project_id, current_subject)
+    snapshots = cognix_db.list_context_graph_snapshots(
+        current_subject,
+        project_id = project_id,
+    )
+    return {
+        "username": current_subject,
+        "snapshots": _rows(snapshots),
+        "sideEffects": {
+            "snapshotWrite": False,
+            "modelLoad": False,
+            "generation": False,
+            "toolExecution": False,
+        },
+    }
 
 
 @router.get("/library")

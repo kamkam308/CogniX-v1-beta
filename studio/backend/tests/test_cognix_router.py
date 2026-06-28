@@ -16,6 +16,7 @@ from auth import storage
 from auth.authentication import get_current_jwt_subject
 from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import codex_pipeline as cognix_codex_pipeline
+from core.cognix import context_graph as cognix_context_graph
 from core.cognix import context_manager as cognix_context_manager
 from core.cognix import debate_orchestrator as cognix_debate_orchestrator
 from core.cognix import deployment_manager as cognix_deployment_manager
@@ -2202,6 +2203,136 @@ def test_tool_discovery_endpoint_stores_recommendations_and_ignore_is_user_scope
     assert ignore_log["metadata"]["sideEffects"]["toolExecution"] is False
 
 
+def test_context_graph_blueprint_declares_theme_safe_graph_contract():
+    blueprint = cognix_context_graph.build_context_graph_blueprint()
+    node_types = {item["id"]: item for item in blueprint["nodeTypes"]}
+
+    assert blueprint["contextGraphVersion"] == "cognix_context_graph_v1"
+    assert blueprint["entityExtractorVersion"] == "cognix_entity_extractor_v1"
+    assert blueprint["relationBuilderVersion"] == "cognix_relation_builder_v1"
+    assert {"project", "document", "chat", "concept", "model", "tool"}.issubset(node_types)
+    assert blueprint["displayContract"]["themeAwareTokensOnly"] is True
+    assert blueprint["displayContract"]["customVisualizationLibraryRequired"] is False
+    assert blueprint["policies"]["rawMessageContentStoredInGraph"] is False
+    assert blueprint["policies"]["modelGenerationAllowed"] is False
+    assert blueprint["sideEffects"]["generation"] is False
+    assert blueprint["sideEffects"]["snapshotWrite"] is False
+    assert blueprint["sideEffects"]["uiMutation"] is False
+
+
+def test_context_graph_snapshot_builds_nodes_edges_without_model_call():
+    graph = cognix_context_graph.build_context_graph_snapshot(
+        username = "alice",
+        project_id = "project-physics",
+        project_name = "Physique",
+        project_type = "physics",
+        messages = [
+            {
+                "id": "msg_1",
+                "role": "user",
+                "content": "Construire un RAG pour mecanique quantique avec PDF et equations LaTeX.",
+            }
+        ],
+        documents = [{"id": "doc_1", "name": "cours.pdf", "summary": "Mecanique quantique et equations."}],
+        files = ["notes.tex", "experiences.md"],
+        decisions = ["Utiliser RAG avant fine-tuning pour ce cours."],
+        tasks = ["Indexer le PDF de physique."],
+        models = ["qwen-local"],
+        tools = ["rag-indexer"],
+    )
+    node_types = {item["type"] for item in graph["nodes"]}
+    edge_types = {item["type"] for item in graph["edges"]}
+    chat_nodes = [item for item in graph["nodes"] if item["type"] == "chat"]
+
+    assert graph["contextGraphVersion"] == "cognix_context_graph_v1"
+    assert {"project", "document", "chat", "concept", "file", "decision", "task", "model", "tool"}.issubset(node_types)
+    assert {"contains", "mentions", "uses_model", "uses_tool", "tracks_task", "references_file"}.issubset(edge_types)
+    assert graph["summary"]["conceptCount"] >= 1
+    assert graph["displayContract"]["rawConversationContentVisibleByDefault"] is False
+    assert all("mecanique quantique" not in item["label"].lower() for item in chat_nodes)
+    assert graph["sideEffects"]["modelLoad"] is False
+    assert graph["sideEffects"]["generation"] is False
+    assert graph["sideEffects"]["snapshotWrite"] is False
+
+
+def test_context_graph_endpoint_stores_project_snapshot_and_audit():
+    seed_accounts()
+    now_ms = int(time.time() * 1000)
+    studio_db_storage.upsert_chat_project(
+        {
+            "id": "project-graph",
+            "name": "Graph Projet",
+            "instructions": "Relier documents, decisions et outils.",
+            "archived": False,
+            "createdAt": now_ms,
+            "updatedAt": now_ms,
+        },
+        owner_username = "alice",
+    )
+    studio_db_storage.upsert_chat_thread(
+        {
+            "id": "thread-graph",
+            "title": "Discussion graph",
+            "modelType": "local",
+            "modelId": "qwen-local",
+            "projectId": "project-graph",
+            "archived": False,
+            "createdAt": now_ms,
+        },
+        owner_username = "alice",
+    )
+    studio_db_storage.upsert_chat_message(
+        {
+            "id": "msg-graph-1",
+            "threadId": "thread-graph",
+            "role": "user",
+            "content": [{"type": "text", "text": "Creer un graph de contexte pour PDF, RAG et decisions."}],
+            "createdAt": now_ms,
+        }
+    )
+
+    body = run_async(
+        cognix_routes.build_context_graph(
+            cognix_routes.ContextGraphBuildRequest(
+                projectId = "project-graph",
+                documents = [{"id": "doc_1", "name": "roadmap.pdf", "summary": "RAG, tools et decisions"}],
+                files = ["roadmap.md"],
+                decisions = ["Garder le graph dans le code source natif."],
+                tasks = ["Afficher le graph dans un onglet projet plus tard."],
+                models = ["qwen-local"],
+                tools = ["rag-indexer"],
+                includeProjectThreads = True,
+                storeSnapshot = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    snapshot = body["snapshot"]
+    stored = cognix_db.get_context_graph_snapshot("alice", snapshot["id"])
+    listed = run_async(cognix_routes.context_graph_snapshots(project_id = "project-graph", current_subject = "alice"))
+    bob_listed = run_async(cognix_routes.context_graph_snapshots(current_subject = "bob"))
+
+    assert body["auditLogId"].startswith("aud_")
+    assert body["contextGraph"]["summary"]["nodeCount"] == snapshot["nodeCount"]
+    assert body["contextGraph"]["summary"]["edgeCount"] == snapshot["edgeCount"]
+    assert body["sideEffects"]["snapshotWrite"] is True
+    assert body["sideEffects"]["generation"] is False
+    assert stored is not None
+    assert stored["node_count"] == snapshot["nodeCount"]
+    assert len(stored["nodes"]) == snapshot["nodeCount"]
+    assert len(stored["edges"]) == snapshot["edgeCount"]
+    assert len(listed["snapshots"]) == 1
+    assert bob_listed["snapshots"] == []
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "context_graph_built"
+    assert log["metadata"]["contextGraphVersion"] == "cognix_context_graph_v1"
+    assert log["metadata"]["sideEffects"]["generation"] is False
+    assert log["metadata"]["sideEffects"]["snapshotWrite"] is True
+
+
 def test_codex_pipeline_plans_required_gates_without_modifying_code():
     plan = cognix_codex_pipeline.build_codex_pipeline_plan(
         objective = "Ajoute un module CogniX Chemistry dans le code source",
@@ -2816,6 +2947,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-multi-draft-generation",
         "cognix-ai-debate",
         "cognix-tool-discovery",
+        "cognix-context-graph",
         "cognix-memory-manager",
         "cognix-onboarding",
         "cognix-rag",
@@ -2868,6 +3000,14 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/tools/discovery/capabilities" in modules["cognix-tool-discovery"]["routes"]
     assert "/api/cognix/tools/discovery/analyze" in modules["cognix-tool-discovery"]["routes"]
     assert "/api/cognix/tools/recommendations" in modules["cognix-tool-discovery"]["routes"]
+    assert modules["cognix-context-graph"]["dependencyState"]["ready"] is True
+    assert "context_graph_snapshot" in modules["cognix-context-graph"]["capabilities"]
+    assert "entity_extraction" in modules["cognix-context-graph"]["capabilities"]
+    assert "relation_builder" in modules["cognix-context-graph"]["capabilities"]
+    assert "graph_store" in modules["cognix-context-graph"]["capabilities"]
+    assert "/api/cognix/context/graph/blueprint" in modules["cognix-context-graph"]["routes"]
+    assert "/api/cognix/context/graph/build" in modules["cognix-context-graph"]["routes"]
+    assert "/api/cognix/context/graph/snapshots" in modules["cognix-context-graph"]["routes"]
     assert modules["cognix-memory-manager"]["activationState"] == "ready"
     assert "central_memory_layers" in modules["cognix-memory-manager"]["capabilities"]
     assert "/api/cognix/memory/plan" in modules["cognix-memory-manager"]["routes"]
