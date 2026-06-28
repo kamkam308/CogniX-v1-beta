@@ -332,6 +332,60 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_response_variants_message
             ON cognix_response_variants(username, message_id, created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_debate_sessions (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            message_id TEXT,
+            thread_id TEXT,
+            project_id TEXT,
+            prompt_excerpt TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'planned',
+            max_rounds INTEGER NOT NULL DEFAULT 3,
+            roles_json TEXT NOT NULL DEFAULT '[]',
+            plan_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_debate_sessions_username_created
+            ON cognix_debate_sessions(username, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_debate_sessions_message
+            ON cognix_debate_sessions(username, message_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_debate_rounds (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            round_index INTEGER NOT NULL,
+            role_id TEXT NOT NULL,
+            label TEXT NOT NULL,
+            purpose TEXT NOT NULL,
+            public_prompt TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'planned',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_debate_rounds_session
+            ON cognix_debate_rounds(session_id, round_index);
+
+        CREATE TABLE IF NOT EXISTS cognix_debate_outputs (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            round_id TEXT,
+            username TEXT NOT NULL,
+            role_id TEXT NOT NULL,
+            output_type TEXT NOT NULL,
+            public_summary TEXT NOT NULL,
+            content TEXT NOT NULL DEFAULT '',
+            model_id TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_debate_outputs_session
+            ON cognix_debate_outputs(session_id, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_scheduled_tasks (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -1696,6 +1750,236 @@ def create_response_variant(
         ).fetchone()
         stored = row_to_dict(row) or {}
         return _hydrate_response_variant(stored)
+    finally:
+        conn.close()
+
+
+def _hydrate_debate_session(row: dict[str, Any]) -> dict[str, Any]:
+    row["roles"] = _json_or_default(row.get("roles_json"), [])
+    row["plan"] = _json_or_default(row.get("plan_json"), {})
+    return row
+
+
+def _hydrate_debate_output(row: dict[str, Any]) -> dict[str, Any]:
+    row["metadata"] = _json_or_default(row.get("metadata_json"), {})
+    return row
+
+
+def _list_debate_rounds_for_session(conn: sqlite3.Connection, session_id: str) -> list[dict[str, Any]]:
+    return _rows_to_dicts(
+        conn.execute(
+            """
+            SELECT * FROM cognix_debate_rounds
+            WHERE session_id = ?
+            ORDER BY round_index ASC
+            """,
+            (session_id,),
+        ).fetchall()
+    )
+
+
+def _list_debate_outputs_for_session(conn: sqlite3.Connection, session_id: str) -> list[dict[str, Any]]:
+    outputs = _rows_to_dicts(
+        conn.execute(
+            """
+            SELECT * FROM cognix_debate_outputs
+            WHERE session_id = ?
+            ORDER BY created_at ASC
+            """,
+            (session_id,),
+        ).fetchall()
+    )
+    return [_hydrate_debate_output(output) for output in outputs]
+
+
+def list_debate_sessions(
+    username: str,
+    *,
+    message_id: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 50), 1), 200)
+    conn = get_connection()
+    try:
+        if message_id:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_debate_sessions
+                WHERE username = ? AND message_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, message_id, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_debate_sessions
+                WHERE username = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, safe_limit),
+            ).fetchall()
+        sessions = [_hydrate_debate_session(row) for row in _rows_to_dicts(rows)]
+        for session in sessions:
+            session["rounds"] = _list_debate_rounds_for_session(conn, str(session.get("id")))
+            session["outputs"] = _list_debate_outputs_for_session(conn, str(session.get("id")))
+        return sessions
+    finally:
+        conn.close()
+
+
+def get_debate_session(username: str, session_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM cognix_debate_sessions WHERE id = ? AND username = ?",
+            (session_id, username),
+        ).fetchone()
+        if row is None:
+            return None
+        session = _hydrate_debate_session(row_to_dict(row) or {})
+        session["rounds"] = _list_debate_rounds_for_session(conn, session_id)
+        session["outputs"] = _list_debate_outputs_for_session(conn, session_id)
+        return session
+    finally:
+        conn.close()
+
+
+def create_debate_session(
+    username: str,
+    *,
+    plan: dict[str, Any],
+    prompt: str,
+    message_id: str | None = None,
+    thread_id: str | None = None,
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    now = _now()
+    session_id = _new_id("deb")
+    roles = plan.get("roles") if isinstance(plan.get("roles"), list) else []
+    rounds = plan.get("rounds") if isinstance(plan.get("rounds"), list) else []
+    max_rounds = int(plan.get("summary", {}).get("maxRounds") or len(rounds) or 3)
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_debate_sessions
+                (
+                    id, username, message_id, thread_id, project_id, prompt_excerpt,
+                    status, max_rounds, roles_json, plan_json, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                username,
+                message_id,
+                thread_id,
+                project_id,
+                " ".join(str(prompt or "").split())[:500],
+                max_rounds,
+                json.dumps(roles, ensure_ascii = False),
+                json.dumps(plan, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        for item in rounds:
+            if not isinstance(item, dict):
+                continue
+            conn.execute(
+                """
+                INSERT INTO cognix_debate_rounds
+                    (
+                        id, session_id, username, round_index, role_id, label,
+                        purpose, public_prompt, status, created_at, updated_at
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?)
+                """,
+                (
+                    _new_id("rnd"),
+                    session_id,
+                    username,
+                    int(item.get("roundIndex") or 0),
+                    str(item.get("roleId") or "unknown"),
+                    str(item.get("label") or ""),
+                    str(item.get("purpose") or ""),
+                    str(item.get("publicPrompt") or ""),
+                    now,
+                    now,
+                ),
+            )
+        conn.commit()
+        return get_debate_session(username, session_id) or {}
+    finally:
+        conn.close()
+
+
+def create_debate_output(
+    username: str,
+    *,
+    session_id: str,
+    role_id: str,
+    output_type: str,
+    public_summary: str,
+    content: str = "",
+    round_id: str | None = None,
+    model_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    now = _now()
+    output_id = _new_id("dbo")
+    conn = get_connection()
+    try:
+        session = conn.execute(
+            "SELECT * FROM cognix_debate_sessions WHERE id = ? AND username = ?",
+            (session_id, username),
+        ).fetchone()
+        if session is None:
+            raise ValueError("Debate session not found")
+        if round_id:
+            round_row = conn.execute(
+                "SELECT * FROM cognix_debate_rounds WHERE id = ? AND session_id = ? AND username = ?",
+                (round_id, session_id, username),
+            ).fetchone()
+            if round_row is None:
+                raise ValueError("Debate round not found")
+        conn.execute(
+            """
+            INSERT INTO cognix_debate_outputs
+                (
+                    id, session_id, round_id, username, role_id, output_type,
+                    public_summary, content, model_id, metadata_json, created_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                output_id,
+                session_id,
+                round_id,
+                username,
+                role_id.strip(),
+                output_type.strip(),
+                public_summary.strip(),
+                content,
+                model_id,
+                json.dumps(metadata or {}, ensure_ascii = False),
+                now,
+            ),
+        )
+        conn.execute(
+            "UPDATE cognix_debate_sessions SET status = 'in_progress', updated_at = ? WHERE id = ? AND username = ?",
+            (now, session_id, username),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM cognix_debate_outputs WHERE id = ?",
+            (output_id,),
+        ).fetchone()
+        stored = row_to_dict(row) or {}
+        return _hydrate_debate_output(stored)
     finally:
         conn.close()
 

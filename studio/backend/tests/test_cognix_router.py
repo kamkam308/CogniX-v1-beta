@@ -17,6 +17,7 @@ from auth.authentication import get_current_jwt_subject
 from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import codex_pipeline as cognix_codex_pipeline
 from core.cognix import context_manager as cognix_context_manager
+from core.cognix import debate_orchestrator as cognix_debate_orchestrator
 from core.cognix import deployment_manager as cognix_deployment_manager
 from core.cognix import draft_generation as cognix_draft_generation
 from core.cognix import decision_engine as cognix_decision_engine
@@ -1957,6 +1958,153 @@ def test_response_variant_store_and_list_are_user_scoped():
     assert log["metadata"]["storageSideEffects"]["variantWrite"] is True
 
 
+def test_debate_role_registry_declares_public_roles_without_generation():
+    registry = cognix_debate_orchestrator.build_debate_role_registry()
+    role_ids = {item["id"] for item in registry["roles"]}
+
+    assert registry["debateRoleRegistryVersion"] == "cognix_debate_role_registry_v1"
+    assert {"advocate", "critic", "synthesizer"}.issubset(role_ids)
+    assert registry["policies"]["backendOrchestratorRequired"] is True
+    assert registry["policies"]["rawChainOfThoughtAllowed"] is False
+    assert registry["policies"]["publicArgumentsOnly"] is True
+    assert registry["summary"]["frontendDirectModelCallAllowed"] is False
+    assert registry["sideEffects"]["generation"] is False
+    assert registry["sideEffects"]["networkModelCall"] is False
+    assert registry["sideEffects"]["debateSessionWrite"] is False
+
+
+def test_debate_plan_prepares_bounded_rounds_without_model_call():
+    plan = cognix_debate_orchestrator.build_debate_plan(
+        prompt = "Fais debattre deux agents sur l'architecture CogniX pour le RAG.",
+        requested_roles = ["advocate", "critic", "domain_expert", "synthesizer"],
+        max_rounds = 4,
+        task_type = "architecture",
+        message_id = "msg_debate",
+        model_id = "cognix-general",
+    )
+
+    role_ids = [item["id"] for item in plan["roles"]]
+    round_ids = [item["id"] for item in plan["rounds"]]
+    assert plan["debateOrchestratorVersion"] == "cognix_debate_orchestrator_v1"
+    assert plan["mode"] == "dry_run"
+    assert role_ids == ["advocate", "critic", "domain_expert", "synthesizer"]
+    assert "round_synthesis" in round_ids
+    assert plan["summary"]["maxRounds"] == 4
+    assert plan["displayContract"]["rawChainOfThoughtVisible"] is False
+    assert plan["displayContract"]["showOneCleanThread"] is True
+    assert plan["policies"]["judgeSynthesisRequired"] is True
+    assert all(item["willGenerateNow"] is False for item in plan["rounds"])
+    assert plan["sideEffects"]["modelLoad"] is False
+    assert plan["sideEffects"]["generation"] is False
+    assert plan["sideEffects"]["debateSessionWrite"] is False
+
+
+def test_debate_plan_endpoint_creates_session_rounds_and_logs_audit():
+    seed_accounts()
+
+    body = run_async(
+        cognix_routes.debate_plan(
+            cognix_routes.DebatePlanRequest(
+                prompt = "Debats sur le choix entre RAG et fine-tuning pour un cours.",
+                requested_roles = ["advocate", "critic", "synthesizer"],
+                max_rounds = 3,
+                task_type = "strategy",
+                message_id = "msg_debate_endpoint",
+                thread_id = "thread_debate",
+                create_session = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    session = body["session"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_debate_orchestrator_v1"
+    assert body["debatePlan"]["displayContract"]["rawChainOfThoughtVisible"] is False
+    assert body["sideEffects"]["generation"] is False
+    assert body["sideEffects"]["debateSessionWrite"] is True
+    assert session["id"].startswith("deb_")
+    assert session["messageId"] == "msg_debate_endpoint"
+    assert len(session["rounds"]) >= 3
+    assert any(round_item["roleId"] == "synthesizer" for round_item in session["rounds"])
+
+    sessions = cognix_db.list_debate_sessions("alice", message_id = "msg_debate_endpoint")
+    assert len(sessions) == 1
+    assert sessions[0]["id"] == session["id"]
+    assert sessions[0]["plan"]["debateOrchestratorVersion"] == "cognix_debate_orchestrator_v1"
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "debate_plan_built"
+    assert log["metadata"]["debateOrchestratorVersion"] == "cognix_debate_orchestrator_v1"
+    assert log["metadata"]["sessionCreated"] is True
+    assert log["metadata"]["sideEffects"]["generation"] is False
+
+
+def test_debate_output_store_is_user_scoped_and_public_summary_only():
+    seed_accounts()
+    plan = cognix_debate_orchestrator.build_debate_plan(
+        prompt = "Debat sur architecture CogniX.",
+        requested_roles = ["advocate", "critic", "synthesizer"],
+        max_rounds = 3,
+    )
+    session = cognix_db.create_debate_session(
+        "alice",
+        plan = plan,
+        prompt = "Debat sur architecture CogniX.",
+        message_id = "msg_debate_store",
+    )
+    bob_session = cognix_db.create_debate_session(
+        "bob",
+        plan = plan,
+        prompt = "Autre debat.",
+        message_id = "msg_debate_store",
+    )
+
+    body = run_async(
+        cognix_routes.create_debate_output(
+            session["id"],
+            cognix_routes.DebateOutputRequest(
+                role_id = "synthesizer",
+                output_type = "synthesis",
+                public_summary = "Synthese publique sans raisonnement interne.",
+                content = "Contenu public final.",
+                model_id = "cognix-general",
+                metadata = {"source": "test"},
+            ),
+            current_subject = "alice",
+        )
+    )
+    run_async(
+        cognix_routes.create_debate_output(
+            bob_session["id"],
+            cognix_routes.DebateOutputRequest(
+                roleId = "synthesizer",
+                outputType = "synthesis",
+                publicSummary = "Bob only.",
+            ),
+            current_subject = "bob",
+        )
+    )
+    listed = run_async(cognix_routes.debate_sessions(message_id = "msg_debate_store", current_subject = "alice"))
+
+    assert body["output"]["id"].startswith("dbo_")
+    assert body["output"]["roleId"] == "synthesizer"
+    assert body["output"]["publicSummary"] == "Synthese publique sans raisonnement interne."
+    assert body["sideEffects"]["generation"] is False
+    assert body["sideEffects"]["debateOutputWrite"] is True
+    assert len(listed["sessions"]) == 1
+    assert listed["sessions"][0]["id"] == session["id"]
+    assert len(listed["sessions"][0]["outputs"]) == 1
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = next(item for item in admin_read["logs"] if item["id"] == body["auditLogId"])
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "debate_output_stored"
+    assert log["metadata"]["storageSideEffects"]["debateOutputWrite"] is True
+
+
 def test_codex_pipeline_plans_required_gates_without_modifying_code():
     plan = cognix_codex_pipeline.build_codex_pipeline_plan(
         objective = "Ajoute un module CogniX Chemistry dans le code source",
@@ -2569,6 +2717,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-thinking-status",
         "cognix-response-reflection",
         "cognix-multi-draft-generation",
+        "cognix-ai-debate",
         "cognix-memory-manager",
         "cognix-onboarding",
         "cognix-rag",
@@ -2607,6 +2756,13 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/drafts/styles" in modules["cognix-multi-draft-generation"]["routes"]
     assert "/api/cognix/drafts/plan" in modules["cognix-multi-draft-generation"]["routes"]
     assert "/api/cognix/drafts/variants" in modules["cognix-multi-draft-generation"]["routes"]
+    assert modules["cognix-ai-debate"]["dependencyState"]["ready"] is True
+    assert "debate_role_registry" in modules["cognix-ai-debate"]["capabilities"]
+    assert "judge_synthesis_planning" in modules["cognix-ai-debate"]["capabilities"]
+    assert "public_argument_summaries" in modules["cognix-ai-debate"]["capabilities"]
+    assert "/api/cognix/debate/roles" in modules["cognix-ai-debate"]["routes"]
+    assert "/api/cognix/debate/plan" in modules["cognix-ai-debate"]["routes"]
+    assert "/api/cognix/debate/sessions" in modules["cognix-ai-debate"]["routes"]
     assert modules["cognix-memory-manager"]["activationState"] == "ready"
     assert "central_memory_layers" in modules["cognix-memory-manager"]["capabilities"]
     assert "/api/cognix/memory/plan" in modules["cognix-memory-manager"]["routes"]

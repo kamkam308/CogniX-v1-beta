@@ -22,6 +22,7 @@ from core.cognix import benchmark as cognix_benchmark
 from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import codex_pipeline as cognix_codex_pipeline
 from core.cognix import context_manager as cognix_context_manager
+from core.cognix import debate_orchestrator as cognix_debate_orchestrator
 from core.cognix import deployment_manager as cognix_deployment_manager
 from core.cognix import draft_generation as cognix_draft_generation
 from core.cognix import decision_engine as cognix_decision_engine
@@ -213,6 +214,32 @@ class ResponseVariantRequest(BaseModel):
     project_id: str | None = Field(None, alias = "projectId", max_length = 160)
     model_id: str | None = Field(None, alias = "modelId", max_length = 240)
     ranking_score: float | None = Field(None, alias = "rankingScore", ge = 0.0, le = 1.0)
+    metadata: dict[str, Any] | None = None
+
+
+class DebatePlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    prompt: str = Field(..., min_length = 1, max_length = 120000)
+    requested_roles: list[str] | None = Field(None, alias = "requestedRoles")
+    max_rounds: int = Field(3, alias = "maxRounds", ge = 2, le = 5)
+    task_type: str | None = Field(None, alias = "taskType", max_length = 80)
+    message_id: str | None = Field(None, alias = "messageId", max_length = 160)
+    thread_id: str | None = Field(None, alias = "threadId", max_length = 160)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    model_id: str | None = Field(None, alias = "modelId", max_length = 240)
+    create_session: bool = Field(True, alias = "createSession")
+
+
+class DebateOutputRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    role_id: str = Field(..., alias = "roleId", min_length = 1, max_length = 80)
+    output_type: Literal["argument", "critique", "reply", "synthesis", "note"] = Field("argument", alias = "outputType")
+    public_summary: str = Field(..., alias = "publicSummary", min_length = 1, max_length = 20000)
+    content: str = Field("", max_length = 400000)
+    round_id: str | None = Field(None, alias = "roundId", max_length = 160)
+    model_id: str | None = Field(None, alias = "modelId", max_length = 240)
     metadata: dict[str, Any] | None = None
 
 
@@ -524,6 +551,14 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "evaluation_json": "evaluationJson",
         "variant_type": "variantType",
         "ranking_score": "rankingScore",
+        "prompt_excerpt": "promptExcerpt",
+        "max_rounds": "maxRounds",
+        "roles_json": "rolesJson",
+        "round_index": "roundIndex",
+        "role_id": "roleId",
+        "public_prompt": "publicPrompt",
+        "output_type": "outputType",
+        "public_summary": "publicSummary",
     }
     for source, target in alias_map.items():
         if source in out:
@@ -1616,6 +1651,143 @@ async def create_response_variant(
             "generation": False,
             "networkModelCall": False,
             "variantWrite": True,
+            "auditWrite": True,
+        },
+    }
+
+
+def _debate_session_response(session: dict[str, Any]) -> dict[str, Any]:
+    out = _row(session)
+    out["rounds"] = _rows(session.get("rounds", []))
+    out["outputs"] = _rows(session.get("outputs", []))
+    return out
+
+
+@router.get("/debate/roles")
+async def debate_roles(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    registry = cognix_debate_orchestrator.build_debate_role_registry()
+    return {
+        "username": current_subject,
+        "debateRoleRegistry": registry,
+        "sideEffects": registry.get("sideEffects", {}),
+    }
+
+
+@router.post("/debate/plan")
+async def debate_plan(
+    payload: DebatePlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_debate_orchestrator.build_debate_plan(
+        prompt = payload.prompt,
+        requested_roles = payload.requested_roles,
+        max_rounds = payload.max_rounds,
+        task_type = payload.task_type,
+        message_id = payload.message_id,
+        project_id = payload.project_id,
+        model_id = payload.model_id,
+    )
+    session: dict[str, Any] | None = None
+    if payload.create_session:
+        session = cognix_db.create_debate_session(
+            current_subject,
+            plan = plan,
+            prompt = payload.prompt,
+            message_id = payload.message_id,
+            thread_id = payload.thread_id,
+            project_id = payload.project_id,
+        )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "debateSessionWrite": bool(session),
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "debate_plan_built",
+        resource_type = "cognix_debate_session" if session else "cognix_debate_plan",
+        resource_id = str((session or {}).get("id") or payload.message_id or "general"),
+        severity = "notice",
+        metadata = {
+            "debateOrchestratorVersion": plan.get("debateOrchestratorVersion"),
+            "plannedRoundCount": plan.get("summary", {}).get("plannedRoundCount"),
+            "roleIds": [str(item.get("id")) for item in plan.get("roles", []) if isinstance(item, dict)],
+            "messageId": payload.message_id,
+            "threadId": payload.thread_id,
+            "projectId": payload.project_id,
+            "sessionCreated": bool(session),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "debatePlan": plan,
+        "session": _debate_session_response(session) if session else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_debate_orchestrator.COGNIX_DEBATE_ORCHESTRATOR_VERSION,
+    }
+
+
+@router.get("/debate/sessions")
+async def debate_sessions(
+    message_id: str | None = None,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    sessions = cognix_db.list_debate_sessions(current_subject, message_id = message_id)
+    return {
+        "username": current_subject,
+        "sessions": [_debate_session_response(session) for session in sessions],
+    }
+
+
+@router.post("/debate/sessions/{session_id}/outputs")
+async def create_debate_output(
+    session_id: str,
+    payload: DebateOutputRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    try:
+        output = cognix_db.create_debate_output(
+            current_subject,
+            session_id = session_id,
+            role_id = payload.role_id,
+            output_type = payload.output_type,
+            public_summary = payload.public_summary,
+            content = payload.content,
+            round_id = payload.round_id,
+            model_id = payload.model_id,
+            metadata = payload.metadata,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code = 404, detail = str(exc)) from exc
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "debate_output_stored",
+        resource_type = "cognix_debate_output",
+        resource_id = output.get("id"),
+        severity = "notice",
+        metadata = {
+            "sessionId": session_id,
+            "roleId": payload.role_id,
+            "outputType": payload.output_type,
+            "roundId": payload.round_id,
+            "storageSideEffects": {"debateOutputWrite": True, "auditWrite": True},
+        },
+    )
+    return {
+        "username": current_subject,
+        "output": _row(output),
+        "auditLogId": audit.get("id"),
+        "sideEffects": {
+            "modelLoad": False,
+            "generation": False,
+            "networkModelCall": False,
+            "debateOutputWrite": True,
             "auditWrite": True,
         },
     }
