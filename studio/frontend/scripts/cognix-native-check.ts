@@ -113,6 +113,8 @@ const checks: Check[] = [
       "cognix_db.create_orchestrator_log",
       '@router.post("/orchestrator/plan")',
       '"orchestratorLogId"',
+      '"latestBenchmark"',
+      "get_latest_benchmark_run",
       '"runtimeType": "dry_run"',
       '"runtimeError": None',
     ],
@@ -136,6 +138,7 @@ const checks: Check[] = [
       "CREATE TABLE IF NOT EXISTS cognix_benchmark_runs",
       "def create_benchmark_run",
       "def list_benchmark_runs",
+      "def get_latest_benchmark_run",
       "metadata_json",
     ],
   },
@@ -192,12 +195,24 @@ const checks: Check[] = [
     includes: [
       '"orchestratorVersion": "cognix_orchestrator_v1"',
       '"mode": "dry_run"',
+      "latest_benchmark_run",
       "cognix_decision_engine.build_task_strategy",
       '"taskStrategy"',
+      '"latestBenchmark"',
       '"recommendedPath"',
       '"willLoadModel": False',
       '"willGenerate": False',
       '"networkModelCall": False',
+    ],
+  },
+  {
+    file: "../backend/core/cognix/recommender.py",
+    includes: [
+      "latest_benchmark_run",
+      "def _benchmark_signal",
+      '"bestLocalModel"',
+      '"Benchmark CogniX absent:',
+      '"Machine calibree par benchmark local;',
     ],
   },
   {
@@ -208,6 +223,15 @@ const checks: Check[] = [
       "cognix_benchmark_v1",
       "/api/cognix/benchmark/run",
       "/api/cognix/admin/benchmark-runs",
+    ],
+  },
+  {
+    file: "../backend/tests/test_cognix_strategy.py",
+    includes: [
+      "test_strategy_uses_latest_benchmark_run_for_recommendation",
+      "test_model_recommendation_uses_latest_benchmark_run",
+      "cognix_db.create_benchmark_run",
+      '"bestLocalModel"',
     ],
   },
   {
@@ -242,6 +266,7 @@ const scopedChecks: ScopedCheck[] = [
     includes: [
       '"runtimeType": "dry_run"',
       "cognix_orchestrator.build_execution_plan",
+      "latest_benchmark_run",
       "cognix_db.create_orchestrator_log",
       '"runtimeError": None',
     ],

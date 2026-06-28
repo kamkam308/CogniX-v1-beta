@@ -15,6 +15,16 @@ COGNIX_DEFAULT_OLLAMA_PROVIDER_ID = cognix_registry.COGNIX_DEFAULT_OLLAMA_PROVID
 COGNIX_DEFAULT_OLLAMA_MODEL_ID = cognix_registry.COGNIX_DEFAULT_OLLAMA_MODEL_ID
 
 
+def _as_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
 def _parse_model_size_b(model_id: str) -> float | None:
     match = re.search(r"(?i)(\d+(?:\.\d+)?)\s*b\b", model_id)
     if not match:
@@ -65,7 +75,74 @@ def _memory_fit(
     }
 
 
-def build_model_recommendation(hardware: dict[str, Any]) -> dict[str, Any]:
+def _best_benchmark_model(benchmark: dict[str, Any]) -> dict[str, Any] | None:
+    fitness = benchmark.get("modelFitness")
+    if not isinstance(fitness, list):
+        return None
+    candidates = [
+        item
+        for item in fitness
+        if isinstance(item, dict)
+        and item.get("status") in {"recommended", "possible", "tight"}
+        and int(item.get("stars") or 0) > 0
+    ]
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key = lambda item: (
+            int(item.get("stars") or 0),
+            _as_float(item.get("estimatedTokensPerSecond")) or 0.0,
+        ),
+    )
+
+
+def _benchmark_signal(latest_benchmark_run: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(latest_benchmark_run, dict):
+        return {
+            "available": False,
+            "status": "missing",
+            "reason": "Aucun benchmark CogniX local n'a encore ete execute.",
+        }
+    benchmark = latest_benchmark_run.get("benchmark")
+    if not isinstance(benchmark, dict):
+        return {
+            "available": False,
+            "status": "invalid",
+            "reason": "Dernier benchmark indisponible ou incomplet.",
+        }
+    best_model = _best_benchmark_model(benchmark)
+    optimization = benchmark.get("optimizationPlan")
+    return {
+        "available": True,
+        "status": "measured",
+        "runId": latest_benchmark_run.get("id"),
+        "createdAt": latest_benchmark_run.get("created_at"),
+        "benchmarkVersion": benchmark.get("benchmarkVersion"),
+        "overallScore": benchmark.get("overallScore"),
+        "estimatedTokensPerSecond": benchmark.get("estimatedTokensPerSecond"),
+        "optimizationPlan": optimization if isinstance(optimization, dict) else {},
+        "bestLocalModel": best_model,
+        "reason": "Dernier benchmark CogniX utilise pour ajuster la recommandation locale.",
+    }
+
+
+def _readiness_confidence(readiness: str) -> float:
+    return {
+        "ready": 0.82,
+        "ready_with_caution": 0.72,
+        "model_missing": 0.58,
+        "service_unreachable": 0.45,
+        "setup_required": 0.35,
+        "hardware_blocked": 0.25,
+    }[readiness]
+
+
+def build_model_recommendation(
+    hardware: dict[str, Any],
+    *,
+    latest_benchmark_run: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     registry = cognix_registry.build_model_registry()
     ollama = registry["ollama"]
     recommended_model = str(ollama["recommendedModel"])
@@ -76,16 +153,22 @@ def build_model_recommendation(hardware: dict[str, Any]) -> dict[str, Any]:
         total_gb = memory.get("totalGb"),
     )
     provider = ollama["provider"]
+    benchmark = _benchmark_signal(latest_benchmark_run)
 
     warnings: list[str] = []
     if hardware.get("deviceBackend") == "cpu":
         warnings.append("Aucun GPU visible: privilégier les petits modeles quantifies.")
+    if not benchmark["available"]:
+        warnings.append("Benchmark CogniX absent: lance /api/cognix/benchmark/run pour calibrer la machine.")
     if not ollama["configured"]:
         warnings.append("Provider Ollama par defaut absent de la base locale.")
     if not ollama["reachable"]:
         warnings.append("Service Ollama non joignable sur l'URL configuree.")
     if not ollama["hasDefaultModel"]:
         warnings.append("Modele Qwen 4B par defaut non visible dans le catalogue Ollama.")
+    expected_speed = str((benchmark.get("optimizationPlan") or {}).get("expectedLocalSpeed") or "")
+    if expected_speed == "slow":
+        warnings.append("Benchmark local lent: privilegier Q4, contexte court et un seul modele resident.")
     if fit["level"] == "tight":
         warnings.append("RAM disponible serree: eviter le multitache pendant les generations.")
     elif fit["level"] == "blocked":
@@ -103,14 +186,11 @@ def build_model_recommendation(hardware: dict[str, Any]) -> dict[str, Any]:
     elif fit["level"] == "tight":
         readiness = "ready_with_caution"
 
-    confidence = {
-        "ready": 0.82,
-        "ready_with_caution": 0.72,
-        "model_missing": 0.58,
-        "service_unreachable": 0.45,
-        "setup_required": 0.35,
-        "hardware_blocked": 0.25,
-    }[readiness]
+    confidence = _readiness_confidence(readiness)
+    if benchmark["available"] and readiness in {"ready", "ready_with_caution"}:
+        confidence = min(0.92, round(confidence + 0.05, 2))
+    elif not benchmark["available"]:
+        confidence = max(0.2, round(confidence - 0.04, 2))
 
     return {
         "registry": registry,
@@ -128,10 +208,13 @@ def build_model_recommendation(hardware: dict[str, Any]) -> dict[str, Any]:
             "modelId": recommended_model,
             "modelLabel": "Qwen 4B local via Ollama",
             "memoryFit": fit,
+            "benchmark": benchmark,
             "confidence": confidence,
             "warnings": warnings,
             "reason": (
-                "Machine detectee en usage local leger; CogniX recommande un petit "
+                "Machine calibree par benchmark local; CogniX recommande un petit modele quantifie via Ollama."
+                if benchmark["available"]
+                else "Machine detectee en usage local leger; CogniX recommande un petit "
                 "modele quantifie via Ollama avant de construire le router avance."
             ),
         },

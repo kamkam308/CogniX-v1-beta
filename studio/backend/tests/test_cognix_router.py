@@ -84,7 +84,11 @@ def stub_hardware_profile() -> dict[str, object]:
     }
 
 
-def stub_recommendation(hardware: dict[str, object]) -> dict[str, object]:
+def stub_recommendation(
+    hardware: dict[str, object],
+    *,
+    latest_benchmark_run: dict[str, object] | None = None,
+) -> dict[str, object]:
     return {
         "providers": {
             "configured": [
@@ -115,6 +119,10 @@ def stub_recommendation(hardware: dict[str, object]) -> dict[str, object]:
                 "level": "ok",
                 "estimatedRamGb": 4.4,
                 "label": "Compatible avec la memoire actuellement disponible",
+            },
+            "benchmark": {
+                "available": latest_benchmark_run is not None,
+                "status": "measured" if latest_benchmark_run is not None else "missing",
             },
             "confidence": 0.82,
             "warnings": [],

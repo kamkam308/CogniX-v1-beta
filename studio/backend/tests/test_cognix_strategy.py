@@ -83,6 +83,50 @@ def _cpu_hardware(available_gb: float = 6.0) -> dict:
     }
 
 
+def _benchmark_payload() -> dict:
+    return {
+        "benchmarkVersion": "cognix_benchmark_v1",
+        "mode": "quick",
+        "hardware": _cpu_hardware(available_gb = 6.0),
+        "measurements": {
+            "cpu": {"status": "complete", "score": 68.0},
+            "memory": {"status": "complete", "score": 52.0},
+            "disk": {"status": "skipped", "score": None},
+            "gpu": {"status": "observed", "score": 0.0},
+            "network": {"status": "skipped"},
+        },
+        "overallScore": 55.0,
+        "estimatedTokensPerSecond": 14.5,
+        "modelFitness": [
+            {
+                "modelId": "cognix-code-4b-q4",
+                "label": "CogniX Code 4B Q4",
+                "status": "recommended",
+                "stars": 4,
+                "estimatedTokensPerSecond": 14.5,
+            },
+            {
+                "modelId": "glm-700b",
+                "label": "GLM 700B",
+                "status": "blocked",
+                "stars": 0,
+                "estimatedTokensPerSecond": 0.0,
+            },
+        ],
+        "optimizationPlan": {
+            "expectedLocalSpeed": "balanced",
+            "quantization": "Q4_or_Q5",
+        },
+        "sideEffects": {
+            "modelLoad": False,
+            "generation": False,
+            "networkCall": False,
+            "gpuStressTest": False,
+            "temporaryDiskWrite": False,
+        },
+    }
+
+
 def test_strategy_recommends_default_ollama_qwen(client, monkeypatch):
     seed_accounts()
     headers = login_headers(client, "alice", "alice-password-123")
@@ -106,6 +150,28 @@ def test_strategy_recommends_default_ollama_qwen(client, monkeypatch):
     assert body["recommendation"]["modelId"] == cognix_registry.COGNIX_DEFAULT_OLLAMA_MODEL_ID
     assert body["providers"]["ollama"]["reachable"] is True
     assert body["providers"]["ollama"]["hasDefaultModel"] is True
+
+
+def test_strategy_uses_latest_benchmark_run_for_recommendation(client, monkeypatch):
+    seed_accounts()
+    benchmark_run = cognix_db.create_benchmark_run("alice", _benchmark_payload())
+    headers = login_headers(client, "alice", "alice-password-123")
+    monkeypatch.setattr(cognix_hardware, "get_hardware_profile", lambda: _cpu_hardware())
+    monkeypatch.setattr(
+        cognix_registry,
+        "_ollama_models",
+        lambda _base_url: (True, [cognix_registry.COGNIX_DEFAULT_OLLAMA_MODEL_ID]),
+    )
+
+    response = client.get("/api/cognix/strategy", headers = headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["latestBenchmark"]["id"] == benchmark_run["id"]
+    assert body["recommendation"]["benchmark"]["available"] is True
+    assert body["recommendation"]["benchmark"]["runId"] == benchmark_run["id"]
+    assert body["recommendation"]["benchmark"]["bestLocalModel"]["modelId"] == "cognix-code-4b-q4"
+    assert body["recommendation"]["confidence"] >= 0.87
 
 
 def test_strategy_keeps_qwen_available_when_memory_is_tight(client, monkeypatch):
@@ -178,6 +244,28 @@ def test_model_recommendation_endpoint_returns_recommender_output(client, monkey
     assert body["recommendation"]["readiness"] == "ready"
     assert body["recommendation"]["modelId"] == cognix_registry.COGNIX_DEFAULT_OLLAMA_MODEL_ID
     assert body["providers"]["ollama"]["hasDefaultModel"] is True
+
+
+def test_model_recommendation_uses_latest_benchmark_run(client, monkeypatch):
+    seed_accounts()
+    benchmark_run = cognix_db.create_benchmark_run("alice", _benchmark_payload())
+    headers = login_headers(client, "alice", "alice-password-123")
+    monkeypatch.setattr(cognix_hardware, "get_hardware_profile", lambda: _cpu_hardware(available_gb = 5.5))
+    monkeypatch.setattr(
+        cognix_registry,
+        "_ollama_models",
+        lambda _base_url: (True, [cognix_registry.COGNIX_DEFAULT_OLLAMA_MODEL_ID]),
+    )
+
+    response = client.get("/api/cognix/models/recommendation", headers = headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["latestBenchmark"]["id"] == benchmark_run["id"]
+    assert body["recommendation"]["benchmark"]["available"] is True
+    assert body["recommendation"]["benchmark"]["runId"] == benchmark_run["id"]
+    assert body["recommendation"]["benchmark"]["overallScore"] == 55.0
+    assert body["recommendation"]["benchmark"]["bestLocalModel"]["modelId"] == "cognix-code-4b-q4"
 
 
 def test_model_registry_endpoint_returns_native_registry(client, monkeypatch):

@@ -9,23 +9,29 @@ from typing import Any
 
 from core.cognix import hardware as cognix_hardware
 from core.cognix import recommender as cognix_recommender
+from storage import cognix_db
 
 
 def build_strategy(current_subject: str) -> dict[str, Any]:
     hardware = cognix_hardware.get_hardware_profile()
-    model_recommendation = cognix_recommender.build_model_recommendation(hardware)
+    latest_benchmark = cognix_db.get_latest_benchmark_run(current_subject)
+    model_recommendation = cognix_recommender.build_model_recommendation(
+        hardware,
+        latest_benchmark_run = latest_benchmark,
+    )
 
     return {
         "username": current_subject,
         "phase": "mvp_core_local",
         "roadmapPhase": "Phase 1 - Core local solide",
         "hardware": hardware,
+        "latestBenchmark": latest_benchmark,
         "providers": model_recommendation["providers"],
         "recommendation": model_recommendation["recommendation"],
         "nextSteps": [
-            "brancher cette strategie au futur Model Router",
-            "ajouter un Hardware Profiler visible",
-            "journaliser les decisions de routage",
-            "preparer le Model Cache Manager sans changer le chat actuel",
+            "utiliser le benchmark pour calibrer les recommandations",
+            "brancher les modeles specialises au router",
+            "preparer le prechargement selon projet et RAM",
+            "connecter RAG et fine-tuning guide au decision engine",
         ],
     }

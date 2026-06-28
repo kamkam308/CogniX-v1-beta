@@ -172,9 +172,13 @@ def build_execution_plan(
     project_type: str | None = None,
     project_id: str | None = None,
     runtime_snapshot: dict[str, Any] | None = None,
+    latest_benchmark_run: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     hardware = cognix_hardware.get_hardware_profile()
-    recommendation_payload = cognix_recommender.build_model_recommendation(hardware)
+    recommendation_payload = cognix_recommender.build_model_recommendation(
+        hardware,
+        latest_benchmark_run = latest_benchmark_run,
+    )
     recommendation = recommendation_payload["recommendation"]
     classification = classify_objective(objective, project_type = project_type)
     task_strategy = cognix_decision_engine.build_task_strategy(
@@ -226,6 +230,7 @@ def build_execution_plan(
         "objectiveExcerpt": _objective_excerpt(objective),
         "classification": classification,
         "hardware": hardware,
+        "latestBenchmark": latest_benchmark_run,
         "providers": recommendation_payload["providers"],
         "recommendation": recommendation,
         "cache": cache,

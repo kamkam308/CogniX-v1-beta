@@ -910,10 +910,15 @@ async def benchmark_runs(current_subject: str = Depends(get_current_jwt_subject)
 @router.get("/models/recommendation")
 async def model_recommendation(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
     hardware = cognix_hardware.get_hardware_profile()
-    recommendation = cognix_recommender.build_model_recommendation(hardware)
+    latest_benchmark = cognix_db.get_latest_benchmark_run(current_subject)
+    recommendation = cognix_recommender.build_model_recommendation(
+        hardware,
+        latest_benchmark_run = latest_benchmark,
+    )
     return {
         "username": current_subject,
         "hardware": hardware,
+        "latestBenchmark": latest_benchmark,
         **recommendation,
     }
 
@@ -1061,6 +1066,7 @@ async def orchestrator_plan(
         project_type = payload.project_type,
         project_id = payload.project_id,
         runtime_snapshot = runtime,
+        latest_benchmark_run = cognix_db.get_latest_benchmark_run(current_subject),
     )
     log = cognix_db.create_router_log(
         current_subject,

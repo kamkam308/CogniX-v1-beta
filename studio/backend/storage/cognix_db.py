@@ -1249,6 +1249,25 @@ def list_benchmark_runs(username: str | None = None, limit: int = 50) -> list[di
         conn.close()
 
 
+def get_latest_benchmark_run(username: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT * FROM cognix_benchmark_runs
+            WHERE username = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (username,),
+        ).fetchone()
+        if row is None:
+            return None
+        return _benchmark_row(dict(row))
+    finally:
+        conn.close()
+
+
 def list_bans() -> list[dict[str, Any]]:
     conn = get_connection()
     try:
