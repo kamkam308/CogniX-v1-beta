@@ -452,6 +452,115 @@ def test_fine_tuning_plan_allows_ceo_cloud_training_without_local_gpu(monkeypatc
     assert log["metadata"]["sideEffects"]["cloudTrainingJob"] is False
 
 
+def test_fine_tuning_cloud_handoff_prepares_kaggle_package_without_launch(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+
+    body = run_async(
+        cognix_routes.fine_tuning_cloud_handoff_plan(
+            cognix_routes.FineTuningCloudHandoffPlanRequest(
+                objective = "Je veux fine-tuning LoRA pour specialiser CogniX sur mon style",
+                project_type = "education",
+                target_id = "kaggle",
+                dataset = {
+                    "format": "jsonl",
+                    "sampleCount": 1200,
+                    "estimatedTokens": 500000,
+                    "duplicateRatio": 0.01,
+                    "invalidRows": 0,
+                    "averageResponseTokens": 42,
+                    "license": "mit",
+                    "containsSensitiveData": False,
+                    "sourceRef": "training-dataset-v1",
+                },
+            ),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+
+    handoff = body["cloudHandoffPlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert handoff["handoffVersion"] == "cognix_cloud_training_handoff_v1"
+    assert handoff["status"] == "ready_for_export"
+    assert handoff["readyToExport"] is True
+    assert handoff["target"]["id"] == "kaggle"
+    assert handoff["target"]["exportFormat"] == "kaggle_kernel_plan"
+    assert handoff["method"]["type"] == "cloud_qlora"
+    assert handoff["datasetAccessPlan"]["datasetDescriptor"]["sourceRef"] == "training-dataset-v1"
+    assert handoff["datasetAccessPlan"]["rawDatasetRead"] is False
+    assert handoff["notebookPlan"]["rawSecretValuesIncluded"] is False
+    assert "HF_TOKEN" in handoff["notebookPlan"]["secretPlaceholders"]
+    assert any(item["path"] == "CogniX_training_notebook.ipynb" for item in handoff["artifactManifest"])
+    assert any(item["id"] == "cloud_training_job" for item in handoff["blockedActions"])
+    assert handoff["sideEffects"]["fileWrite"] is False
+    assert handoff["sideEffects"]["notebookWrite"] is False
+    assert handoff["sideEffects"]["datasetUpload"] is False
+    assert handoff["sideEffects"]["cloudCredentialRead"] is False
+    assert handoff["sideEffects"]["cloudTrainingJob"] is False
+    assert body["executionPolicy"]["automaticExecutionAllowed"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "fine_tuning_cloud_handoff_plan_built"
+    assert log["metadata"]["targetId"] == "kaggle"
+    assert log["metadata"]["readyToExport"] is True
+    assert log["metadata"]["sideEffects"]["cloudTrainingJob"] is False
+    assert "secret_value" not in log["metadataJson"].lower()
+
+
+def test_fine_tuning_cloud_handoff_blocks_non_ceo_cpu_without_launch(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+
+    body = run_async(
+        cognix_routes.fine_tuning_cloud_handoff_plan(
+            cognix_routes.FineTuningCloudHandoffPlanRequest(
+                objective = "Je veux fine-tuning LoRA pour specialiser CogniX sur mon style",
+                target_id = "google_colab",
+                dataset = {
+                    "format": "jsonl",
+                    "sampleCount": 1200,
+                    "estimatedTokens": 500000,
+                    "duplicateRatio": 0.01,
+                    "invalidRows": 0,
+                    "averageResponseTokens": 42,
+                    "license": "mit",
+                    "containsSensitiveData": False,
+                },
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    handoff = body["cloudHandoffPlan"]
+    assert handoff["status"] == "blocked_not_cloud_eligible"
+    assert handoff["readyToExport"] is False
+    assert handoff["target"]["id"] == "google_colab"
+    assert handoff["sideEffects"]["cloudTrainingJob"] is False
+    assert handoff["sideEffects"]["datasetUpload"] is False
+    assert handoff["sideEffects"]["cloudCredentialRead"] is False
+    assert any("training cloud" in item for item in handoff["warnings"])
+
+
 def test_rag_plan_endpoint_prepares_hybrid_retrieval_without_indexing(monkeypatch):
     seed_accounts()
     monkeypatch.setattr(cognix_routes, "_rag_available", lambda: True)
@@ -1979,6 +2088,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/rag/sources" in modules["cognix-rag"]["routes"]
     assert "/api/cognix/rag/indexing-plan" in modules["cognix-rag"]["routes"]
     assert "cloud_training_targets" in modules["cognix-fine-tuning"]["capabilities"]
+    assert "cloud_training_handoff" in modules["cognix-fine-tuning"]["capabilities"]
+    assert "/api/cognix/fine-tuning/cloud-handoff-plan" in modules["cognix-fine-tuning"]["routes"]
     assert "technology_watch" in modules["cognix-research-watch"]["capabilities"]
     assert "benchmark_gate" in modules["cognix-research-watch"]["capabilities"]
     assert "/api/cognix/research/integration-plan" in modules["cognix-research-watch"]["routes"]

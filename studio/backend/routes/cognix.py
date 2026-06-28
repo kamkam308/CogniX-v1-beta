@@ -24,6 +24,7 @@ from core.cognix import codex_pipeline as cognix_codex_pipeline
 from core.cognix import context_manager as cognix_context_manager
 from core.cognix import deployment_manager as cognix_deployment_manager
 from core.cognix import decision_engine as cognix_decision_engine
+from core.cognix import fine_tuning_planner as cognix_fine_tuning_planner
 from core.cognix import governance_manager as cognix_governance_manager
 from core.cognix import hardware as cognix_hardware
 from core.cognix import integration_manager as cognix_integration_manager
@@ -246,6 +247,16 @@ class FineTuningPlanRequest(BaseModel):
     objective: str = Field(..., min_length = 1, max_length = 4000)
     project_type: str | None = Field(None, max_length = 80)
     project_id: str | None = Field(None, max_length = 160)
+    dataset: dict[str, Any] | None = None
+
+
+class FineTuningCloudHandoffPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    project_type: str | None = Field(None, max_length = 80)
+    project_id: str | None = Field(None, max_length = 160)
+    target_id: str | None = Field(None, alias = "targetId", max_length = 120)
     dataset: dict[str, Any] | None = None
 
 
@@ -2080,6 +2091,66 @@ async def rag_indexing_plan(
         "indexingPlan": plan,
         "auditLogId": audit.get("id"),
         "sideEffects": plan.get("sideEffects", {}),
+    }
+
+
+@router.post("/fine-tuning/cloud-handoff-plan")
+async def fine_tuning_cloud_handoff_plan(
+    payload: FineTuningCloudHandoffPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    runtime = _current_model_cache_runtime()
+    user_profile = auth_storage.get_user_profile(current_subject) or {}
+    plan = cognix_orchestrator.build_execution_plan(
+        payload.objective,
+        current_subject = current_subject,
+        project_type = payload.project_type,
+        project_id = payload.project_id,
+        runtime_snapshot = runtime,
+        latest_benchmark_run = cognix_db.get_latest_benchmark_run(current_subject),
+        fine_tuning_dataset = payload.dataset,
+        user_plan = str(user_profile.get("plan") or ""),
+    )
+    tuning_plan = plan["fineTuningPlan"]
+    handoff = cognix_fine_tuning_planner.build_cloud_training_handoff_plan(
+        username = current_subject,
+        objective = payload.objective,
+        project_id = payload.project_id,
+        target_id = payload.target_id,
+        fine_tuning_plan = tuning_plan,
+        dataset = payload.dataset,
+        user_plan = str(user_profile.get("plan") or ""),
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "fine_tuning_cloud_handoff_plan_built",
+        resource_type = "cognix_cloud_training_handoff",
+        resource_id = str(handoff.get("target", {}).get("id") or "unknown"),
+        severity = "notice" if handoff.get("readyToExport") else "warning",
+        metadata = {
+            "plannerVersion": handoff.get("plannerVersion"),
+            "handoffVersion": handoff.get("handoffVersion"),
+            "status": handoff.get("status"),
+            "targetId": handoff.get("target", {}).get("id"),
+            "exportFormat": handoff.get("target", {}).get("exportFormat"),
+            "method": handoff.get("method", {}).get("type"),
+            "datasetStatus": handoff.get("dataset", {}).get("status"),
+            "readyToExport": handoff.get("readyToExport"),
+            "approval": handoff.get("approval", {}),
+            "sideEffects": handoff.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "runtimeError": runtime.get("error"),
+        "classification": plan["classification"],
+        "taskStrategy": plan["taskStrategy"],
+        "fineTuningPlan": tuning_plan,
+        "cloudHandoffPlan": handoff,
+        "executionPolicy": plan["executionPolicy"],
+        "auditLogId": audit.get("id"),
+        "sideEffects": handoff.get("sideEffects", {}),
     }
 
 
