@@ -17,6 +17,7 @@ from auth.authentication import get_current_jwt_subject
 from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import codex_pipeline as cognix_codex_pipeline
 from core.cognix import context_manager as cognix_context_manager
+from core.cognix import deployment_manager as cognix_deployment_manager
 from core.cognix import decision_engine as cognix_decision_engine
 from core.cognix import integration_manager as cognix_integration_manager
 from core.cognix import module_registry as cognix_module_registry
@@ -746,6 +747,87 @@ def test_onboarding_plan_endpoint_logs_audited_dry_run(monkeypatch):
     assert log["metadata"]["sideEffects"]["modelDownload"] is False
 
 
+def test_deployment_manager_plans_enterprise_target_without_provisioning():
+    registry = cognix_deployment_manager.build_deployment_target_registry()
+    assert registry["deploymentManagerVersion"] == "cognix_deployment_manager_v1"
+    assert registry["globalPolicies"]["productionDeploymentFromPlannerAllowed"] is False
+    assert registry["sideEffects"]["deployment"] is False
+
+    plan = cognix_deployment_manager.build_deployment_plan(
+        username = "alice",
+        objective = "Deployer CogniX pour une equipe entreprise avec audit et SSO",
+        hardware = stub_gpu_hardware_profile(),
+        recommendation = stub_recommendation(stub_gpu_hardware_profile())["recommendation"],
+        target_type = "on_premise",
+        edition = "enterprise",
+        expected_users = 80,
+        data_sensitivity = "confidential",
+        requested_features = ["autoscaling", "moe"],
+        latest_benchmark_run = {"id": "bench-1", "benchmark": {"benchmarkVersion": "cognix_benchmark_v1"}},
+    )
+
+    assert plan["deploymentManagerVersion"] == "cognix_deployment_manager_v1"
+    assert plan["mode"] == "dry_run"
+    assert plan["recommendedTarget"]["targetId"] in {"on_prem_multi_gpu", "cloud_managed"}
+    assert "autoscaling" in plan["requiredCapabilities"]
+    assert "moeServing" in plan["requiredCapabilities"]
+    assert plan["schedulerPlan"]["workerQueueRequired"] is True
+    assert plan["securityPlan"]["rbacRequired"] is True
+    assert plan["securityPlan"]["ssoRequired"] is True
+    assert plan["securityPlan"]["productionMergeAllowed"] is False
+    assert any(item["id"] == "production_deployment" for item in plan["blockedActions"])
+    assert plan["sideEffects"]["deployment"] is False
+    assert plan["sideEffects"]["infrastructureProvisioning"] is False
+    assert plan["sideEffects"]["serverStart"] is False
+    assert plan["sideEffects"]["secretWrite"] is False
+    assert plan["sideEffects"]["networkExposure"] is False
+
+
+def test_deployment_plan_endpoint_logs_audited_dry_run(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_routes.cognix_hardware,
+        "get_hardware_profile",
+        stub_gpu_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_routes.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+
+    body = run_async(
+        cognix_routes.deployment_plan(
+            cognix_routes.DeploymentPlanRequest(
+                objective = "Planifie un deploiement CogniX Business pour 12 utilisateurs",
+                targetType = "on_premise",
+                edition = "business",
+                expectedUsers = 12,
+                dataSensitivity = "restricted",
+                requestedFeatures = ["sso"],
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    plan = body["deploymentPlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_deployment_manager_v1"
+    assert plan["request"]["expectedUsers"] == 12
+    assert plan["securityPlan"]["humanApprovalRequired"] is True
+    assert plan["sideEffects"]["deployment"] is False
+    assert plan["sideEffects"]["containerStart"] is False
+    assert plan["sideEffects"]["networkModelCall"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "deployment_plan_built"
+    assert log["metadata"]["deploymentManagerVersion"] == "cognix_deployment_manager_v1"
+    assert log["metadata"]["expectedUsers"] == 12
+    assert log["metadata"]["sideEffects"]["deployment"] is False
+
+
 def test_codex_pipeline_plans_required_gates_without_modifying_code():
     plan = cognix_codex_pipeline.build_codex_pipeline_plan(
         objective = "Ajoute un module CogniX Chemistry dans le code source",
@@ -1029,12 +1111,13 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert registry["sideEffects"]["uiMutation"] is False
 
     modules = {item["id"]: item for item in registry["modules"]}
-    assert {"cognix-local-core", "cognix-onboarding", "cognix-rag", "cognix-integrations", "cognix-codex-secure-agent"}.issubset(
+    assert {"cognix-local-core", "cognix-onboarding", "cognix-rag", "cognix-integrations", "cognix-codex-secure-agent", "cognix-deployment-manager"}.issubset(
         modules
     )
     assert modules["cognix-local-core"]["activationState"] == "ready"
     assert modules["cognix-onboarding"]["activationState"] == "ready"
     assert modules["cognix-rag"]["dependencyState"]["ready"] is True
+    assert modules["cognix-deployment-manager"]["dependencyState"]["ready"] is True
     assert "cognix-integrations" in modules["cognix-codex-secure-agent"]["dependencyState"]["dependencies"]
 
 

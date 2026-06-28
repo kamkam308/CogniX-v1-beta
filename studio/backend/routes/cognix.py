@@ -22,6 +22,7 @@ from core.cognix import benchmark as cognix_benchmark
 from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import codex_pipeline as cognix_codex_pipeline
 from core.cognix import context_manager as cognix_context_manager
+from core.cognix import deployment_manager as cognix_deployment_manager
 from core.cognix import hardware as cognix_hardware
 from core.cognix import integration_manager as cognix_integration_manager
 from core.cognix import module_registry as cognix_module_registry
@@ -211,6 +212,17 @@ class WorkerQueuePlanRequest(BaseModel):
     project_id: str | None = Field(None, max_length = 160)
     sources: list[dict[str, Any]] | None = None
     dataset: dict[str, Any] | None = None
+
+
+class DeploymentPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    target_type: str | None = Field(None, alias = "targetType", max_length = 120)
+    edition: str | None = Field(None, max_length = 80)
+    expected_users: int | None = Field(None, alias = "expectedUsers", ge = 1, le = 100000)
+    data_sensitivity: str | None = Field(None, alias = "dataSensitivity", max_length = 120)
+    requested_features: list[str] | None = Field(None, alias = "requestedFeatures")
 
 
 class ToolActionPlanRequest(BaseModel):
@@ -1081,6 +1093,67 @@ async def runtime_adapters(current_subject: str = Depends(get_current_jwt_subjec
     return {
         "username": current_subject,
         "registry": cognix_runtime_adapter.build_runtime_adapter_registry(),
+    }
+
+
+@router.get("/deployments/targets")
+async def deployment_targets(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    return {
+        "username": current_subject,
+        "registry": cognix_deployment_manager.build_deployment_target_registry(),
+    }
+
+
+@router.post("/deployments/plan")
+async def deployment_plan(
+    payload: DeploymentPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    hardware = cognix_hardware.get_hardware_profile()
+    latest_benchmark = cognix_db.get_latest_benchmark_run(current_subject)
+    recommendation_payload = cognix_recommender.build_model_recommendation(
+        hardware,
+        latest_benchmark_run = latest_benchmark,
+    )
+    plan = cognix_deployment_manager.build_deployment_plan(
+        username = current_subject,
+        objective = payload.objective,
+        hardware = hardware,
+        recommendation = recommendation_payload["recommendation"],
+        target_type = payload.target_type,
+        edition = payload.edition,
+        expected_users = payload.expected_users,
+        data_sensitivity = payload.data_sensitivity,
+        requested_features = payload.requested_features,
+        latest_benchmark_run = latest_benchmark,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "deployment_plan_built",
+        resource_type = "cognix_deployment",
+        resource_id = str(plan.get("recommendedTarget", {}).get("targetId") or "none"),
+        severity = "warning" if plan.get("securityPlan", {}).get("humanApprovalRequired") else "notice",
+        metadata = {
+            "deploymentManagerVersion": plan.get("deploymentManagerVersion"),
+            "targetType": plan.get("request", {}).get("targetType"),
+            "edition": plan.get("request", {}).get("edition"),
+            "expectedUsers": plan.get("request", {}).get("expectedUsers"),
+            "recommendedTargetId": plan.get("recommendedTarget", {}).get("targetId"),
+            "riskLevel": plan.get("securityPlan", {}).get("riskLevel"),
+            "requiredCapabilities": plan.get("requiredCapabilities", []),
+            "sideEffects": plan.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "hardware": hardware,
+        "latestBenchmark": latest_benchmark,
+        "recommendation": recommendation_payload["recommendation"],
+        "deploymentPlan": plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": plan.get("sideEffects", {}),
+        "plannerVersion": cognix_deployment_manager.COGNIX_DEPLOYMENT_MANAGER_VERSION,
     }
 
 

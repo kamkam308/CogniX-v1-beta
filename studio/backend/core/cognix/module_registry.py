@@ -121,6 +121,19 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "uiPanels": ["admin-security", "deployment-settings"],
         "dependencies": ["cognix-local-core", "cognix-integrations"],
     },
+    {
+        "id": "cognix-deployment-manager",
+        "displayName": "CogniX Deployment Manager",
+        "editionTargets": ["business", "university", "enterprise"],
+        "status": "planned",
+        "capabilities": ["deployment_targets", "gpu_scheduler_planning", "monitoring_plan", "autoscaling_plan"],
+        "routes": ["/api/cognix/deployments/targets", "/api/cognix/deployments/plan"],
+        "permissions": ["admin"],
+        "tools": ["github", "cloud-provider", "microsoft-teams"],
+        "defaultModels": ["cognix-general-small"],
+        "uiPanels": ["deployment-settings", "admin-security"],
+        "dependencies": ["cognix-local-core", "cognix-integrations", "cognix-enterprise-foundation"],
+    },
 ]
 
 
