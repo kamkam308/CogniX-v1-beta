@@ -14,6 +14,7 @@ import re
 from typing import Any
 
 from core.cognix import cache_manager as cognix_cache_manager
+from core.cognix import decision_engine as cognix_decision_engine
 from core.cognix import hardware as cognix_hardware
 from core.cognix import recommender as cognix_recommender
 from core.cognix.router import classify_objective
@@ -75,6 +76,7 @@ def _warnings(
     classification: dict[str, Any],
     recommendation: dict[str, Any],
     cache: dict[str, Any],
+    task_strategy: dict[str, Any],
 ) -> list[str]:
     warnings: list[str] = []
     if classification.get("needsClarification"):
@@ -85,6 +87,9 @@ def _warnings(
     next_action = cache.get("nextAction") if isinstance(cache, dict) else None
     if isinstance(next_action, dict) and str(next_action.get("type") or "").startswith("would_unload"):
         warnings.append(str(next_action.get("reason") or "Le cache local proposera une eviction."))
+    for item in task_strategy.get("risks") or []:
+        if isinstance(item, str) and item:
+            warnings.append(item)
 
     deduped: list[str] = []
     seen: set[str] = set()
@@ -98,6 +103,7 @@ def _warnings(
 def _steps(
     *,
     classification: dict[str, Any],
+    task_strategy: dict[str, Any],
     recommendation: dict[str, Any],
     cache: dict[str, Any],
     status: str,
@@ -111,6 +117,15 @@ def _steps(
             "detail": (
                 f"Domaine {classification.get('label', 'General')} "
                 f"via {classification.get('routingMode', 'unknown')}."
+            ),
+        },
+        {
+            "id": "choose_task_strategy",
+            "label": "Choisir la strategie IA",
+            "status": "complete",
+            "detail": (
+                f"{task_strategy.get('label', 'Strategie CogniX')} "
+                f"via {task_strategy.get('primaryCapability', 'orchestrator')}."
             ),
         },
         {
@@ -162,6 +177,11 @@ def build_execution_plan(
     recommendation_payload = cognix_recommender.build_model_recommendation(hardware)
     recommendation = recommendation_payload["recommendation"]
     classification = classify_objective(objective, project_type = project_type)
+    task_strategy = cognix_decision_engine.build_task_strategy(
+        objective,
+        classification = classification,
+        project_type = project_type,
+    )
     cache = cognix_cache_manager.build_cache_state(
         hardware,
         active_model = _runtime_snapshot_value(runtime_snapshot, "activeModel", None),
@@ -185,6 +205,10 @@ def build_execution_plan(
         "selectedModelId": recommendation.get("modelId"),
         "selectedModelLabel": recommendation.get("modelLabel"),
         "domainModelLabel": classification.get("recommendedModelLabel"),
+        "recommendedPath": task_strategy.get("path"),
+        "primaryCapability": task_strategy.get("primaryCapability"),
+        "requiresHumanConfirmation": task_strategy.get("requiresHumanConfirmation"),
+        "uses": task_strategy.get("uses"),
         "requiresModelLoad": not bool(cache.get("runtime", {}).get("activeModel")),
         "willLoadModel": False,
         "willGenerate": False,
@@ -205,9 +229,11 @@ def build_execution_plan(
         "providers": recommendation_payload["providers"],
         "recommendation": recommendation,
         "cache": cache,
+        "taskStrategy": task_strategy,
         "executionStrategy": execution_strategy,
         "steps": _steps(
             classification = classification,
+            task_strategy = task_strategy,
             recommendation = recommendation,
             cache = cache,
             status = status,
@@ -216,11 +242,16 @@ def build_execution_plan(
             classification = classification,
             recommendation = recommendation,
             cache = cache,
+            task_strategy = task_strategy,
         ),
         "sideEffects": {
             "modelLoad": False,
             "generation": False,
             "networkModelCall": False,
+            "toolExecution": False,
+            "ragIndexing": False,
+            "fineTuningJob": False,
+            "codeModification": False,
             "cacheMode": "observe_only",
         },
     }

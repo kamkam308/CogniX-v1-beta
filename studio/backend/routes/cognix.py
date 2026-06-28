@@ -250,6 +250,9 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "project_type": "projectType",
         "selected_domain": "selectedDomain",
         "model_label": "modelLabel",
+        "recommended_path": "recommendedPath",
+        "primary_capability": "primaryCapability",
+        "decision_json": "decisionJson",
         "needs_clarification": "needsClarification",
         "routing_mode": "routingMode",
         "scores_json": "scoresJson",
@@ -1028,10 +1031,18 @@ async def orchestrator_plan(
         project_type = payload.project_type,
         classification = plan["classification"],
     )
+    orchestrator_log = cognix_db.create_orchestrator_log(
+        current_subject,
+        payload.objective,
+        project_type = payload.project_type,
+        project_id = payload.project_id,
+        plan = plan,
+    )
     return {
         **plan,
         "runtimeError": None,
         "logId": log.get("id"),
+        "orchestratorLogId": orchestrator_log.get("id"),
     }
 
 
@@ -1926,6 +1937,12 @@ async def admin_security_threats(current_subject: str = Depends(get_current_jwt_
 async def admin_router_logs(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
     _require_admin(current_subject)
     return {"logs": _rows(cognix_db.list_router_logs(limit = 500))}
+
+
+@router.get("/admin/orchestrator-logs")
+async def admin_orchestrator_logs(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    return {"logs": _rows(cognix_db.list_orchestrator_logs(limit = 500))}
 
 
 @router.get("/admin/audit-logs")

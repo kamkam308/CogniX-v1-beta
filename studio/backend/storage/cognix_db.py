@@ -213,6 +213,30 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_router_logs_username
             ON cognix_router_logs(username, created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_orchestrator_logs (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            objective_excerpt TEXT NOT NULL,
+            project_type TEXT,
+            project_id TEXT,
+            selected_domain TEXT NOT NULL,
+            recommended_path TEXT NOT NULL,
+            primary_capability TEXT NOT NULL,
+            provider_type TEXT,
+            model_id TEXT,
+            status TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            decision_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_orchestrator_logs_created
+            ON cognix_orchestrator_logs(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_orchestrator_logs_username
+            ON cognix_orchestrator_logs(username, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_orchestrator_logs_path
+            ON cognix_orchestrator_logs(recommended_path, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_reports (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -1010,6 +1034,124 @@ def list_router_logs(username: str | None = None, limit: int = 200) -> list[dict
                 (normalized_limit,),
             ).fetchall()
         return _rows_to_dicts(rows)
+    finally:
+        conn.close()
+
+
+def create_orchestrator_log(
+    username: str,
+    objective: str,
+    *,
+    project_type: str | None,
+    project_id: str | None,
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    created_at = _now()
+    log_id = _new_id("orl")
+    objective_excerpt = re.sub(r"\s+", " ", objective or "").strip()[:500]
+    classification = plan.get("classification") if isinstance(plan.get("classification"), dict) else {}
+    task_strategy = plan.get("taskStrategy") if isinstance(plan.get("taskStrategy"), dict) else {}
+    execution_strategy = (
+        plan.get("executionStrategy")
+        if isinstance(plan.get("executionStrategy"), dict)
+        else {}
+    )
+    recommendation = (
+        plan.get("recommendation")
+        if isinstance(plan.get("recommendation"), dict)
+        else {}
+    )
+    decision = {
+        "orchestratorVersion": plan.get("orchestratorVersion"),
+        "decisionEngineVersion": task_strategy.get("decisionEngineVersion"),
+        "mode": plan.get("mode"),
+        "selectedDomain": classification.get("selectedDomain"),
+        "recommendedPath": task_strategy.get("path"),
+        "primaryCapability": task_strategy.get("primaryCapability"),
+        "requiresHumanConfirmation": task_strategy.get("requiresHumanConfirmation"),
+        "uses": task_strategy.get("uses"),
+        "status": execution_strategy.get("status"),
+        "sideEffects": plan.get("sideEffects"),
+        "warnings": plan.get("warnings") or [],
+    }
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_orchestrator_logs
+                (
+                    id,
+                    username,
+                    objective_excerpt,
+                    project_type,
+                    project_id,
+                    selected_domain,
+                    recommended_path,
+                    primary_capability,
+                    provider_type,
+                    model_id,
+                    status,
+                    confidence,
+                    decision_json,
+                    created_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                log_id,
+                username,
+                objective_excerpt,
+                (project_type or "").strip() or None,
+                (project_id or "").strip() or None,
+                str(classification.get("selectedDomain") or "general"),
+                str(task_strategy.get("path") or "expert_chat"),
+                str(task_strategy.get("primaryCapability") or "model_router"),
+                recommendation.get("providerType"),
+                recommendation.get("modelId"),
+                str(execution_strategy.get("status") or "unknown"),
+                float(task_strategy.get("confidence") or 0.0),
+                json.dumps(decision, ensure_ascii = False),
+                created_at,
+            ),
+        )
+        conn.commit()
+        return row_to_dict(
+            conn.execute(
+                "SELECT * FROM cognix_orchestrator_logs WHERE id = ?",
+                (log_id,),
+            ).fetchone()
+        ) or {}
+    finally:
+        conn.close()
+
+
+def list_orchestrator_logs(username: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        normalized_limit = max(1, min(int(limit), 500))
+        if username:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_orchestrator_logs
+                WHERE username = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, normalized_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_orchestrator_logs
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (normalized_limit,),
+            ).fetchall()
+        logs = _rows_to_dicts(rows)
+        for log in logs:
+            log["decision"] = _json_or_default(log.get("decision_json"), {})
+        return logs
     finally:
         conn.close()
 

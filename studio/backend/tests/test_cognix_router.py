@@ -16,6 +16,7 @@ from auth import storage
 from auth.authentication import get_current_jwt_subject
 from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import context_manager as cognix_context_manager
+from core.cognix import decision_engine as cognix_decision_engine
 from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import tool_registry as cognix_tool_registry
 from core.cognix.router import classify_objective
@@ -140,6 +141,23 @@ def test_router_flags_close_math_physics_domains():
     assert classification["scores"]["physique"] > 0.4
 
 
+def test_decision_engine_prefers_rag_before_fine_tuning_for_documents():
+    classification = classify_objective("Je veux entrainer CogniX pour repondre a partir de mes PDF de cours")
+    strategy = cognix_decision_engine.build_task_strategy(
+        "Je veux entrainer CogniX pour repondre a partir de mes PDF de cours",
+        classification = classification,
+    )
+
+    assert strategy["decisionEngineVersion"] == "cognix_decision_engine_v1"
+    assert strategy["path"] == "rag_first"
+    assert strategy["primaryCapability"] == "rag"
+    assert strategy["uses"]["rag"] is True
+    assert strategy["uses"]["fineTuning"] is False
+    assert strategy["contextPlan"]["includeRagChunks"] is True
+    assert strategy["sideEffects"]["ragIndexing"] is False
+    assert any("Fine-tuning differe" in item for item in strategy["deferred"])
+
+
 def test_orchestrator_builds_dry_run_plan_without_loading(monkeypatch):
     monkeypatch.setattr(
         cognix_orchestrator.cognix_hardware,
@@ -168,11 +186,17 @@ def test_orchestrator_builds_dry_run_plan_without_loading(monkeypatch):
     assert plan["classification"]["selectedDomain"] == "code"
     assert plan["executionStrategy"]["selectedModelLabel"] == "Qwen 4B local via Ollama"
     assert plan["executionStrategy"]["domainModelLabel"] == "CogniX Code 4B"
+    assert plan["taskStrategy"]["decisionEngineVersion"] == "cognix_decision_engine_v1"
+    assert plan["taskStrategy"]["path"] == "codex_guarded_pipeline"
+    assert plan["executionStrategy"]["recommendedPath"] == "codex_guarded_pipeline"
+    assert plan["executionStrategy"]["primaryCapability"] == "codex_secure_agent"
     assert plan["executionStrategy"]["willLoadModel"] is False
     assert plan["executionStrategy"]["willGenerate"] is False
     assert plan["sideEffects"]["modelLoad"] is False
     assert plan["sideEffects"]["generation"] is False
+    assert plan["sideEffects"]["codeModification"] is False
     assert any(step["id"] == "dry_run_guard" for step in plan["steps"])
+    assert any(step["id"] == "choose_task_strategy" for step in plan["steps"])
 
 
 def test_context_manager_builds_bounded_context_packet():
@@ -571,8 +595,11 @@ def test_orchestrator_plan_endpoint_logs_dry_run_decision(monkeypatch):
 
     assert body["username"] == "alice"
     assert body["logId"].startswith("rtl_")
+    assert body["orchestratorLogId"].startswith("orl_")
     assert body["mode"] == "dry_run"
     assert body["classification"]["selectedDomain"] == "code"
+    assert body["taskStrategy"]["path"] == "codex_guarded_pipeline"
+    assert body["taskStrategy"]["sideEffects"]["codeModification"] is False
     assert body["executionStrategy"]["willLoadModel"] is False
     assert body["sideEffects"]["networkModelCall"] is False
 
@@ -581,6 +608,22 @@ def test_orchestrator_plan_endpoint_logs_dry_run_decision(monkeypatch):
     assert len(logs) == 1
     assert logs[0]["id"] == body["logId"]
     assert logs[0]["selectedDomain"] == "code"
+
+    with pytest.raises(HTTPException) as user_read:
+        run_async(cognix_routes.admin_orchestrator_logs(current_subject = "alice"))
+    assert user_read.value.status_code == 403
+
+    admin_orchestrator_read = run_async(
+        cognix_routes.admin_orchestrator_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME)
+    )
+    orchestrator_logs = admin_orchestrator_read["logs"]
+    assert len(orchestrator_logs) == 1
+    decision_log = orchestrator_logs[0]
+    assert decision_log["id"] == body["orchestratorLogId"]
+    assert decision_log["selectedDomain"] == "code"
+    assert decision_log["recommendedPath"] == "codex_guarded_pipeline"
+    assert decision_log["primaryCapability"] == "codex_secure_agent"
+    assert decision_log["decision"]["sideEffects"]["generation"] is False
 
 
 def test_router_decisions_are_logged_for_admin_review():
