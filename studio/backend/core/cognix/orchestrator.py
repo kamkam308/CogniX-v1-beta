@@ -14,6 +14,7 @@ import re
 from typing import Any
 
 from core.cognix import cache_manager as cognix_cache_manager
+from core.cognix import codex_pipeline as cognix_codex_pipeline
 from core.cognix import context_manager as cognix_context_manager
 from core.cognix import decision_engine as cognix_decision_engine
 from core.cognix import fine_tuning_planner as cognix_fine_tuning_planner
@@ -84,6 +85,7 @@ def _warnings(
     recommendation: dict[str, Any],
     cache: dict[str, Any],
     task_strategy: dict[str, Any],
+    codex_pipeline_plan: dict[str, Any],
     rag_plan: dict[str, Any],
     context_plan: dict[str, Any],
     optimization_plan: dict[str, Any],
@@ -101,6 +103,9 @@ def _warnings(
     if isinstance(next_action, dict) and str(next_action.get("type") or "").startswith("would_unload"):
         warnings.append(str(next_action.get("reason") or "Le cache local proposera une eviction."))
     for item in task_strategy.get("risks") or []:
+        if isinstance(item, str) and item:
+            warnings.append(item)
+    for item in codex_pipeline_plan.get("warnings") or []:
         if isinstance(item, str) and item:
             warnings.append(item)
     for item in rag_plan.get("warnings") or []:
@@ -137,6 +142,7 @@ def _steps(
     task_strategy: dict[str, Any],
     recommendation: dict[str, Any],
     cache: dict[str, Any],
+    codex_pipeline_plan: dict[str, Any],
     rag_plan: dict[str, Any],
     context_plan: dict[str, Any],
     optimization_plan: dict[str, Any],
@@ -182,6 +188,15 @@ def _steps(
             "detail": str(
                 runtime_adapter_plan.get("reason")
                 or "Adapter runtime selectionne sans mutation de serveur."
+            ),
+        },
+        {
+            "id": "plan_codex_pipeline",
+            "label": "Planifier pipeline Codex",
+            "status": "complete",
+            "detail": str(
+                codex_pipeline_plan.get("reason")
+                or "Pipeline Codex observe uniquement: aucune modification code."
             ),
         },
         {
@@ -362,6 +377,14 @@ def build_execution_plan(
         cache = cache,
         classification = classification,
     )
+    codex_pipeline_plan = cognix_codex_pipeline.build_codex_pipeline_plan(
+        objective = objective,
+        current_subject = current_subject,
+        project_id = project_id,
+        classification = classification,
+        task_strategy = task_strategy,
+        execution_policy = execution_policy,
+    )
 
     execution_strategy = {
         "status": status,
@@ -389,6 +412,8 @@ def build_execution_plan(
         "optimizationHardwareTier": optimization_plan.get("hardwareTier"),
         "runtimeAdapterId": runtime_adapter_plan.get("selectedAdapter", {}).get("adapterId"),
         "runtimeAdapterType": runtime_adapter_plan.get("selectedAdapter", {}).get("runtimeType"),
+        "codexPipelineApplicable": codex_pipeline_plan.get("applicable"),
+        "codexBranchName": codex_pipeline_plan.get("branch", {}).get("recommendedName"),
         "fineTuningMethod": fine_tuning_plan.get("method", {}).get("type"),
         "fineTuningReadyToRequestApproval": fine_tuning_plan.get("approval", {}).get("readyToRequest"),
         "uses": task_strategy.get("uses"),
@@ -413,6 +438,7 @@ def build_execution_plan(
         "providers": recommendation_payload["providers"],
         "recommendation": recommendation,
         "cache": cache,
+        "codexPipelinePlan": codex_pipeline_plan,
         "ragPlan": rag_plan,
         "contextPlan": context_plan,
         "optimizationPlan": optimization_plan,
@@ -427,6 +453,7 @@ def build_execution_plan(
             task_strategy = task_strategy,
             recommendation = recommendation,
             cache = cache,
+            codex_pipeline_plan = codex_pipeline_plan,
             rag_plan = rag_plan,
             context_plan = context_plan,
             optimization_plan = optimization_plan,
@@ -441,6 +468,7 @@ def build_execution_plan(
             recommendation = recommendation,
             cache = cache,
             task_strategy = task_strategy,
+            codex_pipeline_plan = codex_pipeline_plan,
             rag_plan = rag_plan,
             context_plan = context_plan,
             optimization_plan = optimization_plan,
@@ -463,6 +491,11 @@ def build_execution_plan(
             "benchmarkRun": False,
             "fineTuningJob": False,
             "codeModification": False,
+            "branchCreate": False,
+            "commit": False,
+            "push": False,
+            "merge": False,
+            "deployment": False,
             "cacheMode": "observe_only",
         },
     }

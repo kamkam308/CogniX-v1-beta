@@ -20,6 +20,7 @@ from auth import storage as auth_storage
 from auth.authentication import get_current_jwt_subject
 from core.cognix import benchmark as cognix_benchmark
 from core.cognix import cache_manager as cognix_cache_manager
+from core.cognix import codex_pipeline as cognix_codex_pipeline
 from core.cognix import context_manager as cognix_context_manager
 from core.cognix import hardware as cognix_hardware
 from core.cognix import integration_manager as cognix_integration_manager
@@ -181,6 +182,12 @@ class OptimizationPlanRequest(BaseModel):
 
 
 class RuntimePlanRequest(BaseModel):
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    project_type: str | None = Field(None, max_length = 80)
+    project_id: str | None = Field(None, max_length = 160)
+
+
+class CodexPipelinePlanRequest(BaseModel):
     objective: str = Field(..., min_length = 1, max_length = 4000)
     project_type: str | None = Field(None, max_length = 80)
     project_id: str | None = Field(None, max_length = 160)
@@ -1042,6 +1049,53 @@ async def runtime_plan(
         "auditLogId": audit.get("id"),
         "sideEffects": adapter_plan.get("sideEffects", {}),
         "plannerVersion": cognix_runtime_adapter.COGNIX_RUNTIME_ADAPTER_VERSION,
+    }
+
+
+@router.post("/codex/pipeline-plan")
+async def codex_pipeline_plan(
+    payload: CodexPipelinePlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    runtime = _current_model_cache_runtime()
+    plan = cognix_orchestrator.build_execution_plan(
+        payload.objective,
+        current_subject = current_subject,
+        project_type = payload.project_type,
+        project_id = payload.project_id,
+        runtime_snapshot = runtime,
+        latest_benchmark_run = cognix_db.get_latest_benchmark_run(current_subject),
+    )
+    pipeline = plan["codexPipelinePlan"]
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "codex_pipeline_plan_built",
+        resource_type = "cognix_codex_pipeline",
+        resource_id = str(payload.project_id or pipeline.get("branch", {}).get("recommendedName") or "none"),
+        severity = "warning" if pipeline.get("applicable") else "notice",
+        metadata = {
+            "codexPipelineVersion": pipeline.get("plannerVersion"),
+            "applicable": pipeline.get("applicable"),
+            "recommendedPath": pipeline.get("recommendedPath"),
+            "branchName": pipeline.get("branch", {}).get("recommendedName"),
+            "qualityGates": pipeline.get("qualityGates", {}),
+            "blockedActionIds": [
+                item.get("id") for item in pipeline.get("blockedActions", []) if isinstance(item, dict)
+            ],
+            "sideEffects": pipeline.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "runtimeError": runtime.get("error"),
+        "classification": plan["classification"],
+        "taskStrategy": plan["taskStrategy"],
+        "codexPipelinePlan": pipeline,
+        "executionPolicy": plan["executionPolicy"],
+        "auditLogId": audit.get("id"),
+        "sideEffects": pipeline.get("sideEffects", {}),
+        "plannerVersion": cognix_codex_pipeline.COGNIX_CODEX_PIPELINE_VERSION,
     }
 
 

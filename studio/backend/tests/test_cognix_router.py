@@ -15,6 +15,7 @@ if str(_BACKEND_ROOT) not in sys.path:
 from auth import storage
 from auth.authentication import get_current_jwt_subject
 from core.cognix import cache_manager as cognix_cache_manager
+from core.cognix import codex_pipeline as cognix_codex_pipeline
 from core.cognix import context_manager as cognix_context_manager
 from core.cognix import decision_engine as cognix_decision_engine
 from core.cognix import integration_manager as cognix_integration_manager
@@ -243,8 +244,14 @@ def test_orchestrator_builds_dry_run_plan_without_loading(monkeypatch):
     assert plan["runtimeAdapterPlan"]["selectedAdapter"]["adapterId"] == "ollama"
     assert plan["runtimeAdapterPlan"]["sideEffects"]["runtimeMutation"] is False
     assert plan["executionStrategy"]["runtimeAdapterId"] == "ollama"
+    assert plan["codexPipelinePlan"]["plannerVersion"] == "cognix_codex_pipeline_v1"
+    assert plan["codexPipelinePlan"]["applicable"] is True
+    assert plan["codexPipelinePlan"]["sideEffects"]["codeModification"] is False
+    assert plan["executionStrategy"]["codexPipelineApplicable"] is True
+    assert plan["executionStrategy"]["codexBranchName"].startswith("cognix/")
     assert plan["executionStrategy"]["preloadAction"] == "would_preload"
     assert any(step["id"] == "select_runtime_adapter" for step in plan["steps"])
+    assert any(step["id"] == "plan_codex_pipeline" for step in plan["steps"])
     assert any(step["id"] == "plan_rag" for step in plan["steps"])
     assert any(step["id"] == "plan_context" for step in plan["steps"])
     assert any(step["id"] == "plan_optimizations" for step in plan["steps"])
@@ -652,6 +659,71 @@ def test_runtime_adapter_plan_endpoint_logs_audited_dry_run(monkeypatch):
     assert log["action"] == "runtime_adapter_plan_built"
     assert log["metadata"]["runtimeAdapterVersion"] == "cognix_runtime_adapter_v1"
     assert log["metadata"]["sideEffects"]["runtimeMutation"] is False
+
+
+def test_codex_pipeline_plans_required_gates_without_modifying_code():
+    plan = cognix_codex_pipeline.build_codex_pipeline_plan(
+        objective = "Ajoute un module CogniX Chemistry dans le code source",
+        current_subject = "alice",
+        project_id = "project-code",
+        classification = {"selectedDomain": "code"},
+        task_strategy = {"path": "codex_guarded_pipeline"},
+        execution_policy = {"riskLevel": "high"},
+    )
+
+    assert plan["plannerVersion"] == "cognix_codex_pipeline_v1"
+    assert plan["applicable"] is True
+    assert plan["recommendedPath"] == "codex_guarded_pipeline"
+    assert plan["branch"]["recommendedName"] == "cognix/project-code"
+    assert plan["branch"]["willCreate"] is False
+    assert plan["qualityGates"]["testsRequired"] is True
+    assert plan["qualityGates"]["buildRequired"] is True
+    assert plan["qualityGates"]["humanApprovalRequired"] is True
+    assert any(step["id"] == "human_approval" for step in plan["steps"])
+    assert any(item["id"] == "commit_push_merge" for item in plan["blockedActions"])
+    assert plan["sideEffects"]["fileWrite"] is False
+    assert plan["sideEffects"]["codeModification"] is False
+    assert plan["sideEffects"]["merge"] is False
+
+
+def test_codex_pipeline_endpoint_logs_audited_dry_run(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+
+    body = run_async(
+        cognix_routes.codex_pipeline_plan(
+            cognix_routes.CodexPipelinePlanRequest(
+                objective = "Corrige ce bug Python dans mon backend API",
+                project_type = "code",
+                project_id = "project-code",
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    pipeline = body["codexPipelinePlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_codex_pipeline_v1"
+    assert pipeline["applicable"] is True
+    assert pipeline["sideEffects"]["branchCreate"] is False
+    assert pipeline["sideEffects"]["testExecution"] is False
+    assert pipeline["sideEffects"]["codeModification"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "codex_pipeline_plan_built"
+    assert log["metadata"]["codexPipelineVersion"] == "cognix_codex_pipeline_v1"
+    assert log["metadata"]["sideEffects"]["codeModification"] is False
 
 
 def test_context_manager_builds_bounded_context_packet():
