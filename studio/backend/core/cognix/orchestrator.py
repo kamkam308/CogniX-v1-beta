@@ -14,6 +14,7 @@ import re
 from typing import Any
 
 from core.cognix import cache_manager as cognix_cache_manager
+from core.cognix import context_manager as cognix_context_manager
 from core.cognix import decision_engine as cognix_decision_engine
 from core.cognix import fine_tuning_planner as cognix_fine_tuning_planner
 from core.cognix import hardware as cognix_hardware
@@ -82,6 +83,7 @@ def _warnings(
     cache: dict[str, Any],
     task_strategy: dict[str, Any],
     rag_plan: dict[str, Any],
+    context_plan: dict[str, Any],
     preload_plan: dict[str, Any],
     fine_tuning_plan: dict[str, Any],
 ) -> list[str]:
@@ -98,6 +100,9 @@ def _warnings(
         if isinstance(item, str) and item:
             warnings.append(item)
     for item in rag_plan.get("warnings") or []:
+        if isinstance(item, str) and item:
+            warnings.append(item)
+    for item in context_plan.get("warnings") or []:
         if isinstance(item, str) and item:
             warnings.append(item)
     for item in preload_plan.get("warnings") or []:
@@ -123,6 +128,7 @@ def _steps(
     recommendation: dict[str, Any],
     cache: dict[str, Any],
     rag_plan: dict[str, Any],
+    context_plan: dict[str, Any],
     preload_plan: dict[str, Any],
     fine_tuning_plan: dict[str, Any],
     execution_policy: dict[str, Any],
@@ -173,6 +179,15 @@ def _steps(
             "detail": str(
                 rag_plan.get("reason")
                 or "RAG observe uniquement: aucune indexation ni recherche."
+            ),
+        },
+        {
+            "id": "plan_context",
+            "label": "Construire le contexte",
+            "status": "complete",
+            "detail": str(
+                context_plan.get("reason")
+                or "Contexte observe uniquement: aucune memoire ecrite ni retrieval execute."
             ),
         },
         {
@@ -262,6 +277,15 @@ def build_execution_plan(
         sources = rag_sources,
         rag_available = rag_available,
     )
+    context_plan = cognix_context_manager.build_context_plan(
+        current_subject = current_subject,
+        objective = objective,
+        project_id = project_id,
+        classification = classification,
+        task_strategy = task_strategy,
+        recommendation = recommendation,
+        rag_plan = rag_plan,
+    )
     preload_plan = cognix_preload_planner.build_preload_plan(
         objective = objective,
         project_type = project_type,
@@ -311,6 +335,9 @@ def build_execution_plan(
         "preloadTargetModelId": preload_plan.get("target", {}).get("modelId"),
         "ragReadyForRetrieval": rag_plan.get("readyForRetrieval"),
         "ragStrategy": rag_plan.get("retrieval", {}).get("strategy"),
+        "contextAssemblyStrategy": context_plan.get("assemblyStrategy"),
+        "maxContextTokens": context_plan.get("tokenBudget", {}).get("maxContextTokens"),
+        "rawHistoryAllowed": context_plan.get("tokenBudget", {}).get("rawHistoryAllowed"),
         "fineTuningMethod": fine_tuning_plan.get("method", {}).get("type"),
         "fineTuningReadyToRequestApproval": fine_tuning_plan.get("approval", {}).get("readyToRequest"),
         "uses": task_strategy.get("uses"),
@@ -336,6 +363,7 @@ def build_execution_plan(
         "recommendation": recommendation,
         "cache": cache,
         "ragPlan": rag_plan,
+        "contextPlan": context_plan,
         "preloadPlan": preload_plan,
         "fineTuningPlan": fine_tuning_plan,
         "taskStrategy": task_strategy,
@@ -347,6 +375,7 @@ def build_execution_plan(
             recommendation = recommendation,
             cache = cache,
             rag_plan = rag_plan,
+            context_plan = context_plan,
             preload_plan = preload_plan,
             fine_tuning_plan = fine_tuning_plan,
             execution_policy = execution_policy,
@@ -358,6 +387,7 @@ def build_execution_plan(
             cache = cache,
             task_strategy = task_strategy,
             rag_plan = rag_plan,
+            context_plan = context_plan,
             preload_plan = preload_plan,
             fine_tuning_plan = fine_tuning_plan,
         ),
@@ -367,6 +397,9 @@ def build_execution_plan(
             "networkModelCall": False,
             "toolExecution": False,
             "ragIndexing": False,
+            "ragRetrieval": False,
+            "memoryWrite": False,
+            "contextMutation": False,
             "fineTuningJob": False,
             "codeModification": False,
             "cacheMode": "observe_only",

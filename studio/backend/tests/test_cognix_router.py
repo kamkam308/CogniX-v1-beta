@@ -226,8 +226,14 @@ def test_orchestrator_builds_dry_run_plan_without_loading(monkeypatch):
     assert plan["ragPlan"]["recommendedPath"] == "no_rag_needed"
     assert plan["ragPlan"]["sideEffects"]["ragIndexing"] is False
     assert plan["executionStrategy"]["ragReadyForRetrieval"] is False
+    assert plan["contextPlan"]["contextManagerVersion"] == "cognix_context_manager_v1"
+    assert plan["contextPlan"]["tokenBudget"]["rawHistoryAllowed"] is False
+    assert plan["contextPlan"]["sideEffects"]["memoryWrite"] is False
+    assert plan["executionStrategy"]["contextAssemblyStrategy"] == "memory_project_recent"
+    assert plan["executionStrategy"]["rawHistoryAllowed"] is False
     assert plan["executionStrategy"]["preloadAction"] == "would_preload"
     assert any(step["id"] == "plan_rag" for step in plan["steps"])
+    assert any(step["id"] == "plan_context" for step in plan["steps"])
     assert any(step["id"] == "plan_preload" for step in plan["steps"])
     assert plan["fineTuningPlan"]["plannerVersion"] == "cognix_fine_tuning_planner_v1"
     assert plan["fineTuningPlan"]["recommendedPath"] == "no_fine_tuning_needed"
@@ -475,6 +481,36 @@ def test_fine_tuning_plan_defers_to_rag_for_document_objective(monkeypatch):
     assert plan["fineTuningPlan"]["sideEffects"]["fineTuningJob"] is False
 
 
+def test_context_plan_reserves_rag_and_caps_history():
+    plan = cognix_context_manager.build_context_plan(
+        current_subject = "alice",
+        objective = "Reponds a partir du document avec citations",
+        project_id = "project-rag",
+        classification = {"selectedDomain": "education"},
+        task_strategy = {"path": "rag_first"},
+        recommendation = {"memoryFit": {"level": "ok"}},
+        rag_plan = {
+            "recommendedPath": "rag_first",
+            "readyForRetrieval": True,
+            "contextBudget": {"maxContextTokens": 3200},
+        },
+        user_memory = {"content": "Reponds en francais."},
+        project = {"name": "Cours", "instructions": "Toujours citer les sources."},
+        recent_messages = [{"role": "user", "content": str(index)} for index in range(10)],
+    )
+
+    assert plan["contextManagerVersion"] == "cognix_context_manager_v1"
+    assert plan["assemblyStrategy"] == "rag_augmented_context"
+    assert plan["tokenBudget"]["rawHistoryAllowed"] is False
+    assert plan["tokenBudget"]["recentMessageLimit"] == 6
+    assert "rag_chunks" in plan["includedChannelIds"]
+    assert "conversation_summary" in plan["requiredChannelIds"]
+    assert "never_send_raw_history" in plan["compression"]
+    assert "compress_rag_chunks_with_citations" in plan["compression"]
+    assert plan["sideEffects"]["ragRetrieval"] is False
+    assert plan["sideEffects"]["memoryWrite"] is False
+
+
 def test_context_manager_builds_bounded_context_packet():
     packet = cognix_context_manager.build_context_packet(
         current_subject = "alice",
@@ -494,9 +530,11 @@ def test_context_manager_builds_bounded_context_packet():
     assert "<cognix_context>" in packet["systemInstruction"]
     assert "<user_memory>" in packet["systemInstruction"]
     assert "<project_instructions>" in packet["systemInstruction"]
+    assert packet["contextPlan"]["tokenBudget"]["rawHistoryAllowed"] is False
     assert packet["sideEffects"]["modelLoad"] is False
     assert packet["sideEffects"]["generation"] is False
     assert packet["sideEffects"]["networkModelCall"] is False
+    assert packet["sideEffects"]["memoryWrite"] is False
 
 
 def test_context_pack_endpoint_combines_user_memory_and_project_instructions():
@@ -532,6 +570,8 @@ def test_context_pack_endpoint_combines_user_memory_and_project_instructions():
     assert body["username"] == "alice"
     assert body["projectId"] == "project-code"
     assert body["includedSectionIds"] == ["user_memory", "project_instructions"]
+    assert body["contextPlan"]["assemblyStrategy"] == "memory_project_recent"
+    assert body["contextPlan"]["tokenBudget"]["rawHistoryAllowed"] is False
     assert "Reponds en francais" in body["systemInstruction"]
     assert "Priorite a la securite" in body["systemInstruction"]
     assert body["sideEffects"]["networkModelCall"] is False
@@ -569,6 +609,7 @@ def test_context_pack_writes_sanitized_audit_log():
     assert log["action"] == "context_pack_built"
     assert log["resourceType"] == "cognix_context"
     assert log["metadata"]["sectionIds"] == ["user_memory"]
+    assert log["metadata"]["rawHistoryAllowed"] is False
     assert log["metadata"]["sideEffects"]["networkModelCall"] is False
     assert "Preference sensible" not in log["metadataJson"]
 

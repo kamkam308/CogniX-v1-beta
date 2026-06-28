@@ -13,6 +13,14 @@ MAX_SECTION_CHARS = 4000
 MAX_SYSTEM_INSTRUCTION_CHARS = 10000
 
 
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _as_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
 def _normalize_text(value: Any) -> str:
     if not isinstance(value, str):
         return ""
@@ -74,6 +82,233 @@ def _render_instruction(sections: list[dict[str, Any]]) -> str:
     return clipped
 
 
+def _as_non_negative_int(value: Any, default: int) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 0 else default
+
+
+def _channel(
+    *,
+    channel_id: str,
+    label: str,
+    source: str,
+    priority: int,
+    status: str,
+    max_tokens: int,
+    included: bool,
+    required: bool = False,
+    reason: str = "",
+) -> dict[str, Any]:
+    return {
+        "id": channel_id,
+        "label": label,
+        "source": source,
+        "priority": priority,
+        "status": status,
+        "included": included,
+        "required": required,
+        "maxTokens": max_tokens,
+        "reason": reason,
+    }
+
+
+def _context_budget(
+    *,
+    task_strategy: dict[str, Any],
+    recommendation: dict[str, Any],
+    rag_plan: dict[str, Any] | None,
+) -> dict[str, Any]:
+    rag_budget = _as_dict(_as_dict(rag_plan).get("contextBudget"))
+    rag_max = _as_non_negative_int(rag_budget.get("maxContextTokens"), 0)
+    memory_fit = _as_dict(recommendation.get("memoryFit"))
+    memory_level = str(memory_fit.get("level") or "unknown")
+    path = str(task_strategy.get("path") or "expert_chat")
+
+    if rag_max:
+        max_context_tokens = rag_max
+    elif memory_level == "tight":
+        max_context_tokens = 1800
+    elif path == "rag_first":
+        max_context_tokens = 3200
+    else:
+        max_context_tokens = 2400
+
+    recent_message_limit = 4 if memory_level == "tight" else 6 if path == "rag_first" else 8
+    rag_token_reserve = 0
+    if path == "rag_first" or _as_dict(rag_plan).get("recommendedPath") == "rag_first":
+        rag_token_reserve = min(max(700, max_context_tokens // 2), 1800)
+
+    return {
+        "maxContextTokens": max_context_tokens,
+        "recentMessageLimit": recent_message_limit,
+        "ragTokenReserve": rag_token_reserve,
+        "memoryTokenReserve": min(360, max_context_tokens // 6),
+        "projectTokenReserve": min(500, max_context_tokens // 5),
+        "summaryTokenReserve": min(420, max_context_tokens // 5),
+        "rawHistoryAllowed": False,
+    }
+
+
+def build_context_plan(
+    *,
+    current_subject: str,
+    objective: str | None = None,
+    project_id: str | None = None,
+    classification: dict[str, Any] | None = None,
+    task_strategy: dict[str, Any] | None = None,
+    recommendation: dict[str, Any] | None = None,
+    rag_plan: dict[str, Any] | None = None,
+    user_memory: dict[str, Any] | None = None,
+    project: dict[str, Any] | None = None,
+    conversation_summary: str | None = None,
+    recent_messages: list[dict[str, Any]] | None = None,
+    warnings: list[str] | None = None,
+) -> dict[str, Any]:
+    """Plan context assembly without reading extra data or calling a model."""
+
+    task_strategy = _as_dict(task_strategy)
+    recommendation = _as_dict(recommendation)
+    rag_plan = _as_dict(rag_plan)
+    classification = _as_dict(classification)
+    budget = _context_budget(
+        task_strategy = task_strategy,
+        recommendation = recommendation,
+        rag_plan = rag_plan,
+    )
+
+    memory_content = _normalize_text(_as_dict(user_memory).get("content"))
+    project_instructions = _normalize_text(_as_dict(project).get("instructions"))
+    project_name = _normalize_text(_as_dict(project).get("name"))
+    summary_content = _normalize_text(conversation_summary)
+    recent = [item for item in _as_list(recent_messages) if isinstance(item, dict)]
+    objective_excerpt = _clip_text(_normalize_text(objective)[:500], 500)[0]
+
+    path = str(task_strategy.get("path") or "expert_chat")
+    rag_recommended = path == "rag_first" or rag_plan.get("recommendedPath") == "rag_first"
+    rag_ready = bool(rag_plan.get("readyForRetrieval"))
+    needs_summary = len(recent) > int(budget["recentMessageLimit"])
+
+    channels = [
+        _channel(
+            channel_id = "user_memory",
+            label = "Memoire utilisateur",
+            source = "cognix_context_memory",
+            priority = 10,
+            status = "ready" if memory_content else "missing_optional",
+            max_tokens = int(budget["memoryTokenReserve"]),
+            included = bool(memory_content),
+            reason = "Preferences stables utilisateur." if memory_content else "Aucune memoire utilisateur utile fournie.",
+        ),
+        _channel(
+            channel_id = "project_memory",
+            label = "Memoire projet",
+            source = "chat_project",
+            priority = 20,
+            status = "ready" if project_instructions or project_name else "missing_optional",
+            max_tokens = int(budget["projectTokenReserve"]),
+            included = bool(project_instructions or project_name),
+            reason = "Instructions projet disponibles." if project_instructions or project_name else "Aucun contexte projet disponible.",
+        ),
+        _channel(
+            channel_id = "conversation_summary",
+            label = "Resume conversation",
+            source = "conversation_summary",
+            priority = 30,
+            status = "ready" if summary_content else "recommended" if needs_summary else "optional",
+            max_tokens = int(budget["summaryTokenReserve"]),
+            included = bool(summary_content),
+            required = needs_summary,
+            reason = "Resume compact des anciens messages." if summary_content else "Resumer les anciens tours avant injection brute.",
+        ),
+        _channel(
+            channel_id = "rag_chunks",
+            label = "Passages RAG cites",
+            source = "rag_engine",
+            priority = 40,
+            status = "ready" if rag_ready else "blocked" if rag_recommended else "not_needed",
+            max_tokens = int(budget["ragTokenReserve"]),
+            included = rag_ready,
+            required = rag_recommended,
+            reason = "Passages documentaires prets avec citations." if rag_ready else "Retrieval non execute en planification dry-run.",
+        ),
+        _channel(
+            channel_id = "recent_messages",
+            label = "Messages recents",
+            source = "conversation",
+            priority = 50,
+            status = "capped" if len(recent) > int(budget["recentMessageLimit"]) else "ready" if recent else "optional",
+            max_tokens = max(240, int(budget["maxContextTokens"]) - int(budget["ragTokenReserve"]) - int(budget["summaryTokenReserve"])),
+            included = bool(recent),
+            reason = f"Limiter a {budget['recentMessageLimit']} messages recents, jamais toute l'histoire brute.",
+        ),
+        _channel(
+            channel_id = "current_request",
+            label = "Demande courante",
+            source = "user_input",
+            priority = 60,
+            status = "ready" if objective_excerpt else "missing",
+            max_tokens = 420,
+            included = bool(objective_excerpt),
+            required = True,
+            reason = "La demande courante reste prioritaire sur tout contexte plus ancien.",
+        ),
+    ]
+
+    plan_warnings = list(warnings or [])
+    if rag_recommended and not rag_ready:
+        plan_warnings.append("RAG requis mais aucun passage pret: ne pas halluciner de source.")
+    if needs_summary and not summary_content:
+        plan_warnings.append("Conversation longue: resume requis avant injection au modele.")
+    if not memory_content and not project_instructions and not rag_ready:
+        plan_warnings.append("Contexte minimal: reponse basee surtout sur la demande courante.")
+
+    compression = ["never_send_raw_history"]
+    if needs_summary:
+        compression.append("summarize_old_turns")
+    if rag_ready:
+        compression.append("compress_rag_chunks_with_citations")
+    if classification.get("needsClarification"):
+        compression.append("defer_context_until_clarified")
+
+    return {
+        "username": current_subject,
+        "contextManagerVersion": CONTEXT_MANAGER_VERSION,
+        "mode": "dry_run",
+        "projectId": project_id,
+        "objectiveExcerpt": objective_excerpt,
+        "targetDomain": classification.get("selectedDomain") or "general",
+        "assemblyStrategy": "rag_augmented_context" if rag_ready else "memory_project_recent",
+        "tokenBudget": budget,
+        "channels": channels,
+        "includedChannelIds": [
+            channel["id"] for channel in channels if channel.get("included")
+        ],
+        "requiredChannelIds": [
+            channel["id"] for channel in channels if channel.get("required")
+        ],
+        "compression": compression,
+        "warnings": plan_warnings,
+        "reason": (
+            "Construire un contexte compact avec passages RAG cites et memoire utile."
+            if rag_ready
+            else "Construire un contexte minimal: memoire, projet, resume et demande courante."
+        ),
+        "sideEffects": {
+            "modelLoad": False,
+            "generation": False,
+            "networkModelCall": False,
+            "memoryWrite": False,
+            "ragRetrieval": False,
+            "contextMutation": False,
+        },
+    }
+
+
 def build_context_packet(
     *,
     current_subject: str,
@@ -111,6 +346,15 @@ def build_context_packet(
             )
         )
 
+    context_plan = build_context_plan(
+        current_subject = current_subject,
+        user_memory = user_memory,
+        project = project,
+        project_id = project_id,
+        objective = objective,
+        warnings = warnings,
+    )
+
     return {
         "username": current_subject,
         "contextManagerVersion": CONTEXT_MANAGER_VERSION,
@@ -119,6 +363,7 @@ def build_context_packet(
         "objectiveExcerpt": objective_excerpt,
         "sections": sections,
         "systemInstruction": _render_instruction(sections),
+        "contextPlan": context_plan,
         "includedSectionIds": [
             section["id"] for section in sections if section.get("included")
         ],
@@ -127,5 +372,8 @@ def build_context_packet(
             "modelLoad": False,
             "generation": False,
             "networkModelCall": False,
+            "memoryWrite": False,
+            "ragRetrieval": False,
+            "contextMutation": False,
         },
     }
