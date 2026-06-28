@@ -33,6 +33,7 @@ from core.cognix import intent_prediction as cognix_intent_prediction
 from core.cognix import memory_editor as cognix_memory_editor
 from core.cognix import memory_manager as cognix_memory_manager
 from core.cognix import model_lifecycle as cognix_model_lifecycle
+from core.cognix import model_translator as cognix_model_translator
 from core.cognix import module_registry as cognix_module_registry
 from core.cognix import onboarding as cognix_onboarding
 from core.cognix import optimization_planner as cognix_optimization_planner
@@ -2023,6 +2024,85 @@ def test_model_lifecycle_endpoint_logs_audited_dry_run(monkeypatch):
     assert log["metadata"]["modelLifecycleVersion"] == "cognix_model_lifecycle_v1"
     assert log["metadata"]["selectedPackId"] == "ollama-qwen-4b-local"
     assert log["metadata"]["sideEffects"]["modelLoad"] is False
+
+
+def test_model_translator_plans_gguf_to_ollama_without_conversion_job():
+    plan = cognix_model_translator.build_model_conversion_plan(
+        source_model = {
+            "modelId": "qwen-4b-q4.gguf",
+            "format": "gguf",
+            "architecture": "qwen",
+            "license": "apache-2.0",
+        },
+        target_format = "ollama_modelfile",
+        conversion_options = {"template": "chatml"},
+    )
+
+    assert plan["conversionServiceVersion"] == "cognix_model_conversion_service_v1"
+    assert plan["compatibilityCheckerVersion"] == "cognix_compatibility_checker_v1"
+    assert plan["exportManagerVersion"] == "cognix_model_export_manager_v1"
+    assert plan["compatibility"]["compatible"] is True
+    assert plan["targetFormat"] == "ollama_modelfile"
+    assert plan["conversionPlan"]["jobQueueRequired"] is True
+    assert plan["conversionPlan"]["willEnqueueNow"] is False
+    assert plan["exportPlan"]["willWriteArtifact"] is False
+    assert plan["registryUpdatePlan"]["willUpdateRegistryNow"] is False
+    assert plan["sideEffects"]["modelFileWrite"] is False
+    assert plan["sideEffects"]["conversionJobEnqueue"] is False
+    assert plan["sideEffects"]["modelLoad"] is False
+
+
+def test_model_translator_blocks_unknown_or_impossible_conversion_without_promise():
+    plan = cognix_model_translator.build_model_conversion_plan(
+        source_model = {"modelId": "qwen-4b-q4.gguf", "format": "gguf"},
+        target_format = "transformers",
+    )
+
+    assert plan["status"] == "blocked"
+    assert plan["compatibility"]["compatible"] is False
+    assert plan["compatibility"]["status"] == "blocked_impossible_or_unknown"
+    assert any("conversion universelle" in item["message"] for item in plan["risks"])
+    assert plan["conversionPlan"]["willEnqueueNow"] is False
+    assert plan["sideEffects"]["modelFileRead"] is False
+    assert plan["sideEffects"]["modelFileWrite"] is False
+
+
+def test_model_conversion_endpoint_stores_plan_and_logs_audit():
+    seed_accounts()
+    body = run_async(
+        cognix_routes.model_conversion_plan(
+            cognix_routes.ModelConversionPlanRequest(
+                sourceModel = {
+                    "modelId": "qwen-4b-q4.gguf",
+                    "format": "gguf",
+                    "architecture": "qwen",
+                },
+                targetFormat = "ollama_modelfile",
+                conversionOptions = {"template": "chatml"},
+                storeConversion = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    plan = body["modelConversionPlan"]
+    conversion = body["modelConversion"]
+    assert body["auditLogId"].startswith("aud_")
+    assert conversion["id"] == plan["conversionId"]
+    assert conversion["logs"][0]["eventType"] == "conversion_plan_stored"
+    assert body["sideEffects"]["conversionPlanWrite"] is True
+    assert body["sideEffects"]["conversionJobEnqueue"] is False
+    assert body["sideEffects"]["registryUpdate"] is False
+    assert body["sideEffects"]["modelLoad"] is False
+
+    listed = run_async(cognix_routes.model_conversions(current_subject = "alice"))
+    assert listed["conversions"][0]["id"] == conversion["id"]
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "model_conversion_plan_built"
+    assert log["metadata"]["compatible"] is True
+    assert log["metadata"]["sideEffects"]["conversionJobEnqueue"] is False
 
 
 def test_thinking_status_redacts_technical_model_details():
@@ -4498,6 +4578,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert {
         "cognix-local-core",
         "cognix-model-lifecycle",
+        "cognix-model-translator",
         "cognix-optimization-engine",
         "cognix-prompt-compression",
         "cognix-context-heatmap",
@@ -4534,6 +4615,12 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "cache_load_planning" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "/api/cognix/models/lifecycle-plan" in modules["cognix-model-lifecycle"]["routes"]
     assert "/api/cognix/models/cache/load-plan" in modules["cognix-model-lifecycle"]["routes"]
+    assert modules["cognix-model-translator"]["dependencyState"]["ready"] is True
+    assert "model_conversion_planning" in modules["cognix-model-translator"]["capabilities"]
+    assert "compatibility_checking" in modules["cognix-model-translator"]["capabilities"]
+    assert "model_export_planning" in modules["cognix-model-translator"]["capabilities"]
+    assert "/api/cognix/models/translator/plan" in modules["cognix-model-translator"]["routes"]
+    assert "/api/cognix/models/conversions" in modules["cognix-model-translator"]["routes"]
     assert modules["cognix-optimization-engine"]["dependencyState"]["ready"] is True
     assert "optimization_capability_registry" in modules["cognix-optimization-engine"]["capabilities"]
     assert "benchmark_gated_experiments" in modules["cognix-optimization-engine"]["capabilities"]

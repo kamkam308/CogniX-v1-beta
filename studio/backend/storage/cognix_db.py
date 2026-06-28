@@ -324,6 +324,38 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_execution_cost_logs_project
             ON cognix_execution_cost_logs(username, project_id, created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_model_conversions (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            project_id TEXT,
+            source_model_id TEXT NOT NULL,
+            source_format TEXT NOT NULL,
+            target_format TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'planned_no_execution',
+            compatibility_status TEXT NOT NULL DEFAULT 'unknown',
+            plan_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_model_conversions_username_created
+            ON cognix_model_conversions(username, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_model_conversions_project
+            ON cognix_model_conversions(username, project_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_conversion_logs (
+            id TEXT PRIMARY KEY,
+            conversion_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            message TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_conversion_logs_conversion
+            ON cognix_conversion_logs(username, conversion_id, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_reports (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -2424,6 +2456,135 @@ def list_execution_cost_logs(username: str, *, project_id: str | None = None, li
                 (username, normalized_limit),
             ).fetchall()
         return [_hydrate_execution_cost_log(dict(row)) for row in rows]
+    finally:
+        conn.close()
+
+
+def _hydrate_model_conversion(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["plan"] = _json_or_default(item.get("plan_json"), {})
+    return item
+
+
+def _hydrate_conversion_log(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def create_model_conversion(
+    username: str,
+    *,
+    plan: dict[str, Any],
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    now = _now()
+    conversion_id = str(plan.get("conversionId") or _new_id("mconv"))[:160]
+    source = plan.get("sourceModel") if isinstance(plan.get("sourceModel"), dict) else {}
+    compatibility = plan.get("compatibility") if isinstance(plan.get("compatibility"), dict) else {}
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_model_conversions
+                (
+                    id, username, project_id, source_model_id, source_format,
+                    target_format, status, compatibility_status, plan_json,
+                    created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                conversion_id,
+                username,
+                project_id or plan.get("projectId"),
+                str(source.get("modelId") or "selected_model")[:240],
+                str(source.get("sourceFormat") or "unknown")[:80],
+                str(plan.get("targetFormat") or "unknown")[:80],
+                str(plan.get("status") or "planned_no_execution")[:80],
+                str(compatibility.get("status") or "unknown")[:120],
+                json.dumps(plan, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO cognix_conversion_logs
+                (id, conversion_id, username, event_type, message, metadata_json, created_at)
+            VALUES (?, ?, ?, 'conversion_plan_stored', ?, ?, ?)
+            """,
+            (
+                _new_id("clog"),
+                conversion_id,
+                username,
+                "Model conversion plan stored without enqueueing a conversion job.",
+                json.dumps(
+                    {
+                        "conversionServiceVersion": plan.get("conversionServiceVersion"),
+                        "compatible": compatibility.get("compatible"),
+                        "targetFormat": plan.get("targetFormat"),
+                    },
+                    ensure_ascii = False,
+                ),
+                now,
+            ),
+        )
+        conn.commit()
+        return get_model_conversion(username, conversion_id) or {}
+    finally:
+        conn.close()
+
+
+def list_model_conversions(username: str, *, project_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        safe_limit = max(1, min(int(limit), 200))
+        if project_id:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_model_conversions
+                WHERE username = ? AND project_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, project_id, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_model_conversions
+                WHERE username = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, safe_limit),
+            ).fetchall()
+        return [_hydrate_model_conversion(dict(row)) for row in rows]
+    finally:
+        conn.close()
+
+
+def get_model_conversion(username: str, conversion_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM cognix_model_conversions WHERE id = ? AND username = ?",
+            (conversion_id, username),
+        ).fetchone()
+        if row is None:
+            return None
+        conversion = _hydrate_model_conversion(dict(row))
+        log_rows = conn.execute(
+            """
+            SELECT * FROM cognix_conversion_logs
+            WHERE username = ? AND conversion_id = ?
+            ORDER BY created_at DESC
+            """,
+            (username, conversion_id),
+        ).fetchall()
+        conversion["logs"] = [_hydrate_conversion_log(dict(item)) for item in log_rows]
+        return conversion
     finally:
         conn.close()
 

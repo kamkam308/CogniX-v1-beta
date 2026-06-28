@@ -40,6 +40,7 @@ from core.cognix import intent_prediction as cognix_intent_prediction
 from core.cognix import memory_manager as cognix_memory_manager
 from core.cognix import memory_editor as cognix_memory_editor
 from core.cognix import model_lifecycle as cognix_model_lifecycle
+from core.cognix import model_translator as cognix_model_translator
 from core.cognix import module_registry as cognix_module_registry
 from core.cognix import onboarding as cognix_onboarding
 from core.cognix import optimization_planner as cognix_optimization_planner
@@ -384,6 +385,16 @@ class ModelLifecyclePlanRequest(BaseModel):
     execution_target: str | None = Field(None, alias = "executionTarget", max_length = 120)
     quality_priority: str | None = Field(None, alias = "qualityPriority", max_length = 80)
     offline_required: bool = Field(False, alias = "offlineRequired")
+
+
+class ModelConversionPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    source_model: dict[str, Any] = Field(..., alias = "sourceModel")
+    target_format: str = Field(..., alias = "targetFormat", min_length = 1, max_length = 120)
+    conversion_options: dict[str, Any] | None = Field(None, alias = "conversionOptions")
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    store_conversion: bool = Field(True, alias = "storeConversion")
 
 
 class ThinkingStatusPlanRequest(BaseModel):
@@ -861,6 +872,12 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "estimated_latency_ms": "estimatedLatencyMs",
         "sensitivity_level": "sensitivityLevel",
         "decision_json": "decisionJson",
+        "source_model_id": "sourceModelId",
+        "source_format": "sourceFormat",
+        "target_format": "targetFormat",
+        "compatibility_status": "compatibilityStatus",
+        "plan_json": "planJson",
+        "conversion_id": "conversionId",
         "scores_json": "scoresJson",
         "message_id": "messageId",
         "thread_id": "threadId",
@@ -1823,6 +1840,95 @@ async def model_lifecycle_plan(
         "auditLogId": audit.get("id"),
         "sideEffects": lifecycle.get("sideEffects", {}),
         "plannerVersion": cognix_model_lifecycle.COGNIX_MODEL_LIFECYCLE_VERSION,
+    }
+
+
+@router.get("/models/translator/blueprint")
+async def model_translator_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_model_translator.build_model_translator_blueprint()
+    return {
+        "username": current_subject,
+        "modelTranslatorBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_model_translator.COGNIX_MODEL_CONVERSION_SERVICE_VERSION,
+    }
+
+
+@router.post("/models/translator/plan")
+async def model_conversion_plan(
+    payload: ModelConversionPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_model_translator.build_model_conversion_plan(
+        source_model = payload.source_model,
+        target_format = payload.target_format,
+        conversion_options = payload.conversion_options,
+        project_id = payload.project_id,
+    )
+    stored_conversion = (
+        cognix_db.create_model_conversion(
+            current_subject,
+            plan = plan,
+            project_id = payload.project_id,
+        )
+        if payload.store_conversion
+        else None
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "conversionPlanWrite": stored_conversion is not None,
+        "conversionLogWrite": stored_conversion is not None,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "model_conversion_plan_built",
+        resource_type = "cognix_model_conversion",
+        resource_id = str((stored_conversion or {}).get("id") or plan.get("conversionId") or "conversion_plan"),
+        severity = "warning" if not plan.get("compatibility", {}).get("compatible") else "notice",
+        metadata = {
+            "conversionServiceVersion": plan.get("conversionServiceVersion"),
+            "compatibilityCheckerVersion": plan.get("compatibilityCheckerVersion"),
+            "exportManagerVersion": plan.get("exportManagerVersion"),
+            "sourceFormat": plan.get("sourceModel", {}).get("sourceFormat"),
+            "targetFormat": plan.get("targetFormat"),
+            "compatible": plan.get("compatibility", {}).get("compatible"),
+            "compatibilityStatus": plan.get("compatibility", {}).get("status"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "modelConversionPlan": plan,
+        "modelConversion": _row(stored_conversion) if stored_conversion else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_model_translator.COGNIX_MODEL_CONVERSION_SERVICE_VERSION,
+    }
+
+
+@router.get("/models/conversions")
+async def model_conversions(
+    project_id: str | None = None,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if project_id:
+        _require_owned_project(project_id, current_subject)
+    return {
+        "conversions": _rows(cognix_db.list_model_conversions(current_subject, project_id = project_id)),
+        "sideEffects": {
+            "modelFileRead": False,
+            "modelFileWrite": False,
+            "conversionJobEnqueue": False,
+            "registryUpdate": False,
+            "modelLoad": False,
+            "generation": False,
+            "networkCall": False,
+        },
+        "plannerVersion": cognix_model_translator.COGNIX_MODEL_CONVERSION_SERVICE_VERSION,
     }
 
 
