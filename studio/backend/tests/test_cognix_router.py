@@ -28,6 +28,7 @@ from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import project_experts as cognix_project_experts
 from core.cognix import runtime_adapter as cognix_runtime_adapter
+from core.cognix import thinking_status as cognix_thinking_status
 from core.cognix import tool_registry as cognix_tool_registry
 from core.cognix import worker_queue as cognix_worker_queue
 from core.cognix.router import classify_objective
@@ -1189,6 +1190,114 @@ def test_model_lifecycle_endpoint_logs_audited_dry_run(monkeypatch):
     assert log["metadata"]["sideEffects"]["modelLoad"] is False
 
 
+def test_thinking_status_redacts_technical_model_details():
+    lifecycle = {
+        "installPlan": {"required": False},
+        "loadPlan": {"action": "would_load_on_demand"},
+        "compatibility": {"fit": {"status": "ok"}},
+        "warnings": [],
+    }
+
+    plan = cognix_thinking_status.build_thinking_status_plan(
+        objective = "Explique ce bug avec huihui_ai/qwen3-vl-abliterated:4b-instruct",
+        classification = {"selectedDomain": "code", "label": "Code", "needsClarification": False},
+        task_strategy = {"label": "Assistant code", "path": "codex_guarded_pipeline"},
+        recommendation = {"readiness": "ready", "modelId": "huihui_ai/qwen3-vl-abliterated:4b-instruct"},
+        model_lifecycle_plan = lifecycle,
+        context_plan = {"assemblyStrategy": "memory_project_recent"},
+        rag_plan = {"recommendedPath": "no_rag_needed"},
+        project_expert_plan = {
+            "projectMode": "specialized_project",
+            "primaryExpert": {"selectedModel": {"modelId": "cognix-code-4b-q4"}},
+        },
+        execution_policy = {"automaticExecutionAllowed": False},
+    )
+
+    visible_text = str(plan["visibleTimeline"]).casefold()
+    assert plan["thinkingStatusVersion"] == "cognix_thinking_status_v1"
+    assert plan["status"] == "ready"
+    assert plan["progress"] == 100
+    assert plan["displayContract"]["frontendMustHideModelIdentifiers"] is True
+    assert plan["redaction"]["visibleTimelineContainsModelIds"] is False
+    assert "qwen" not in visible_text
+    assert "cognix-code-4b-q4" not in visible_text
+    assert plan["sideEffects"]["modelLoad"] is False
+    assert plan["sideEffects"]["uiMutation"] is False
+
+
+def test_thinking_status_endpoint_logs_audited_visible_plan(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+    monkeypatch.setattr(
+        cognix_routes,
+        "_current_model_cache_runtime",
+        lambda: {"runtimeType": "ollama", "activeModel": None, "loadedModels": [], "loadingModels": []},
+    )
+    monkeypatch.setattr(
+        cognix_routes.cognix_registry,
+        "build_model_registry",
+        lambda: {
+            "registryVersion": "local_model_registry_v1",
+            "providers": [],
+            "models": [
+                {
+                    "id": "huihui_ai/qwen3-vl-abliterated:4b-instruct",
+                    "providerId": "ollama-local",
+                    "providerType": "ollama",
+                    "source": "ollama",
+                    "available": True,
+                }
+            ],
+            "defaultModelId": "huihui_ai/qwen3-vl-abliterated:4b-instruct",
+            "recommendedModelId": "huihui_ai/qwen3-vl-abliterated:4b-instruct",
+            "ollama": {
+                "configured": True,
+                "reachable": True,
+                "hasDefaultModel": True,
+                "recommendedModel": "huihui_ai/qwen3-vl-abliterated:4b-instruct",
+            },
+        },
+    )
+
+    body = run_async(
+        cognix_routes.thinking_status_plan(
+            cognix_routes.ThinkingStatusPlanRequest(
+                objective = "Teste une reponse visible propre pour Qwen",
+                modelId = "huihui_ai/qwen3-vl-abliterated:4b-instruct",
+                projectType = "code",
+                audience = "chat",
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    thinking = body["thinkingStatusPlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_thinking_status_v1"
+    assert thinking["displayContract"]["frontendMayShowOnlyTimeline"] is True
+    assert thinking["redaction"]["visibleTimelineContainsRoutingScores"] is False
+    assert thinking["sideEffects"]["generation"] is False
+    assert thinking["sideEffects"]["uiMutation"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "thinking_status_plan_built"
+    assert log["resourceType"] == "cognix_thinking_status"
+    assert log["metadata"]["thinkingStatusVersion"] == "cognix_thinking_status_v1"
+    assert "modelId" in log["metadata"]["hiddenTechnicalFields"]
+    assert log["metadata"]["sideEffects"]["uiMutation"] is False
+
+
 def test_codex_pipeline_plans_required_gates_without_modifying_code():
     plan = cognix_codex_pipeline.build_codex_pipeline_plan(
         objective = "Ajoute un module CogniX Chemistry dans le code source",
@@ -1472,13 +1581,16 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert registry["sideEffects"]["uiMutation"] is False
 
     modules = {item["id"]: item for item in registry["modules"]}
-    assert {"cognix-local-core", "cognix-model-lifecycle", "cognix-onboarding", "cognix-rag", "cognix-integrations", "cognix-codex-secure-agent", "cognix-enterprise-foundation", "cognix-deployment-manager"}.issubset(
+    assert {"cognix-local-core", "cognix-model-lifecycle", "cognix-thinking-status", "cognix-onboarding", "cognix-rag", "cognix-integrations", "cognix-codex-secure-agent", "cognix-enterprise-foundation", "cognix-deployment-manager"}.issubset(
         modules
     )
     assert modules["cognix-local-core"]["activationState"] == "ready"
     assert modules["cognix-model-lifecycle"]["activationState"] == "ready"
     assert "load_unload_planning" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "/api/cognix/models/lifecycle-plan" in modules["cognix-model-lifecycle"]["routes"]
+    assert modules["cognix-thinking-status"]["activationState"] == "ready"
+    assert "technical_redaction" in modules["cognix-thinking-status"]["capabilities"]
+    assert "/api/cognix/thinking/plan" in modules["cognix-thinking-status"]["routes"]
     assert modules["cognix-onboarding"]["activationState"] == "ready"
     assert modules["cognix-rag"]["dependencyState"]["ready"] is True
     assert "sso_planning" in modules["cognix-enterprise-foundation"]["capabilities"]

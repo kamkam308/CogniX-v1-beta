@@ -44,6 +44,19 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "dependencies": ["cognix-local-core"],
     },
     {
+        "id": "cognix-thinking-status",
+        "displayName": "CogniX Thinking Status",
+        "editionTargets": ["free", "local", "developer", "business", "university", "enterprise"],
+        "status": "enabled",
+        "capabilities": ["visible_thinking_timeline", "technical_redaction", "progress_status"],
+        "routes": ["/api/cognix/thinking/plan"],
+        "permissions": ["authenticated"],
+        "tools": [],
+        "defaultModels": [],
+        "uiPanels": ["chat"],
+        "dependencies": ["cognix-local-core", "cognix-model-lifecycle"],
+    },
+    {
         "id": "cognix-projects",
         "displayName": "CogniX Projects",
         "editionTargets": ["free", "developer", "business", "university"],
@@ -54,7 +67,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "tools": [],
         "defaultModels": ["cognix-code-small", "cognix-math-small", "cognix-physics-small"],
         "uiPanels": ["project-sidebar", "project-settings"],
-        "dependencies": ["cognix-local-core", "cognix-model-lifecycle"],
+        "dependencies": ["cognix-local-core", "cognix-model-lifecycle", "cognix-thinking-status"],
     },
     {
         "id": "cognix-onboarding",

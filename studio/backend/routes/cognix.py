@@ -35,6 +35,7 @@ from core.cognix import project_experts as cognix_project_experts
 from core.cognix import registry as cognix_registry
 from core.cognix import recommender as cognix_recommender
 from core.cognix import runtime_adapter as cognix_runtime_adapter
+from core.cognix import thinking_status as cognix_thinking_status
 from core.cognix import tool_registry as cognix_tool_registry
 from core.cognix import worker_queue as cognix_worker_queue
 from core.cognix.router import classify_objective
@@ -132,6 +133,16 @@ class ModelLifecyclePlanRequest(BaseModel):
     execution_target: str | None = Field(None, alias = "executionTarget", max_length = 120)
     quality_priority: str | None = Field(None, alias = "qualityPriority", max_length = 80)
     offline_required: bool = Field(False, alias = "offlineRequired")
+
+
+class ThinkingStatusPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    model_id: str | None = Field(None, alias = "modelId", max_length = 240)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    project_type: str | None = Field(None, alias = "projectType", max_length = 80)
+    audience: Literal["chat", "project", "onboarding"] = "chat"
 
 
 class ProjectDefaultModelRequest(BaseModel):
@@ -1219,6 +1230,79 @@ async def model_lifecycle_plan(
         "auditLogId": audit.get("id"),
         "sideEffects": lifecycle.get("sideEffects", {}),
         "plannerVersion": cognix_model_lifecycle.COGNIX_MODEL_LIFECYCLE_VERSION,
+    }
+
+
+@router.post("/thinking/plan")
+async def thinking_status_plan(
+    payload: ThinkingStatusPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    runtime = _current_model_cache_runtime()
+    latest_benchmark = cognix_db.get_latest_benchmark_run(current_subject)
+    model_registry_payload = cognix_registry.build_model_registry()
+    plan = cognix_orchestrator.build_execution_plan(
+        payload.objective,
+        current_subject = current_subject,
+        project_type = payload.project_type,
+        project_id = payload.project_id,
+        runtime_snapshot = runtime,
+        latest_benchmark_run = latest_benchmark,
+        rag_available = _rag_available(),
+    )
+    lifecycle = cognix_model_lifecycle.build_model_lifecycle_plan(
+        objective = payload.objective,
+        hardware = plan["hardware"],
+        recommendation = plan["recommendation"],
+        cache = plan["cache"],
+        classification = plan["classification"],
+        project_expert_plan = plan["projectExpertPlan"],
+        runtime_adapter_plan = plan["runtimeAdapterPlan"],
+        model_registry = model_registry_payload,
+        latest_benchmark_run = latest_benchmark,
+        project_id = payload.project_id,
+        project_type = payload.project_type,
+        requested_model_id = payload.model_id,
+    )
+    thinking = cognix_thinking_status.build_thinking_status_plan(
+        objective = payload.objective,
+        classification = plan["classification"],
+        task_strategy = plan["taskStrategy"],
+        recommendation = plan["recommendation"],
+        model_lifecycle_plan = lifecycle,
+        context_plan = plan["contextPlan"],
+        rag_plan = plan["ragPlan"],
+        project_expert_plan = plan["projectExpertPlan"],
+        execution_policy = plan["executionPolicy"],
+        audience = payload.audience,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "thinking_status_plan_built",
+        resource_type = "cognix_thinking_status",
+        resource_id = str(payload.project_id or payload.audience),
+        severity = "warning" if thinking.get("status") != "ready" else "notice",
+        metadata = {
+            "thinkingStatusVersion": thinking.get("thinkingStatusVersion"),
+            "status": thinking.get("status"),
+            "audience": thinking.get("audience"),
+            "progress": thinking.get("progress"),
+            "hiddenTechnicalFields": thinking.get("redaction", {}).get("hiddenTechnicalFields", []),
+            "sideEffects": thinking.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "runtimeError": runtime.get("error"),
+        "thinkingStatusPlan": thinking,
+        "modelLifecyclePlan": lifecycle,
+        "executionPolicy": plan["executionPolicy"],
+        "auditLogId": audit.get("id"),
+        "sideEffects": thinking.get("sideEffects", {}),
+        "plannerVersion": cognix_thinking_status.COGNIX_THINKING_STATUS_VERSION,
     }
 
 
