@@ -14,6 +14,44 @@ import type {
   TrainingStatusResponse,
 } from "../types/runtime";
 
+export interface CloudTrainingHandoffRequest {
+  objective: string;
+  project_type?: string | null;
+  project_id?: string | null;
+  targetId?: string | null;
+  dataset?: Record<string, unknown> | null;
+}
+
+export interface CloudTrainingHandoffResponse {
+  username: string;
+  cloudHandoffPlan: {
+    status: string;
+    readyToExport: boolean;
+    target?: {
+      id?: string;
+      label?: string;
+      exportFormat?: string;
+    };
+    notebookPlan?: {
+      format?: string;
+    };
+    sideEffects?: Record<string, unknown>;
+  };
+  fineTuningPlan?: {
+    method?: {
+      type?: string;
+      requiresLocalGpu?: boolean;
+      requiresCloudCompute?: boolean;
+    };
+    resourceTargetPlan?: {
+      recommendedTargetId?: string;
+      localGpuBypassAllowed?: boolean;
+    };
+  };
+  auditLogId?: string;
+  sideEffects?: Record<string, unknown>;
+}
+
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
 }
@@ -36,6 +74,17 @@ export async function startTraining(
     body: JSON.stringify(payload),
   });
   return parseJson<TrainingStartResponse>(response);
+}
+
+export async function prepareCloudTrainingHandoff(
+  payload: CloudTrainingHandoffRequest,
+): Promise<CloudTrainingHandoffResponse> {
+  const response = await authFetch("/api/cognix/fine-tuning/cloud-handoff-plan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseJson<CloudTrainingHandoffResponse>(response);
 }
 
 export async function stopTraining(save = true): Promise<TrainingStopResponse> {

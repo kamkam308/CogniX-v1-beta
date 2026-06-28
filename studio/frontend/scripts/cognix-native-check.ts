@@ -55,6 +55,48 @@ const checks: Check[] = [
     ],
   },
   {
+    file: "src/features/training/hooks/use-training-actions.ts",
+    includes: [
+      "cloudOnlyTraining",
+      "platform.trainingCloudAvailable && !platform.trainingLocalAvailable",
+      "prepareCloudTrainingHandoff",
+      "buildCloudTrainingObjective",
+      "buildCloudTrainingDataset",
+      "preferredCloudTrainingTarget",
+      "Mode CEO cloud training",
+      "sans GPU local AMD/NVIDIA",
+    ],
+  },
+  {
+    file: "src/features/studio/sections/training-section.tsx",
+    includes: [
+      "cloudOnlyTraining",
+      "trainingCloudAvailable && !s.trainingLocalAvailable",
+      "formatCloudProviderLabel",
+      "studio.training.prepareCloudTraining",
+      "studio.training.cloudTrainingReady",
+    ],
+  },
+  {
+    file: "src/i18n/locales/en.ts",
+    includes: [
+      "prepareCloudTraining",
+      "Prepare Cloud Training",
+      "cloudTrainingReady",
+      "CEO cloud training is available",
+    ],
+  },
+  {
+    file: "src/features/training/api/train-api.ts",
+    includes: [
+      "CloudTrainingHandoffRequest",
+      "CloudTrainingHandoffResponse",
+      "prepareCloudTrainingHandoff",
+      '"/api/cognix/fine-tuning/cloud-handoff-plan"',
+      "readyToExport",
+    ],
+  },
+  {
     file: "src/app/routes/__root.tsx",
     includes: [
       "isChatOnlyAllowed(pathname: string, trainingAccessible = false)",

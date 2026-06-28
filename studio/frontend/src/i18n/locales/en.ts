@@ -691,6 +691,9 @@ export const en = {
       chartNoDataTitle: "No training data yet",
       chartNoDataDescription: "Start training to see loss progress",
       startTraining: "Start Training",
+      prepareCloudTraining: "Prepare Cloud Training",
+      cloudTrainingReady:
+        "CEO cloud training is available through {providers}; local AMD/NVIDIA hardware is not required for this handoff.",
       starting: "Starting...",
       loadingModel: "Loading model...",
       checkingDataset: "Checking dataset...",
