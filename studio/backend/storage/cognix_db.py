@@ -311,6 +311,27 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_response_eval_message
             ON cognix_response_evaluations(username, message_id, created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_response_variants (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            message_id TEXT,
+            thread_id TEXT,
+            project_id TEXT,
+            variant_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            model_id TEXT,
+            ranking_score REAL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_response_variants_username_created
+            ON cognix_response_variants(username, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_response_variants_message
+            ON cognix_response_variants(username, message_id, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_scheduled_tasks (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -1582,6 +1603,99 @@ def create_response_evaluation(
         ).fetchone()
         stored = row_to_dict(row) or {}
         return _hydrate_response_evaluation(stored)
+    finally:
+        conn.close()
+
+
+def _hydrate_response_variant(row: dict[str, Any]) -> dict[str, Any]:
+    row["metadata"] = _json_or_default(row.get("metadata_json"), {})
+    return row
+
+
+def list_response_variants(
+    username: str,
+    *,
+    message_id: str | None = None,
+    limit: int = 80,
+) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 80), 1), 200)
+    conn = get_connection()
+    try:
+        if message_id:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_response_variants
+                WHERE username = ? AND message_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, message_id, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_response_variants
+                WHERE username = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, safe_limit),
+            ).fetchall()
+        return [_hydrate_response_variant(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def create_response_variant(
+    username: str,
+    *,
+    variant_type: str,
+    title: str,
+    content: str,
+    message_id: str | None = None,
+    thread_id: str | None = None,
+    project_id: str | None = None,
+    model_id: str | None = None,
+    ranking_score: float | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    now = _now()
+    variant_id = _new_id("var")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_response_variants
+                (
+                    id, username, message_id, thread_id, project_id, variant_type,
+                    title, content, model_id, ranking_score, metadata_json,
+                    created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                variant_id,
+                username,
+                message_id,
+                thread_id,
+                project_id,
+                variant_type.strip(),
+                title.strip(),
+                content,
+                model_id,
+                ranking_score,
+                json.dumps(metadata or {}, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM cognix_response_variants WHERE id = ?",
+            (variant_id,),
+        ).fetchone()
+        stored = row_to_dict(row) or {}
+        return _hydrate_response_variant(stored)
     finally:
         conn.close()
 

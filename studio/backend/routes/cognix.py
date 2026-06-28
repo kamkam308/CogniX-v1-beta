@@ -23,6 +23,7 @@ from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import codex_pipeline as cognix_codex_pipeline
 from core.cognix import context_manager as cognix_context_manager
 from core.cognix import deployment_manager as cognix_deployment_manager
+from core.cognix import draft_generation as cognix_draft_generation
 from core.cognix import decision_engine as cognix_decision_engine
 from core.cognix import fine_tuning_planner as cognix_fine_tuning_planner
 from core.cognix import governance_manager as cognix_governance_manager
@@ -185,6 +186,34 @@ class ResponseReflectionRequest(BaseModel):
     task_type: str | None = Field(None, alias = "taskType", max_length = 80)
     requires_sources: bool = Field(False, alias = "requiresSources")
     response_sources: list[dict[str, Any]] | None = Field(None, alias = "responseSources")
+
+
+class DraftGenerationPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    prompt: str = Field(..., min_length = 1, max_length = 120000)
+    requested_variants: list[str] | None = Field(None, alias = "requestedVariants")
+    max_variants: int = Field(3, alias = "maxVariants", ge = 1, le = 6)
+    task_type: str | None = Field(None, alias = "taskType", max_length = 80)
+    include_ranking: bool = Field(True, alias = "includeRanking")
+    message_id: str | None = Field(None, alias = "messageId", max_length = 160)
+    thread_id: str | None = Field(None, alias = "threadId", max_length = 160)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    model_id: str | None = Field(None, alias = "modelId", max_length = 240)
+
+
+class ResponseVariantRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    variant_type: str = Field(..., alias = "variantType", min_length = 1, max_length = 80)
+    title: str = Field(..., min_length = 1, max_length = 160)
+    content: str = Field(..., min_length = 1, max_length = 400000)
+    message_id: str | None = Field(None, alias = "messageId", max_length = 160)
+    thread_id: str | None = Field(None, alias = "threadId", max_length = 160)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    model_id: str | None = Field(None, alias = "modelId", max_length = 240)
+    ranking_score: float | None = Field(None, alias = "rankingScore", ge = 0.0, le = 1.0)
+    metadata: dict[str, Any] | None = None
 
 
 class ProjectDefaultModelRequest(BaseModel):
@@ -493,6 +522,8 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "recommended_action": "recommendedAction",
         "issues_json": "issuesJson",
         "evaluation_json": "evaluationJson",
+        "variant_type": "variantType",
+        "ranking_score": "rankingScore",
     }
     for source, target in alias_map.items():
         if source in out:
@@ -1473,6 +1504,120 @@ async def response_reflection_evaluations(
     return {
         "username": current_subject,
         "evaluations": _rows(evaluations),
+    }
+
+
+@router.get("/drafts/styles")
+async def draft_style_profiles(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    registry = cognix_draft_generation.build_style_profile_registry()
+    return {
+        "username": current_subject,
+        "styleProfileRegistry": registry,
+        "sideEffects": registry.get("sideEffects", {}),
+    }
+
+
+@router.post("/drafts/plan")
+async def draft_generation_plan(
+    payload: DraftGenerationPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_draft_generation.build_draft_generation_plan(
+        prompt = payload.prompt,
+        requested_variants = payload.requested_variants,
+        max_variants = payload.max_variants,
+        task_type = payload.task_type,
+        include_ranking = payload.include_ranking,
+        message_id = payload.message_id,
+        project_id = payload.project_id,
+        model_id = payload.model_id,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "draft_generation_plan_built",
+        resource_type = "cognix_draft_generation_plan",
+        resource_id = str(payload.message_id or payload.thread_id or payload.project_id or "general"),
+        severity = "notice",
+        metadata = {
+            "draftGenerationVersion": plan.get("draftGenerationVersion"),
+            "selectedVariantTypes": plan.get("selectedVariantTypes", []),
+            "estimatedGenerationCount": plan.get("costPlan", {}).get("estimatedGenerationCount"),
+            "messageId": payload.message_id,
+            "threadId": payload.thread_id,
+            "projectId": payload.project_id,
+            "sideEffects": plan.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "draftGenerationPlan": plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": plan.get("sideEffects", {}),
+        "plannerVersion": cognix_draft_generation.COGNIX_DRAFT_GENERATION_VERSION,
+    }
+
+
+@router.get("/drafts/variants")
+async def response_variants(
+    message_id: str | None = None,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    variants = cognix_db.list_response_variants(current_subject, message_id = message_id)
+    return {
+        "username": current_subject,
+        "variants": _rows(variants),
+    }
+
+
+@router.post("/drafts/variants")
+async def create_response_variant(
+    payload: ResponseVariantRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    variant = cognix_db.create_response_variant(
+        current_subject,
+        variant_type = payload.variant_type,
+        title = payload.title,
+        content = payload.content,
+        message_id = payload.message_id,
+        thread_id = payload.thread_id,
+        project_id = payload.project_id,
+        model_id = payload.model_id,
+        ranking_score = payload.ranking_score,
+        metadata = payload.metadata,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "response_variant_stored",
+        resource_type = "cognix_response_variant",
+        resource_id = variant.get("id"),
+        severity = "notice",
+        metadata = {
+            "variantType": variant.get("variant_type"),
+            "messageId": payload.message_id,
+            "threadId": payload.thread_id,
+            "projectId": payload.project_id,
+            "modelId": payload.model_id,
+            "storageSideEffects": {"variantWrite": True, "auditWrite": True},
+        },
+    )
+    return {
+        "username": current_subject,
+        "variant": _row(variant),
+        "auditLogId": audit.get("id"),
+        "sideEffects": {
+            "modelLoad": False,
+            "generation": False,
+            "networkModelCall": False,
+            "variantWrite": True,
+            "auditWrite": True,
+        },
     }
 
 

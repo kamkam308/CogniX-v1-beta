@@ -18,6 +18,7 @@ from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import codex_pipeline as cognix_codex_pipeline
 from core.cognix import context_manager as cognix_context_manager
 from core.cognix import deployment_manager as cognix_deployment_manager
+from core.cognix import draft_generation as cognix_draft_generation
 from core.cognix import decision_engine as cognix_decision_engine
 from core.cognix import governance_manager as cognix_governance_manager
 from core.cognix import integration_manager as cognix_integration_manager
@@ -1837,6 +1838,125 @@ def test_response_reflection_list_endpoint_is_user_scoped():
     assert body["evaluations"][0]["messageId"] == "msg_alice"
 
 
+def test_draft_style_registry_declares_profiles_without_generation():
+    registry = cognix_draft_generation.build_style_profile_registry()
+    profile_ids = {item["id"] for item in registry["profiles"]}
+
+    assert registry["styleProfileRegistryVersion"] == "cognix_style_profile_registry_v1"
+    assert {"quick", "detailed", "technical", "simple", "business", "pedagogical"}.issubset(profile_ids)
+    assert registry["policies"]["backendOrchestratorRequired"] is True
+    assert registry["policies"]["multipleDraftsOnDemandOnly"] is True
+    assert registry["summary"]["frontendDirectModelCallAllowed"] is False
+    assert registry["sideEffects"]["generation"] is False
+    assert registry["sideEffects"]["networkModelCall"] is False
+    assert registry["sideEffects"]["variantWrite"] is False
+
+
+def test_draft_generation_plan_prepares_variants_without_model_call():
+    plan = cognix_draft_generation.build_draft_generation_plan(
+        prompt = "Explique ce bug Python avec une version courte et une version technique.",
+        requested_variants = ["quick", "technical", "detailed"],
+        max_variants = 3,
+        task_type = "code",
+        message_id = "msg_draft",
+        model_id = "cognix-code",
+    )
+
+    assert plan["draftGenerationVersion"] == "cognix_draft_generation_v1"
+    assert plan["mode"] == "dry_run"
+    assert plan["selectedVariantTypes"] == ["quick", "technical", "detailed"]
+    assert plan["costPlan"]["estimatedGenerationCount"] == 3
+    assert plan["costPlan"]["requiresExplicitUserAction"] is True
+    assert plan["rankingPlan"]["usesResponseReflection"] is True
+    assert plan["rankingPlan"]["rawReasoningVisible"] is False
+    assert all(item["requiresBackendGeneration"] is True for item in plan["variants"])
+    assert all(item["willGenerateNow"] is False for item in plan["variants"])
+    assert plan["policies"]["frontendDirectModelCallAllowed"] is False
+    assert plan["sideEffects"]["modelLoad"] is False
+    assert plan["sideEffects"]["generation"] is False
+    assert plan["sideEffects"]["variantWrite"] is False
+
+
+def test_draft_generation_plan_endpoint_logs_audit_without_generation():
+    seed_accounts()
+
+    body = run_async(
+        cognix_routes.draft_generation_plan(
+            cognix_routes.DraftGenerationPlanRequest(
+                prompt = "Prepare plusieurs styles pour expliquer une notion de physique.",
+                requested_variants = ["simple", "pedagogical", "detailed"],
+                max_variants = 3,
+                task_type = "education",
+                message_id = "msg_multi",
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    plan = body["draftGenerationPlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_draft_generation_v1"
+    assert plan["selectedVariantTypes"] == ["simple", "pedagogical", "detailed"]
+    assert body["sideEffects"]["generation"] is False
+    assert body["sideEffects"]["networkModelCall"] is False
+    assert body["sideEffects"]["variantWrite"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "draft_generation_plan_built"
+    assert log["metadata"]["draftGenerationVersion"] == "cognix_draft_generation_v1"
+    assert log["metadata"]["selectedVariantTypes"] == ["simple", "pedagogical", "detailed"]
+    assert log["metadata"]["sideEffects"]["generation"] is False
+
+
+def test_response_variant_store_and_list_are_user_scoped():
+    seed_accounts()
+    variant = run_async(
+        cognix_routes.create_response_variant(
+            cognix_routes.ResponseVariantRequest(
+                variant_type = "technical",
+                title = "Version technique",
+                content = "Analyse technique stockee apres generation backend.",
+                message_id = "msg_variant",
+                thread_id = "thread_variant",
+                model_id = "cognix-code",
+                ranking_score = 0.82,
+                metadata = {"source": "test"},
+            ),
+            current_subject = "alice",
+        )
+    )
+    cognix_db.create_response_variant(
+        "bob",
+        variant_type = "quick",
+        title = "Bob",
+        content = "Variante autre utilisateur.",
+        message_id = "msg_variant",
+    )
+
+    listed = run_async(
+        cognix_routes.response_variants(
+            message_id = "msg_variant",
+            current_subject = "alice",
+        )
+    )
+
+    assert variant["variant"]["id"].startswith("var_")
+    assert variant["variant"]["variantType"] == "technical"
+    assert variant["variant"]["rankingScore"] == 0.82
+    assert variant["sideEffects"]["generation"] is False
+    assert variant["sideEffects"]["variantWrite"] is True
+    assert len(listed["variants"]) == 1
+    assert listed["variants"][0]["title"] == "Version technique"
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == variant["auditLogId"]
+    assert log["action"] == "response_variant_stored"
+    assert log["metadata"]["storageSideEffects"]["variantWrite"] is True
+
+
 def test_codex_pipeline_plans_required_gates_without_modifying_code():
     plan = cognix_codex_pipeline.build_codex_pipeline_plan(
         objective = "Ajoute un module CogniX Chemistry dans le code source",
@@ -2448,6 +2568,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-optimization-engine",
         "cognix-thinking-status",
         "cognix-response-reflection",
+        "cognix-multi-draft-generation",
         "cognix-memory-manager",
         "cognix-onboarding",
         "cognix-rag",
@@ -2480,6 +2601,12 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "raw_reasoning_redaction" in modules["cognix-response-reflection"]["capabilities"]
     assert "/api/cognix/reflection/evaluate" in modules["cognix-response-reflection"]["routes"]
     assert "/api/cognix/reflection/evaluations" in modules["cognix-response-reflection"]["routes"]
+    assert modules["cognix-multi-draft-generation"]["dependencyState"]["ready"] is True
+    assert "style_profile_registry" in modules["cognix-multi-draft-generation"]["capabilities"]
+    assert "response_variant_store" in modules["cognix-multi-draft-generation"]["capabilities"]
+    assert "/api/cognix/drafts/styles" in modules["cognix-multi-draft-generation"]["routes"]
+    assert "/api/cognix/drafts/plan" in modules["cognix-multi-draft-generation"]["routes"]
+    assert "/api/cognix/drafts/variants" in modules["cognix-multi-draft-generation"]["routes"]
     assert modules["cognix-memory-manager"]["activationState"] == "ready"
     assert "central_memory_layers" in modules["cognix-memory-manager"]["capabilities"]
     assert "/api/cognix/memory/plan" in modules["cognix-memory-manager"]["routes"]
