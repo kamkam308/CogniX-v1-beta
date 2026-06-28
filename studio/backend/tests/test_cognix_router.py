@@ -14,6 +14,7 @@ if str(_BACKEND_ROOT) not in sys.path:
 
 from auth import storage
 from auth.authentication import get_current_jwt_subject
+from core.cognix import background_agents as cognix_background_agents
 from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import codex_pipeline as cognix_codex_pipeline
 from core.cognix import context_graph as cognix_context_graph
@@ -2868,6 +2869,77 @@ def test_dynamic_ui_profile_endpoint_stores_profile_without_changing_ui():
     assert logs[0]["action"] == "dynamic_ui_profile_built"
 
 
+def test_background_agent_blueprint_requires_queue_without_worker_start():
+    blueprint = cognix_background_agents.build_background_agent_blueprint()
+
+    assert blueprint["backgroundAgentVersion"] == "cognix_background_agent_v1"
+    assert blueprint["progressTrackerVersion"] == "cognix_progress_tracker_v1"
+    assert blueprint["notificationPlanVersion"] == "cognix_notification_plan_v1"
+    assert blueprint["securityPolicy"]["queueRequired"] is True
+    assert blueprint["securityPolicy"]["permissionsRequired"] is True
+    assert blueprint["securityPolicy"]["nightModeRespected"] is True
+    assert blueprint["securityPolicy"]["directToolExecutionAllowed"] is False
+    assert blueprint["sideEffects"]["jobEnqueue"] is False
+    assert blueprint["sideEffects"]["workerStart"] is False
+    assert blueprint["sideEffects"]["toolExecution"] is False
+    assert blueprint["sideEffects"]["generation"] is False
+    assert blueprint["sideEffects"]["notificationSend"] is False
+
+
+def test_background_agent_plan_selects_job_type_and_respects_night_mode():
+    indexing = cognix_background_agents.build_background_agent_job_plan(
+        username = "alice",
+        task = "Indexer 200 PDF pour le RAG",
+        night_mode = True,
+    )
+    audit = cognix_background_agents.build_background_agent_job_plan(
+        username = "alice",
+        task = "Auditer un repo GitHub pour la securite",
+        priority = "high",
+    )
+
+    assert indexing["jobType"] == "index_documents"
+    assert indexing["summary"]["nightModeRespected"] is True
+    assert indexing["queuePlan"]["willEnqueueNow"] is False
+    assert audit["jobType"] == "audit_repo"
+    assert audit["priority"] == "high"
+    assert audit["sideEffects"]["workerStart"] is False
+    assert audit["sideEffects"]["toolExecution"] is False
+
+
+def test_background_agent_endpoint_queues_planned_job_without_starting_worker():
+    seed_accounts()
+    body = run_async(
+        cognix_routes.background_agent_job_plan(
+            cognix_routes.BackgroundJobPlanRequest(
+                task = "Comparer plusieurs modeles sur la latence et la qualite",
+                priority = "high",
+                nightMode = True,
+                enqueueJob = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    job_id = body["job"]["id"]
+    listed = run_async(cognix_routes.background_agent_jobs(current_subject = "alice"))
+    fetched = run_async(cognix_routes.background_agent_job(job_id, current_subject = "alice"))
+    bob_listed = run_async(cognix_routes.background_agent_jobs(current_subject = "bob"))
+
+    assert job_id.startswith("bjob_")
+    assert body["jobPlan"]["jobType"] == "compare_models"
+    assert body["sideEffects"]["jobEnqueue"] is True
+    assert body["sideEffects"]["workerStart"] is False
+    assert body["sideEffects"]["toolExecution"] is False
+    assert body["sideEffects"]["generation"] is False
+    assert listed["jobs"][0]["id"] == job_id
+    assert fetched["job"]["runs"][0]["status"] == "planned"
+    assert fetched["job"]["logs"][0]["progressPercent"] == 0
+    assert bob_listed["jobs"] == []
+
+    logs = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))["logs"]
+    assert logs[0]["action"] == "background_agent_job_planned"
+
+
 def test_codex_pipeline_plans_required_gates_without_modifying_code():
     plan = cognix_codex_pipeline.build_codex_pipeline_plan(
         objective = "Ajoute un module CogniX Chemistry dans le code source",
@@ -3480,6 +3552,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-prompt-compression",
         "cognix-intent-prediction",
         "cognix-dynamic-ui",
+        "cognix-background-agents",
         "cognix-thinking-status",
         "cognix-response-reflection",
         "cognix-multi-draft-generation",
@@ -3529,6 +3602,11 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "adaptive_panels" in modules["cognix-dynamic-ui"]["capabilities"]
     assert "theme_safe_layout_planning" in modules["cognix-dynamic-ui"]["capabilities"]
     assert "/api/cognix/dynamic-ui/profile" in modules["cognix-dynamic-ui"]["routes"]
+    assert modules["cognix-background-agents"]["dependencyState"]["ready"] is True
+    assert "background_job_planning" in modules["cognix-background-agents"]["capabilities"]
+    assert "agent_queue_contract" in modules["cognix-background-agents"]["capabilities"]
+    assert "progress_tracking" in modules["cognix-background-agents"]["capabilities"]
+    assert "/api/cognix/background-agents/job-plan" in modules["cognix-background-agents"]["routes"]
     assert modules["cognix-thinking-status"]["activationState"] == "ready"
     assert "technical_redaction" in modules["cognix-thinking-status"]["capabilities"]
     assert "/api/cognix/thinking/plan" in modules["cognix-thinking-status"]["routes"]

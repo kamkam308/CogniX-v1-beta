@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from auth import storage as auth_storage
 from auth.authentication import get_current_jwt_subject
 from core.cognix import benchmark as cognix_benchmark
+from core.cognix import background_agents as cognix_background_agents
 from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import codex_pipeline as cognix_codex_pipeline
 from core.cognix import context_graph as cognix_context_graph
@@ -216,6 +217,17 @@ class DynamicUIProfileRequest(BaseModel):
     viewport: Literal["desktop", "mobile"] = "desktop"
     theme: Literal["dark", "light"] = "dark"
     store_profile: bool = Field(True, alias = "storeProfile")
+
+
+class BackgroundJobPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    task: str = Field(..., min_length = 1, max_length = 4000)
+    job_type: str | None = Field(None, alias = "jobType", max_length = 120)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    priority: Literal["low", "normal", "high"] = "normal"
+    night_mode: bool = Field(False, alias = "nightMode")
+    enqueue_job: bool = Field(True, alias = "enqueueJob")
 
 
 class ResearchIntegrationPlanRequest(BaseModel):
@@ -738,6 +750,11 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "profile_key": "profileKey",
         "profile_json": "profileJson",
         "value_json": "valueJson",
+        "job_type": "jobType",
+        "progress_percent": "progressPercent",
+        "job_plan_json": "jobPlanJson",
+        "job_id": "jobId",
+        "runner_type": "runnerType",
     }
     for source, target in alias_map.items():
         if source in out:
@@ -750,6 +767,8 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         out["ignored"] = bool(out["ignored"])
     if isinstance(out.get("steps"), list):
         out["steps"] = [_row(item) if isinstance(item, dict) else item for item in out["steps"]]
+    if isinstance(out.get("runs"), list):
+        out["runs"] = [_row(item) if isinstance(item, dict) else item for item in out["runs"]]
     if isinstance(out.get("logs"), list):
         out["logs"] = [_row(item) if isinstance(item, dict) else item for item in out["logs"]]
     return out
@@ -4512,6 +4531,117 @@ async def dynamic_ui_profiles(current_subject: str = Depends(get_current_jwt_sub
             "toolExecution": False,
             "modelLoad": False,
             "generation": False,
+        },
+    }
+
+
+@router.get("/background-agents/blueprint")
+async def background_agents_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_background_agents.build_background_agent_blueprint()
+    return {
+        "username": current_subject,
+        "backgroundAgentBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_background_agents.COGNIX_BACKGROUND_AGENT_VERSION,
+    }
+
+
+@router.post("/background-agents/job-plan")
+async def background_agent_job_plan(
+    payload: BackgroundJobPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_background_agents.build_background_agent_job_plan(
+        username = current_subject,
+        task = payload.task,
+        job_type = payload.job_type,
+        project_id = payload.project_id,
+        priority = payload.priority,
+        night_mode = payload.night_mode,
+    )
+    job = (
+        cognix_db.create_background_job_from_plan(
+            current_subject,
+            plan = plan,
+            project_id = payload.project_id,
+        )
+        if payload.enqueue_job
+        else None
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "jobEnqueue": job is not None,
+        "agentRunWrite": job is not None,
+        "progressLogWrite": job is not None,
+        "workerStart": False,
+        "toolExecution": False,
+        "modelLoad": False,
+        "generation": False,
+        "notificationSend": False,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "background_agent_job_planned",
+        resource_type = "cognix_background_agent",
+        resource_id = str((job or {}).get("id") or payload.project_id or current_subject),
+        severity = "notice",
+        metadata = {
+            "backgroundAgentVersion": plan.get("backgroundAgentVersion"),
+            "jobType": plan.get("jobType"),
+            "priority": plan.get("priority"),
+            "nightMode": plan.get("nightMode"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "jobPlan": plan,
+        "job": _row(job) if job else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_background_agents.COGNIX_BACKGROUND_AGENT_VERSION,
+    }
+
+
+@router.get("/background-agents/jobs")
+async def background_agent_jobs(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    return {
+        "jobs": _rows(cognix_db.list_background_jobs(current_subject)),
+        "sideEffects": {
+            "jobEnqueue": False,
+            "agentRunWrite": False,
+            "progressLogWrite": False,
+            "workerStart": False,
+            "toolExecution": False,
+            "modelLoad": False,
+            "generation": False,
+            "notificationSend": False,
+        },
+    }
+
+
+@router.get("/background-agents/jobs/{job_id}")
+async def background_agent_job(
+    job_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    job = cognix_db.get_background_job(current_subject, job_id)
+    if job is None:
+        raise HTTPException(status_code = 404, detail = "Background job not found")
+    return {
+        "job": _row(job),
+        "sideEffects": {
+            "jobEnqueue": False,
+            "agentRunWrite": False,
+            "progressLogWrite": False,
+            "workerStart": False,
+            "toolExecution": False,
+            "modelLoad": False,
+            "generation": False,
+            "notificationSend": False,
         },
     }
 

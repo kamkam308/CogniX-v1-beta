@@ -499,6 +499,52 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_user_layout_preferences_username
             ON cognix_user_layout_preferences(username, updated_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_background_jobs (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            project_id TEXT,
+            job_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'queued',
+            priority TEXT NOT NULL DEFAULT 'normal',
+            progress_percent INTEGER NOT NULL DEFAULT 0,
+            job_plan_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_background_jobs_username_status
+            ON cognix_background_jobs(username, status, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_background_agent_runs (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            job_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'planned',
+            runner_type TEXT NOT NULL DEFAULT 'AgentRunner',
+            run_plan_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_background_agent_runs_job
+            ON cognix_background_agent_runs(username, job_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_background_job_logs (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            job_id TEXT NOT NULL,
+            run_id TEXT,
+            level TEXT NOT NULL DEFAULT 'info',
+            message TEXT NOT NULL,
+            progress_percent INTEGER NOT NULL DEFAULT 0,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_background_job_logs_job
+            ON cognix_background_job_logs(username, job_id, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_library_items (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -2960,6 +3006,133 @@ def list_project_ui_profiles(username: str, *, limit: int = 100) -> list[dict[st
             (username, safe_limit),
         ).fetchall()
         return [_hydrate_project_ui_profile(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_background_job(row: dict[str, Any]) -> dict[str, Any]:
+    row["jobPlan"] = _json_or_default(row.get("job_plan_json"), {})
+    return row
+
+
+def _hydrate_agent_run(row: dict[str, Any]) -> dict[str, Any]:
+    row["runPlan"] = _json_or_default(row.get("run_plan_json"), {})
+    return row
+
+
+def _hydrate_job_log(row: dict[str, Any]) -> dict[str, Any]:
+    row["metadata"] = _json_or_default(row.get("metadata_json"), {})
+    return row
+
+
+def create_background_job_from_plan(
+    username: str,
+    *,
+    plan: dict[str, Any],
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    job_id = _new_id("bjob")
+    run_id = _new_id("arun")
+    now = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_background_jobs
+                (
+                    id, username, project_id, job_type, title, status, priority,
+                    progress_percent, job_plan_json, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, 'queued', ?, 0, ?, ?, ?)
+            """,
+            (
+                job_id,
+                username,
+                project_id or plan.get("projectId"),
+                str(plan.get("jobType") or "prepare_report")[:120],
+                str(plan.get("title") or "Background job")[:180],
+                str(plan.get("priority") or "normal")[:40],
+                json.dumps(plan, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO cognix_background_agent_runs
+                (id, username, job_id, status, runner_type, run_plan_json, created_at, updated_at)
+            VALUES (?, ?, ?, 'planned', 'AgentRunner', ?, ?, ?)
+            """,
+            (
+                run_id,
+                username,
+                job_id,
+                json.dumps(plan.get("agentRunPlan") or {}, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO cognix_background_job_logs
+                (id, username, job_id, run_id, level, message, progress_percent, metadata_json, created_at)
+            VALUES (?, ?, ?, ?, 'info', ?, 0, ?, ?)
+            """,
+            (
+                _new_id("jlog"),
+                username,
+                job_id,
+                run_id,
+                "Background job planned and queued; worker execution has not started.",
+                json.dumps({"sideEffects": plan.get("sideEffects", {})}, ensure_ascii = False),
+                now,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_background_job(username, job_id) or {}
+
+
+def get_background_job(username: str, job_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM cognix_background_jobs WHERE id = ? AND username = ?",
+            (job_id, username),
+        ).fetchone()
+        if row is None:
+            return None
+        job = _hydrate_background_job(row_to_dict(row) or {})
+        run_rows = conn.execute(
+            "SELECT * FROM cognix_background_agent_runs WHERE username = ? AND job_id = ? ORDER BY created_at DESC",
+            (username, job_id),
+        ).fetchall()
+        log_rows = conn.execute(
+            "SELECT * FROM cognix_background_job_logs WHERE username = ? AND job_id = ? ORDER BY created_at DESC",
+            (username, job_id),
+        ).fetchall()
+        job["runs"] = [_hydrate_agent_run(item) for item in _rows_to_dicts(run_rows)]
+        job["logs"] = [_hydrate_job_log(item) for item in _rows_to_dicts(log_rows)]
+        return job
+    finally:
+        conn.close()
+
+
+def list_background_jobs(username: str, *, limit: int = 100) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 100), 1), 300)
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM cognix_background_jobs
+            WHERE username = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (username, safe_limit),
+        ).fetchall()
+        return [_hydrate_background_job(row) for row in _rows_to_dicts(rows)]
     finally:
         conn.close()
 
