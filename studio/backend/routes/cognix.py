@@ -43,6 +43,7 @@ from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import project_experts as cognix_project_experts
 from core.cognix import prompt_compression as cognix_prompt_compression
+from core.cognix import quantization_advisor as cognix_quantization_advisor
 from core.cognix import rag_planner as cognix_rag_planner
 from core.cognix import registry as cognix_registry
 from core.cognix import recommender as cognix_recommender
@@ -580,6 +581,17 @@ class OptimizationExperimentPlanRequest(BaseModel):
     requested_optimizations: list[str] | None = Field(None, alias = "requestedOptimizations")
 
 
+class QuantizationPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    priority: str = Field("balanced", max_length = 80)
+    model_id: str | None = Field(None, alias = "modelId", max_length = 240)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    project_type: str | None = Field(None, alias = "projectType", max_length = 80)
+    model_metadata: dict[str, Any] | None = Field(None, alias = "modelMetadata")
+    store_profile: bool = Field(True, alias = "storeProfile")
+
+
 class RuntimePlanRequest(BaseModel):
     objective: str = Field(..., min_length = 1, max_length = 4000)
     project_type: str | None = Field(None, max_length = 80)
@@ -779,6 +791,9 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "sandbox_id": "sandboxId",
         "badge_label": "badgeLabel",
         "risk_level": "riskLevel",
+        "variant_id": "variantId",
+        "selected_variant_id": "selectedVariantId",
+        "quantization": "quantization",
         "scores_json": "scoresJson",
         "message_id": "messageId",
         "thread_id": "threadId",
@@ -3361,6 +3376,157 @@ async def optimization_experiment_plan(
         "auditLogId": audit.get("id"),
         "sideEffects": plan.get("sideEffects", {}),
         "plannerVersion": cognix_optimization_planner.COGNIX_OPTIMIZATION_PLANNER_VERSION,
+    }
+
+
+@router.get("/quantization/variants")
+async def quantization_variants(
+    priority: str = "balanced",
+    model_id: str | None = None,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    hardware = cognix_hardware.get_hardware_profile()
+    latest_benchmark = cognix_db.get_latest_benchmark_run(current_subject)
+    recommendation_payload = cognix_recommender.build_model_recommendation(
+        hardware,
+        latest_benchmark_run = latest_benchmark,
+    )
+    recommendation = dict(recommendation_payload.get("recommendation") or {})
+    if model_id:
+        recommendation["modelId"] = model_id
+    registry = cognix_quantization_advisor.build_model_variant_registry(
+        model_metadata = recommendation,
+        hardware = hardware,
+        priority = priority,
+    )
+    stored_variants = cognix_db.upsert_model_variants(registry.get("variants", []))
+    side_effects = {
+        **registry.get("sideEffects", {}),
+        "modelVariantWrite": bool(stored_variants),
+        "profileWrite": False,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "model_variant_registry_built",
+        resource_type = "cognix_model_variant_registry",
+        resource_id = str(registry.get("model", {}).get("modelId") or "selected_model"),
+        severity = "notice",
+        metadata = {
+            "advisorVersion": registry.get("advisorVersion"),
+            "registryVersion": registry.get("registryVersion"),
+            "priority": registry.get("priority"),
+            "selectedQuantization": registry.get("recommendedVariant", {}).get("quantization"),
+            "badgeLabel": registry.get("badge", {}).get("label"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "variantRegistry": registry,
+        "storedVariants": _rows(stored_variants),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_quantization_advisor.COGNIX_QUANTIZATION_ADVISOR_VERSION,
+    }
+
+
+@router.post("/quantization/plan")
+async def adaptive_quantization_plan(
+    payload: QuantizationPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    hardware = cognix_hardware.get_hardware_profile()
+    latest_benchmark = cognix_db.get_latest_benchmark_run(current_subject)
+    recommendation_payload = cognix_recommender.build_model_recommendation(
+        hardware,
+        latest_benchmark_run = latest_benchmark,
+    )
+    model_metadata = dict(payload.model_metadata or recommendation_payload.get("recommendation") or {})
+    if payload.model_id:
+        model_metadata["modelId"] = payload.model_id
+    plan = cognix_quantization_advisor.build_adaptive_quantization_plan(
+        hardware = hardware,
+        model_metadata = model_metadata,
+        priority = payload.priority,
+        latest_benchmark_run = latest_benchmark,
+    )
+    plan["projectId"] = payload.project_id
+    plan["projectType"] = payload.project_type
+    cognix_db.upsert_model_variants(plan.get("variantRegistry", {}).get("variants", []))
+    profile = (
+        cognix_db.create_quantization_profile(
+            current_subject,
+            plan = plan,
+            project_id = payload.project_id,
+        )
+        if payload.store_profile
+        else None
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "modelVariantWrite": True,
+        "profileWrite": profile is not None,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "adaptive_quantization_plan_built",
+        resource_type = "cognix_quantization_profile",
+        resource_id = str((profile or {}).get("id") or payload.project_id or plan.get("model", {}).get("modelId") or "selected_model"),
+        severity = "warning" if plan.get("selectedVariant", {}).get("fit", {}).get("status") == "tight" else "notice",
+        metadata = {
+            "advisorVersion": plan.get("advisorVersion"),
+            "variantRegistryVersion": plan.get("variantRegistryVersion"),
+            "performancePredictorVersion": plan.get("performancePredictorVersion"),
+            "priority": plan.get("priority"),
+            "modelId": plan.get("model", {}).get("modelId"),
+            "selectedVariantId": plan.get("selectedVariant", {}).get("variantId"),
+            "selectedQuantization": plan.get("selectedVariant", {}).get("quantization"),
+            "badgeLabel": plan.get("badge", {}).get("label"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "quantizationPlan": plan,
+        "profile": _row(profile) if profile else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_quantization_advisor.COGNIX_QUANTIZATION_ADVISOR_VERSION,
+    }
+
+
+@router.get("/quantization/profiles")
+async def quantization_profiles(
+    project_id: str | None = None,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if project_id:
+        _require_owned_project(project_id, current_subject)
+    return {
+        "profiles": _rows(
+            cognix_db.list_quantization_profiles(
+                current_subject,
+                project_id = project_id,
+            )
+        ),
+        "sideEffects": {
+            "modelLoad": False,
+            "modelDownload": False,
+            "modelConversion": False,
+            "modelFileWrite": False,
+            "runtimeConfigWrite": False,
+            "networkCall": False,
+            "benchmarkRun": False,
+            "generation": False,
+            "profileWrite": False,
+        },
+        "plannerVersion": cognix_quantization_advisor.COGNIX_QUANTIZATION_ADVISOR_VERSION,
     }
 
 

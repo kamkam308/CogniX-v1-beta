@@ -253,6 +253,41 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_benchmark_runs_created
             ON cognix_benchmark_runs(created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_model_variants (
+            id TEXT PRIMARY KEY,
+            model_id TEXT NOT NULL,
+            variant_id TEXT NOT NULL,
+            quantization TEXT NOT NULL,
+            label TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'planned',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(model_id, variant_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_model_variants_model
+            ON cognix_model_variants(model_id, quantization);
+
+        CREATE TABLE IF NOT EXISTS cognix_quantization_profiles (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            project_id TEXT,
+            priority TEXT NOT NULL,
+            model_id TEXT NOT NULL,
+            selected_variant_id TEXT NOT NULL,
+            quantization TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'planned_no_execution',
+            plan_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_quantization_profiles_username_created
+            ON cognix_quantization_profiles(username, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_quantization_profiles_project
+            ON cognix_quantization_profiles(username, project_id, updated_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_reports (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -1895,6 +1930,143 @@ def get_latest_benchmark_run(username: str) -> dict[str, Any] | None:
         if row is None:
             return None
         return _benchmark_row(dict(row))
+    finally:
+        conn.close()
+
+
+def _hydrate_model_variant(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def upsert_model_variants(variants: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not variants:
+        return []
+    now = _now()
+    conn = get_connection()
+    try:
+        for variant in variants:
+            model_id = str(variant.get("modelId") or "selected_model")[:240]
+            variant_id = str(variant.get("variantId") or variant.get("variantKey") or "unknown")[:160]
+            conn.execute(
+                """
+                INSERT INTO cognix_model_variants
+                    (id, model_id, variant_id, quantization, label, status, metadata_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, 'planned', ?, ?, ?)
+                ON CONFLICT(model_id, variant_id) DO UPDATE SET
+                    quantization = excluded.quantization,
+                    label = excluded.label,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    _new_id("mvar"),
+                    model_id,
+                    variant_id,
+                    str(variant.get("quantization") or "")[:80],
+                    str(variant.get("label") or variant_id)[:240],
+                    json.dumps(variant, ensure_ascii = False),
+                    now,
+                    now,
+                ),
+            )
+        conn.commit()
+        model_ids = sorted({str(item.get("modelId") or "selected_model")[:240] for item in variants})
+        placeholders = ",".join("?" for _ in model_ids)
+        rows = conn.execute(
+            f"SELECT * FROM cognix_model_variants WHERE model_id IN ({placeholders}) ORDER BY model_id, variant_id",
+            tuple(model_ids),
+        ).fetchall()
+        return [_hydrate_model_variant(dict(row)) for row in rows]
+    finally:
+        conn.close()
+
+
+def _hydrate_quantization_profile(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["plan"] = _json_or_default(item.get("plan_json"), {})
+    return item
+
+
+def create_quantization_profile(
+    username: str,
+    *,
+    plan: dict[str, Any],
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    created_at = _now()
+    profile_id = _new_id("qprof")
+    model = plan.get("model") if isinstance(plan.get("model"), dict) else {}
+    selected = plan.get("selectedVariant") if isinstance(plan.get("selectedVariant"), dict) else {}
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_quantization_profiles
+                (
+                    id,
+                    username,
+                    project_id,
+                    priority,
+                    model_id,
+                    selected_variant_id,
+                    quantization,
+                    status,
+                    plan_json,
+                    created_at,
+                    updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'planned_no_execution', ?, ?, ?)
+            """,
+            (
+                profile_id,
+                username,
+                project_id or plan.get("projectId"),
+                str(plan.get("priority") or "balanced")[:80],
+                str(model.get("modelId") or "selected_model")[:240],
+                str(selected.get("variantId") or selected.get("variantKey") or "unknown")[:160],
+                str(selected.get("quantization") or "")[:80],
+                json.dumps(plan, ensure_ascii = False),
+                created_at,
+                created_at,
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM cognix_quantization_profiles WHERE id = ? AND username = ?",
+            (profile_id, username),
+        ).fetchone()
+        return _hydrate_quantization_profile(dict(row)) if row else {}
+    finally:
+        conn.close()
+
+
+def list_quantization_profiles(username: str, *, project_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        normalized_limit = max(1, min(int(limit), 200))
+        if project_id:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_quantization_profiles
+                WHERE username = ? AND project_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, project_id, normalized_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_quantization_profiles
+                WHERE username = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, normalized_limit),
+            ).fetchall()
+        return [_hydrate_quantization_profile(dict(row)) for row in rows]
     finally:
         conn.close()
 

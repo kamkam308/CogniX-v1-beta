@@ -36,6 +36,7 @@ from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import project_experts as cognix_project_experts
 from core.cognix import prompt_compression as cognix_prompt_compression
+from core.cognix import quantization_advisor as cognix_quantization_advisor
 from core.cognix import rag_planner as cognix_rag_planner
 from core.cognix import research_watch as cognix_research_watch
 from core.cognix import response_reflection as cognix_response_reflection
@@ -1109,6 +1110,100 @@ def test_optimization_experiment_plan_endpoint_blocks_enablement_until_benchmark
     assert log["action"] == "optimization_experiment_plan_built"
     assert log["metadata"]["experimentPlanVersion"] == "cognix_optimization_experiment_plan_v1"
     assert "benchmark_baseline" in log["metadata"]["blockedGateIds"]
+
+
+def test_adaptive_quantization_recommends_memory_safe_variant_without_model_mutation():
+    registry = cognix_quantization_advisor.build_model_variant_registry(
+        hardware = {
+            "deviceBackend": "cpu",
+            "memory": {"totalGb": 8.0, "availableGb": 4.2},
+            "gpu": {"available": False, "devices": []},
+        },
+        model_metadata = {
+            "modelId": "qwen-4b-local",
+            "modelLabel": "Qwen 4B local",
+            "providerType": "ollama",
+            "estimatedRamGb": 4.6,
+        },
+        priority = "memory",
+    )
+
+    assert registry["registryVersion"] == "cognix_model_variant_registry_v1"
+    assert registry["mode"] == "dry_run"
+    assert registry["badge"]["label"] == "Recommande pour ton PC"
+    assert registry["recommendedVariant"]["quantization"] in {"IQ2", "Q4"}
+    assert registry["recommendedVariant"]["fit"]["status"] != "blocked"
+    assert registry["policies"]["frontendDirectModelSelectionMutationAllowed"] is False
+    assert registry["sideEffects"]["modelLoad"] is False
+    assert registry["sideEffects"]["modelConversion"] is False
+    assert registry["sideEffects"]["runtimeConfigWrite"] is False
+
+
+def test_adaptive_quantization_plan_prefers_quality_on_powerful_gpu_without_apply():
+    plan = cognix_quantization_advisor.build_adaptive_quantization_plan(
+        hardware = stub_gpu_hardware_profile(),
+        model_metadata = {
+            "modelId": "qwen-4b-local",
+            "modelLabel": "Qwen 4B local",
+            "providerType": "ollama",
+            "estimatedRamGb": 4.6,
+        },
+        priority = "quality",
+        latest_benchmark_run = {"id": "bench-ok", "benchmark": {"benchmarkVersion": "cognix_benchmark_v1"}},
+    )
+
+    assert plan["advisorVersion"] == "cognix_quantization_advisor_v1"
+    assert plan["performancePredictorVersion"] == "cognix_performance_predictor_v1"
+    assert plan["selectedVariant"]["quantization"] in {"Q8", "FP16"}
+    assert plan["applyPlan"]["willApplyAutomatically"] is False
+    assert plan["applyPlan"]["writesModelFiles"] is False
+    assert plan["sideEffects"]["modelLoad"] is False
+    assert plan["sideEffects"]["modelFileWrite"] is False
+    assert plan["sideEffects"]["generation"] is False
+
+
+def test_adaptive_quantization_endpoint_stores_profile_and_logs_audit(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_routes.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_routes.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+
+    body = run_async(
+        cognix_routes.adaptive_quantization_plan(
+            cognix_routes.QuantizationPlanRequest(
+                priority = "balanced",
+                model_id = "huihui_ai/qwen3-vl-abliterated:4b-instruct",
+                store_profile = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    plan = body["quantizationPlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["profile"]["id"].startswith("qprof_")
+    assert plan["badge"]["label"] == "Recommande pour ton PC"
+    assert plan["selectedVariant"]["quantization"] in {"Q4", "Q5"}
+    assert body["sideEffects"]["modelLoad"] is False
+    assert body["sideEffects"]["modelConversion"] is False
+    assert body["sideEffects"]["runtimeConfigWrite"] is False
+    assert body["sideEffects"]["profileWrite"] is True
+
+    profiles = run_async(cognix_routes.quantization_profiles(current_subject = "alice"))
+    assert profiles["profiles"][0]["id"] == body["profile"]["id"]
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "adaptive_quantization_plan_built"
+    assert log["metadata"]["selectedQuantization"] == plan["selectedVariant"]["quantization"]
+    assert log["metadata"]["sideEffects"]["modelLoad"] is False
 
 
 def test_runtime_adapter_registry_and_plan_select_ollama_without_side_effects():
@@ -4213,6 +4308,11 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "cloud_training_job_specs" in modules["cognix-worker-queue"]["capabilities"]
     assert "/api/cognix/workers/registry" in modules["cognix-worker-queue"]["routes"]
     assert "/api/cognix/workers/job-spec-plan" in modules["cognix-worker-queue"]["routes"]
+    assert "adaptive_quantization" in modules["cognix-optimization-engine"]["capabilities"]
+    assert "quantization_advisor" in modules["cognix-optimization-engine"]["capabilities"]
+    assert "model_variant_registry" in modules["cognix-optimization-engine"]["capabilities"]
+    assert "/api/cognix/quantization/plan" in modules["cognix-optimization-engine"]["routes"]
+    assert "/api/cognix/quantization/variants" in modules["cognix-optimization-engine"]["routes"]
     assert "technology_watch" in modules["cognix-research-watch"]["capabilities"]
     assert "benchmark_gate" in modules["cognix-research-watch"]["capabilities"]
     assert "/api/cognix/research/integration-plan" in modules["cognix-research-watch"]["routes"]
