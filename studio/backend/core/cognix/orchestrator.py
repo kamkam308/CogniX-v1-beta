@@ -22,6 +22,7 @@ from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import preload_planner as cognix_preload_planner
 from core.cognix import rag_planner as cognix_rag_planner
 from core.cognix import recommender as cognix_recommender
+from core.cognix import runtime_adapter as cognix_runtime_adapter
 from core.cognix import security_policy as cognix_security_policy
 from core.cognix.router import classify_objective
 
@@ -86,6 +87,7 @@ def _warnings(
     rag_plan: dict[str, Any],
     context_plan: dict[str, Any],
     optimization_plan: dict[str, Any],
+    runtime_adapter_plan: dict[str, Any],
     preload_plan: dict[str, Any],
     fine_tuning_plan: dict[str, Any],
 ) -> list[str]:
@@ -108,6 +110,9 @@ def _warnings(
         if isinstance(item, str) and item:
             warnings.append(item)
     for item in optimization_plan.get("warnings") or []:
+        if isinstance(item, str) and item:
+            warnings.append(item)
+    for item in runtime_adapter_plan.get("warnings") or []:
         if isinstance(item, str) and item:
             warnings.append(item)
     for item in preload_plan.get("warnings") or []:
@@ -135,6 +140,7 @@ def _steps(
     rag_plan: dict[str, Any],
     context_plan: dict[str, Any],
     optimization_plan: dict[str, Any],
+    runtime_adapter_plan: dict[str, Any],
     preload_plan: dict[str, Any],
     fine_tuning_plan: dict[str, Any],
     execution_policy: dict[str, Any],
@@ -167,6 +173,15 @@ def _steps(
             "detail": (
                 f"{recommendation.get('providerName') or 'Provider local'} / "
                 f"{recommendation.get('modelLabel') or recommendation.get('modelId') or 'modele local'}."
+            ),
+        },
+        {
+            "id": "select_runtime_adapter",
+            "label": "Choisir l'adapter runtime",
+            "status": "complete",
+            "detail": str(
+                runtime_adapter_plan.get("reason")
+                or "Adapter runtime selectionne sans mutation de serveur."
             ),
         },
         {
@@ -310,6 +325,23 @@ def build_execution_plan(
         task_strategy = task_strategy,
         latest_benchmark_run = latest_benchmark_run,
     )
+    fine_tuning_plan = cognix_fine_tuning_planner.build_fine_tuning_plan(
+        objective = objective,
+        classification = classification,
+        task_strategy = task_strategy,
+        recommendation = recommendation,
+        hardware = hardware,
+        dataset = fine_tuning_dataset,
+        latest_benchmark_run = latest_benchmark_run,
+    )
+    runtime_adapter_plan = cognix_runtime_adapter.build_runtime_adapter_plan(
+        recommendation = recommendation,
+        hardware = hardware,
+        task_strategy = task_strategy,
+        rag_plan = rag_plan,
+        fine_tuning_plan = fine_tuning_plan,
+        optimization_plan = optimization_plan,
+    )
     preload_plan = cognix_preload_planner.build_preload_plan(
         objective = objective,
         project_type = project_type,
@@ -318,15 +350,6 @@ def build_execution_plan(
         task_strategy = task_strategy,
         recommendation = recommendation,
         cache = cache,
-        latest_benchmark_run = latest_benchmark_run,
-    )
-    fine_tuning_plan = cognix_fine_tuning_planner.build_fine_tuning_plan(
-        objective = objective,
-        classification = classification,
-        task_strategy = task_strategy,
-        recommendation = recommendation,
-        hardware = hardware,
-        dataset = fine_tuning_dataset,
         latest_benchmark_run = latest_benchmark_run,
     )
     status = _execution_status(
@@ -364,6 +387,8 @@ def build_execution_plan(
         "rawHistoryAllowed": context_plan.get("tokenBudget", {}).get("rawHistoryAllowed"),
         "optimizationProfile": optimization_plan.get("optimizationProfile"),
         "optimizationHardwareTier": optimization_plan.get("hardwareTier"),
+        "runtimeAdapterId": runtime_adapter_plan.get("selectedAdapter", {}).get("adapterId"),
+        "runtimeAdapterType": runtime_adapter_plan.get("selectedAdapter", {}).get("runtimeType"),
         "fineTuningMethod": fine_tuning_plan.get("method", {}).get("type"),
         "fineTuningReadyToRequestApproval": fine_tuning_plan.get("approval", {}).get("readyToRequest"),
         "uses": task_strategy.get("uses"),
@@ -391,6 +416,7 @@ def build_execution_plan(
         "ragPlan": rag_plan,
         "contextPlan": context_plan,
         "optimizationPlan": optimization_plan,
+        "runtimeAdapterPlan": runtime_adapter_plan,
         "preloadPlan": preload_plan,
         "fineTuningPlan": fine_tuning_plan,
         "taskStrategy": task_strategy,
@@ -404,6 +430,7 @@ def build_execution_plan(
             rag_plan = rag_plan,
             context_plan = context_plan,
             optimization_plan = optimization_plan,
+            runtime_adapter_plan = runtime_adapter_plan,
             preload_plan = preload_plan,
             fine_tuning_plan = fine_tuning_plan,
             execution_policy = execution_policy,
@@ -417,6 +444,7 @@ def build_execution_plan(
             rag_plan = rag_plan,
             context_plan = context_plan,
             optimization_plan = optimization_plan,
+            runtime_adapter_plan = runtime_adapter_plan,
             preload_plan = preload_plan,
             fine_tuning_plan = fine_tuning_plan,
         ),
@@ -430,6 +458,8 @@ def build_execution_plan(
             "memoryWrite": False,
             "contextMutation": False,
             "modelReconfiguration": False,
+            "runtimeMutation": False,
+            "serverStart": False,
             "benchmarkRun": False,
             "fineTuningJob": False,
             "codeModification": False,

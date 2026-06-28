@@ -28,6 +28,7 @@ from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import registry as cognix_registry
 from core.cognix import recommender as cognix_recommender
+from core.cognix import runtime_adapter as cognix_runtime_adapter
 from core.cognix import tool_registry as cognix_tool_registry
 from core.cognix.router import classify_objective
 from core.cognix.strategy import build_strategy
@@ -174,6 +175,12 @@ class RagPlanRequest(BaseModel):
 
 
 class OptimizationPlanRequest(BaseModel):
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    project_type: str | None = Field(None, max_length = 80)
+    project_id: str | None = Field(None, max_length = 160)
+
+
+class RuntimePlanRequest(BaseModel):
     objective: str = Field(..., min_length = 1, max_length = 4000)
     project_type: str | None = Field(None, max_length = 80)
     project_id: str | None = Field(None, max_length = 160)
@@ -983,6 +990,58 @@ async def model_registry(current_subject: str = Depends(get_current_jwt_subject)
     return {
         "username": current_subject,
         "registry": cognix_registry.build_model_registry(),
+    }
+
+
+@router.get("/runtime/adapters")
+async def runtime_adapters(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    return {
+        "username": current_subject,
+        "registry": cognix_runtime_adapter.build_runtime_adapter_registry(),
+    }
+
+
+@router.post("/runtime/plan")
+async def runtime_plan(
+    payload: RuntimePlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    runtime = _current_model_cache_runtime()
+    plan = cognix_orchestrator.build_execution_plan(
+        payload.objective,
+        current_subject = current_subject,
+        project_type = payload.project_type,
+        project_id = payload.project_id,
+        runtime_snapshot = runtime,
+        latest_benchmark_run = cognix_db.get_latest_benchmark_run(current_subject),
+        rag_available = _rag_available(),
+    )
+    adapter_plan = plan["runtimeAdapterPlan"]
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "runtime_adapter_plan_built",
+        resource_type = "cognix_runtime_adapter",
+        resource_id = str(adapter_plan.get("selectedAdapter", {}).get("adapterId") or "none"),
+        severity = "warning" if adapter_plan.get("warnings") else "notice",
+        metadata = {
+            "runtimeAdapterVersion": adapter_plan.get("runtimeAdapterVersion"),
+            "requestedRuntimeType": adapter_plan.get("requestedRuntimeType"),
+            "selectedAdapter": adapter_plan.get("selectedAdapter", {}),
+            "requiredCapabilities": adapter_plan.get("requiredCapabilities", []),
+            "sideEffects": adapter_plan.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "runtimeError": runtime.get("error"),
+        "classification": plan["classification"],
+        "taskStrategy": plan["taskStrategy"],
+        "runtimeAdapterPlan": adapter_plan,
+        "executionPolicy": plan["executionPolicy"],
+        "auditLogId": audit.get("id"),
+        "sideEffects": adapter_plan.get("sideEffects", {}),
+        "plannerVersion": cognix_runtime_adapter.COGNIX_RUNTIME_ADAPTER_VERSION,
     }
 
 

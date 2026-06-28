@@ -21,6 +21,7 @@ from core.cognix import integration_manager as cognix_integration_manager
 from core.cognix import module_registry as cognix_module_registry
 from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
+from core.cognix import runtime_adapter as cognix_runtime_adapter
 from core.cognix import tool_registry as cognix_tool_registry
 from core.cognix.router import classify_objective
 from routes import auth as auth_routes
@@ -238,7 +239,12 @@ def test_orchestrator_builds_dry_run_plan_without_loading(monkeypatch):
     assert plan["optimizationPlan"]["optimizationProfile"] == "balanced"
     assert plan["optimizationPlan"]["sideEffects"]["modelReconfiguration"] is False
     assert plan["executionStrategy"]["optimizationProfile"] == "balanced"
+    assert plan["runtimeAdapterPlan"]["runtimeAdapterVersion"] == "cognix_runtime_adapter_v1"
+    assert plan["runtimeAdapterPlan"]["selectedAdapter"]["adapterId"] == "ollama"
+    assert plan["runtimeAdapterPlan"]["sideEffects"]["runtimeMutation"] is False
+    assert plan["executionStrategy"]["runtimeAdapterId"] == "ollama"
     assert plan["executionStrategy"]["preloadAction"] == "would_preload"
+    assert any(step["id"] == "select_runtime_adapter" for step in plan["steps"])
     assert any(step["id"] == "plan_rag" for step in plan["steps"])
     assert any(step["id"] == "plan_context" for step in plan["steps"])
     assert any(step["id"] == "plan_optimizations" for step in plan["steps"])
@@ -583,6 +589,69 @@ def test_optimization_plan_endpoint_logs_dry_run_decision(monkeypatch):
     assert log["action"] == "optimization_plan_built"
     assert log["metadata"]["optimizationPlannerVersion"] == "cognix_optimization_planner_v1"
     assert log["metadata"]["sideEffects"]["modelReconfiguration"] is False
+
+
+def test_runtime_adapter_registry_and_plan_select_ollama_without_side_effects():
+    registry = cognix_runtime_adapter.build_runtime_adapter_registry()
+
+    assert registry["runtimeAdapterVersion"] == "cognix_runtime_adapter_v1"
+    assert registry["summary"]["directFrontendModelCallAllowed"] is False
+    assert registry["globalPolicies"]["frontendMustUseBackend"] is True
+    assert registry["sideEffects"]["runtimeMutation"] is False
+
+    plan = cognix_runtime_adapter.build_runtime_adapter_plan(
+        recommendation = {"providerType": "ollama"},
+        hardware = stub_hardware_profile(),
+        task_strategy = {"path": "expert_chat"},
+        rag_plan = {"readyForRetrieval": False},
+        fine_tuning_plan = {"recommendedPath": "no_fine_tuning_needed"},
+        optimization_plan = {"recommendedOptimizationIds": ["prompt_cache"]},
+    )
+
+    assert plan["runtimeAdapterVersion"] == "cognix_runtime_adapter_v1"
+    assert plan["selectedAdapter"]["adapterId"] == "ollama"
+    assert "promptCaching" in plan["selectedAdapter"]["missingCapabilities"]
+    assert plan["sideEffects"]["modelLoad"] is False
+    assert plan["sideEffects"]["serverStart"] is False
+    assert plan["sideEffects"]["networkModelCall"] is False
+
+
+def test_runtime_adapter_plan_endpoint_logs_audited_dry_run(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+
+    body = run_async(
+        cognix_routes.runtime_plan(
+            cognix_routes.RuntimePlanRequest(
+                objective = "Choisis le meilleur runtime local pour cette demande",
+                project_type = "general",
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    adapter_plan = body["runtimeAdapterPlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_runtime_adapter_v1"
+    assert adapter_plan["selectedAdapter"]["adapterId"] == "ollama"
+    assert adapter_plan["sideEffects"]["runtimeMutation"] is False
+    assert adapter_plan["sideEffects"]["serverStart"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "runtime_adapter_plan_built"
+    assert log["metadata"]["runtimeAdapterVersion"] == "cognix_runtime_adapter_v1"
+    assert log["metadata"]["sideEffects"]["runtimeMutation"] is False
 
 
 def test_context_manager_builds_bounded_context_packet():
