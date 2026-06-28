@@ -10,10 +10,12 @@ running benchmarks, or changing code.
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 
 COGNIX_WORKER_QUEUE_VERSION = "cognix_worker_queue_v1"
+COGNIX_WORKER_JOB_SPEC_VERSION = "cognix_worker_job_spec_v1"
 
 QUEUE_DEFINITIONS: list[dict[str, Any]] = [
     {
@@ -49,6 +51,14 @@ QUEUE_DEFINITIONS: list[dict[str, Any]] = [
         "requiresHumanConfirmation": True,
     },
     {
+        "id": "cloud_training",
+        "label": "Cloud training",
+        "acceptedJobTypes": ["cloud_training_job"],
+        "maxConcurrentJobs": 1,
+        "requiresAudit": True,
+        "requiresHumanConfirmation": True,
+    },
+    {
         "id": "codex_guarded",
         "label": "Codex guarded",
         "acceptedJobTypes": ["codex_pipeline"],
@@ -69,6 +79,11 @@ def _as_list(value: Any) -> list[Any]:
 
 def _objective_excerpt(objective: str | None) -> str:
     return " ".join((objective or "").split())[:500]
+
+
+def _stable_key(*parts: Any) -> str:
+    payload = "|".join(str(part or "") for part in parts)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:18]
 
 
 def _queue(queue_id: str) -> dict[str, Any]:
@@ -140,6 +155,8 @@ def build_worker_queue_registry() -> dict[str, Any]:
         "globalPolicies": {
             "frontendDirectQueueMutationAllowed": False,
             "backgroundExecutionAllowedFromPlanner": False,
+            "jobSpecsRequireApproval": True,
+            "idempotencyKeyRequired": True,
             "maxConcurrentLocalJobs": 1,
             "auditRequired": True,
             "rateLimitsEnabled": True,
@@ -150,6 +167,7 @@ def build_worker_queue_registry() -> dict[str, Any]:
             "modelDownload": False,
             "modelLoad": False,
             "ragIndexing": False,
+            "cloudTrainingJob": False,
             "fineTuningJob": False,
             "benchmarkRun": False,
             "codeModification": False,
@@ -199,19 +217,28 @@ def build_worker_queue_plan(
 
     if fine_tuning_plan.get("recommendedPath") == "guided_fine_tuning":
         ready = bool(_as_dict(fine_tuning_plan.get("approval")).get("readyToRequest"))
+        method = _as_dict(fine_tuning_plan.get("method"))
+        resource_target = _as_dict(fine_tuning_plan.get("resourceTargetPlan"))
+        cloud_training = bool(resource_target.get("cloudTrainingAllowed")) or method.get("type") == "cloud_qlora"
         jobs.append(
             _job(
-                job_id = "fine_tuning_job",
-                job_type = "fine_tuning_job",
-                queue_id = "gpu_long_running",
-                label = "Preparer un fine-tuning guide",
+                job_id = "cloud_training_job" if cloud_training else "fine_tuning_job",
+                job_type = "cloud_training_job" if cloud_training else "fine_tuning_job",
+                queue_id = "cloud_training" if cloud_training else "gpu_long_running",
+                label = "Preparer un training cloud guide" if cloud_training else "Preparer un fine-tuning guide",
                 reason = (
-                    "Dataset et methode prets pour demande d'approbation."
+                    "Dataset, methode et cible cloud prets pour demande d'approbation."
+                    if ready and cloud_training
+                    else "Dataset et methode prets pour demande d'approbation."
                     if ready
                     else "Fine-tuning detecte mais validation dataset ou materiel encore incomplete."
                 ),
                 priority = 82 if ready else 68,
-                required_gates = ["dataset_validation", "resource_estimate", "human_approval"],
+                required_gates = (
+                    ["dataset_validation", "cloud_handoff_export", "secret_review", "budget_limit", "human_approval"]
+                    if cloud_training
+                    else ["dataset_validation", "resource_estimate", "human_approval"]
+                ),
                 source_plan = "fineTuningPlan",
                 requires_human_confirmation = True,
             )
@@ -334,12 +361,209 @@ def build_worker_queue_plan(
             "networkModelCall": False,
             "ragIndexing": False,
             "embeddingGeneration": False,
+            "cloudTrainingJob": False,
             "fineTuningJob": False,
             "benchmarkRun": False,
             "codeModification": False,
             "branchCreate": False,
             "commit": False,
             "push": False,
+            "deployment": False,
+        },
+    }
+
+
+def _payload_summary_for_job(
+    *,
+    job: dict[str, Any],
+    rag_indexing_plan: dict[str, Any],
+    cloud_handoff_plan: dict[str, Any],
+    preload_plan: dict[str, Any],
+) -> dict[str, Any]:
+    job_type = str(job.get("type") or "")
+    if job_type == "rag_indexing":
+        return {
+            "sourcePlan": "ragIndexingPlan",
+            "sourceCount": _as_dict(rag_indexing_plan.get("summary")).get("sourceCount"),
+            "readyToIndexCount": rag_indexing_plan.get("readyToIndexCount"),
+            "estimatedChunkCount": _as_dict(rag_indexing_plan.get("summary")).get("estimatedChunkCount"),
+            "rawSourceContentIncluded": False,
+        }
+    if job_type == "cloud_training_job":
+        target = _as_dict(cloud_handoff_plan.get("target"))
+        return {
+            "sourcePlan": "cloudHandoffPlan",
+            "targetId": target.get("id"),
+            "exportFormat": target.get("exportFormat"),
+            "readyToExport": cloud_handoff_plan.get("readyToExport"),
+            "artifactCount": len(_as_list(cloud_handoff_plan.get("artifactManifest"))),
+            "rawSecretsIncluded": False,
+            "datasetUploadPlannedOnly": True,
+        }
+    if job_type == "model_preload":
+        target = _as_dict(preload_plan.get("target"))
+        return {
+            "sourcePlan": "preloadPlan",
+            "targetModelId": target.get("modelId"),
+            "modelRole": target.get("modelRole"),
+            "willLoadModel": False,
+        }
+    return {
+        "sourcePlan": job.get("sourcePlan"),
+        "rawPayloadIncluded": False,
+    }
+
+
+def _spec_for_job(
+    *,
+    job: dict[str, Any],
+    project_id: str | None,
+    rag_indexing_plan: dict[str, Any],
+    cloud_handoff_plan: dict[str, Any],
+    preload_plan: dict[str, Any],
+) -> dict[str, Any]:
+    queue = _queue(str(job.get("queueId") or "none"))
+    job_id = str(job.get("id") or "job")
+    job_type = str(job.get("type") or job_id)
+    idempotency_key = f"cognix:{project_id or 'global'}:{job_type}:{_stable_key(job_id, project_id, job.get('sourcePlan'))}"
+    required_gates = [str(item) for item in _as_list(job.get("requiredGates")) if item]
+    source_plan_status = "planned"
+    if job_type == "rag_indexing":
+        source_plan_status = str(rag_indexing_plan.get("status") or "planned")
+    elif job_type == "cloud_training_job":
+        source_plan_status = str(cloud_handoff_plan.get("status") or "planned")
+
+    return {
+        "specVersion": COGNIX_WORKER_JOB_SPEC_VERSION,
+        "jobId": job_id,
+        "jobType": job_type,
+        "queueId": queue.get("id"),
+        "queueLabel": queue.get("label"),
+        "idempotencyKey": idempotency_key,
+        "status": "spec_ready",
+        "priority": int(job.get("priority") or 0),
+        "sourcePlan": job.get("sourcePlan"),
+        "sourcePlanStatus": source_plan_status,
+        "requiredGates": required_gates,
+        "requiresAudit": True,
+        "requiresRateLimit": True,
+        "requiresHumanConfirmation": bool(job.get("requiresHumanConfirmation") or queue.get("requiresHumanConfirmation")),
+        "payloadSummary": _payload_summary_for_job(
+            job = job,
+            rag_indexing_plan = rag_indexing_plan,
+            cloud_handoff_plan = cloud_handoff_plan,
+            preload_plan = preload_plan,
+        ),
+        "willEnqueue": False,
+        "willStartWorker": False,
+        "willExecute": False,
+    }
+
+
+def build_worker_job_spec_plan(
+    *,
+    objective: str,
+    project_id: str | None = None,
+    worker_queue_plan: dict[str, Any] | None = None,
+    rag_indexing_plan: dict[str, Any] | None = None,
+    cloud_handoff_plan: dict[str, Any] | None = None,
+    preload_plan: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    worker_queue_plan = _as_dict(worker_queue_plan)
+    rag_indexing_plan = _as_dict(rag_indexing_plan)
+    cloud_handoff_plan = _as_dict(cloud_handoff_plan)
+    preload_plan = _as_dict(preload_plan)
+    jobs = [item for item in _as_list(worker_queue_plan.get("jobs")) if isinstance(item, dict)]
+    existing_job_ids = {str(job.get("id") or "") for job in jobs}
+
+    if rag_indexing_plan and "rag_indexing" not in existing_job_ids:
+        jobs.append(
+            _job(
+                job_id = "rag_indexing",
+                job_type = "rag_indexing",
+                queue_id = "io_bound",
+                label = "Indexer les sources RAG",
+                reason = "Plan d'indexation RAG fourni au handoff worker.",
+                priority = 86,
+                required_gates = ["sources_present", "permissions_checked", "embedding_runtime_ready", "human_approval"],
+                source_plan = "ragIndexingPlan",
+                requires_human_confirmation = True,
+            )
+        )
+    if cloud_handoff_plan and cloud_handoff_plan.get("readyToExport") and "cloud_training_job" not in existing_job_ids:
+        jobs.append(
+            _job(
+                job_id = "cloud_training_job",
+                job_type = "cloud_training_job",
+                queue_id = "cloud_training",
+                label = "Preparer un training cloud guide",
+                reason = "Plan de handoff cloud fourni au handoff worker.",
+                priority = 84 if cloud_handoff_plan.get("readyToExport") else 66,
+                required_gates = ["dataset_validation", "cloud_handoff_export", "secret_review", "budget_limit", "human_approval"],
+                source_plan = "cloudHandoffPlan",
+                requires_human_confirmation = True,
+            )
+        )
+
+    jobs = sorted(jobs, key = lambda item: int(item.get("priority") or 0), reverse = True)
+    specs = [
+        _spec_for_job(
+            job = job,
+            project_id = project_id,
+            rag_indexing_plan = rag_indexing_plan,
+            cloud_handoff_plan = cloud_handoff_plan,
+            preload_plan = preload_plan,
+        )
+        for job in jobs
+    ]
+    return {
+        "workerQueueVersion": COGNIX_WORKER_QUEUE_VERSION,
+        "jobSpecVersion": COGNIX_WORKER_JOB_SPEC_VERSION,
+        "mode": "dry_run",
+        "objectiveExcerpt": _objective_excerpt(objective),
+        "projectId": project_id,
+        "jobSpecs": specs,
+        "summary": {
+            "jobSpecCount": len(specs),
+            "jobTypes": [str(spec.get("jobType")) for spec in specs],
+            "requiresHumanConfirmation": any(bool(spec.get("requiresHumanConfirmation")) for spec in specs),
+            "safeToEnqueueAutomatically": False,
+            "idempotencyKeys": [str(spec.get("idempotencyKey")) for spec in specs],
+        },
+        "policies": {
+            "frontendDirectQueueMutationAllowed": False,
+            "jobSpecsRequireApproval": True,
+            "idempotencyKeyRequired": True,
+            "rawPayloadStorageAllowed": False,
+            "secretValuesAllowed": False,
+            "backgroundExecutionAllowedFromPlanner": False,
+        },
+        "blockedActions": [
+            {
+                "id": "job_enqueue",
+                "reason": "Les specs sont preparees sans enqueue.",
+            },
+            {
+                "id": "worker_start",
+                "reason": "Aucun worker n'est demarre par le handoff.",
+            },
+            {
+                "id": "side_effect_execution",
+                "reason": "Indexation, training, preload, benchmark et code restent bloques.",
+            },
+        ],
+        "sideEffects": {
+            "jobEnqueue": False,
+            "workerStart": False,
+            "jobPersist": False,
+            "modelDownload": False,
+            "modelLoad": False,
+            "ragIndexing": False,
+            "embeddingGeneration": False,
+            "cloudTrainingJob": False,
+            "fineTuningJob": False,
+            "benchmarkRun": False,
+            "codeModification": False,
             "deployment": False,
         },
     }

@@ -1709,6 +1709,79 @@ def test_worker_queue_plans_long_running_jobs_without_enqueueing():
     assert plan["sideEffects"]["benchmarkRun"] is False
 
 
+def test_worker_queue_registry_declares_cloud_training_without_execution():
+    registry = cognix_worker_queue.build_worker_queue_registry()
+
+    assert registry["workerQueueVersion"] == "cognix_worker_queue_v1"
+    assert registry["mode"] == "declarative_dry_run"
+    assert registry["globalPolicies"]["frontendDirectQueueMutationAllowed"] is False
+    assert registry["globalPolicies"]["jobSpecsRequireApproval"] is True
+    assert registry["globalPolicies"]["idempotencyKeyRequired"] is True
+    assert registry["sideEffects"]["jobEnqueue"] is False
+    assert registry["sideEffects"]["workerStart"] is False
+    assert registry["sideEffects"]["cloudTrainingJob"] is False
+
+    queues = {item["id"]: item for item in registry["queues"]}
+    assert "cloud_training" in queues
+    assert "cloud_training_job" in queues["cloud_training"]["acceptedJobTypes"]
+    assert queues["cloud_training"]["requiresHumanConfirmation"] is True
+
+
+def test_worker_job_spec_plan_materializes_cloud_and_rag_jobs_without_enqueueing():
+    queue_plan = cognix_worker_queue.build_worker_queue_plan(
+        objective = "Prepare RAG indexing and cloud training",
+        project_id = "project-ai",
+        task_strategy = {"path": "rag_first"},
+        rag_plan = {
+            "recommendedPath": "rag_first",
+            "readyForRetrieval": False,
+        },
+        fine_tuning_plan = {
+            "recommendedPath": "guided_fine_tuning",
+            "method": {"type": "cloud_qlora"},
+            "resourceTargetPlan": {"cloudTrainingAllowed": True},
+            "approval": {"readyToRequest": True},
+        },
+        preload_plan = {},
+        codex_pipeline_plan = {},
+        optimization_plan = {},
+        latest_benchmark_run = {"id": "bench-ok", "benchmark": {}},
+    )
+
+    spec_plan = cognix_worker_queue.build_worker_job_spec_plan(
+        objective = "Prepare RAG indexing and cloud training",
+        project_id = "project-ai",
+        worker_queue_plan = queue_plan,
+        rag_indexing_plan = {
+            "status": "ready",
+            "readyToIndexCount": 1,
+            "summary": {"sourceCount": 1, "estimatedChunkCount": 24},
+        },
+        cloud_handoff_plan = {
+            "status": "ready_for_export",
+            "readyToExport": True,
+            "target": {"id": "kaggle", "exportFormat": "kaggle_kernel_plan"},
+            "artifactManifest": [{"path": "CogniX_training_notebook.ipynb"}],
+        },
+        preload_plan = {},
+    )
+
+    assert spec_plan["jobSpecVersion"] == "cognix_worker_job_spec_v1"
+    assert spec_plan["summary"]["safeToEnqueueAutomatically"] is False
+    assert spec_plan["policies"]["rawPayloadStorageAllowed"] is False
+    assert spec_plan["sideEffects"]["jobEnqueue"] is False
+    assert spec_plan["sideEffects"]["cloudTrainingJob"] is False
+    assert spec_plan["sideEffects"]["ragIndexing"] is False
+
+    specs = {item["jobType"]: item for item in spec_plan["jobSpecs"]}
+    assert {"rag_indexing", "cloud_training_job"}.issubset(specs)
+    assert specs["cloud_training_job"]["queueId"] == "cloud_training"
+    assert specs["cloud_training_job"]["payloadSummary"]["targetId"] == "kaggle"
+    assert specs["cloud_training_job"]["payloadSummary"]["rawSecretsIncluded"] is False
+    assert specs["rag_indexing"]["payloadSummary"]["rawSourceContentIncluded"] is False
+    assert all(spec["idempotencyKey"].startswith("cognix:project-ai:") for spec in spec_plan["jobSpecs"])
+
+
 def test_worker_queue_endpoint_logs_audited_dry_run(monkeypatch):
     seed_accounts()
     monkeypatch.setattr(
@@ -1748,6 +1821,80 @@ def test_worker_queue_endpoint_logs_audited_dry_run(monkeypatch):
     assert log["action"] == "worker_queue_plan_built"
     assert log["metadata"]["workerQueueVersion"] == "cognix_worker_queue_v1"
     assert "codex_pipeline" in log["metadata"]["plannedJobIds"]
+    assert log["metadata"]["sideEffects"]["jobEnqueue"] is False
+
+
+def test_worker_registry_endpoint_logs_audited_dry_run():
+    seed_accounts()
+
+    body = run_async(cognix_routes.worker_queue_registry(current_subject = "alice"))
+
+    assert body["auditLogId"].startswith("aud_")
+    assert body["registry"]["workerQueueVersion"] == "cognix_worker_queue_v1"
+    assert body["registry"]["sideEffects"]["jobEnqueue"] is False
+    assert any(item["id"] == "cloud_training" for item in body["registry"]["queues"])
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "worker_queue_registry_built"
+    assert log["resourceType"] == "cognix_worker_queue_registry"
+    assert log["metadata"]["sideEffects"]["workerStart"] is False
+
+
+def test_worker_job_spec_endpoint_builds_cloud_specs_without_enqueueing(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+
+    body = run_async(
+        cognix_routes.worker_job_spec_plan(
+            cognix_routes.WorkerJobSpecPlanRequest(
+                objective = "Je veux fine-tuning LoRA pour specialiser CogniX sur mon style",
+                project_type = "education",
+                project_id = "project-training",
+                target_id = "kaggle",
+                dataset = {
+                    "format": "jsonl",
+                    "sampleCount": 1200,
+                    "estimatedTokens": 500000,
+                    "duplicateRatio": 0.01,
+                    "invalidRows": 0,
+                    "averageResponseTokens": 42,
+                    "license": "mit",
+                    "containsSensitiveData": False,
+                },
+            ),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+
+    spec_plan = body["workerJobSpecPlan"]
+    specs = {item["jobType"]: item for item in spec_plan["jobSpecs"]}
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_worker_queue_v1"
+    assert spec_plan["jobSpecVersion"] == "cognix_worker_job_spec_v1"
+    assert "cloud_training_job" in specs
+    assert specs["cloud_training_job"]["queueId"] == "cloud_training"
+    assert specs["cloud_training_job"]["payloadSummary"]["targetId"] == "kaggle"
+    assert specs["cloud_training_job"]["payloadSummary"]["rawSecretsIncluded"] is False
+    assert spec_plan["sideEffects"]["jobEnqueue"] is False
+    assert spec_plan["sideEffects"]["cloudTrainingJob"] is False
+    assert spec_plan["sideEffects"]["workerStart"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "worker_job_spec_plan_built"
+    assert "cloud_training_job" in log["metadata"]["jobTypes"]
     assert log["metadata"]["sideEffects"]["jobEnqueue"] is False
 
 
@@ -2064,7 +2211,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert registry["sideEffects"]["secretRead"] is False
 
     modules = {item["id"]: item for item in registry["modules"]}
-    assert {"cognix-local-core", "cognix-model-lifecycle", "cognix-thinking-status", "cognix-memory-manager", "cognix-onboarding", "cognix-rag", "cognix-fine-tuning", "cognix-research-watch", "cognix-integrations", "cognix-codex-secure-agent", "cognix-enterprise-foundation", "cognix-deployment-manager"}.issubset(
+    assert {"cognix-local-core", "cognix-model-lifecycle", "cognix-thinking-status", "cognix-memory-manager", "cognix-onboarding", "cognix-rag", "cognix-fine-tuning", "cognix-worker-queue", "cognix-research-watch", "cognix-integrations", "cognix-codex-secure-agent", "cognix-enterprise-foundation", "cognix-deployment-manager"}.issubset(
         modules
     )
     assert modules["cognix-local-core"]["activationState"] == "ready"
@@ -2090,6 +2237,10 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "cloud_training_targets" in modules["cognix-fine-tuning"]["capabilities"]
     assert "cloud_training_handoff" in modules["cognix-fine-tuning"]["capabilities"]
     assert "/api/cognix/fine-tuning/cloud-handoff-plan" in modules["cognix-fine-tuning"]["routes"]
+    assert "worker_job_specs" in modules["cognix-worker-queue"]["capabilities"]
+    assert "cloud_training_job_specs" in modules["cognix-worker-queue"]["capabilities"]
+    assert "/api/cognix/workers/registry" in modules["cognix-worker-queue"]["routes"]
+    assert "/api/cognix/workers/job-spec-plan" in modules["cognix-worker-queue"]["routes"]
     assert "technology_watch" in modules["cognix-research-watch"]["capabilities"]
     assert "benchmark_gate" in modules["cognix-research-watch"]["capabilities"]
     assert "/api/cognix/research/integration-plan" in modules["cognix-research-watch"]["routes"]
