@@ -21,7 +21,7 @@ QUEUE_DEFINITIONS: list[dict[str, Any]] = [
     {
         "id": "local_probe",
         "label": "Local probe",
-        "acceptedJobTypes": ["benchmark_run", "health_check"],
+        "acceptedJobTypes": ["benchmark_run", "health_check", "simulation_run"],
         "maxConcurrentJobs": 1,
         "requiresAudit": True,
         "requiresHumanConfirmation": False,

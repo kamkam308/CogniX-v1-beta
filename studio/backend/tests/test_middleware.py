@@ -764,3 +764,33 @@ class TestHealthAuthGate:
         assert body["training_local_available"] is False
         assert body["training_access"] == "cloud_ceo"
         assert body["cloud_training_providers"] == ["google_colab", "kaggle", "cloud_gpu"]
+
+    def test_health_keeps_admin_cloud_training_when_plan_is_restored_free(self, health_app, monkeypatch):
+        from auth import storage
+        from auth.authentication import create_access_token
+        import main as _main
+
+        token = create_access_token(storage.DEFAULT_ADMIN_USERNAME)
+        real_get_user_profile = storage.get_user_profile
+
+        def restored_profile(username: str):
+            profile = real_get_user_profile(username)
+            if profile and username == storage.DEFAULT_ADMIN_USERNAME:
+                return {**profile, "role": "admin", "plan": "free"}
+            return profile
+
+        monkeypatch.setattr(_main._hw_module, "CHAT_ONLY", True)
+        monkeypatch.setattr(_main._hw_module, "CHAT_ONLY_REASON", "no_gpu")
+        monkeypatch.setattr(storage, "get_user_profile", restored_profile)
+
+        c = TestClient(health_app)
+        r = c.get(
+            "/api/health",
+            headers = {"Authorization": f"Bearer {token}"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["cloud_training_unlocked"] is True
+        assert body["training_cloud_available"] is True
+        assert body["training_local_available"] is False
+        assert body["training_access"] == "cloud_ceo"

@@ -50,6 +50,7 @@ from core.cognix import research_watch as cognix_research_watch
 from core.cognix import response_reflection as cognix_response_reflection
 from core.cognix import runtime_adapter as cognix_runtime_adapter
 from core.cognix import skill_memory as cognix_skill_memory
+from core.cognix import simulation as cognix_simulation
 from core.cognix import thinking_status as cognix_thinking_status
 from core.cognix import timeline as cognix_timeline
 from core.cognix import tool_discovery as cognix_tool_discovery
@@ -279,6 +280,19 @@ class TimelineEventRequest(BaseModel):
     source_id: str | None = Field(None, alias = "sourceId", max_length = 160)
     metadata: dict[str, Any] | None = None
     store_event: bool = Field(True, alias = "storeEvent")
+
+
+class SimulationRunRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    simulation_type: str = Field("business", alias = "simulationType", max_length = 80)
+    user_count: int = Field(10, alias = "userCount", ge = 1, le = 100000)
+    scenario: str = Field(..., min_length = 1, max_length = 4000)
+    duration_minutes: int = Field(15, alias = "durationMinutes", ge = 1, le = 10080)
+    constraints: list[str] = Field(default_factory = list, max_length = 20)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    project_type: str | None = Field(None, alias = "projectType", max_length = 120)
+    store_run: bool = Field(True, alias = "storeRun")
 
 
 class ResearchIntegrationPlanRequest(BaseModel):
@@ -667,6 +681,13 @@ def _require_admin(current_subject: str) -> None:
         )
 
 
+def _effective_training_plan(current_subject: str, profile: dict[str, Any] | None = None) -> str:
+    profile = profile or auth_storage.get_user_profile(current_subject) or {}
+    if auth_storage.has_ceo_training_entitlement(current_subject, profile):
+        return "CEO"
+    return str(profile.get("plan") or "")
+
+
 def _row(row: dict[str, Any]) -> dict[str, Any]:
     """Return a frontend-friendly copy while keeping raw fields available."""
 
@@ -715,6 +736,7 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "finished_at": "finishedAt",
         "sources_json": "sourcesJson",
         "plan_json": "planJson",
+        "report_json": "reportJson",
         "published_at": "publishedAt",
         "game_type": "gameType",
         "opponent_type": "opponentType",
@@ -733,6 +755,11 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "benchmark_json": "benchmarkJson",
         "needs_clarification": "needsClarification",
         "routing_mode": "routingMode",
+        "simulation_type": "simulationType",
+        "user_count": "userCount",
+        "duration_minutes": "durationMinutes",
+        "metric_key": "metricKey",
+        "metric_value": "metricValue",
         "scores_json": "scoresJson",
         "message_id": "messageId",
         "thread_id": "threadId",
@@ -829,6 +856,8 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         out["runs"] = [_row(item) if isinstance(item, dict) else item for item in out["runs"]]
     if isinstance(out.get("logs"), list):
         out["logs"] = [_row(item) if isinstance(item, dict) else item for item in out["logs"]]
+    if isinstance(out.get("metrics"), list):
+        out["metrics"] = [_row(item) if isinstance(item, dict) else item for item in out["metrics"]]
     if isinstance(out.get("versions"), list):
         out["versions"] = [_row(item) if isinstance(item, dict) else item for item in out["versions"]]
     if isinstance(out.get("auditLogs"), list):
@@ -2356,7 +2385,7 @@ async def worker_job_spec_plan(
     runtime = _current_model_cache_runtime()
     latest_benchmark = cognix_db.get_latest_benchmark_run(current_subject)
     user_profile = auth_storage.get_user_profile(current_subject) or {}
-    user_plan = str(user_profile.get("plan") or "")
+    user_plan = _effective_training_plan(current_subject, user_profile)
     plan = cognix_orchestrator.build_execution_plan(
         payload.objective,
         current_subject = current_subject,
@@ -2951,6 +2980,7 @@ async def fine_tuning_plan(
 ) -> dict[str, Any]:
     runtime = _current_model_cache_runtime()
     user_profile = auth_storage.get_user_profile(current_subject) or {}
+    user_plan = _effective_training_plan(current_subject, user_profile)
     plan = cognix_orchestrator.build_execution_plan(
         payload.objective,
         current_subject = current_subject,
@@ -2959,7 +2989,7 @@ async def fine_tuning_plan(
         runtime_snapshot = runtime,
         latest_benchmark_run = cognix_db.get_latest_benchmark_run(current_subject),
         fine_tuning_dataset = payload.dataset,
-        user_plan = str(user_profile.get("plan") or ""),
+        user_plan = user_plan,
     )
     tuning_plan = plan["fineTuningPlan"]
     audit = cognix_db.create_audit_log(
@@ -3082,6 +3112,7 @@ async def fine_tuning_cloud_handoff_plan(
 ) -> dict[str, Any]:
     runtime = _current_model_cache_runtime()
     user_profile = auth_storage.get_user_profile(current_subject) or {}
+    user_plan = _effective_training_plan(current_subject, user_profile)
     plan = cognix_orchestrator.build_execution_plan(
         payload.objective,
         current_subject = current_subject,
@@ -3090,7 +3121,7 @@ async def fine_tuning_cloud_handoff_plan(
         runtime_snapshot = runtime,
         latest_benchmark_run = cognix_db.get_latest_benchmark_run(current_subject),
         fine_tuning_dataset = payload.dataset,
-        user_plan = str(user_profile.get("plan") or ""),
+        user_plan = user_plan,
     )
     tuning_plan = plan["fineTuningPlan"]
     handoff = cognix_fine_tuning_planner.build_cloud_training_handoff_plan(
@@ -3100,7 +3131,7 @@ async def fine_tuning_cloud_handoff_plan(
         target_id = payload.target_id,
         fine_tuning_plan = tuning_plan,
         dataset = payload.dataset,
-        user_plan = str(user_profile.get("plan") or ""),
+        user_plan = user_plan,
     )
     audit = cognix_db.create_audit_log(
         username = current_subject,
@@ -5180,6 +5211,138 @@ async def timeline_events(
         "sideEffects": {
             "timelineWrite": False,
             "uiMutation": False,
+            "modelLoad": False,
+            "generation": False,
+            "toolExecution": False,
+        },
+    }
+
+
+@router.get("/simulations/blueprint")
+async def simulation_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_simulation.build_simulation_blueprint()
+    return {
+        "username": current_subject,
+        "simulationBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_simulation.COGNIX_SIMULATION_ENGINE_VERSION,
+    }
+
+
+@router.post("/simulations/runs")
+async def create_simulation_run(
+    payload: SimulationRunRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_simulation.build_simulation_plan(
+        username = current_subject,
+        simulation_type = payload.simulation_type,
+        user_count = payload.user_count,
+        scenario = payload.scenario,
+        duration_minutes = payload.duration_minutes,
+        constraints = payload.constraints,
+        project_id = payload.project_id,
+        project_type = payload.project_type,
+    )
+    run = (
+        cognix_db.create_simulation_run(
+            current_subject,
+            plan = plan,
+            project_id = payload.project_id,
+        )
+        if payload.store_run
+        else None
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "simulationRunWrite": run is not None,
+        "metricsWrite": run is not None,
+        "queueEnqueue": False,
+        "syntheticAgentRun": False,
+        "loadExecution": False,
+        "reportWrite": run is not None,
+        "modelLoad": False,
+        "generation": False,
+        "toolExecution": False,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "simulation_run_planned",
+        resource_type = "cognix_simulation",
+        resource_id = str((run or {}).get("id") or payload.project_id or current_subject),
+        severity = "warning" if plan.get("queuePlan", {}).get("queueRequired") else "notice",
+        metadata = {
+            "simulationEngineVersion": plan.get("simulationEngineVersion"),
+            "simulationType": plan.get("scenario", {}).get("simulationType"),
+            "userCount": plan.get("scenario", {}).get("userCount"),
+            "durationMinutes": plan.get("scenario", {}).get("durationMinutes"),
+            "queueRequired": plan.get("queuePlan", {}).get("queueRequired"),
+            "highestMetricSeverity": plan.get("report", {}).get("summary", {}).get("highestMetricSeverity"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "simulationPlan": plan,
+        "run": _row(run) if run else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_simulation.COGNIX_SIMULATION_ENGINE_VERSION,
+    }
+
+
+@router.get("/simulations/runs")
+async def simulation_runs(
+    project_id: str | None = None,
+    simulation_type: str | None = None,
+    query: str | None = None,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if project_id:
+        _require_owned_project(project_id, current_subject)
+    return {
+        "runs": _rows(
+            cognix_db.list_simulation_runs(
+                current_subject,
+                project_id = project_id,
+                simulation_type = cognix_simulation.normalize_simulation_type(simulation_type) if simulation_type else None,
+                query = query,
+            )
+        ),
+        "sideEffects": {
+            "simulationRunWrite": False,
+            "metricsWrite": False,
+            "queueEnqueue": False,
+            "syntheticAgentRun": False,
+            "loadExecution": False,
+            "reportWrite": False,
+            "modelLoad": False,
+            "generation": False,
+            "toolExecution": False,
+        },
+    }
+
+
+@router.get("/simulations/runs/{run_id}")
+async def simulation_run(
+    run_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    run = cognix_db.get_simulation_run(current_subject, run_id)
+    if run is None:
+        raise HTTPException(status_code = 404, detail = "Simulation run not found")
+    return {
+        "run": _row(run),
+        "sideEffects": {
+            "simulationRunWrite": False,
+            "metricsWrite": False,
+            "queueEnqueue": False,
+            "syntheticAgentRun": False,
+            "loadExecution": False,
+            "reportWrite": False,
             "modelLoad": False,
             "generation": False,
             "toolExecution": False,

@@ -250,8 +250,7 @@ def _studio_root_id() -> str:
 
 def build_training_access_payload(subject: str) -> dict[str, object]:
     profile = auth_storage.get_user_profile(subject) or {}
-    plan = str(profile.get("plan") or "").strip().casefold()
-    has_cloud_training = plan == "ceo" or auth_storage.is_admin(subject)
+    has_cloud_training = auth_storage.has_ceo_training_entitlement(subject, profile)
     cloud_training_unlocked = bool(has_cloud_training)
     local_training_available = not bool(_hw_module.CHAT_ONLY)
     training_access = "local"

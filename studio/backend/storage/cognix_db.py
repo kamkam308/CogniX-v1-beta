@@ -613,6 +613,44 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_project_timeline_type
             ON cognix_project_timeline_events(username, event_type, created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_simulation_runs (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            project_id TEXT,
+            project_type TEXT,
+            simulation_type TEXT NOT NULL,
+            scenario TEXT NOT NULL,
+            user_count INTEGER NOT NULL DEFAULT 1,
+            duration_minutes INTEGER NOT NULL DEFAULT 15,
+            status TEXT NOT NULL DEFAULT 'planned',
+            plan_json TEXT NOT NULL DEFAULT '{}',
+            report_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_simulation_runs_username_created
+            ON cognix_simulation_runs(username, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_simulation_runs_project
+            ON cognix_simulation_runs(username, project_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_simulation_runs_type
+            ON cognix_simulation_runs(username, simulation_type, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_simulation_metrics (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            metric_key TEXT NOT NULL,
+            metric_value REAL NOT NULL DEFAULT 0,
+            unit TEXT NOT NULL DEFAULT '',
+            severity TEXT NOT NULL DEFAULT 'low',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_simulation_metrics_run
+            ON cognix_simulation_metrics(username, run_id, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_library_items (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -3672,6 +3710,144 @@ def list_timeline_events(
             tuple(params),
         ).fetchall()
         return [_hydrate_timeline_event(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_simulation_run(row: dict[str, Any]) -> dict[str, Any]:
+    row["plan"] = _json_or_default(row.get("plan_json"), {})
+    row["report"] = _json_or_default(row.get("report_json"), {})
+    return row
+
+
+def _hydrate_simulation_metric(row: dict[str, Any]) -> dict[str, Any]:
+    row["metadata"] = _json_or_default(row.get("metadata_json"), {})
+    return row
+
+
+def create_simulation_run(
+    username: str,
+    *,
+    plan: dict[str, Any],
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    scenario = plan.get("scenario") if isinstance(plan.get("scenario"), dict) else {}
+    report = plan.get("report") if isinstance(plan.get("report"), dict) else {}
+    metrics = plan.get("metrics") if isinstance(plan.get("metrics"), list) else []
+    run_id = _new_id("sim")
+    now = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_simulation_runs
+                (
+                    id, username, project_id, project_type, simulation_type, scenario,
+                    user_count, duration_minutes, status, plan_json, report_json,
+                    created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                username,
+                project_id or plan.get("projectId"),
+                plan.get("projectType"),
+                str(scenario.get("simulationType") or "business")[:80],
+                str(scenario.get("description") or "")[:4000],
+                int(scenario.get("userCount") or 1),
+                int(scenario.get("durationMinutes") or 15),
+                json.dumps(plan, ensure_ascii = False),
+                json.dumps(report, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        for metric in metrics:
+            if not isinstance(metric, dict):
+                continue
+            conn.execute(
+                """
+                INSERT INTO cognix_simulation_metrics
+                    (id, username, run_id, metric_key, metric_value, unit, severity, metadata_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _new_id("smet"),
+                    username,
+                    run_id,
+                    str(metric.get("id") or metric.get("metricKey") or "metric")[:120],
+                    float(metric.get("value") or 0),
+                    str(metric.get("unit") or "")[:40],
+                    str(metric.get("severity") or "low")[:40],
+                    json.dumps(metric, ensure_ascii = False),
+                    now,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_simulation_run(username, run_id) or {}
+
+
+def get_simulation_run(username: str, run_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM cognix_simulation_runs WHERE id = ? AND username = ?",
+            (run_id, username),
+        ).fetchone()
+        if row is None:
+            return None
+        run = _hydrate_simulation_run(row_to_dict(row) or {})
+        metric_rows = conn.execute(
+            """
+            SELECT * FROM cognix_simulation_metrics
+            WHERE username = ? AND run_id = ?
+            ORDER BY created_at ASC
+            """,
+            (username, run_id),
+        ).fetchall()
+        run["metrics"] = [_hydrate_simulation_metric(item) for item in _rows_to_dicts(metric_rows)]
+        return run
+    finally:
+        conn.close()
+
+
+def list_simulation_runs(
+    username: str,
+    *,
+    project_id: str | None = None,
+    simulation_type: str | None = None,
+    query: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 100), 1), 300)
+    clauses = ["username = ?"]
+    params: list[Any] = [username]
+    if project_id:
+        clauses.append("project_id = ?")
+        params.append(project_id)
+    if simulation_type:
+        clauses.append("simulation_type = ?")
+        params.append(simulation_type)
+    if query:
+        clauses.append("(LOWER(scenario) LIKE ? OR LOWER(report_json) LIKE ?)")
+        needle = f"%{query.lower()}%"
+        params.extend([needle, needle])
+    params.append(safe_limit)
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM cognix_simulation_runs
+            WHERE {' AND '.join(clauses)}
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_simulation_run(row) for row in _rows_to_dicts(rows)]
     finally:
         conn.close()
 

@@ -41,6 +41,7 @@ from core.cognix import research_watch as cognix_research_watch
 from core.cognix import response_reflection as cognix_response_reflection
 from core.cognix import runtime_adapter as cognix_runtime_adapter
 from core.cognix import skill_memory as cognix_skill_memory
+from core.cognix import simulation as cognix_simulation
 from core.cognix import thinking_status as cognix_thinking_status
 from core.cognix import timeline as cognix_timeline
 from core.cognix import tool_discovery as cognix_tool_discovery
@@ -463,6 +464,55 @@ def test_fine_tuning_plan_allows_ceo_cloud_training_without_local_gpu(monkeypatc
     assert log["metadata"]["method"] == "cloud_qlora"
     assert log["metadata"]["resourceTarget"] == "google_colab"
     assert log["metadata"]["sideEffects"]["cloudTrainingJob"] is False
+
+
+def test_fine_tuning_plan_keeps_admin_cloud_training_when_plan_is_restored_free(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+    real_get_user_profile = storage.get_user_profile
+
+    def restored_profile(username: str) -> dict[str, object] | None:
+        profile = real_get_user_profile(username)
+        if profile and username == storage.DEFAULT_ADMIN_USERNAME:
+            return {**profile, "role": "admin", "plan": "free"}
+        return profile
+
+    monkeypatch.setattr(cognix_routes.auth_storage, "get_user_profile", restored_profile)
+
+    body = run_async(
+        cognix_routes.fine_tuning_plan(
+            cognix_routes.FineTuningPlanRequest(
+                objective = "Je veux fine-tuning LoRA pour specialiser CogniX sur mon style",
+                project_type = "education",
+                dataset = {
+                    "format": "jsonl",
+                    "sampleCount": 1200,
+                    "estimatedTokens": 500000,
+                    "duplicateRatio": 0.01,
+                    "invalidRows": 0,
+                    "averageResponseTokens": 42,
+                    "license": "mit",
+                    "containsSensitiveData": False,
+                },
+            ),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+
+    plan = body["fineTuningPlan"]
+    assert plan["method"]["type"] == "cloud_qlora"
+    assert plan["hardwareFit"]["tier"] == "cloud_training_ready"
+    assert plan["resourceTargetPlan"]["localGpuBypassAllowed"] is True
+    assert plan["resourceTargetPlan"]["recommendedTargetId"] == "google_colab"
 
 
 def test_fine_tuning_cloud_handoff_prepares_kaggle_package_without_launch(monkeypatch):
@@ -3201,6 +3251,107 @@ def test_timeline_endpoint_stores_filters_searches_and_is_user_scoped():
     assert logs[0]["action"] == "timeline_event_planned"
 
 
+def test_simulation_blueprint_declares_dashboard_contract_without_execution():
+    blueprint = cognix_simulation.build_simulation_blueprint()
+
+    assert blueprint["simulationEngineVersion"] == "cognix_simulation_engine_v1"
+    assert blueprint["syntheticUserGeneratorVersion"] == "cognix_synthetic_user_generator_v1"
+    assert blueprint["loadScenarioRunnerVersion"] == "cognix_load_scenario_runner_v1"
+    assert blueprint["reportGeneratorVersion"] == "cognix_simulation_report_generator_v1"
+    assert blueprint["services"] == ["SimulationEngine", "SyntheticUserGenerator", "LoadScenarioRunner", "ReportGenerator"]
+    assert {"business", "user", "server", "database", "workflow"}.issubset(set(blueprint["simulationTypes"]))
+    assert blueprint["reportContract"]["risks"] is True
+    assert blueprint["reportContract"]["estimatedLatency"] is True
+    assert blueprint["reportContract"]["estimatedCosts"] is True
+    assert blueprint["reportContract"]["bottlenecks"] is True
+    assert blueprint["reportContract"]["dashboardSimple"] is True
+    assert blueprint["queuePolicy"]["directLoadTestAllowedFromPlanner"] is False
+    assert blueprint["sideEffects"]["simulationRunWrite"] is False
+    assert blueprint["sideEffects"]["queueEnqueue"] is False
+    assert blueprint["sideEffects"]["syntheticAgentRun"] is False
+    assert blueprint["sideEffects"]["loadExecution"] is False
+    assert blueprint["sideEffects"]["generation"] is False
+
+
+def test_simulation_plan_estimates_10_and_100_user_loads_without_execution():
+    small = cognix_simulation.build_simulation_plan(
+        username = "alice",
+        simulation_type = "server",
+        user_count = 10,
+        scenario = "Simule un serveur local CogniX pour une classe.",
+        duration_minutes = 15,
+        constraints = ["local only"],
+        project_type = "school",
+    )
+    large = cognix_simulation.build_simulation_plan(
+        username = "alice",
+        simulation_type = "business",
+        user_count = 100,
+        scenario = "Simule 100 utilisateurs utilisant CogniX Business avec SQLite.",
+        duration_minutes = 45,
+        constraints = ["database", "privacy"],
+        project_type = "business",
+    )
+    small_metrics = {item["id"]: item for item in small["metrics"]}
+    large_metrics = {item["id"]: item for item in large["metrics"]}
+
+    assert small["scenario"]["simulationType"] == "server"
+    assert small["scenario"]["userCount"] == 10
+    assert small["queuePlan"]["queueRequired"] is False
+    assert small["report"]["summary"]["estimatedCostUsd"] == 0.0
+    assert small["sideEffects"]["loadExecution"] is False
+    assert small["sideEffects"]["generation"] is False
+    assert large["scenario"]["simulationType"] == "business"
+    assert large["scenario"]["userCount"] == 100
+    assert large["queuePlan"]["queueRequired"] is True
+    assert large["queuePlan"]["jobType"] == "simulation_run"
+    assert large["syntheticAgents"]["plannedCount"] == 25
+    assert large_metrics["estimated_latency_ms"]["value"] > small_metrics["estimated_latency_ms"]["value"]
+    assert any(item["id"] == "high_concurrency" for item in large["report"]["risks"])
+    assert any(item["id"] == "database_pressure" for item in large["report"]["bottlenecks"])
+
+
+def test_simulation_endpoint_stores_metrics_and_is_user_scoped():
+    seed_accounts()
+    body = run_async(
+        cognix_routes.create_simulation_run(
+            cognix_routes.SimulationRunRequest(
+                simulationType = "business",
+                userCount = 100,
+                scenario = "Simule 100 utilisateurs utilisant CogniX Business avec SQLite.",
+                durationMinutes = 45,
+                constraints = ["database", "privacy"],
+                storeRun = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    run_id = body["run"]["id"]
+    detail = run_async(cognix_routes.simulation_run(run_id, current_subject = "alice"))
+    listed = run_async(cognix_routes.simulation_runs(simulation_type = "business", query = "sqlite", current_subject = "alice"))
+    bob_runs = run_async(cognix_routes.simulation_runs(current_subject = "bob"))
+
+    assert run_id.startswith("sim_")
+    assert body["simulationPlan"]["queuePlan"]["queueRequired"] is True
+    assert body["simulationPlan"]["report"]["dashboardSimple"] is True
+    assert body["sideEffects"]["simulationRunWrite"] is True
+    assert body["sideEffects"]["metricsWrite"] is True
+    assert body["sideEffects"]["queueEnqueue"] is False
+    assert body["sideEffects"]["loadExecution"] is False
+    assert body["sideEffects"]["generation"] is False
+    assert detail["run"]["id"] == run_id
+    assert detail["run"]["simulationType"] == "business"
+    assert detail["run"]["userCount"] == 100
+    assert len(detail["run"]["metrics"]) >= 6
+    assert any(item["metricKey"] == "estimated_latency_ms" for item in detail["run"]["metrics"])
+    assert listed["runs"][0]["id"] == run_id
+    assert bob_runs["runs"] == []
+
+    logs = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))["logs"]
+    assert logs[0]["action"] == "simulation_run_planned"
+    assert logs[0]["metadata"]["queueRequired"] is True
+
+
 def test_codex_pipeline_plans_required_gates_without_modifying_code():
     plan = cognix_codex_pipeline.build_codex_pipeline_plan(
         objective = "Ajoute un module CogniX Chemistry dans le code source",
@@ -3317,6 +3468,7 @@ def test_worker_queue_registry_declares_cloud_training_without_execution():
     assert registry["sideEffects"]["cloudTrainingJob"] is False
 
     queues = {item["id"]: item for item in registry["queues"]}
+    assert "simulation_run" in queues["local_probe"]["acceptedJobTypes"]
     assert "cloud_training" in queues
     assert "cloud_training_job" in queues["cloud_training"]["acceptedJobTypes"]
     assert queues["cloud_training"]["requiresHumanConfirmation"] is True
@@ -3930,6 +4082,16 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/memory/editor/items" in modules["cognix-live-memory-editing"]["routes"]
     assert "/api/cognix/memory/editor/merge" in modules["cognix-live-memory-editing"]["routes"]
     assert "/api/cognix/memory/editor/export" in modules["cognix-live-memory-editing"]["routes"]
+    assert modules["cognix-ai-simulation"]["dependencyState"]["ready"] is True
+    assert "simulation_engine" in modules["cognix-ai-simulation"]["capabilities"]
+    assert "synthetic_user_generation" in modules["cognix-ai-simulation"]["capabilities"]
+    assert "load_scenario_runner" in modules["cognix-ai-simulation"]["capabilities"]
+    assert "simulation_metrics" in modules["cognix-ai-simulation"]["capabilities"]
+    assert "risk_report" in modules["cognix-ai-simulation"]["capabilities"]
+    assert "queue_safe_simulation" in modules["cognix-ai-simulation"]["capabilities"]
+    assert "/api/cognix/simulations/blueprint" in modules["cognix-ai-simulation"]["routes"]
+    assert "/api/cognix/simulations/runs" in modules["cognix-ai-simulation"]["routes"]
+    assert "/api/cognix/simulations/runs/{run_id}" in modules["cognix-ai-simulation"]["routes"]
     assert modules["cognix-ai-workflow-recorder"]["dependencyState"]["ready"] is True
     assert "workflow_recording" in modules["cognix-ai-workflow-recorder"]["capabilities"]
     assert "workflow_replay_planning" in modules["cognix-ai-workflow-recorder"]["capabilities"]

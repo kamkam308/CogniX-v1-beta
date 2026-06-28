@@ -23,6 +23,7 @@ ADMIN_USERNAMES = frozenset({DEFAULT_ADMIN_USERNAME, LEGACY_ADMIN_USERNAME, "kam
 ADMIN_LOGIN_ALIASES = frozenset({"kamil", "kamil_ebk", "ceo"})
 DEFAULT_USER_PLAN = "free"
 CEO_PLAN = "CEO"
+CEO_TRAINING_PLAN_TOKENS = frozenset({"ceo", "cloud_ceo", "local_plus_cloud_ceo"})
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{2,31}$")
 PASSWORD_MIN_LENGTH = 8
 PASSWORD_MAX_LENGTH = 128
@@ -667,6 +668,22 @@ def list_user_profiles() -> list[dict]:
 def is_admin(username: str) -> bool:
     profile = get_user_profile(username)
     return bool(profile and profile["role"] == "admin")
+
+
+def has_ceo_training_entitlement(username: str, profile: Optional[dict] = None) -> bool:
+    """Return whether a user can bypass local GPU checks for cloud training."""
+
+    if profile is None:
+        profile = get_user_profile(username) or {}
+    normalized_username = str(profile.get("username") or username or "").strip().casefold()
+    role = str(profile.get("role") or "").strip().casefold()
+    plan = str(profile.get("plan") or "").strip().casefold()
+    admin_names = {item.casefold() for item in ADMIN_USERNAMES}
+    return (
+        plan in CEO_TRAINING_PLAN_TOKENS
+        or role in {"admin", "ceo"}
+        or normalized_username in admin_names
+    )
 
 
 def get_login_lockout_state(username: str) -> Optional[dict]:
