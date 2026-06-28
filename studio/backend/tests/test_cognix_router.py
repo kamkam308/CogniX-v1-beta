@@ -19,6 +19,7 @@ from core.cognix import codex_pipeline as cognix_codex_pipeline
 from core.cognix import context_manager as cognix_context_manager
 from core.cognix import deployment_manager as cognix_deployment_manager
 from core.cognix import decision_engine as cognix_decision_engine
+from core.cognix import governance_manager as cognix_governance_manager
 from core.cognix import integration_manager as cognix_integration_manager
 from core.cognix import module_registry as cognix_module_registry
 from core.cognix import onboarding as cognix_onboarding
@@ -828,6 +829,107 @@ def test_deployment_plan_endpoint_logs_audited_dry_run(monkeypatch):
     assert log["metadata"]["sideEffects"]["deployment"] is False
 
 
+def test_governance_manager_plans_university_rbac_sso_without_mutation():
+    blueprint = cognix_governance_manager.build_governance_blueprint()
+    assert blueprint["governanceManagerVersion"] == "cognix_governance_manager_v1"
+    assert blueprint["globalPolicies"]["frontendCannotGrantRoles"] is True
+    assert blueprint["sideEffects"]["roleGrant"] is False
+    assert blueprint["sideEffects"]["ssoMutation"] is False
+
+    plan = cognix_governance_manager.build_governance_plan(
+        username = "admin",
+        organization_name = "CogniX Universite",
+        organization_type = "university",
+        edition = "university",
+        user_count = 420,
+        roles = ["teacher", "student", "security_admin"],
+        sso_provider = "google_workspace",
+        data_sensitivity = "education_records",
+        classroom_count = 18,
+        requested_features = ["exam_mode", "directory_sync"],
+    )
+
+    assert plan["governanceManagerVersion"] == "cognix_governance_manager_v1"
+    assert plan["mode"] == "dry_run"
+    assert plan["organization"]["type"] == "university"
+    assert plan["organization"]["edition"] == "university"
+    assert "sso" in plan["requiredCapabilities"]
+    assert "education_spaces" in plan["requiredCapabilities"]
+    assert "class_permissions" in plan["requiredCapabilities"]
+    assert "advanced_audit" in plan["requiredCapabilities"]
+    assert {role["id"] for role in plan["roles"]}.issuperset({"admin", "teacher", "student"})
+    assert plan["ssoPlan"]["provider"]["id"] == "google_workspace"
+    assert plan["ssoPlan"]["directorySyncRequired"] is True
+    assert plan["ssoPlan"]["willSyncDirectory"] is False
+    assert any(space["id"] == "class_spaces" and space["plannedCount"] == 18 for space in plan["spacePlan"])
+    assert plan["policyPlan"]["educationRecordsScoped"] is True
+    assert plan["policyPlan"]["policyActivationAllowed"] is False
+    assert any(item["id"] == "role_grant" for item in plan["blockedActions"])
+    assert plan["sideEffects"]["organizationWrite"] is False
+    assert plan["sideEffects"]["roleGrant"] is False
+    assert plan["sideEffects"]["permissionWrite"] is False
+    assert plan["sideEffects"]["secretRead"] is False
+    assert plan["sideEffects"]["secretWrite"] is False
+    assert plan["sideEffects"]["directorySync"] is False
+    assert plan["sideEffects"]["classroomWrite"] is False
+
+
+def test_governance_plan_endpoint_requires_admin_and_logs_audited_dry_run():
+    seed_accounts()
+
+    with pytest.raises(HTTPException) as user_call:
+        run_async(
+            cognix_routes.governance_plan(
+                cognix_routes.GovernancePlanRequest(
+                    organizationName = "CogniX Business",
+                    organizationType = "business",
+                    edition = "business",
+                    userCount = 25,
+                    ssoProvider = "microsoft_entra_id",
+                    dataSensitivity = "confidential",
+                ),
+                current_subject = "alice",
+            )
+        )
+    assert user_call.value.status_code == 403
+
+    body = run_async(
+        cognix_routes.governance_plan(
+            cognix_routes.GovernancePlanRequest(
+                organizationName = "CogniX Business",
+                organizationType = "business",
+                edition = "business",
+                userCount = 25,
+                roles = ["owner", "admin", "member"],
+                ssoProvider = "microsoft_entra_id",
+                dataSensitivity = "confidential",
+                requestedFeatures = ["directory_sync"],
+            ),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+
+    plan = body["governancePlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_governance_manager_v1"
+    assert plan["organization"]["id"] == "cognix_business"
+    assert plan["ssoPlan"]["provider"]["id"] == "microsoft_entra_id"
+    assert plan["policyPlan"]["humanApprovalRequired"] is True
+    assert plan["sideEffects"]["organizationWrite"] is False
+    assert plan["sideEffects"]["ssoMutation"] is False
+    assert plan["sideEffects"]["networkCall"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "governance_plan_built"
+    assert log["resourceType"] == "cognix_governance"
+    assert log["metadata"]["governanceManagerVersion"] == "cognix_governance_manager_v1"
+    assert log["metadata"]["edition"] == "business"
+    assert log["metadata"]["ssoProviderId"] == "microsoft_entra_id"
+    assert log["metadata"]["sideEffects"]["organizationWrite"] is False
+
+
 def test_codex_pipeline_plans_required_gates_without_modifying_code():
     plan = cognix_codex_pipeline.build_codex_pipeline_plan(
         objective = "Ajoute un module CogniX Chemistry dans le code source",
@@ -1111,12 +1213,14 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert registry["sideEffects"]["uiMutation"] is False
 
     modules = {item["id"]: item for item in registry["modules"]}
-    assert {"cognix-local-core", "cognix-onboarding", "cognix-rag", "cognix-integrations", "cognix-codex-secure-agent", "cognix-deployment-manager"}.issubset(
+    assert {"cognix-local-core", "cognix-onboarding", "cognix-rag", "cognix-integrations", "cognix-codex-secure-agent", "cognix-enterprise-foundation", "cognix-deployment-manager"}.issubset(
         modules
     )
     assert modules["cognix-local-core"]["activationState"] == "ready"
     assert modules["cognix-onboarding"]["activationState"] == "ready"
     assert modules["cognix-rag"]["dependencyState"]["ready"] is True
+    assert "sso_planning" in modules["cognix-enterprise-foundation"]["capabilities"]
+    assert "/api/cognix/governance/plan" in modules["cognix-enterprise-foundation"]["routes"]
     assert modules["cognix-deployment-manager"]["dependencyState"]["ready"] is True
     assert "cognix-integrations" in modules["cognix-codex-secure-agent"]["dependencyState"]["dependencies"]
 

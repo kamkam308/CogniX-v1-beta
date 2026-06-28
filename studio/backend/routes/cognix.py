@@ -23,6 +23,7 @@ from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import codex_pipeline as cognix_codex_pipeline
 from core.cognix import context_manager as cognix_context_manager
 from core.cognix import deployment_manager as cognix_deployment_manager
+from core.cognix import governance_manager as cognix_governance_manager
 from core.cognix import hardware as cognix_hardware
 from core.cognix import integration_manager as cognix_integration_manager
 from core.cognix import module_registry as cognix_module_registry
@@ -222,6 +223,20 @@ class DeploymentPlanRequest(BaseModel):
     edition: str | None = Field(None, max_length = 80)
     expected_users: int | None = Field(None, alias = "expectedUsers", ge = 1, le = 100000)
     data_sensitivity: str | None = Field(None, alias = "dataSensitivity", max_length = 120)
+    requested_features: list[str] | None = Field(None, alias = "requestedFeatures")
+
+
+class GovernancePlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    organization_name: str | None = Field(None, alias = "organizationName", max_length = 160)
+    organization_type: str | None = Field(None, alias = "organizationType", max_length = 120)
+    edition: str | None = Field(None, max_length = 80)
+    user_count: int | None = Field(None, alias = "userCount", ge = 1, le = 100000)
+    roles: list[str] | None = None
+    sso_provider: str | None = Field(None, alias = "ssoProvider", max_length = 120)
+    data_sensitivity: str | None = Field(None, alias = "dataSensitivity", max_length = 120)
+    classroom_count: int | None = Field(None, alias = "classroomCount", ge = 0, le = 10000)
     requested_features: list[str] | None = Field(None, alias = "requestedFeatures")
 
 
@@ -1154,6 +1169,63 @@ async def deployment_plan(
         "auditLogId": audit.get("id"),
         "sideEffects": plan.get("sideEffects", {}),
         "plannerVersion": cognix_deployment_manager.COGNIX_DEPLOYMENT_MANAGER_VERSION,
+    }
+
+
+@router.get("/governance/blueprint")
+async def governance_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    return {
+        "username": current_subject,
+        "blueprint": cognix_governance_manager.build_governance_blueprint(),
+    }
+
+
+@router.post("/governance/plan")
+async def governance_plan(
+    payload: GovernancePlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    plan = cognix_governance_manager.build_governance_plan(
+        username = current_subject,
+        organization_name = payload.organization_name,
+        organization_type = payload.organization_type,
+        edition = payload.edition,
+        user_count = payload.user_count,
+        roles = payload.roles,
+        sso_provider = payload.sso_provider,
+        data_sensitivity = payload.data_sensitivity,
+        classroom_count = payload.classroom_count,
+        requested_features = payload.requested_features,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "governance_plan_built",
+        resource_type = "cognix_governance",
+        resource_id = str(plan.get("organization", {}).get("id") or "organization"),
+        severity = "warning" if plan.get("policyPlan", {}).get("humanApprovalRequired") else "notice",
+        metadata = {
+            "governanceManagerVersion": plan.get("governanceManagerVersion"),
+            "organizationId": plan.get("organization", {}).get("id"),
+            "organizationType": plan.get("organization", {}).get("type"),
+            "edition": plan.get("organization", {}).get("edition"),
+            "plannedUserCount": plan.get("organization", {}).get("plannedUserCount"),
+            "requiredCapabilities": plan.get("requiredCapabilities", []),
+            "ssoProviderId": plan.get("ssoPlan", {}).get("provider", {}).get("id"),
+            "roleIds": [
+                item.get("roleId") for item in plan.get("roleMatrix", []) if isinstance(item, dict)
+            ],
+            "sideEffects": plan.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "governancePlan": plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": plan.get("sideEffects", {}),
+        "plannerVersion": cognix_governance_manager.COGNIX_GOVERNANCE_MANAGER_VERSION,
     }
 
 
