@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from auth import storage as auth_storage
 from auth.authentication import get_current_jwt_subject
+from core.cognix import benchmark as cognix_benchmark
 from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import context_manager as cognix_context_manager
 from core.cognix import hardware as cognix_hardware
@@ -154,6 +155,13 @@ class ToolActionPlanRequest(BaseModel):
     action_id: str = Field(..., min_length = 1, max_length = 120)
 
 
+class BenchmarkRunRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    mode: Literal["quick", "extended"] = "quick"
+    include_disk: bool = Field(True, alias = "includeDisk")
+
+
 class NewsRefreshRequest(BaseModel):
     topic: str = Field("intelligence artificielle", min_length = 1, max_length = 120)
 
@@ -253,6 +261,10 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "recommended_path": "recommendedPath",
         "primary_capability": "primaryCapability",
         "decision_json": "decisionJson",
+        "overall_score": "overallScore",
+        "estimated_tokens_per_second": "estimatedTokensPerSecond",
+        "hardware_json": "hardwareJson",
+        "benchmark_json": "benchmarkJson",
         "needs_clarification": "needsClarification",
         "routing_mode": "routingMode",
         "scores_json": "scoresJson",
@@ -867,6 +879,31 @@ async def hardware_profile(current_subject: str = Depends(get_current_jwt_subjec
     return {
         "username": current_subject,
         "hardware": cognix_hardware.get_hardware_profile(),
+    }
+
+
+@router.post("/benchmark/run")
+async def run_benchmark(
+    payload: BenchmarkRunRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    benchmark = cognix_benchmark.run_benchmark(
+        mode = payload.mode,
+        include_disk = payload.include_disk,
+    )
+    run = cognix_db.create_benchmark_run(current_subject, benchmark)
+    return {
+        "username": current_subject,
+        "runId": run.get("id"),
+        "benchmark": benchmark,
+    }
+
+
+@router.get("/benchmark/runs")
+async def benchmark_runs(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    return {
+        "username": current_subject,
+        "runs": _rows(cognix_db.list_benchmark_runs(username = current_subject, limit = 50)),
     }
 
 
@@ -1943,6 +1980,12 @@ async def admin_router_logs(current_subject: str = Depends(get_current_jwt_subje
 async def admin_orchestrator_logs(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
     _require_admin(current_subject)
     return {"logs": _rows(cognix_db.list_orchestrator_logs(limit = 500))}
+
+
+@router.get("/admin/benchmark-runs")
+async def admin_benchmark_runs(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    return {"runs": _rows(cognix_db.list_benchmark_runs(limit = 200))}
 
 
 @router.get("/admin/audit-logs")

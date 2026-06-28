@@ -237,6 +237,22 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_orchestrator_logs_path
             ON cognix_orchestrator_logs(recommended_path, created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_benchmark_runs (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            overall_score REAL NOT NULL,
+            estimated_tokens_per_second REAL NOT NULL,
+            hardware_json TEXT NOT NULL DEFAULT '{}',
+            benchmark_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_benchmark_runs_username_created
+            ON cognix_benchmark_runs(username, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_benchmark_runs_created
+            ON cognix_benchmark_runs(created_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_reports (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -1152,6 +1168,83 @@ def list_orchestrator_logs(username: str | None = None, limit: int = 200) -> lis
         for log in logs:
             log["decision"] = _json_or_default(log.get("decision_json"), {})
         return logs
+    finally:
+        conn.close()
+
+
+def create_benchmark_run(username: str, benchmark: dict[str, Any]) -> dict[str, Any]:
+    created_at = _now()
+    run_id = _new_id("bnc")
+    hardware = benchmark.get("hardware") if isinstance(benchmark.get("hardware"), dict) else {}
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_benchmark_runs
+                (
+                    id,
+                    username,
+                    mode,
+                    overall_score,
+                    estimated_tokens_per_second,
+                    hardware_json,
+                    benchmark_json,
+                    created_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                username,
+                str(benchmark.get("mode") or "quick"),
+                float(benchmark.get("overallScore") or 0.0),
+                float(benchmark.get("estimatedTokensPerSecond") or 0.0),
+                json.dumps(hardware, ensure_ascii = False),
+                json.dumps(benchmark, ensure_ascii = False),
+                created_at,
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM cognix_benchmark_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        return _benchmark_row(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def _benchmark_row(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["hardware"] = _json_or_default(item.get("hardware_json"), {})
+    item["benchmark"] = _json_or_default(item.get("benchmark_json"), {})
+    return item
+
+
+def list_benchmark_runs(username: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        normalized_limit = max(1, min(int(limit), 200))
+        if username:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_benchmark_runs
+                WHERE username = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, normalized_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_benchmark_runs
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (normalized_limit,),
+            ).fetchall()
+        return [_benchmark_row(dict(row)) for row in rows]
     finally:
         conn.close()
 

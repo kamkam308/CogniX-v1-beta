@@ -94,7 +94,10 @@ const checks: Check[] = [
     file: "../backend/routes/cognix.py",
     includes: [
       '@router.post("/context/pack")',
+      '@router.post("/benchmark/run")',
+      '@router.get("/benchmark/runs")',
       '@router.get("/admin/audit-logs")',
+      '@router.get("/admin/benchmark-runs")',
       '@router.get("/tools/registry")',
       '@router.post("/tools/plan")',
       '@router.get("/admin/permissions/{username}")',
@@ -130,7 +133,22 @@ const checks: Check[] = [
       "CREATE TABLE IF NOT EXISTS cognix_orchestrator_logs",
       "def create_orchestrator_log",
       "def list_orchestrator_logs",
+      "CREATE TABLE IF NOT EXISTS cognix_benchmark_runs",
+      "def create_benchmark_run",
+      "def list_benchmark_runs",
       "metadata_json",
+    ],
+  },
+  {
+    file: "../backend/core/cognix/benchmark.py",
+    includes: [
+      'COGNIX_BENCHMARK_VERSION = "cognix_benchmark_v1"',
+      "def run_benchmark",
+      '"estimatedTokensPerSecond"',
+      '"modelFitness"',
+      '"optimizationPlan"',
+      '"networkCall": False',
+      '"gpuStressTest": False',
     ],
   },
   {
@@ -180,6 +198,16 @@ const checks: Check[] = [
       '"willLoadModel": False',
       '"willGenerate": False',
       '"networkModelCall": False',
+    ],
+  },
+  {
+    file: "../backend/tests/test_cognix_benchmark.py",
+    includes: [
+      "test_benchmark_estimates_model_fitness_without_model_side_effects",
+      "test_benchmark_run_endpoint_persists_user_history_and_admin_view",
+      "cognix_benchmark_v1",
+      "/api/cognix/benchmark/run",
+      "/api/cognix/admin/benchmark-runs",
     ],
   },
   {
