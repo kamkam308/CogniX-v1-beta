@@ -23,6 +23,7 @@ from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import context_manager as cognix_context_manager
 from core.cognix import hardware as cognix_hardware
 from core.cognix import integration_manager as cognix_integration_manager
+from core.cognix import module_registry as cognix_module_registry
 from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import registry as cognix_registry
 from core.cognix import recommender as cognix_recommender
@@ -178,6 +179,10 @@ class ToolActionPlanRequest(BaseModel):
 
 class IntegrationPlanRequest(BaseModel):
     tool_id: str = Field(..., min_length = 1, max_length = 120)
+
+
+class ModulePlanRequest(BaseModel):
+    module_id: str = Field(..., min_length = 1, max_length = 160)
 
 
 class BenchmarkRunRequest(BaseModel):
@@ -972,6 +977,42 @@ async def model_registry(current_subject: str = Depends(get_current_jwt_subject)
         "username": current_subject,
         "registry": cognix_registry.build_model_registry(),
     }
+
+
+@router.get("/modules/registry")
+async def module_registry(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    return {
+        "username": current_subject,
+        "registry": cognix_module_registry.build_module_registry(),
+    }
+
+
+@router.post("/modules/plan")
+async def plan_module_activation(
+    payload: ModulePlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    plan = cognix_module_registry.build_module_activation_plan(payload.module_id)
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "module_plan_built",
+        resource_type = "cognix_module",
+        resource_id = str(payload.module_id),
+        severity = "warning" if plan.get("humanApprovalRequired") else "notice",
+        metadata = {
+            "moduleRegistryVersion": plan.get("moduleRegistryVersion"),
+            "moduleId": plan.get("moduleId"),
+            "status": plan.get("status"),
+            "allowedToActivate": plan.get("allowedToActivate"),
+            "humanApprovalRequired": plan.get("humanApprovalRequired"),
+            "riskLevel": plan.get("module", {}).get("riskLevel"),
+            "dependencies": plan.get("module", {}).get("dependencyState", {}).get("dependencies", []),
+            "sideEffects": plan.get("sideEffects", {}),
+        },
+    )
+    plan["auditLogId"] = audit.get("id")
+    return plan
 
 
 @router.get("/tools/registry")

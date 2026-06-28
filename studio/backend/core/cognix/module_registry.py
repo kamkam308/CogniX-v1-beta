@@ -1,0 +1,240 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
+
+"""Declarative CogniX module registry.
+
+Modules describe optional product capabilities without mutating routes, UI, or
+permissions. Activation remains a separate guarded workflow.
+"""
+
+from __future__ import annotations
+
+from copy import deepcopy
+from typing import Any
+
+
+COGNIX_MODULE_REGISTRY_VERSION = "cognix_module_registry_v1"
+
+
+MODULE_MANIFESTS: list[dict[str, Any]] = [
+    {
+        "id": "cognix-local-core",
+        "displayName": "CogniX Local Core",
+        "editionTargets": ["free", "local", "developer"],
+        "status": "enabled",
+        "capabilities": ["chat_local", "model_registry", "hardware_profiler", "model_recommender"],
+        "routes": ["/api/cognix/models/registry", "/api/cognix/hardware/profile"],
+        "permissions": ["authenticated"],
+        "tools": [],
+        "defaultModels": ["cognix-general-small"],
+        "uiPanels": ["chat", "model-selector"],
+        "dependencies": [],
+    },
+    {
+        "id": "cognix-projects",
+        "displayName": "CogniX Projects",
+        "editionTargets": ["free", "developer", "business", "university"],
+        "status": "enabled",
+        "capabilities": ["project_memory", "project_default_model", "specialized_projects"],
+        "routes": ["/projects", "/api/cognix/project-model-defaults"],
+        "permissions": ["authenticated"],
+        "tools": [],
+        "defaultModels": ["cognix-code-small", "cognix-math-small", "cognix-physics-small"],
+        "uiPanels": ["project-sidebar", "project-settings"],
+        "dependencies": ["cognix-local-core"],
+    },
+    {
+        "id": "cognix-rag",
+        "displayName": "CogniX RAG",
+        "editionTargets": ["free", "developer", "business", "university", "enterprise"],
+        "status": "planned",
+        "capabilities": ["document_memory", "retrieval_planning", "citations"],
+        "routes": ["/api/cognix/rag/plan", "/api/cognix/context/pack"],
+        "permissions": ["authenticated", "rag:read"],
+        "tools": ["google-drive"],
+        "defaultModels": ["cognix-general-small"],
+        "uiPanels": ["project-documents"],
+        "dependencies": ["cognix-local-core", "cognix-projects"],
+    },
+    {
+        "id": "cognix-fine-tuning",
+        "displayName": "CogniX Fine-tuning",
+        "editionTargets": ["developer", "enterprise"],
+        "status": "planned",
+        "capabilities": ["dataset_validation", "qlora_planning", "adapter_library"],
+        "routes": ["/api/cognix/fine-tuning/plan"],
+        "permissions": ["developer_mode"],
+        "tools": [],
+        "defaultModels": ["cognix-general-small"],
+        "uiPanels": ["dataset-manager", "lora-manager"],
+        "dependencies": ["cognix-local-core"],
+    },
+    {
+        "id": "cognix-integrations",
+        "displayName": "CogniX Integrations",
+        "editionTargets": ["developer", "business", "university", "enterprise"],
+        "status": "planned",
+        "capabilities": ["tool_registry", "integration_status", "permissions_audit"],
+        "routes": ["/api/cognix/integrations/status", "/api/cognix/tools/registry"],
+        "permissions": ["authenticated"],
+        "tools": ["github", "google-drive", "gmail", "notion"],
+        "defaultModels": [],
+        "uiPanels": ["integrations-settings"],
+        "dependencies": ["cognix-local-core"],
+    },
+    {
+        "id": "cognix-codex-secure-agent",
+        "displayName": "CogniX Codex Secure Agent",
+        "editionTargets": ["developer", "enterprise"],
+        "status": "planned",
+        "capabilities": ["feature_request", "branch_pipeline", "tests_build_preview"],
+        "routes": ["/api/cognix/tools/plan"],
+        "permissions": ["developer_mode"],
+        "tools": ["codex-secure-agent", "github"],
+        "defaultModels": ["cognix-code-small"],
+        "uiPanels": ["developer-workflow"],
+        "dependencies": ["cognix-local-core", "cognix-integrations"],
+    },
+    {
+        "id": "cognix-enterprise-foundation",
+        "displayName": "CogniX Enterprise Foundation",
+        "editionTargets": ["business", "enterprise"],
+        "status": "planned",
+        "capabilities": ["organizations", "rbac", "audit_logs", "deployment_targets"],
+        "routes": ["/api/cognix/admin/audit-logs", "/api/cognix/admin/permissions/{username}"],
+        "permissions": ["admin"],
+        "tools": ["sharepoint", "microsoft-teams"],
+        "defaultModels": ["cognix-general-small"],
+        "uiPanels": ["admin-security", "deployment-settings"],
+        "dependencies": ["cognix-local-core", "cognix-integrations"],
+    },
+]
+
+
+def _manifest_ids() -> set[str]:
+    return {str(item.get("id")) for item in MODULE_MANIFESTS}
+
+
+def _dependency_status(module: dict[str, Any]) -> dict[str, Any]:
+    manifest_ids = _manifest_ids()
+    dependencies = [
+        str(item) for item in module.get("dependencies") or [] if item
+    ]
+    missing = [item for item in dependencies if item not in manifest_ids]
+    return {
+        "dependencies": dependencies,
+        "missingDependencies": missing,
+        "ready": not missing,
+    }
+
+
+def _module_record(module: dict[str, Any]) -> dict[str, Any]:
+    record = deepcopy(module)
+    dependency_state = _dependency_status(record)
+    record["dependencyState"] = dependency_state
+    record["activationState"] = (
+        "ready"
+        if record.get("status") == "enabled" and dependency_state["ready"]
+        else "planned"
+        if dependency_state["ready"]
+        else "blocked"
+    )
+    record["riskLevel"] = (
+        "high"
+        if "admin" in record.get("permissions", [])
+        else "medium"
+        if "developer_mode" in record.get("permissions", [])
+        else "low"
+    )
+    return record
+
+
+def build_module_registry() -> dict[str, Any]:
+    modules = [_module_record(module) for module in MODULE_MANIFESTS]
+    return {
+        "moduleRegistryVersion": COGNIX_MODULE_REGISTRY_VERSION,
+        "mode": "declarative_dry_run",
+        "modules": modules,
+        "summary": {
+            "moduleCount": len(modules),
+            "enabledCount": sum(1 for item in modules if item.get("status") == "enabled"),
+            "plannedCount": sum(1 for item in modules if item.get("status") == "planned"),
+            "blockedCount": sum(1 for item in modules if item.get("activationState") == "blocked"),
+            "uiMutationAllowed": False,
+            "routeMutationAllowed": False,
+        },
+        "globalPolicies": {
+            "declarativeManifestRequired": True,
+            "dependenciesMustResolve": True,
+            "permissionsMustBeDeclared": True,
+            "activationRequiresAudit": True,
+            "frontendCannotSelfRegisterModules": True,
+        },
+        "sideEffects": {
+            "moduleActivation": False,
+            "routeRegistration": False,
+            "uiMutation": False,
+            "permissionWrite": False,
+        },
+    }
+
+
+def build_module_activation_plan(module_id: str) -> dict[str, Any]:
+    registry = build_module_registry()
+    module = next(
+        (item for item in registry["modules"] if item.get("id") == module_id),
+        None,
+    )
+    if module is None:
+        return {
+            "moduleRegistryVersion": COGNIX_MODULE_REGISTRY_VERSION,
+            "mode": "dry_run",
+            "moduleId": module_id,
+            "status": "unknown_module",
+            "allowedToActivate": False,
+            "steps": [
+                {
+                    "id": "verify_manifest",
+                    "status": "blocked",
+                    "detail": "Module absent de la registry CogniX.",
+                }
+            ],
+            "sideEffects": registry["sideEffects"],
+        }
+
+    dependency_ready = bool(module.get("dependencyState", {}).get("ready"))
+    already_enabled = module.get("status") == "enabled"
+    allowed_to_activate = dependency_ready and not already_enabled
+    return {
+        "moduleRegistryVersion": COGNIX_MODULE_REGISTRY_VERSION,
+        "mode": "dry_run",
+        "moduleId": module.get("id"),
+        "displayName": module.get("displayName"),
+        "status": module.get("activationState"),
+        "allowedToActivate": allowed_to_activate,
+        "humanApprovalRequired": True,
+        "module": module,
+        "steps": [
+            {
+                "id": "verify_manifest",
+                "status": "complete",
+                "detail": "Manifest declaratif present.",
+            },
+            {
+                "id": "verify_dependencies",
+                "status": "complete" if dependency_ready else "blocked",
+                "detail": "Dependances resolues dans la registry locale.",
+            },
+            {
+                "id": "verify_permissions",
+                "status": "complete" if module.get("permissions") else "blocked",
+                "detail": "Permissions declarees avant activation.",
+            },
+            {
+                "id": "dry_run_guard",
+                "status": "complete",
+                "detail": "Aucune route, permission ou UI n'est modifiee pendant ce plan.",
+            },
+        ],
+        "sideEffects": registry["sideEffects"],
+    }

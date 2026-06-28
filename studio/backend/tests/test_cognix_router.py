@@ -18,6 +18,7 @@ from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import context_manager as cognix_context_manager
 from core.cognix import decision_engine as cognix_decision_engine
 from core.cognix import integration_manager as cognix_integration_manager
+from core.cognix import module_registry as cognix_module_registry
 from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import tool_registry as cognix_tool_registry
 from core.cognix.router import classify_objective
@@ -637,6 +638,52 @@ def test_audit_log_retention_prunes_old_entries():
     assert len(logs) == 3
     assert set(created_ids[-3:]) == kept_ids
     assert set(created_ids[:2]).isdisjoint(kept_ids)
+
+
+def test_module_registry_declares_modular_cognix_capabilities():
+    registry = cognix_module_registry.build_module_registry()
+
+    assert registry["moduleRegistryVersion"] == "cognix_module_registry_v1"
+    assert registry["mode"] == "declarative_dry_run"
+    assert registry["summary"]["uiMutationAllowed"] is False
+    assert registry["summary"]["routeMutationAllowed"] is False
+    assert registry["sideEffects"]["moduleActivation"] is False
+    assert registry["sideEffects"]["uiMutation"] is False
+
+    modules = {item["id"]: item for item in registry["modules"]}
+    assert {"cognix-local-core", "cognix-rag", "cognix-integrations", "cognix-codex-secure-agent"}.issubset(
+        modules
+    )
+    assert modules["cognix-local-core"]["activationState"] == "ready"
+    assert modules["cognix-rag"]["dependencyState"]["ready"] is True
+    assert "cognix-integrations" in modules["cognix-codex-secure-agent"]["dependencyState"]["dependencies"]
+
+
+def test_module_plan_endpoint_writes_sanitized_audit_log():
+    seed_accounts()
+
+    body = run_async(
+        cognix_routes.plan_module_activation(
+            cognix_routes.ModulePlanRequest(module_id = "cognix-rag"),
+            current_subject = "alice",
+        )
+    )
+
+    assert body["auditLogId"].startswith("aud_")
+    assert body["moduleRegistryVersion"] == "cognix_module_registry_v1"
+    assert body["moduleId"] == "cognix-rag"
+    assert body["allowedToActivate"] is True
+    assert body["sideEffects"]["moduleActivation"] is False
+    assert body["sideEffects"]["routeRegistration"] is False
+    assert body["sideEffects"]["permissionWrite"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "module_plan_built"
+    assert log["resourceType"] == "cognix_module"
+    assert log["metadata"]["moduleRegistryVersion"] == "cognix_module_registry_v1"
+    assert log["metadata"]["sideEffects"]["moduleActivation"] is False
 
 
 def test_tool_registry_declares_permissions_and_guardrails():
