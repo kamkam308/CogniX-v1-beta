@@ -220,6 +220,92 @@ def test_cache_endpoint_returns_authenticated_runtime_policy(client, monkeypatch
     assert cache["runtime"]["activeModel"] == "qwen:4b"
 
 
+def test_cache_load_plan_selects_lru_evictions_without_loading():
+    cache_manager.mark_model_used("general:3b", runtime_type = "ollama", now = 1000.0)
+    cache_manager.mark_model_used("code:4b", runtime_type = "ollama", now = 1200.0)
+    cache = cache_manager.build_cache_state(
+        _cpu_hardware(available_gb = 4.0, total_gb = 8.0),
+        active_model = "code:4b",
+        loaded_models = ["general:3b", "code:4b"],
+        runtime_type = "ollama",
+        now = 1300.0,
+    )
+
+    plan = cache_manager.build_cache_load_plan(
+        _cpu_hardware(available_gb = 4.0, total_gb = 8.0),
+        cache_state = cache,
+        target_model_id = "math:3b",
+        target_runtime_type = "ollama",
+        estimated_ram_gb = 3.8,
+        project_id = "project-math",
+    )
+
+    assert plan["managerVersion"] == "model_cache_manager_v1"
+    assert plan["mode"] == "dry_run"
+    assert plan["target"]["modelId"] == "math:3b"
+    assert plan["target"]["alreadyResident"] is False
+    assert plan["memoryGuard"]["status"] == "needs_eviction"
+    assert plan["capacity"]["requiredEvictionCount"] == 2
+    assert [item["modelId"] for item in plan["selectedEvictions"]] == ["general:3b", "code:4b"]
+    assert plan["selectedEvictions"][0]["reasonCode"] == "least_recently_used"
+    assert plan["selectedEvictions"][1]["reasonCode"] == "active_last_resort"
+    assert plan["actions"][-1]["type"] == "would_load_model"
+    assert plan["allowedToPrepare"] is True
+    assert plan["sideEffects"]["modelLoad"] is False
+    assert plan["sideEffects"]["modelUnload"] is False
+    assert plan["sideEffects"]["cacheMutation"] is False
+
+
+def test_cache_load_plan_endpoint_returns_audited_dry_run_plan(client, monkeypatch):
+    seed_accounts()
+    headers = login_headers(client, "alice", "alice-password-123")
+    monkeypatch.setattr(cognix_hardware, "get_hardware_profile", lambda: _cpu_hardware(available_gb = 10.0, total_gb = 16.0))
+    monkeypatch.setattr(
+        cognix_routes,
+        "_current_model_cache_runtime",
+        lambda: {
+            "runtimeType": "ollama",
+            "activeModel": "code:4b",
+            "loadedModels": ["general:3b", "code:4b"],
+            "loadingModels": [],
+        },
+    )
+
+    response = client.post(
+        "/api/cognix/models/cache/load-plan",
+        headers = headers,
+        json = {
+            "modelId": "math:3b",
+            "runtimeType": "ollama",
+            "estimatedRamGb": 3.8,
+            "projectId": "project-math",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["username"] == "alice"
+    assert body["auditLogId"].startswith("aud_")
+    plan = body["loadPlan"]
+    assert plan["managerVersion"] == "model_cache_manager_v1"
+    assert plan["mode"] == "dry_run"
+    assert plan["capacity"]["requiredEvictionCount"] == 1
+    assert plan["selectedEvictions"][0]["modelId"] == "general:3b"
+    assert plan["actions"][-1]["type"] == "would_load_model"
+    assert plan["sideEffects"]["modelLoad"] is False
+    assert plan["sideEffects"]["modelUnload"] is False
+
+    admin_headers = login_headers(client, storage.DEFAULT_ADMIN_USERNAME, "admin-password-123")
+    audit = client.get("/api/cognix/admin/audit-logs", headers = admin_headers)
+    assert audit.status_code == 200
+    log = audit.json()["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "cache_load_plan_built"
+    assert log["metadata"]["managerVersion"] == "model_cache_manager_v1"
+    assert log["metadata"]["selectedEvictions"] == ["general:3b"]
+    assert log["metadata"]["sideEffects"]["modelLoad"] is False
+
+
 def test_preload_plan_endpoint_returns_audited_dry_run_plan(client, monkeypatch):
     seed_accounts()
     headers = login_headers(client, "alice", "alice-password-123")

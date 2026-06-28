@@ -237,6 +237,7 @@ def _read_studio_install_id() -> str:
 
 
 _STUDIO_ROOT_ID_CACHE: str = _read_studio_install_id()
+CLOUD_TRAINING_PROVIDERS = ["google_colab", "kaggle", "cloud_gpu"]
 
 
 def _studio_root_id() -> str:
@@ -245,6 +246,26 @@ def _studio_root_id() -> str:
     Empty when no installer token is present; the launcher treats "" as
     "accept any healthy backend"."""
     return _STUDIO_ROOT_ID_CACHE
+
+
+def build_training_access_payload(subject: str) -> dict[str, object]:
+    profile = auth_storage.get_user_profile(subject) or {}
+    plan = str(profile.get("plan") or "").strip().casefold()
+    has_cloud_training = plan == "ceo" or auth_storage.is_admin(subject)
+    cloud_training_unlocked = bool(has_cloud_training)
+    local_training_available = not bool(_hw_module.CHAT_ONLY)
+    training_access = "local"
+    if cloud_training_unlocked and not local_training_available:
+        training_access = "cloud_ceo"
+    elif cloud_training_unlocked and local_training_available:
+        training_access = "local_plus_cloud_ceo"
+    return {
+        "cloud_training_unlocked": cloud_training_unlocked,
+        "cloud_training_providers": CLOUD_TRAINING_PROVIDERS,
+        "training_access": training_access,
+        "training_local_available": local_training_available,
+        "training_cloud_available": cloud_training_unlocked,
+    }
 
 
 # Fix broken Windows registry MIME types: some installs map .js to text/plain,
@@ -1473,21 +1494,14 @@ async def health_check(request: Request):
     if not subject:
         return base
 
-    profile = auth_storage.get_user_profile(subject) or {}
-    plan = str(profile.get("plan") or "").casefold()
-    cloud_training_unlocked = (
-        _hw_module.CHAT_ONLY
-        and (plan == "ceo" or auth_storage.is_admin(subject))
-    )
+    training_access = build_training_access_payload(subject)
     platform_map = {"darwin": "mac", "win32": "windows", "linux": "linux"}
     device_type = platform_map.get(sys.platform, sys.platform)
     return {
         **base,
         # Why chat_only is set. This fingerprints the host, so keep it authed.
         "chat_only_reason": getattr(_hw_module, "CHAT_ONLY_REASON", None),
-        "cloud_training_unlocked": cloud_training_unlocked,
-        "cloud_training_providers": ["google_colab", "kaggle", "cloud_gpu"],
-        "training_access": "cloud_ceo" if cloud_training_unlocked else "local",
+        **training_access,
         "version": UNSLOTH_VERSION,
         "studio_version": STUDIO_VERSION,
         "device_type": device_type,

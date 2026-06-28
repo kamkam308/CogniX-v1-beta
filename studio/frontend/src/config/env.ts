@@ -30,6 +30,8 @@ interface PlatformState {
   cloudTrainingUnlocked: boolean;
   cloudTrainingProviders: string[];
   trainingAccess: "local" | "cloud_ceo" | string;
+  trainingLocalAvailable: boolean;
+  trainingCloudAvailable: boolean;
   fetched: boolean;
   isChatOnly: () => boolean;
   isTrainingAccessible: () => boolean;
@@ -57,9 +59,11 @@ export const usePlatformStore = create<PlatformState>()((_, get) => ({
   cloudTrainingUnlocked: false,
   cloudTrainingProviders: [],
   trainingAccess: "local",
+  trainingLocalAvailable: localDeviceType !== "mac",
+  trainingCloudAvailable: false,
   fetched: false,
   isChatOnly: () => get().chatOnly,
-  isTrainingAccessible: () => !get().chatOnly || get().cloudTrainingUnlocked,
+  isTrainingAccessible: () => get().trainingLocalAvailable || get().trainingCloudAvailable || get().cloudTrainingUnlocked,
 }));
 
 // `force` re-reads /api/health even if cached, to pick up a late-arriving tunnel URL.
@@ -91,6 +95,8 @@ export async function fetchDeviceType(options?: {
         cloud_training_unlocked?: boolean;
         cloud_training_providers?: string[];
         training_access?: string;
+        training_local_available?: boolean;
+        training_cloud_available?: boolean;
       };
       const deviceType = data.device_type ?? detectLocalPlatform();
       const chatOnly = data.chat_only ?? false;
@@ -111,6 +117,8 @@ export async function fetchDeviceType(options?: {
         cloudTrainingUnlocked: data.cloud_training_unlocked === true,
         cloudTrainingProviders,
         trainingAccess: data.training_access ?? "local",
+        trainingLocalAvailable: data.training_local_available ?? !chatOnly,
+        trainingCloudAvailable: data.training_cloud_available ?? data.cloud_training_unlocked === true,
         fetched: data.device_type !== undefined,
       });
       return deviceType;
@@ -127,6 +135,8 @@ export async function fetchDeviceType(options?: {
       cloudTrainingUnlocked: false,
       cloudTrainingProviders: [],
       trainingAccess: "local",
+      trainingLocalAvailable: !chatOnly,
+      trainingCloudAvailable: false,
       fetched: false,
     });
     return deviceType;

@@ -4,6 +4,7 @@
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { fetchDeviceType } from "@/config/env";
 import { apiUrl } from "@/lib/api-base";
 import { cn } from "@/lib/utils";
 import { Link, useNavigate } from "@tanstack/react-router";
@@ -362,6 +363,7 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
 
       setMustChangePassword(token.must_change_password);
       storeAuthTokens(token.access_token, token.refresh_token);
+      await fetchDeviceType({ force: true });
       navigate({ to: getPostAuthRoute() });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Authentification impossible.";

@@ -232,6 +232,15 @@ class PreloadPlanRequest(BaseModel):
     project_id: str | None = Field(None, max_length = 160)
 
 
+class ModelCacheLoadPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    model_id: str = Field(..., alias = "modelId", min_length = 1, max_length = 240)
+    runtime_type: str | None = Field(None, alias = "runtimeType", max_length = 80)
+    estimated_ram_gb: float | None = Field(None, alias = "estimatedRamGb", ge = 0)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+
+
 class FineTuningPlanRequest(BaseModel):
     objective: str = Field(..., min_length = 1, max_length = 4000)
     project_type: str | None = Field(None, max_length = 80)
@@ -1799,6 +1808,62 @@ async def model_cache_state(
         "hardware": hardware,
         "runtimeError": runtime.get("error"),
         "cache": cache,
+    }
+
+
+@router.post("/models/cache/load-plan")
+async def model_cache_load_plan(
+    payload: ModelCacheLoadPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    hardware = cognix_hardware.get_hardware_profile()
+    runtime = _current_model_cache_runtime()
+    cache = cognix_cache_manager.build_cache_state(
+        hardware,
+        active_model = runtime.get("activeModel"),
+        loaded_models = runtime.get("loadedModels") or [],
+        loading_models = runtime.get("loadingModels") or [],
+        runtime_type = str(runtime.get("runtimeType") or "unknown"),
+        project_id = payload.project_id,
+    )
+    load_plan = cognix_cache_manager.build_cache_load_plan(
+        hardware,
+        cache_state = cache,
+        target_model_id = payload.model_id,
+        target_runtime_type = payload.runtime_type,
+        estimated_ram_gb = payload.estimated_ram_gb,
+        project_id = payload.project_id,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "cache_load_plan_built",
+        resource_type = "cognix_cache_load_plan",
+        resource_id = str(load_plan.get("target", {}).get("modelId") or payload.model_id),
+        severity = "warning" if load_plan.get("blockedReasons") else "notice",
+        metadata = {
+            "managerVersion": load_plan.get("managerVersion"),
+            "targetModelId": load_plan.get("target", {}).get("modelId"),
+            "runtimeType": load_plan.get("target", {}).get("runtimeType"),
+            "allowedToPrepare": load_plan.get("allowedToPrepare"),
+            "requiredEvictionCount": load_plan.get("capacity", {}).get("requiredEvictionCount"),
+            "selectedEvictions": [
+                item.get("modelId")
+                for item in load_plan.get("selectedEvictions", [])
+                if isinstance(item, dict)
+            ],
+            "memoryGuardStatus": load_plan.get("memoryGuard", {}).get("status"),
+            "sideEffects": load_plan.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "hardware": hardware,
+        "runtimeError": runtime.get("error"),
+        "cache": cache,
+        "loadPlan": load_plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": load_plan.get("sideEffects", {}),
     }
 
 

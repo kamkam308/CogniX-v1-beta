@@ -1817,7 +1817,9 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert modules["cognix-local-core"]["activationState"] == "ready"
     assert modules["cognix-model-lifecycle"]["activationState"] == "ready"
     assert "load_unload_planning" in modules["cognix-model-lifecycle"]["capabilities"]
+    assert "cache_load_planning" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "/api/cognix/models/lifecycle-plan" in modules["cognix-model-lifecycle"]["routes"]
+    assert "/api/cognix/models/cache/load-plan" in modules["cognix-model-lifecycle"]["routes"]
     assert modules["cognix-thinking-status"]["activationState"] == "ready"
     assert "technical_redaction" in modules["cognix-thinking-status"]["capabilities"]
     assert "/api/cognix/thinking/plan" in modules["cognix-thinking-status"]["routes"]

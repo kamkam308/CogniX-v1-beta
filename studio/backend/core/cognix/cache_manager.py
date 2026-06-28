@@ -17,6 +17,7 @@ from typing import Any, Iterable
 
 CHAT_IDLE_TIMEOUT_SECONDS = 10 * 60
 PROJECT_IDLE_TIMEOUT_SECONDS = 15 * 60
+MODEL_CACHE_MANAGER_VERSION = "model_cache_manager_v1"
 
 
 @dataclass
@@ -176,6 +177,103 @@ def _policy_for_hardware(
     }
 
 
+def _memory_guard(
+    hardware: dict[str, Any],
+    policy: dict[str, Any],
+    *,
+    estimated_ram_gb: float | None,
+) -> dict[str, Any]:
+    memory = hardware.get("memory") if isinstance(hardware, dict) else {}
+    if not isinstance(memory, dict):
+        memory = {}
+    available_gb = _as_float(memory.get("availableGb"))
+    tier = str(policy.get("tier") or "balanced_local")
+    reserve_gb = 1.5 if tier == "small_local" else 2.0 if tier == "balanced_local" else 4.0
+    if estimated_ram_gb is None:
+        return {
+            "status": "unknown_estimate",
+            "availableGb": available_gb,
+            "estimatedTargetRamGb": None,
+            "reserveGb": reserve_gb,
+            "estimatedAfterLoadGb": None,
+            "requiresEvictionForMemory": False,
+            "reason": "Estimation RAM cible absente: appliquer seulement les limites LRU/cache.",
+        }
+    if available_gb is None:
+        return {
+            "status": "unknown_available_memory",
+            "availableGb": None,
+            "estimatedTargetRamGb": estimated_ram_gb,
+            "reserveGb": reserve_gb,
+            "estimatedAfterLoadGb": None,
+            "requiresEvictionForMemory": False,
+            "reason": "Memoire disponible inconnue: appliquer les limites LRU/cache avant execution.",
+        }
+    after = available_gb - estimated_ram_gb
+    ok = after >= reserve_gb
+    return {
+        "status": "safe" if ok else "needs_eviction",
+        "availableGb": available_gb,
+        "estimatedTargetRamGb": estimated_ram_gb,
+        "reserveGb": reserve_gb,
+        "estimatedAfterLoadGb": round(after, 2),
+        "requiresEvictionForMemory": not ok,
+        "reason": (
+            "Memoire suffisante pour charger le modele cible en conservant une reserve."
+            if ok
+            else "Memoire disponible insuffisante: decharger un modele resident avant chargement."
+        ),
+    }
+
+
+def _eviction_candidates(cache_state: dict[str, Any], *, target_model_id: str | None) -> list[dict[str, Any]]:
+    policy = cache_state.get("policy") if isinstance(cache_state, dict) else {}
+    if not isinstance(policy, dict):
+        policy = {}
+    idle_timeout = int(policy.get("idleTimeoutSeconds") or CHAT_IDLE_TIMEOUT_SECONDS)
+    resident = cache_state.get("residentModels") if isinstance(cache_state, dict) else []
+    if not isinstance(resident, list):
+        resident = []
+    records = [item for item in resident if isinstance(item, dict)]
+    records.sort(
+        key = lambda item: (
+            bool(item.get("active")),
+            float(item.get("lastUsedAt") or 0),
+            str(item.get("modelId") or ""),
+        )
+    )
+    candidates: list[dict[str, Any]] = []
+    for rank, item in enumerate(records, start = 1):
+        model_id = _clean_model_id(str(item.get("modelId") or ""))
+        if not model_id or model_id == target_model_id:
+            continue
+        idle_for = int(_as_float(item.get("idleForSeconds")) or 0)
+        reason_code = "idle_timeout" if idle_for >= idle_timeout else "least_recently_used"
+        if item.get("active"):
+            reason_code = "active_last_resort"
+        candidates.append(
+            {
+                "rank": rank,
+                "modelId": model_id,
+                "active": bool(item.get("active")),
+                "projectId": item.get("projectId"),
+                "idleForSeconds": idle_for,
+                "hits": int(_as_float(item.get("hits")) or 0),
+                "reasonCode": reason_code,
+                "reason": (
+                    "Modele idle: candidat prioritaire a l'eviction."
+                    if reason_code == "idle_timeout"
+                    else (
+                        "Modele actif: eviction uniquement en dernier recours."
+                        if reason_code == "active_last_resort"
+                        else "Modele le moins recemment utilise."
+                    )
+                ),
+            }
+        )
+    return candidates
+
+
 def _reconcile_runtime(
     *,
     loaded_models: list[str],
@@ -274,7 +372,7 @@ def build_cache_state(
         )
 
     return {
-        "managerVersion": "model_cache_manager_v1",
+        "managerVersion": MODEL_CACHE_MANAGER_VERSION,
         "mode": "observe_only",
         "observedAt": timestamp,
         "policy": policy,
@@ -288,4 +386,139 @@ def build_cache_state(
         "residentModels": resident,
         "actions": actions,
         "nextAction": actions[0] if actions else None,
+    }
+
+
+def build_cache_load_plan(
+    hardware: dict[str, Any],
+    *,
+    cache_state: dict[str, Any],
+    target_model_id: str,
+    target_runtime_type: str | None = None,
+    estimated_ram_gb: float | None = None,
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    target = _clean_model_id(target_model_id)
+    policy = cache_state.get("policy") if isinstance(cache_state, dict) else {}
+    if not isinstance(policy, dict):
+        policy = {}
+    runtime = cache_state.get("runtime") if isinstance(cache_state, dict) else {}
+    if not isinstance(runtime, dict):
+        runtime = {}
+    loaded = set(_unique_models(runtime.get("loadedModels") if isinstance(runtime.get("loadedModels"), list) else []))
+    loading = set(_unique_models(runtime.get("loadingModels") if isinstance(runtime.get("loadingModels"), list) else []))
+    resident_count = int(_as_float(runtime.get("residentCount")) or len(loaded))
+    max_resident = max(1, int(_as_float(policy.get("maxResidentModels")) or 1))
+    already_resident = bool(target and target in loaded)
+    currently_loading = bool(target and target in loading)
+    projected_resident_count = resident_count + (0 if already_resident or currently_loading else 1)
+    capacity_eviction_count = max(0, projected_resident_count - max_resident)
+    normalized_estimate = _as_float(estimated_ram_gb)
+    memory = _memory_guard(
+        hardware,
+        policy,
+        estimated_ram_gb = normalized_estimate,
+    )
+    candidates = _eviction_candidates(cache_state, target_model_id = target)
+    required_count = capacity_eviction_count
+    if memory["requiresEvictionForMemory"] and required_count == 0 and not already_resident:
+        required_count = 1
+    selected = candidates[:required_count]
+    blockers: list[dict[str, Any]] = []
+    actions: list[dict[str, Any]] = []
+
+    if not target:
+        blockers.append({"id": "missing_target_model", "reason": "Aucun modele cible valide."})
+    if currently_loading:
+        actions.append(
+            {
+                "type": "wait_existing_load",
+                "modelId": target,
+                "reason": "Le modele cible est deja en cours de chargement.",
+                "automatic": False,
+            }
+        )
+    elif already_resident:
+        actions.append(
+            {
+                "type": "keep_loaded",
+                "modelId": target,
+                "reason": "Le modele cible est deja resident.",
+                "automatic": False,
+            }
+        )
+    elif required_count > len(selected):
+        blockers.append(
+            {
+                "id": "insufficient_eviction_candidates",
+                "reason": "Pas assez de modeles residents a decharger pour respecter les limites cache/RAM.",
+            }
+        )
+
+    for item in selected:
+        actions.append(
+            {
+                "type": "would_unload_before_load",
+                "modelId": item["modelId"],
+                "reason": item["reason"],
+                "reasonCode": item["reasonCode"],
+                "automatic": False,
+            }
+        )
+
+    if target and not already_resident and not currently_loading and not blockers:
+        actions.append(
+            {
+                "type": "would_load_model",
+                "modelId": target,
+                "runtimeType": target_runtime_type or runtime.get("runtimeType") or "unknown",
+                "reason": "Cache et garde memoire prepares pour un chargement controle.",
+                "automatic": False,
+            }
+        )
+
+    allowed_to_prepare = bool(target) and not blockers
+    return {
+        "managerVersion": MODEL_CACHE_MANAGER_VERSION,
+        "mode": "dry_run",
+        "target": {
+            "modelId": target,
+            "runtimeType": target_runtime_type or runtime.get("runtimeType") or "unknown",
+            "projectId": project_id,
+            "estimatedRamGb": normalized_estimate,
+            "alreadyResident": already_resident,
+            "currentlyLoading": currently_loading,
+        },
+        "policy": {
+            "tier": policy.get("tier"),
+            "maxResidentModels": max_resident,
+            "idleTimeoutSeconds": policy.get("idleTimeoutSeconds"),
+            "evictionStrategy": policy.get("evictionStrategy") or "lru",
+            "automaticEvictionEnabled": bool(policy.get("automaticEvictionEnabled")),
+        },
+        "memoryGuard": memory,
+        "capacity": {
+            "residentCount": resident_count,
+            "projectedResidentCount": projected_resident_count,
+            "requiredEvictionCount": required_count,
+            "capacityEvictionCount": capacity_eviction_count,
+        },
+        "evictionCandidates": candidates,
+        "selectedEvictions": selected,
+        "actions": actions,
+        "allowedToPrepare": allowed_to_prepare,
+        "blockedReasons": blockers,
+        "reason": (
+            "Plan cache pret pour chargement controle."
+            if allowed_to_prepare
+            else "Chargement differe par les garde-fous cache/memoire."
+        ),
+        "sideEffects": {
+            "modelLoad": False,
+            "modelUnload": False,
+            "cacheMutation": False,
+            "runtimeMutation": False,
+            "networkModelCall": False,
+            "generation": False,
+        },
     }
