@@ -44,6 +44,7 @@ from core.cognix import research_watch as cognix_research_watch
 from core.cognix import response_reflection as cognix_response_reflection
 from core.cognix import runtime_adapter as cognix_runtime_adapter
 from core.cognix import thinking_status as cognix_thinking_status
+from core.cognix import tool_discovery as cognix_tool_discovery
 from core.cognix import tool_registry as cognix_tool_registry
 from core.cognix import worker_queue as cognix_worker_queue
 from core.cognix.router import classify_objective
@@ -241,6 +242,21 @@ class DebateOutputRequest(BaseModel):
     round_id: str | None = Field(None, alias = "roundId", max_length = 160)
     model_id: str | None = Field(None, alias = "modelId", max_length = 240)
     metadata: dict[str, Any] | None = None
+
+
+class ToolDiscoveryRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str | None = Field(None, max_length = 4000)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    project_type: str | None = Field(None, alias = "projectType", max_length = 80)
+    project_name: str | None = Field(None, alias = "projectName", max_length = 240)
+    file_names: list[str] | None = Field(None, alias = "fileNames")
+    documents: list[dict[str, Any]] | None = None
+    tags: list[str] | None = None
+    installed_tool_ids: list[str] | None = Field(None, alias = "installedToolIds")
+    store_recommendations: bool = Field(True, alias = "storeRecommendations")
+    record_installed_snapshot: bool = Field(False, alias = "recordInstalledSnapshot")
 
 
 class ProjectDefaultModelRequest(BaseModel):
@@ -559,6 +575,10 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "public_prompt": "publicPrompt",
         "output_type": "outputType",
         "public_summary": "publicSummary",
+        "tool_id": "toolId",
+        "tool_name": "toolName",
+        "need_id": "needId",
+        "recommendation_json": "recommendationJson",
     }
     for source, target in alias_map.items():
         if source in out:
@@ -567,6 +587,8 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         out["needsClarification"] = bool(out["needsClarification"])
     if "verificationRequired" in out:
         out["verificationRequired"] = bool(out["verificationRequired"])
+    if "ignored" in out:
+        out["ignored"] = bool(out["ignored"])
     return out
 
 
@@ -2260,6 +2282,173 @@ async def tool_permission_matrix(current_subject: str = Depends(get_current_jwt_
         has_developer_mode = has_developer_mode,
         granted_permissions = _granted_permission_keys(current_subject),
     )
+
+
+@router.get("/tools/discovery/capabilities")
+async def tool_discovery_capabilities(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    registry = cognix_tool_discovery.build_tool_capability_registry()
+    return {
+        "username": current_subject,
+        "capabilityRegistry": registry,
+        "sideEffects": registry.get("sideEffects", {}),
+    }
+
+
+@router.post("/tools/discovery/analyze")
+async def analyze_tool_discovery(
+    payload: ToolDiscoveryRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    project: dict[str, Any] | None = None
+    if payload.project_id:
+        project = _require_owned_project(payload.project_id, current_subject)
+    capability_lookup = {
+        str(item.get("toolId")): item
+        for item in cognix_tool_discovery.build_tool_capability_registry().get("capabilities", [])
+        if item.get("toolId")
+    }
+    installed_writes: list[dict[str, Any]] = []
+    if payload.record_installed_snapshot:
+        for tool_id in payload.installed_tool_ids or []:
+            normalized_tool_id = str(tool_id or "").strip().lower()
+            if not normalized_tool_id:
+                continue
+            capability = capability_lookup.get(normalized_tool_id, {})
+            installed_writes.append(
+                cognix_db.upsert_installed_tool(
+                    current_subject,
+                    tool_id = normalized_tool_id,
+                    tool_name = str(capability.get("name") or normalized_tool_id),
+                    status = "installed",
+                    source = "client_snapshot",
+                    metadata = {
+                        "toolDiscoveryVersion": cognix_tool_discovery.COGNIX_TOOL_DISCOVERY_VERSION,
+                        "recordedFromAnalyzeRequest": True,
+                    },
+                )
+            )
+    installed_records = cognix_db.list_installed_tools(current_subject)
+    project_name = payload.project_name
+    project_type = payload.project_type
+    if project:
+        project_name = project_name or str(project.get("title") or project.get("name") or "")
+        project_type = project_type or str(project.get("project_type") or project.get("projectType") or "")
+    plan = cognix_tool_discovery.build_tool_discovery_plan(
+        username = current_subject,
+        objective = payload.objective,
+        project_type = project_type,
+        project_name = project_name,
+        project_id = payload.project_id,
+        file_names = payload.file_names,
+        documents = payload.documents,
+        tags = payload.tags,
+        installed_tool_ids = payload.installed_tool_ids,
+        installed_records = installed_records,
+    )
+    stored_recommendations = (
+        cognix_db.create_tool_recommendations(
+            current_subject,
+            plan = plan,
+            project_id = payload.project_id,
+        )
+        if payload.store_recommendations
+        else []
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "recommendationWrite": bool(stored_recommendations),
+        "installedToolWrite": bool(installed_writes),
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "tool_discovery_analyzed",
+        resource_type = "cognix_tool_discovery_plan",
+        resource_id = payload.project_id or "general",
+        severity = "notice",
+        metadata = {
+            "toolDiscoveryVersion": plan.get("toolDiscoveryVersion"),
+            "projectId": payload.project_id,
+            "needCount": plan.get("summary", {}).get("needCount"),
+            "recommendationCount": plan.get("summary", {}).get("recommendationCount"),
+            "storedRecommendationCount": len(stored_recommendations),
+            "installedSnapshotCount": len(installed_writes),
+            "automaticInstallAllowed": plan.get("summary", {}).get("automaticInstallAllowed"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "toolDiscoveryPlan": plan,
+        "storedRecommendations": _rows(stored_recommendations),
+        "installedTools": _rows(installed_records),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+    }
+
+
+@router.get("/tools/recommendations")
+async def tool_recommendations(
+    project_id: str | None = None,
+    include_ignored: bool = False,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if project_id:
+        _require_owned_project(project_id, current_subject)
+    recommendations = cognix_db.list_tool_recommendations(
+        current_subject,
+        project_id = project_id,
+        include_ignored = include_ignored,
+    )
+    return {
+        "username": current_subject,
+        "recommendations": _rows(recommendations),
+        "sideEffects": {
+            "toolExecution": False,
+            "installation": False,
+            "recommendationWrite": False,
+            "secretRead": False,
+        },
+    }
+
+
+@router.post("/tools/recommendations/{recommendation_id}/ignore")
+async def ignore_tool_recommendation(
+    recommendation_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    recommendation = cognix_db.ignore_tool_recommendation(current_subject, recommendation_id)
+    if recommendation is None:
+        raise HTTPException(status_code = 404, detail = "Recommendation not found")
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "tool_recommendation_ignored",
+        resource_type = "cognix_tool_recommendation",
+        resource_id = recommendation_id,
+        severity = "notice",
+        metadata = {
+            "toolId": recommendation.get("tool_id"),
+            "needId": recommendation.get("need_id"),
+            "sideEffects": {
+                "recommendationWrite": True,
+                "installation": False,
+                "toolExecution": False,
+            },
+        },
+    )
+    return {
+        "username": current_subject,
+        "recommendation": _row(recommendation),
+        "auditLogId": audit.get("id"),
+        "sideEffects": {
+            "recommendationWrite": True,
+            "installation": False,
+            "toolExecution": False,
+            "secretRead": False,
+        },
+    }
 
 
 @router.get("/integrations/status")

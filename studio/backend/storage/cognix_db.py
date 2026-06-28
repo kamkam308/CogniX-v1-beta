@@ -386,6 +386,58 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_debate_outputs_session
             ON cognix_debate_outputs(session_id, created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_tool_capabilities (
+            id TEXT PRIMARY KEY,
+            tool_id TEXT NOT NULL,
+            capability_id TEXT NOT NULL,
+            label TEXT NOT NULL,
+            category TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(tool_id, capability_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_tool_capabilities_tool
+            ON cognix_tool_capabilities(tool_id, category);
+
+        CREATE TABLE IF NOT EXISTS cognix_installed_tools (
+            username TEXT NOT NULL,
+            tool_id TEXT NOT NULL,
+            tool_name TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'installed',
+            source TEXT NOT NULL DEFAULT 'manual',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(username, tool_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_installed_tools_username_status
+            ON cognix_installed_tools(username, status, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_tool_recommendations (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            project_id TEXT,
+            need_id TEXT NOT NULL,
+            tool_id TEXT NOT NULL,
+            tool_name TEXT NOT NULL,
+            category TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            status TEXT NOT NULL,
+            confidence REAL NOT NULL DEFAULT 0,
+            recommendation_json TEXT NOT NULL DEFAULT '{}',
+            ignored INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_tool_recommendations_username_created
+            ON cognix_tool_recommendations(username, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_tool_recommendations_project
+            ON cognix_tool_recommendations(username, project_id, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_scheduled_tasks (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -1980,6 +2032,193 @@ def create_debate_output(
         ).fetchone()
         stored = row_to_dict(row) or {}
         return _hydrate_debate_output(stored)
+    finally:
+        conn.close()
+
+
+def _hydrate_installed_tool(row: dict[str, Any]) -> dict[str, Any]:
+    row["metadata"] = _json_or_default(row.get("metadata_json"), {})
+    return row
+
+
+def list_installed_tools(username: str) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM cognix_installed_tools
+            WHERE username = ?
+            ORDER BY updated_at DESC
+            """,
+            (username,),
+        ).fetchall()
+        return [_hydrate_installed_tool(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def upsert_installed_tool(
+    username: str,
+    *,
+    tool_id: str,
+    tool_name: str = "",
+    status: str = "installed",
+    source: str = "manual",
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    now = _now()
+    normalized_tool_id = tool_id.strip().lower()
+    if not normalized_tool_id:
+        raise ValueError("tool_id is required")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_installed_tools
+                (username, tool_id, tool_name, status, source, metadata_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(username, tool_id) DO UPDATE SET
+                tool_name = excluded.tool_name,
+                status = excluded.status,
+                source = excluded.source,
+                metadata_json = excluded.metadata_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                username,
+                normalized_tool_id,
+                tool_name.strip()[:240],
+                status.strip().lower()[:80] or "installed",
+                source.strip().lower()[:80] or "manual",
+                json.dumps(metadata or {}, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM cognix_installed_tools WHERE username = ? AND tool_id = ?",
+            (username, normalized_tool_id),
+        ).fetchone()
+        return _hydrate_installed_tool(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def _hydrate_tool_recommendation(row: dict[str, Any]) -> dict[str, Any]:
+    row["recommendation"] = _json_or_default(row.get("recommendation_json"), {})
+    row["ignored"] = bool(row.get("ignored"))
+    return row
+
+
+def create_tool_recommendations(
+    username: str,
+    *,
+    plan: dict[str, Any],
+    project_id: str | None = None,
+) -> list[dict[str, Any]]:
+    recommendations = [
+        item
+        for item in (plan.get("recommendations") or [])
+        if isinstance(item, dict)
+    ]
+    if not recommendations:
+        return []
+    now = _now()
+    rows_to_return: list[dict[str, Any]] = []
+    conn = get_connection()
+    try:
+        for recommendation in recommendations:
+            rec_id = _new_id("trec")
+            conn.execute(
+                """
+                INSERT INTO cognix_tool_recommendations
+                    (
+                        id, username, project_id, need_id, tool_id, tool_name,
+                        category, reason, status, confidence, recommendation_json,
+                        ignored, created_at, updated_at
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                """,
+                (
+                    rec_id,
+                    username,
+                    project_id,
+                    str(recommendation.get("needId") or "general")[:160],
+                    str(recommendation.get("toolId") or "")[:160],
+                    str(recommendation.get("toolName") or "")[:240],
+                    str(recommendation.get("category") or "other")[:120],
+                    str(recommendation.get("reason") or "")[:2000],
+                    str(recommendation.get("status") or "recommended")[:80],
+                    float(recommendation.get("confidence") or 0.0),
+                    json.dumps(recommendation, ensure_ascii = False),
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM cognix_tool_recommendations WHERE id = ?",
+                (rec_id,),
+            ).fetchone()
+            rows_to_return.append(_hydrate_tool_recommendation(row_to_dict(row) or {}))
+        conn.commit()
+        return rows_to_return
+    finally:
+        conn.close()
+
+
+def list_tool_recommendations(
+    username: str,
+    *,
+    project_id: str | None = None,
+    include_ignored: bool = False,
+    limit: int = 80,
+) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 80), 1), 200)
+    conn = get_connection()
+    try:
+        clauses = ["username = ?"]
+        params: list[Any] = [username]
+        if project_id:
+            clauses.append("project_id = ?")
+            params.append(project_id)
+        if not include_ignored:
+            clauses.append("ignored = 0")
+        params.append(safe_limit)
+        rows = conn.execute(
+            f"""
+            SELECT * FROM cognix_tool_recommendations
+            WHERE {' AND '.join(clauses)}
+            ORDER BY confidence DESC, created_at DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_tool_recommendation(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def ignore_tool_recommendation(username: str, recommendation_id: str) -> dict[str, Any] | None:
+    now = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            UPDATE cognix_tool_recommendations
+            SET ignored = 1, status = 'ignored', updated_at = ?
+            WHERE id = ? AND username = ?
+            """,
+            (now, recommendation_id, username),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM cognix_tool_recommendations WHERE id = ? AND username = ?",
+            (recommendation_id, username),
+        ).fetchone()
+        if row is None:
+            return None
+        return _hydrate_tool_recommendation(row_to_dict(row) or {})
     finally:
         conn.close()
 

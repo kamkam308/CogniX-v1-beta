@@ -35,6 +35,7 @@ from core.cognix import research_watch as cognix_research_watch
 from core.cognix import response_reflection as cognix_response_reflection
 from core.cognix import runtime_adapter as cognix_runtime_adapter
 from core.cognix import thinking_status as cognix_thinking_status
+from core.cognix import tool_discovery as cognix_tool_discovery
 from core.cognix import tool_registry as cognix_tool_registry
 from core.cognix import worker_queue as cognix_worker_queue
 from core.cognix.router import classify_objective
@@ -2105,6 +2106,102 @@ def test_debate_output_store_is_user_scoped_and_public_summary_only():
     assert log["metadata"]["storageSideEffects"]["debateOutputWrite"] is True
 
 
+def test_tool_discovery_capability_registry_blocks_auto_installation():
+    registry = cognix_tool_discovery.build_tool_capability_registry()
+    tools = {item["toolId"]: item for item in registry["capabilities"]}
+
+    assert registry["capabilityRegistryVersion"] == "cognix_tool_capability_registry_v1"
+    assert registry["toolDiscoveryVersion"] == "cognix_tool_discovery_v1"
+    assert {"latex-renderer", "python-runtime", "pytorch", "ollama", "google-drive"}.issubset(tools)
+    assert registry["summary"]["automaticInstallAllowed"] is False
+    assert registry["policies"]["automaticInstallationAllowed"] is False
+    assert registry["policies"]["frontendDirectInstallationAllowed"] is False
+    assert registry["sideEffects"]["installation"] is False
+    assert registry["sideEffects"]["toolExecution"] is False
+    assert registry["sideEffects"]["secretRead"] is False
+
+
+def test_tool_discovery_plan_recommends_project_tools_without_installing():
+    plan = cognix_tool_discovery.build_tool_discovery_plan(
+        username = "alice",
+        objective = "Projet Python ML avec Qwen GGUF, training local et requirements.",
+        project_type = "ml",
+        file_names = ["train.py", "model.gguf", "requirements.txt"],
+        installed_tool_ids = ["ollama"],
+    )
+    recommendations = {item["toolId"]: item for item in plan["recommendations"]}
+
+    assert plan["toolDiscoveryVersion"] == "cognix_tool_discovery_v1"
+    assert plan["mode"] == "recommendation_dry_run"
+    assert {"python-runtime", "python-venv", "pytorch", "ollama", "llama-cpp"}.issubset(recommendations)
+    assert recommendations["ollama"]["status"] == "installed"
+    assert recommendations["python-runtime"]["actions"]["automaticInstallAllowed"] is False
+    assert recommendations["llama-cpp"]["guardrails"]["noAutomaticInstallation"] is True
+    assert plan["summary"]["automaticInstallAllowed"] is False
+    assert plan["sideEffects"]["installation"] is False
+    assert plan["sideEffects"]["toolExecution"] is False
+    assert plan["sideEffects"]["networkToolCall"] is False
+
+
+def test_tool_discovery_endpoint_stores_recommendations_and_ignore_is_user_scoped():
+    seed_accounts()
+
+    body = run_async(
+        cognix_routes.analyze_tool_discovery(
+            cognix_routes.ToolDiscoveryRequest(
+                objective = "Cours de physique avec formules LaTeX, notes PDF et documents sources.",
+                projectType = "maths",
+                fileNames = ["cours.tex", "notes.pdf"],
+                installedToolIds = ["python-runtime"],
+                recordInstalledSnapshot = True,
+                storeRecommendations = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    tool_ids = {item["toolId"] for item in body["toolDiscoveryPlan"]["recommendations"]}
+    stored_ids = {item["toolId"] for item in body["storedRecommendations"]}
+    assert body["auditLogId"].startswith("aud_")
+    assert {"latex-renderer", "rag-indexer"}.issubset(tool_ids)
+    assert {"latex-renderer", "rag-indexer"}.issubset(stored_ids)
+    assert body["sideEffects"]["recommendationWrite"] is True
+    assert body["sideEffects"]["installedToolWrite"] is True
+    assert body["sideEffects"]["installation"] is False
+    assert body["sideEffects"]["toolExecution"] is False
+    assert any(item["toolId"] == "python-runtime" for item in body["installedTools"])
+
+    listed = run_async(cognix_routes.tool_recommendations(current_subject = "alice"))
+    bob_listed = run_async(cognix_routes.tool_recommendations(current_subject = "bob"))
+    assert len(listed["recommendations"]) == len(body["storedRecommendations"])
+    assert bob_listed["recommendations"] == []
+
+    recommendation_id = listed["recommendations"][0]["id"]
+    ignored = run_async(
+        cognix_routes.ignore_tool_recommendation(
+            recommendation_id,
+            current_subject = "alice",
+        )
+    )
+    after_ignore = run_async(cognix_routes.tool_recommendations(current_subject = "alice"))
+    include_ignored = run_async(
+        cognix_routes.tool_recommendations(include_ignored = True, current_subject = "alice")
+    )
+
+    assert ignored["recommendation"]["id"] == recommendation_id
+    assert ignored["recommendation"]["ignored"] is True
+    assert all(item["id"] != recommendation_id for item in after_ignore["recommendations"])
+    assert any(item["id"] == recommendation_id and item["ignored"] for item in include_ignored["recommendations"])
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    analyze_log = next(item for item in admin_read["logs"] if item["id"] == body["auditLogId"])
+    ignore_log = next(item for item in admin_read["logs"] if item["id"] == ignored["auditLogId"])
+    assert analyze_log["action"] == "tool_discovery_analyzed"
+    assert analyze_log["metadata"]["sideEffects"]["installation"] is False
+    assert ignore_log["action"] == "tool_recommendation_ignored"
+    assert ignore_log["metadata"]["sideEffects"]["toolExecution"] is False
+
+
 def test_codex_pipeline_plans_required_gates_without_modifying_code():
     plan = cognix_codex_pipeline.build_codex_pipeline_plan(
         objective = "Ajoute un module CogniX Chemistry dans le code source",
@@ -2718,6 +2815,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-response-reflection",
         "cognix-multi-draft-generation",
         "cognix-ai-debate",
+        "cognix-tool-discovery",
         "cognix-memory-manager",
         "cognix-onboarding",
         "cognix-rag",
@@ -2763,6 +2861,13 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/debate/roles" in modules["cognix-ai-debate"]["routes"]
     assert "/api/cognix/debate/plan" in modules["cognix-ai-debate"]["routes"]
     assert "/api/cognix/debate/sessions" in modules["cognix-ai-debate"]["routes"]
+    assert modules["cognix-tool-discovery"]["dependencyState"]["ready"] is True
+    assert "project_tool_need_detection" in modules["cognix-tool-discovery"]["capabilities"]
+    assert "tool_recommendation_store" in modules["cognix-tool-discovery"]["capabilities"]
+    assert "no_auto_install_guardrail" in modules["cognix-tool-discovery"]["capabilities"]
+    assert "/api/cognix/tools/discovery/capabilities" in modules["cognix-tool-discovery"]["routes"]
+    assert "/api/cognix/tools/discovery/analyze" in modules["cognix-tool-discovery"]["routes"]
+    assert "/api/cognix/tools/recommendations" in modules["cognix-tool-discovery"]["routes"]
     assert modules["cognix-memory-manager"]["activationState"] == "ready"
     assert "central_memory_layers" in modules["cognix-memory-manager"]["capabilities"]
     assert "/api/cognix/memory/plan" in modules["cognix-memory-manager"]["routes"]
