@@ -14,6 +14,33 @@ from typing import Any
 
 
 COGNIX_MODULE_REGISTRY_VERSION = "cognix_module_registry_v1"
+COGNIX_MODULE_MANIFEST_SCHEMA_VERSION = "cognix_module_manifest_schema_v1"
+COGNIX_MODULE_MANIFEST_BUNDLE_VERSION = "cognix_module_manifest_bundle_v1"
+
+MANIFEST_REQUIRED_FIELDS = (
+    "id",
+    "displayName",
+    "editionTargets",
+    "status",
+    "capabilities",
+    "routes",
+    "permissions",
+    "tools",
+    "defaultModels",
+    "uiPanels",
+    "dependencies",
+)
+MANIFEST_LIST_FIELDS = (
+    "editionTargets",
+    "capabilities",
+    "routes",
+    "permissions",
+    "tools",
+    "defaultModels",
+    "uiPanels",
+    "dependencies",
+)
+MANIFEST_STATUS_VALUES = {"enabled", "planned"}
 
 
 MODULE_MANIFESTS: list[dict[str, Any]] = [
@@ -22,8 +49,23 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "displayName": "CogniX Local Core",
         "editionTargets": ["free", "local", "developer"],
         "status": "enabled",
-        "capabilities": ["chat_local", "model_registry", "hardware_profiler", "model_recommender", "model_pack_registry"],
-        "routes": ["/api/cognix/models/registry", "/api/cognix/models/packs", "/api/cognix/hardware/profile"],
+        "capabilities": [
+            "chat_local",
+            "model_registry",
+            "module_registry",
+            "module_manifest_registry",
+            "hardware_profiler",
+            "model_recommender",
+            "model_pack_registry",
+        ],
+        "routes": [
+            "/api/cognix/models/registry",
+            "/api/cognix/models/packs",
+            "/api/cognix/hardware/profile",
+            "/api/cognix/modules/registry",
+            "/api/cognix/modules/manifests",
+            "/api/cognix/modules/plan",
+        ],
         "permissions": ["authenticated"],
         "tools": [],
         "defaultModels": ["cognix-general-small"],
@@ -211,6 +253,117 @@ def _dependency_status(module: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _check_record(check_id: str, passed: bool, detail: str, **metadata: Any) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "id": check_id,
+        "status": "pass" if passed else "fail",
+        "detail": detail,
+    }
+    record.update(metadata)
+    return record
+
+
+def _validate_module_manifest(module: dict[str, Any], manifest_ids: set[str]) -> dict[str, Any]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    checks: list[dict[str, Any]] = []
+    module_id = str(module.get("id") or "")
+
+    missing_fields = [field for field in MANIFEST_REQUIRED_FIELDS if field not in module]
+    if missing_fields:
+        errors.append("required_fields_missing")
+    checks.append(
+        _check_record(
+            "required_fields",
+            not missing_fields,
+            "Tous les champs manifestes obligatoires sont declares.",
+            missingFields = missing_fields,
+        )
+    )
+
+    invalid_list_fields = [field for field in MANIFEST_LIST_FIELDS if field in module and not isinstance(module.get(field), list)]
+    if invalid_list_fields:
+        errors.append("list_fields_invalid")
+    checks.append(
+        _check_record(
+            "typed_list_fields",
+            not invalid_list_fields,
+            "Les champs liste du manifeste restent normalises.",
+            invalidFields = invalid_list_fields,
+        )
+    )
+
+    status = str(module.get("status") or "")
+    invalid_status = status not in MANIFEST_STATUS_VALUES
+    if invalid_status:
+        errors.append("status_invalid")
+    checks.append(
+        _check_record(
+            "status_value",
+            not invalid_status,
+            "Le statut du module fait partie du contrat supporte.",
+            allowedStatuses = sorted(MANIFEST_STATUS_VALUES),
+        )
+    )
+
+    invalid_routes = [
+        str(route)
+        for route in module.get("routes") or []
+        if not str(route).startswith("/")
+    ]
+    if invalid_routes:
+        errors.append("routes_invalid")
+    checks.append(
+        _check_record(
+            "declared_routes",
+            bool(module.get("routes")) and not invalid_routes,
+            "Les routes backend/UI du module sont declarees sans mutation runtime.",
+            invalidRoutes = invalid_routes,
+        )
+    )
+
+    if not module.get("permissions"):
+        errors.append("permissions_missing")
+    checks.append(
+        _check_record(
+            "declared_permissions",
+            bool(module.get("permissions")),
+            "Les permissions requises sont declarees avant activation.",
+        )
+    )
+
+    dependencies = [str(item) for item in module.get("dependencies") or [] if item]
+    missing_dependencies = [item for item in dependencies if item not in manifest_ids]
+    if missing_dependencies:
+        errors.append("dependencies_missing")
+    checks.append(
+        _check_record(
+            "dependency_resolution",
+            not missing_dependencies,
+            "Les dependances module se resolvent dans la registry native.",
+            missingDependencies = missing_dependencies,
+        )
+    )
+
+    if not module_id.startswith("cognix-"):
+        warnings.append("module_id_prefix_non_standard")
+    checks.append(
+        _check_record(
+            "stable_module_id",
+            bool(module_id) and module_id.startswith("cognix-"),
+            "L'identifiant module reste stable et namespace CogniX.",
+        )
+    )
+
+    return {
+        "moduleId": module_id,
+        "ready": not errors,
+        "errors": errors,
+        "warnings": warnings,
+        "checks": checks,
+    }
+
+
 def _module_record(module: dict[str, Any]) -> dict[str, Any]:
     record = deepcopy(module)
     dependency_state = _dependency_status(record)
@@ -248,16 +401,98 @@ def build_module_registry() -> dict[str, Any]:
         },
         "globalPolicies": {
             "declarativeManifestRequired": True,
+            "manifestSchemaVersion": COGNIX_MODULE_MANIFEST_SCHEMA_VERSION,
             "dependenciesMustResolve": True,
             "permissionsMustBeDeclared": True,
             "activationRequiresAudit": True,
             "frontendCannotSelfRegisterModules": True,
+            "runtimeRouteMutationAllowed": False,
         },
         "sideEffects": {
             "moduleActivation": False,
             "routeRegistration": False,
             "uiMutation": False,
             "permissionWrite": False,
+            "toolExecution": False,
+            "secretRead": False,
+        },
+    }
+
+
+def build_module_manifest_bundle(edition: str | None = None) -> dict[str, Any]:
+    normalized_edition = str(edition).strip().lower() if edition else None
+    manifest_ids = _manifest_ids()
+    all_modules = [_module_record(module) for module in MODULE_MANIFESTS]
+    modules = [
+        module
+        for module in all_modules
+        if normalized_edition is None or normalized_edition in {str(item).lower() for item in module.get("editionTargets", [])}
+    ]
+    ids = [str(module.get("id")) for module in modules]
+    duplicate_ids = sorted({module_id for module_id in ids if ids.count(module_id) > 1})
+    manifests: list[dict[str, Any]] = []
+    validation_by_module: dict[str, Any] = {}
+
+    for module in modules:
+        manifest = deepcopy(module)
+        manifest["kind"] = "cognix.module.manifest"
+        manifest["schemaVersion"] = COGNIX_MODULE_MANIFEST_SCHEMA_VERSION
+        manifest["manifestVersion"] = f"{manifest.get('id')}@{COGNIX_MODULE_MANIFEST_SCHEMA_VERSION}"
+        manifest["declaredBy"] = "backend_source"
+        manifest["runtimeMutationAllowed"] = False
+        validation = _validate_module_manifest(manifest, manifest_ids)
+        manifest["manifestValidation"] = validation
+        validation_by_module[str(manifest.get("id"))] = validation
+        manifests.append(manifest)
+
+    invalid_ids = [
+        module_id
+        for module_id, validation in validation_by_module.items()
+        if not validation.get("ready")
+    ]
+    if duplicate_ids:
+        invalid_ids.extend(duplicate_ids)
+
+    return {
+        "bundleVersion": COGNIX_MODULE_MANIFEST_BUNDLE_VERSION,
+        "moduleRegistryVersion": COGNIX_MODULE_REGISTRY_VERSION,
+        "schemaVersion": COGNIX_MODULE_MANIFEST_SCHEMA_VERSION,
+        "mode": "declarative_dry_run",
+        "editionFilter": normalized_edition,
+        "contract": {
+            "sourceOfTruth": "backend_source_manifest",
+            "declarativeManifestRequired": True,
+            "dependenciesMustResolve": True,
+            "permissionsMustBeDeclared": True,
+            "activationRequiresAudit": True,
+            "runtimeRouteMutationAllowed": False,
+            "frontendSelfRegistrationAllowed": False,
+            "directModelExecutionAllowed": False,
+            "toolExecutionRequiresPlan": True,
+        },
+        "summary": {
+            "manifestCount": len(manifests),
+            "invalidManifestCount": len(set(invalid_ids)),
+            "duplicateIdCount": len(duplicate_ids),
+            "editionFilterApplied": normalized_edition is not None,
+        },
+        "moduleIds": [str(item.get("id")) for item in manifests],
+        "manifests": manifests,
+        "validation": {
+            "ready": not invalid_ids,
+            "invalidManifestIds": sorted(set(invalid_ids)),
+            "duplicateIds": duplicate_ids,
+            "modules": validation_by_module,
+        },
+        "sideEffects": {
+            "moduleActivation": False,
+            "routeRegistration": False,
+            "uiMutation": False,
+            "permissionWrite": False,
+            "toolExecution": False,
+            "secretRead": False,
+            "modelLoad": False,
+            "trainingRun": False,
         },
     }
 

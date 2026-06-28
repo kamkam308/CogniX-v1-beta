@@ -1613,6 +1613,38 @@ async def module_registry(current_subject: str = Depends(get_current_jwt_subject
     }
 
 
+@router.get("/modules/manifests")
+async def module_manifests(
+    edition: str | None = None,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    bundle = cognix_module_registry.build_module_manifest_bundle(edition = edition)
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "module_manifest_bundle_built",
+        resource_type = "cognix_module_manifest_bundle",
+        resource_id = str(bundle.get("schemaVersion")),
+        severity = "notice",
+        metadata = {
+            "bundleVersion": bundle.get("bundleVersion"),
+            "moduleRegistryVersion": bundle.get("moduleRegistryVersion"),
+            "schemaVersion": bundle.get("schemaVersion"),
+            "editionFilter": bundle.get("editionFilter"),
+            "manifestCount": bundle.get("summary", {}).get("manifestCount"),
+            "invalidManifestCount": bundle.get("summary", {}).get("invalidManifestCount"),
+            "validationReady": bundle.get("validation", {}).get("ready"),
+            "sideEffects": bundle.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "manifestBundle": bundle,
+        "auditLogId": audit.get("id"),
+        "sideEffects": bundle.get("sideEffects", {}),
+    }
+
+
 @router.post("/modules/plan")
 async def plan_module_activation(
     payload: ModulePlanRequest,

@@ -1809,12 +1809,16 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert registry["summary"]["routeMutationAllowed"] is False
     assert registry["sideEffects"]["moduleActivation"] is False
     assert registry["sideEffects"]["uiMutation"] is False
+    assert registry["sideEffects"]["toolExecution"] is False
+    assert registry["sideEffects"]["secretRead"] is False
 
     modules = {item["id"]: item for item in registry["modules"]}
     assert {"cognix-local-core", "cognix-model-lifecycle", "cognix-thinking-status", "cognix-memory-manager", "cognix-onboarding", "cognix-rag", "cognix-fine-tuning", "cognix-research-watch", "cognix-integrations", "cognix-codex-secure-agent", "cognix-enterprise-foundation", "cognix-deployment-manager"}.issubset(
         modules
     )
     assert modules["cognix-local-core"]["activationState"] == "ready"
+    assert "module_manifest_registry" in modules["cognix-local-core"]["capabilities"]
+    assert "/api/cognix/modules/manifests" in modules["cognix-local-core"]["routes"]
     assert modules["cognix-model-lifecycle"]["activationState"] == "ready"
     assert "load_unload_planning" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "cache_load_planning" in modules["cognix-model-lifecycle"]["capabilities"]
@@ -1838,6 +1842,71 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/governance/plan" in modules["cognix-enterprise-foundation"]["routes"]
     assert modules["cognix-deployment-manager"]["dependencyState"]["ready"] is True
     assert "cognix-integrations" in modules["cognix-codex-secure-agent"]["dependencyState"]["dependencies"]
+
+
+def test_module_manifest_bundle_exports_declarative_contract_without_mutation():
+    bundle = cognix_module_registry.build_module_manifest_bundle()
+
+    assert bundle["bundleVersion"] == "cognix_module_manifest_bundle_v1"
+    assert bundle["moduleRegistryVersion"] == "cognix_module_registry_v1"
+    assert bundle["schemaVersion"] == "cognix_module_manifest_schema_v1"
+    assert bundle["mode"] == "declarative_dry_run"
+    assert bundle["contract"]["sourceOfTruth"] == "backend_source_manifest"
+    assert bundle["contract"]["runtimeRouteMutationAllowed"] is False
+    assert bundle["contract"]["frontendSelfRegistrationAllowed"] is False
+    assert bundle["validation"]["ready"] is True
+    assert bundle["summary"]["invalidManifestCount"] == 0
+    assert bundle["sideEffects"]["moduleActivation"] is False
+    assert bundle["sideEffects"]["routeRegistration"] is False
+    assert bundle["sideEffects"]["uiMutation"] is False
+    assert bundle["sideEffects"]["permissionWrite"] is False
+    assert bundle["sideEffects"]["toolExecution"] is False
+    assert bundle["sideEffects"]["secretRead"] is False
+    assert bundle["sideEffects"]["modelLoad"] is False
+    assert bundle["sideEffects"]["trainingRun"] is False
+
+    manifests = {item["id"]: item for item in bundle["manifests"]}
+    assert "cognix-local-core" in manifests
+    assert "cognix-codex-secure-agent" in manifests
+    assert manifests["cognix-local-core"]["kind"] == "cognix.module.manifest"
+    assert manifests["cognix-local-core"]["runtimeMutationAllowed"] is False
+    assert "module_manifest_registry" in manifests["cognix-local-core"]["capabilities"]
+    assert "/api/cognix/modules/manifests" in manifests["cognix-local-core"]["routes"]
+    assert manifests["cognix-local-core"]["manifestValidation"]["ready"] is True
+    assert "developer_mode" in manifests["cognix-codex-secure-agent"]["permissions"]
+    assert "github" in manifests["cognix-codex-secure-agent"]["tools"]
+
+    developer_bundle = cognix_module_registry.build_module_manifest_bundle(edition = "developer")
+    assert developer_bundle["editionFilter"] == "developer"
+    assert developer_bundle["validation"]["ready"] is True
+    assert all("developer" in item["editionTargets"] for item in developer_bundle["manifests"])
+
+
+def test_module_manifest_endpoint_writes_sanitized_audit_log():
+    seed_accounts()
+
+    body = run_async(cognix_routes.module_manifests(edition = "developer", current_subject = "alice"))
+
+    assert body["auditLogId"].startswith("aud_")
+    assert body["manifestBundle"]["bundleVersion"] == "cognix_module_manifest_bundle_v1"
+    assert body["manifestBundle"]["schemaVersion"] == "cognix_module_manifest_schema_v1"
+    assert body["manifestBundle"]["editionFilter"] == "developer"
+    assert body["manifestBundle"]["validation"]["ready"] is True
+    assert body["sideEffects"]["moduleActivation"] is False
+    assert body["sideEffects"]["toolExecution"] is False
+    assert body["sideEffects"]["secretRead"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "module_manifest_bundle_built"
+    assert log["resourceType"] == "cognix_module_manifest_bundle"
+    assert log["metadata"]["bundleVersion"] == "cognix_module_manifest_bundle_v1"
+    assert log["metadata"]["schemaVersion"] == "cognix_module_manifest_schema_v1"
+    assert log["metadata"]["editionFilter"] == "developer"
+    assert log["metadata"]["validationReady"] is True
+    assert log["metadata"]["sideEffects"]["moduleActivation"] is False
+    assert log["metadata"]["sideEffects"]["secretRead"] is False
 
 
 def test_module_plan_endpoint_writes_sanitized_audit_log():
