@@ -31,6 +31,7 @@ from core.cognix import registry as cognix_registry
 from core.cognix import recommender as cognix_recommender
 from core.cognix import runtime_adapter as cognix_runtime_adapter
 from core.cognix import tool_registry as cognix_tool_registry
+from core.cognix import worker_queue as cognix_worker_queue
 from core.cognix.router import classify_objective
 from core.cognix.strategy import build_strategy
 from storage import cognix_db
@@ -191,6 +192,14 @@ class CodexPipelinePlanRequest(BaseModel):
     objective: str = Field(..., min_length = 1, max_length = 4000)
     project_type: str | None = Field(None, max_length = 80)
     project_id: str | None = Field(None, max_length = 160)
+
+
+class WorkerQueuePlanRequest(BaseModel):
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    project_type: str | None = Field(None, max_length = 80)
+    project_id: str | None = Field(None, max_length = 160)
+    sources: list[dict[str, Any]] | None = None
+    dataset: dict[str, Any] | None = None
 
 
 class ToolActionPlanRequest(BaseModel):
@@ -1096,6 +1105,54 @@ async def codex_pipeline_plan(
         "auditLogId": audit.get("id"),
         "sideEffects": pipeline.get("sideEffects", {}),
         "plannerVersion": cognix_codex_pipeline.COGNIX_CODEX_PIPELINE_VERSION,
+    }
+
+
+@router.post("/workers/plan")
+async def worker_queue_plan(
+    payload: WorkerQueuePlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    runtime = _current_model_cache_runtime()
+    latest_benchmark = cognix_db.get_latest_benchmark_run(current_subject)
+    plan = cognix_orchestrator.build_execution_plan(
+        payload.objective,
+        current_subject = current_subject,
+        project_type = payload.project_type,
+        project_id = payload.project_id,
+        runtime_snapshot = runtime,
+        latest_benchmark_run = latest_benchmark,
+        rag_sources = payload.sources or [],
+        rag_available = _rag_available(),
+        fine_tuning_dataset = payload.dataset,
+    )
+    queue_plan = plan["workerQueuePlan"]
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "worker_queue_plan_built",
+        resource_type = "cognix_worker_queue",
+        resource_id = str(payload.project_id or queue_plan.get("recommendedQueue", {}).get("id") or "none"),
+        severity = "warning" if queue_plan.get("summary", {}).get("requiresHumanConfirmation") else "notice",
+        metadata = {
+            "workerQueueVersion": queue_plan.get("workerQueueVersion"),
+            "recommendedQueueId": queue_plan.get("recommendedQueue", {}).get("id"),
+            "plannedJobCount": queue_plan.get("summary", {}).get("plannedJobCount"),
+            "plannedJobIds": queue_plan.get("summary", {}).get("plannedJobIds", []),
+            "requiresHumanConfirmation": queue_plan.get("summary", {}).get("requiresHumanConfirmation"),
+            "sideEffects": queue_plan.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "runtimeError": runtime.get("error"),
+        "classification": plan["classification"],
+        "taskStrategy": plan["taskStrategy"],
+        "workerQueuePlan": queue_plan,
+        "executionPolicy": plan["executionPolicy"],
+        "auditLogId": audit.get("id"),
+        "sideEffects": queue_plan.get("sideEffects", {}),
+        "plannerVersion": cognix_worker_queue.COGNIX_WORKER_QUEUE_VERSION,
     }
 
 

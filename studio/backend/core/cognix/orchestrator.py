@@ -25,6 +25,7 @@ from core.cognix import rag_planner as cognix_rag_planner
 from core.cognix import recommender as cognix_recommender
 from core.cognix import runtime_adapter as cognix_runtime_adapter
 from core.cognix import security_policy as cognix_security_policy
+from core.cognix import worker_queue as cognix_worker_queue
 from core.cognix.router import classify_objective
 
 
@@ -92,6 +93,7 @@ def _warnings(
     runtime_adapter_plan: dict[str, Any],
     preload_plan: dict[str, Any],
     fine_tuning_plan: dict[str, Any],
+    worker_queue_plan: dict[str, Any],
 ) -> list[str]:
     warnings: list[str] = []
     if classification.get("needsClarification"):
@@ -126,6 +128,9 @@ def _warnings(
     for item in fine_tuning_plan.get("warnings") or []:
         if isinstance(item, str) and item:
             warnings.append(item)
+    for item in worker_queue_plan.get("warnings") or []:
+        if isinstance(item, str) and item:
+            warnings.append(item)
 
     deduped: list[str] = []
     seen: set[str] = set()
@@ -149,6 +154,7 @@ def _steps(
     runtime_adapter_plan: dict[str, Any],
     preload_plan: dict[str, Any],
     fine_tuning_plan: dict[str, Any],
+    worker_queue_plan: dict[str, Any],
     execution_policy: dict[str, Any],
     status: str,
 ) -> list[dict[str, Any]]:
@@ -251,6 +257,15 @@ def _steps(
             "detail": str(
                 fine_tuning_plan.get("reason")
                 or "Fine-tuning observe uniquement: aucun job lance."
+            ),
+        },
+        {
+            "id": "plan_worker_queue",
+            "label": "Planifier workers",
+            "status": "complete",
+            "detail": str(
+                worker_queue_plan.get("reason")
+                or "Workers observes uniquement: aucun job enfile ni demarre."
             ),
         },
         {
@@ -385,6 +400,17 @@ def build_execution_plan(
         task_strategy = task_strategy,
         execution_policy = execution_policy,
     )
+    worker_queue_plan = cognix_worker_queue.build_worker_queue_plan(
+        objective = objective,
+        project_id = project_id,
+        task_strategy = task_strategy,
+        rag_plan = rag_plan,
+        fine_tuning_plan = fine_tuning_plan,
+        preload_plan = preload_plan,
+        codex_pipeline_plan = codex_pipeline_plan,
+        optimization_plan = optimization_plan,
+        latest_benchmark_run = latest_benchmark_run,
+    )
 
     execution_strategy = {
         "status": status,
@@ -414,6 +440,9 @@ def build_execution_plan(
         "runtimeAdapterType": runtime_adapter_plan.get("selectedAdapter", {}).get("runtimeType"),
         "codexPipelineApplicable": codex_pipeline_plan.get("applicable"),
         "codexBranchName": codex_pipeline_plan.get("branch", {}).get("recommendedName"),
+        "workerQueueRecommended": bool(worker_queue_plan.get("jobs")),
+        "workerQueueId": worker_queue_plan.get("recommendedQueue", {}).get("id"),
+        "plannedWorkerJobCount": worker_queue_plan.get("summary", {}).get("plannedJobCount"),
         "fineTuningMethod": fine_tuning_plan.get("method", {}).get("type"),
         "fineTuningReadyToRequestApproval": fine_tuning_plan.get("approval", {}).get("readyToRequest"),
         "uses": task_strategy.get("uses"),
@@ -445,6 +474,7 @@ def build_execution_plan(
         "runtimeAdapterPlan": runtime_adapter_plan,
         "preloadPlan": preload_plan,
         "fineTuningPlan": fine_tuning_plan,
+        "workerQueuePlan": worker_queue_plan,
         "taskStrategy": task_strategy,
         "executionPolicy": execution_policy,
         "executionStrategy": execution_strategy,
@@ -460,6 +490,7 @@ def build_execution_plan(
             runtime_adapter_plan = runtime_adapter_plan,
             preload_plan = preload_plan,
             fine_tuning_plan = fine_tuning_plan,
+            worker_queue_plan = worker_queue_plan,
             execution_policy = execution_policy,
             status = status,
         ),
@@ -475,6 +506,7 @@ def build_execution_plan(
             runtime_adapter_plan = runtime_adapter_plan,
             preload_plan = preload_plan,
             fine_tuning_plan = fine_tuning_plan,
+            worker_queue_plan = worker_queue_plan,
         ),
         "sideEffects": {
             "modelLoad": False,
@@ -490,6 +522,8 @@ def build_execution_plan(
             "serverStart": False,
             "benchmarkRun": False,
             "fineTuningJob": False,
+            "jobEnqueue": False,
+            "workerStart": False,
             "codeModification": False,
             "branchCreate": False,
             "commit": False,

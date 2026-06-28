@@ -24,6 +24,7 @@ from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import runtime_adapter as cognix_runtime_adapter
 from core.cognix import tool_registry as cognix_tool_registry
+from core.cognix import worker_queue as cognix_worker_queue
 from core.cognix.router import classify_objective
 from routes import auth as auth_routes
 from routes import cognix as cognix_routes
@@ -249,6 +250,11 @@ def test_orchestrator_builds_dry_run_plan_without_loading(monkeypatch):
     assert plan["codexPipelinePlan"]["sideEffects"]["codeModification"] is False
     assert plan["executionStrategy"]["codexPipelineApplicable"] is True
     assert plan["executionStrategy"]["codexBranchName"].startswith("cognix/")
+    assert plan["workerQueuePlan"]["workerQueueVersion"] == "cognix_worker_queue_v1"
+    assert plan["workerQueuePlan"]["summary"]["plannedJobCount"] >= 1
+    assert plan["workerQueuePlan"]["sideEffects"]["jobEnqueue"] is False
+    assert plan["executionStrategy"]["workerQueueRecommended"] is True
+    assert plan["executionStrategy"]["plannedWorkerJobCount"] >= 1
     assert plan["executionStrategy"]["preloadAction"] == "would_preload"
     assert any(step["id"] == "select_runtime_adapter" for step in plan["steps"])
     assert any(step["id"] == "plan_codex_pipeline" for step in plan["steps"])
@@ -261,6 +267,7 @@ def test_orchestrator_builds_dry_run_plan_without_loading(monkeypatch):
     assert plan["fineTuningPlan"]["sideEffects"]["fineTuningJob"] is False
     assert plan["executionStrategy"]["fineTuningMethod"] == "none"
     assert any(step["id"] == "plan_fine_tuning" for step in plan["steps"])
+    assert any(step["id"] == "plan_worker_queue" for step in plan["steps"])
     assert plan["executionStrategy"]["automaticExecutionAllowed"] is False
     assert plan["executionStrategy"]["securityRiskLevel"] == "high"
     assert plan["executionPolicy"]["policyVersion"] == "cognix_security_policy_v1"
@@ -274,6 +281,8 @@ def test_orchestrator_builds_dry_run_plan_without_loading(monkeypatch):
     assert plan["sideEffects"]["modelLoad"] is False
     assert plan["sideEffects"]["generation"] is False
     assert plan["sideEffects"]["codeModification"] is False
+    assert plan["sideEffects"]["jobEnqueue"] is False
+    assert plan["sideEffects"]["workerStart"] is False
     assert any(step["id"] == "apply_execution_policy" for step in plan["steps"])
     assert any(step["id"] == "dry_run_guard" for step in plan["steps"])
     assert any(step["id"] == "choose_task_strategy" for step in plan["steps"])
@@ -724,6 +733,86 @@ def test_codex_pipeline_endpoint_logs_audited_dry_run(monkeypatch):
     assert log["action"] == "codex_pipeline_plan_built"
     assert log["metadata"]["codexPipelineVersion"] == "cognix_codex_pipeline_v1"
     assert log["metadata"]["sideEffects"]["codeModification"] is False
+
+
+def test_worker_queue_plans_long_running_jobs_without_enqueueing():
+    plan = cognix_worker_queue.build_worker_queue_plan(
+        objective = "Corrige ce bug Python et prepare mes PDF pour RAG",
+        project_id = "project-code",
+        task_strategy = {"path": "codex_guarded_pipeline"},
+        rag_plan = {
+            "recommendedPath": "rag_first",
+            "readyForRetrieval": False,
+        },
+        fine_tuning_plan = {"recommendedPath": "no_fine_tuning_needed"},
+        preload_plan = {
+            "actions": [
+                {
+                    "type": "would_preload",
+                    "priority": 72,
+                    "reason": "Modele cible pret.",
+                }
+            ]
+        },
+        codex_pipeline_plan = {"applicable": True},
+        optimization_plan = {
+            "optimizations": [
+                {"id": "benchmark_calibration", "status": "recommended"},
+            ]
+        },
+        latest_benchmark_run = None,
+    )
+
+    job_ids = {job["id"] for job in plan["jobs"]}
+    assert plan["workerQueueVersion"] == "cognix_worker_queue_v1"
+    assert {"codex_pipeline", "model_preload", "benchmark_run"}.issubset(job_ids)
+    assert plan["summary"]["safeToAutoEnqueue"] is False
+    assert plan["resourceGuards"]["frontendDirectQueueMutationAllowed"] is False
+    assert plan["sideEffects"]["jobEnqueue"] is False
+    assert plan["sideEffects"]["workerStart"] is False
+    assert plan["sideEffects"]["benchmarkRun"] is False
+
+
+def test_worker_queue_endpoint_logs_audited_dry_run(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+
+    body = run_async(
+        cognix_routes.worker_queue_plan(
+            cognix_routes.WorkerQueuePlanRequest(
+                objective = "Corrige ce bug Python dans mon backend API",
+                project_type = "code",
+                project_id = "project-code",
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    queue_plan = body["workerQueuePlan"]
+    job_ids = {job["id"] for job in queue_plan["jobs"]}
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_worker_queue_v1"
+    assert "codex_pipeline" in job_ids
+    assert queue_plan["summary"]["plannedJobCount"] >= 1
+    assert queue_plan["sideEffects"]["jobEnqueue"] is False
+    assert queue_plan["sideEffects"]["codeModification"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "worker_queue_plan_built"
+    assert log["metadata"]["workerQueueVersion"] == "cognix_worker_queue_v1"
+    assert "codex_pipeline" in log["metadata"]["plannedJobIds"]
+    assert log["metadata"]["sideEffects"]["jobEnqueue"] is False
 
 
 def test_context_manager_builds_bounded_context_packet():
