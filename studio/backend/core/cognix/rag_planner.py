@@ -9,6 +9,7 @@ retrieval, embedding, indexing, or model call happens.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from core.cognix import tool_registry as cognix_tool_registry
@@ -16,8 +17,30 @@ from core.cognix import tool_registry as cognix_tool_registry
 
 COGNIX_RAG_PLANNER_VERSION = "cognix_rag_planner_v1"
 COGNIX_RAG_SOURCE_REGISTRY_VERSION = "cognix_rag_source_registry_v1"
+COGNIX_RAG_RETRIEVAL_PACKET_VERSION = "cognix_rag_retrieval_packet_v1"
 
 SUPPORTED_SOURCE_TYPES = {"pdf", "docx", "txt", "md", "csv", "html", "url", "knowledge_base"}
+STOPWORDS = {
+    "avec",
+    "dans",
+    "pour",
+    "from",
+    "that",
+    "this",
+    "quoi",
+    "quel",
+    "quelle",
+    "mes",
+    "mon",
+    "the",
+    "and",
+    "des",
+    "les",
+    "une",
+    "sur",
+    "aux",
+    "par",
+}
 
 RAG_SOURCE_MANIFESTS: list[dict[str, Any]] = [
     {
@@ -127,6 +150,18 @@ def _as_int(value: Any, default: int = 0) -> int:
 
 def _normalize_text(value: Any) -> str:
     return str(value or "").strip().lower()
+
+
+def _clean_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").replace("\r\n", "\n")).strip()
+
+
+def _terms(value: Any) -> set[str]:
+    return {
+        item.lower()
+        for item in re.findall(r"[a-zA-Z0-9_+-]{3,}", str(value or ""))
+        if item.lower() not in STOPWORDS
+    }
 
 
 def _normalize_permission(permission: str) -> str:
@@ -547,6 +582,184 @@ def _recommended_path(task_strategy: dict[str, Any]) -> str:
     if _as_dict(task_strategy.get("uses")).get("rag"):
         return "rag_first"
     return "no_rag_needed"
+
+
+def _source_chunks(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    chunks: list[dict[str, Any]] = []
+    for source_index, source in enumerate(sources):
+        source_id = str(source.get("id") or source.get("sourceId") or f"source-{source_index + 1}")[:160]
+        source_title = str(source.get("title") or source.get("name") or source_id)[:240]
+        source_type = _source_type(source)
+        raw_chunks = (
+            source.get("chunks")
+            or source.get("documentChunks")
+            or source.get("chunkList")
+            or []
+        )
+        if not isinstance(raw_chunks, list):
+            raw_chunks = []
+        if not raw_chunks and (source.get("content") or source.get("text") or source.get("excerpt")):
+            raw_chunks = [
+                {
+                    "id": source.get("chunkId") or f"{source_id}:1",
+                    "content": source.get("content") or source.get("text") or source.get("excerpt"),
+                    "page": source.get("page"),
+                }
+            ]
+        for chunk_index, chunk in enumerate(raw_chunks):
+            if not isinstance(chunk, dict):
+                continue
+            content = _clean_text(chunk.get("content") or chunk.get("text") or chunk.get("excerpt"))
+            if not content:
+                continue
+            chunks.append(
+                {
+                    "sourceId": str(chunk.get("sourceId") or source_id)[:160],
+                    "sourceTitle": str(chunk.get("sourceTitle") or chunk.get("title") or source_title)[:240],
+                    "sourceType": source_type,
+                    "chunkId": str(chunk.get("id") or chunk.get("chunkId") or f"{source_id}:{chunk_index + 1}")[:180],
+                    "page": chunk.get("page") or chunk.get("pageNumber"),
+                    "content": content[:6000],
+                    "originalIndex": len(chunks),
+                }
+            )
+    return chunks
+
+
+def _rank_chunk(chunk: dict[str, Any], objective_terms: set[str]) -> dict[str, Any]:
+    chunk_terms = _terms(chunk.get("content"))
+    matched_terms = sorted(chunk_terms & objective_terms)
+    content = str(chunk.get("content") or "")
+    if objective_terms and not matched_terms:
+        return {
+            **chunk,
+            "score": 0.0,
+            "matchedTerms": [],
+        }
+    exact_bonus = 0.18 if any(term in content.lower() for term in objective_terms) else 0.0
+    density = len(matched_terms) / max(1, len(objective_terms))
+    score = round(min(1.0, (density * 0.74) + exact_bonus + min(0.08, len(chunk_terms) / 1200)), 3)
+    return {
+        **chunk,
+        "score": score,
+        "matchedTerms": matched_terms[:16],
+    }
+
+
+def build_rag_retrieval_packet(
+    *,
+    username: str,
+    objective: str,
+    project_id: str | None = None,
+    sources: list[dict[str, Any]] | None = None,
+    rag_plan: dict[str, Any] | None = None,
+    top_k: int | None = None,
+) -> dict[str, Any]:
+    normalized_sources = [item for item in _as_list(sources) if isinstance(item, dict)]
+    source_result = _source_checks(normalized_sources)
+    rag_plan = _as_dict(rag_plan)
+    objective_excerpt = " ".join((objective or "").split())[:500]
+    objective_terms = _terms(objective)
+    chunk_budget = _as_int(top_k, 0) or _as_int(_as_dict(rag_plan.get("retrieval")).get("topK"), 6) or 6
+    safe_top_k = min(max(chunk_budget, 1), 12)
+    candidates = [_rank_chunk(chunk, objective_terms) for chunk in _source_chunks(normalized_sources)]
+    candidates.sort(
+        key = lambda item: (
+            float(item.get("score") or 0.0),
+            len(item.get("matchedTerms") or []),
+            -int(item.get("originalIndex") or 0),
+        ),
+        reverse = True,
+    )
+    selected = [item for item in candidates if float(item.get("score") or 0.0) > 0][:safe_top_k]
+    if not selected and candidates:
+        selected = candidates[: min(2, safe_top_k)]
+
+    citations: list[dict[str, Any]] = []
+    context_lines: list[str] = []
+    packet_chunks: list[dict[str, Any]] = []
+    for index, item in enumerate(selected, start = 1):
+        citation_id = f"S{index}"
+        citation = {
+            "id": citation_id,
+            "sourceId": item.get("sourceId"),
+            "chunkId": item.get("chunkId"),
+            "title": item.get("sourceTitle"),
+            "page": item.get("page"),
+        }
+        citations.append(citation)
+        content = str(item.get("content") or "")
+        clipped_content = content[:1800].rstrip()
+        context_lines.append(f"[{citation_id}] {clipped_content}")
+        packet_chunks.append(
+            {
+                "citationId": citation_id,
+                "sourceId": item.get("sourceId"),
+                "sourceTitle": item.get("sourceTitle"),
+                "sourceType": item.get("sourceType"),
+                "chunkId": item.get("chunkId"),
+                "page": item.get("page"),
+                "score": item.get("score"),
+                "matchedTerms": item.get("matchedTerms"),
+                "content": clipped_content,
+                "charCount": len(content),
+            }
+        )
+
+    warnings: list[str] = []
+    if not normalized_sources:
+        warnings.append("Aucune source RAG fournie pour construire le paquet de retrieval.")
+    if not candidates and normalized_sources:
+        warnings.append("Aucun chunk textuel exploitable trouve dans les sources RAG.")
+    if candidates and not selected:
+        warnings.append("Aucun chunk ne correspond suffisamment a l'objectif.")
+
+    context_block = "\n\n".join(context_lines)
+    return {
+        "retrievalPacketVersion": COGNIX_RAG_RETRIEVAL_PACKET_VERSION,
+        "plannerVersion": COGNIX_RAG_PLANNER_VERSION,
+        "mode": "deterministic_lexical_retrieval",
+        "username": username,
+        "projectId": project_id,
+        "objectiveExcerpt": objective_excerpt,
+        "readyForInjection": bool(packet_chunks),
+        "retrieval": {
+            "strategy": "lexical",
+            "topK": safe_top_k,
+            "includeCitations": True,
+            "embeddingRequired": False,
+            "vectorStoreRequired": False,
+        },
+        "sourceReadiness": source_result,
+        "summary": {
+            "sourceCount": len(normalized_sources),
+            "candidateChunkCount": len(candidates),
+            "selectedChunkCount": len(packet_chunks),
+            "citationCount": len(citations),
+        },
+        "chunks": packet_chunks,
+        "citations": citations,
+        "contextBlock": context_block,
+        "injection": {
+            "channelId": "rag_chunks",
+            "format": "citation_block",
+            "systemInstruction": "Use only cited RAG chunks for source-grounded claims. Cite sources with [S#].",
+        },
+        "warnings": warnings,
+        "sideEffects": {
+            "modelLoad": False,
+            "generation": False,
+            "networkModelCall": False,
+            "fileRead": False,
+            "networkRead": False,
+            "secretRead": False,
+            "embeddingGeneration": False,
+            "vectorSearch": False,
+            "ragIndexing": False,
+            "retrievalQuery": True,
+            "sourceMutation": False,
+        },
+    }
 
 
 def build_rag_plan(

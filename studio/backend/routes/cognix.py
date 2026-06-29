@@ -966,6 +966,16 @@ class RagPlanRequest(BaseModel):
     sources: list[dict[str, Any]] | None = None
 
 
+class RagRetrievalPacketRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    project_type: str | None = Field(None, alias = "projectType", max_length = 80)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    sources: list[dict[str, Any]] | None = None
+    top_k: int = Field(6, alias = "topK", ge = 1, le = 12)
+
+
 class RagIndexingPlanRequest(BaseModel):
     objective: str | None = Field(None, max_length = 4000)
     project_id: str | None = Field(None, max_length = 160)
@@ -5438,6 +5448,61 @@ async def rag_plan(
         "executionPolicy": plan["executionPolicy"],
         "auditLogId": audit.get("id"),
         "sideEffects": rag.get("sideEffects", {}),
+    }
+
+
+@router.post("/rag/retrieval-packet")
+async def rag_retrieval_packet(
+    payload: RagRetrievalPacketRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    runtime = _current_model_cache_runtime()
+    plan = cognix_orchestrator.build_execution_plan(
+        payload.objective,
+        current_subject = current_subject,
+        project_type = payload.project_type,
+        project_id = payload.project_id,
+        runtime_snapshot = runtime,
+        latest_benchmark_run = cognix_db.get_latest_benchmark_run(current_subject),
+        rag_sources = payload.sources or [],
+        rag_available = _rag_available(),
+    )
+    packet = cognix_rag_planner.build_rag_retrieval_packet(
+        username = current_subject,
+        objective = payload.objective,
+        project_id = payload.project_id,
+        sources = payload.sources or [],
+        rag_plan = plan["ragPlan"],
+        top_k = payload.top_k,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "rag_retrieval_packet_built",
+        resource_type = "cognix_rag_retrieval_packet",
+        resource_id = str(payload.project_id or plan["ragPlan"].get("targetDomain") or "general"),
+        severity = "notice" if packet.get("readyForInjection") else "warning",
+        metadata = {
+            "retrievalPacketVersion": packet.get("retrievalPacketVersion"),
+            "plannerVersion": packet.get("plannerVersion"),
+            "readyForInjection": packet.get("readyForInjection"),
+            "sourceCount": packet.get("summary", {}).get("sourceCount"),
+            "candidateChunkCount": packet.get("summary", {}).get("candidateChunkCount"),
+            "selectedChunkCount": packet.get("summary", {}).get("selectedChunkCount"),
+            "citationCount": packet.get("summary", {}).get("citationCount"),
+            "sideEffects": packet.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "runtimeError": runtime.get("error"),
+        "classification": plan["classification"],
+        "taskStrategy": plan["taskStrategy"],
+        "ragPlan": plan["ragPlan"],
+        "retrievalPacket": packet,
+        "executionPolicy": plan["executionPolicy"],
+        "auditLogId": audit.get("id"),
+        "sideEffects": packet.get("sideEffects", {}),
     }
 
 

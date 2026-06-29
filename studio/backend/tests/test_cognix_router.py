@@ -1061,6 +1061,81 @@ def test_rag_plan_endpoint_prepares_hybrid_retrieval_without_indexing(monkeypatc
     assert log["metadata"]["sideEffects"]["ragIndexing"] is False
 
 
+def test_rag_retrieval_packet_endpoint_ranks_chunks_with_citations_without_model(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(cognix_routes, "_rag_available", lambda: True)
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+
+    body = run_async(
+        cognix_routes.rag_retrieval_packet(
+            cognix_routes.RagRetrievalPacketRequest(
+                objective = "Explique le RAG avec citations fiables",
+                project_id = "project-rag",
+                sources = [
+                    {
+                        "id": "cours-rag",
+                        "type": "pdf",
+                        "indexed": True,
+                        "title": "Cours RAG",
+                        "chunks": [
+                            {
+                                "id": "chunk-noise",
+                                "content": "La couleur du theme est sombre.",
+                            },
+                            {
+                                "id": "chunk-rag",
+                                "page": 4,
+                                "content": (
+                                    "Le RAG utilise des documents indexes pour fournir des citations "
+                                    "fiables et reduire les hallucinations."
+                                ),
+                            },
+                        ],
+                    }
+                ],
+                top_k = 2,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    packet = body["retrievalPacket"]
+    assert body["auditLogId"].startswith("aud_")
+    assert packet["retrievalPacketVersion"] == "cognix_rag_retrieval_packet_v1"
+    assert packet["plannerVersion"] == "cognix_rag_planner_v1"
+    assert packet["readyForInjection"] is True
+    assert packet["retrieval"]["strategy"] == "lexical"
+    assert packet["retrieval"]["includeCitations"] is True
+    assert packet["retrieval"]["embeddingRequired"] is False
+    assert packet["retrieval"]["vectorStoreRequired"] is False
+    assert packet["chunks"][0]["chunkId"] == "chunk-rag"
+    assert packet["chunks"][0]["citationId"] == "S1"
+    assert packet["citations"][0]["sourceId"] == "cours-rag"
+    assert "[S1]" in packet["contextBlock"]
+    assert packet["sideEffects"]["networkModelCall"] is False
+    assert packet["sideEffects"]["embeddingGeneration"] is False
+    assert packet["sideEffects"]["vectorSearch"] is False
+    assert packet["sideEffects"]["retrievalQuery"] is True
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "rag_retrieval_packet_built"
+    assert log["metadata"]["retrievalPacketVersion"] == "cognix_rag_retrieval_packet_v1"
+    assert log["metadata"]["selectedChunkCount"] == 1
+    assert log["metadata"]["citationCount"] == 1
+    assert "reduire les hallucinations" not in str(log["metadata"])
+
+
 def test_rag_plan_blocks_retrieval_when_sources_are_missing(monkeypatch):
     monkeypatch.setattr(
         cognix_orchestrator.cognix_hardware,
@@ -5973,8 +6048,10 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert modules["cognix-rag"]["dependencyState"]["ready"] is True
     assert "rag_source_registry" in modules["cognix-rag"]["capabilities"]
     assert "rag_indexing_planning" in modules["cognix-rag"]["capabilities"]
+    assert "rag_retrieval_packet" in modules["cognix-rag"]["capabilities"]
     assert "/api/cognix/rag/sources" in modules["cognix-rag"]["routes"]
     assert "/api/cognix/rag/indexing-plan" in modules["cognix-rag"]["routes"]
+    assert "/api/cognix/rag/retrieval-packet" in modules["cognix-rag"]["routes"]
     assert "cloud_training_targets" in modules["cognix-fine-tuning"]["capabilities"]
     assert "cloud_training_handoff" in modules["cognix-fine-tuning"]["capabilities"]
     assert "/api/cognix/fine-tuning/cloud-handoff-plan" in modules["cognix-fine-tuning"]["routes"]
