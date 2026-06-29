@@ -59,6 +59,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
             "model_pack_registry",
             "architecture_decision_contract",
             "orchestrator_runtime_plan",
+            "runtime_optimization_contract",
         ],
         "routes": [
             "/api/cognix/models/registry",

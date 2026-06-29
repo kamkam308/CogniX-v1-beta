@@ -2134,6 +2134,8 @@ def test_runtime_adapter_registry_and_plan_select_ollama_without_side_effects():
     assert registry["runtimeAdapterVersion"] == "cognix_runtime_adapter_v1"
     assert registry["summary"]["directFrontendModelCallAllowed"] is False
     assert registry["globalPolicies"]["frontendMustUseBackend"] is True
+    assert registry["globalPolicies"]["optimizationCompatibilityContractRequired"] is True
+    assert registry["globalPolicies"]["optimizationContractVersion"] == "cognix_runtime_optimization_contract_v1"
     assert registry["sideEffects"]["runtimeMutation"] is False
 
     plan = cognix_runtime_adapter.build_runtime_adapter_plan(
@@ -2148,9 +2150,35 @@ def test_runtime_adapter_registry_and_plan_select_ollama_without_side_effects():
     assert plan["runtimeAdapterVersion"] == "cognix_runtime_adapter_v1"
     assert plan["selectedAdapter"]["adapterId"] == "ollama"
     assert "promptCaching" in plan["selectedAdapter"]["missingCapabilities"]
+    assert plan["optimizationContract"]["contractVersion"] == "cognix_runtime_optimization_contract_v1"
+    assert plan["optimizationContract"]["blockedOptimizationIds"] == ["prompt_cache"]
+    assert plan["optimizationContract"]["activationContract"]["runtimeMutationAllowed"] is False
+    assert plan["optimizationContract"]["sideEffects"]["runtimeFlagWrite"] is False
     assert plan["sideEffects"]["modelLoad"] is False
     assert plan["sideEffects"]["serverStart"] is False
     assert plan["sideEffects"]["networkModelCall"] is False
+
+
+def test_runtime_adapter_optimization_contract_allows_llama_cpp_after_benchmark_only():
+    plan = cognix_runtime_adapter.build_runtime_adapter_plan(
+        recommendation = {"providerType": "llama.cpp"},
+        hardware = stub_hardware_profile(),
+        task_strategy = {"path": "expert_chat"},
+        rag_plan = {"readyForRetrieval": False},
+        fine_tuning_plan = {"recommendedPath": "no_fine_tuning_needed"},
+        optimization_plan = {"recommendedOptimizationIds": ["prompt_cache", "kv_cache_policy", "speculative_decoding"]},
+    )
+
+    contract = plan["optimizationContract"]
+    assert plan["selectedAdapter"]["adapterId"] == "llama-cpp"
+    assert contract["contractVersion"] == "cognix_runtime_optimization_contract_v1"
+    assert contract["compatibleOptimizationIds"] == ["prompt_cache", "kv_cache_policy", "speculative_decoding"]
+    assert contract["blockedOptimizationIds"] == []
+    assert contract["activationContract"]["benchmarkRequiredBeforeActivation"] is True
+    assert contract["activationContract"]["runtimeFlagWriteAllowed"] is False
+    assert all(item["status"] == "compatible_requires_benchmark" for item in contract["checks"])
+    assert contract["sideEffects"]["runtimeMutation"] is False
+    assert contract["sideEffects"]["benchmarkRun"] is False
 
 
 def test_runtime_adapter_plan_endpoint_logs_audited_dry_run(monkeypatch):
@@ -2180,6 +2208,7 @@ def test_runtime_adapter_plan_endpoint_logs_audited_dry_run(monkeypatch):
     assert body["auditLogId"].startswith("aud_")
     assert body["plannerVersion"] == "cognix_runtime_adapter_v1"
     assert adapter_plan["selectedAdapter"]["adapterId"] == "ollama"
+    assert adapter_plan["optimizationContract"]["contractVersion"] == "cognix_runtime_optimization_contract_v1"
     assert adapter_plan["sideEffects"]["runtimeMutation"] is False
     assert adapter_plan["sideEffects"]["serverStart"] is False
 
@@ -2188,6 +2217,7 @@ def test_runtime_adapter_plan_endpoint_logs_audited_dry_run(monkeypatch):
     assert log["id"] == body["auditLogId"]
     assert log["action"] == "runtime_adapter_plan_built"
     assert log["metadata"]["runtimeAdapterVersion"] == "cognix_runtime_adapter_v1"
+    assert log["metadata"]["optimizationContractVersion"] == "cognix_runtime_optimization_contract_v1"
     assert log["metadata"]["sideEffects"]["runtimeMutation"] is False
 
 
@@ -6195,6 +6225,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "module_manifest_registry" in modules["cognix-local-core"]["capabilities"]
     assert "architecture_decision_contract" in modules["cognix-local-core"]["capabilities"]
     assert "orchestrator_runtime_plan" in modules["cognix-local-core"]["capabilities"]
+    assert "runtime_optimization_contract" in modules["cognix-local-core"]["capabilities"]
     assert "/api/cognix/orchestrator/plan" in modules["cognix-local-core"]["routes"]
     assert "/api/cognix/runtime/plan" in modules["cognix-local-core"]["routes"]
     assert "/api/cognix/modules/manifests" in modules["cognix-local-core"]["routes"]

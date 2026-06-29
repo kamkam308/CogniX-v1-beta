@@ -3880,9 +3880,12 @@ async def runtime_plan(
         severity = "warning" if adapter_plan.get("warnings") else "notice",
         metadata = {
             "runtimeAdapterVersion": adapter_plan.get("runtimeAdapterVersion"),
+            "optimizationContractVersion": adapter_plan.get("optimizationContract", {}).get("contractVersion"),
             "requestedRuntimeType": adapter_plan.get("requestedRuntimeType"),
             "selectedAdapter": adapter_plan.get("selectedAdapter", {}),
             "requiredCapabilities": adapter_plan.get("requiredCapabilities", []),
+            "compatibleOptimizationIds": adapter_plan.get("optimizationContract", {}).get("compatibleOptimizationIds", []),
+            "blockedOptimizationIds": adapter_plan.get("optimizationContract", {}).get("blockedOptimizationIds", []),
             "sideEffects": adapter_plan.get("sideEffects", {}),
         },
     )

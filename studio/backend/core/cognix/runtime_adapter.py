@@ -15,6 +15,31 @@ from typing import Any
 
 
 COGNIX_RUNTIME_ADAPTER_VERSION = "cognix_runtime_adapter_v1"
+COGNIX_RUNTIME_OPTIMIZATION_CONTRACT_VERSION = "cognix_runtime_optimization_contract_v1"
+
+
+OPTIMIZATION_CAPABILITY_MAP: dict[str, dict[str, Any]] = {
+    "prompt_cache": {
+        "capability": "promptCaching",
+        "label": "Prompt caching",
+        "benchmarkMetric": "first_token_latency_and_prompt_eval_ms",
+    },
+    "kv_cache_policy": {
+        "capability": "kvCacheTuning",
+        "label": "KV-cache policy",
+        "benchmarkMetric": "long_context_latency_and_memory",
+    },
+    "speculative_decoding": {
+        "capability": "speculativeDecoding",
+        "label": "Speculative decoding",
+        "benchmarkMetric": "tokens_per_second_and_quality_delta",
+    },
+    "batching": {
+        "capability": "multiUserBatching",
+        "label": "Multi-user batching",
+        "benchmarkMetric": "throughput_under_concurrent_load",
+    },
+}
 
 
 RUNTIME_ADAPTERS: list[dict[str, Any]] = [
@@ -155,6 +180,100 @@ def _required_capabilities(
     return required
 
 
+def _requested_optimizations(optimization_plan: dict[str, Any]) -> list[str]:
+    requested: list[str] = []
+    for key in ("recommendedOptimizationIds", "requestedOptimizationIds", "enabledOptimizationIds"):
+        for item in optimization_plan.get(key) or []:
+            optimization_id = str(item or "").strip()
+            if optimization_id and optimization_id not in requested:
+                requested.append(optimization_id)
+    return requested
+
+
+def _optimization_contract(
+    *,
+    selected_adapter: dict[str, Any],
+    selected_candidate: dict[str, Any],
+    optimization_plan: dict[str, Any],
+) -> dict[str, Any]:
+    requested = _requested_optimizations(optimization_plan)
+    supports = _as_dict(selected_adapter.get("supports"))
+    checks: list[dict[str, Any]] = []
+    compatible: list[str] = []
+    blocked: list[str] = []
+    unknown: list[str] = []
+    for optimization_id in requested:
+        definition = OPTIMIZATION_CAPABILITY_MAP.get(optimization_id)
+        if not definition:
+            unknown.append(optimization_id)
+            checks.append(
+                {
+                    "id": optimization_id,
+                    "status": "unknown_optimization",
+                    "activationAllowedHere": False,
+                    "reason": "Optimization is not declared in the native CogniX runtime contract.",
+                }
+            )
+            continue
+        capability = str(definition["capability"])
+        is_supported = bool(supports.get(capability))
+        if is_supported:
+            compatible.append(optimization_id)
+        else:
+            blocked.append(optimization_id)
+        checks.append(
+            {
+                "id": optimization_id,
+                "label": definition["label"],
+                "capability": capability,
+                "status": "compatible_requires_benchmark" if is_supported else "blocked_missing_runtime_capability",
+                "activationAllowedHere": False,
+                "runtimeFlagMutationAllowed": False,
+                "benchmarkRequired": is_supported,
+                "benchmarkMetric": definition["benchmarkMetric"],
+                "reason": (
+                    "Runtime declares the required capability; benchmark and rollback review are still required."
+                    if is_supported
+                    else "Selected runtime adapter does not declare the capability required for this optimization."
+                ),
+            }
+        )
+    return {
+        "contractVersion": COGNIX_RUNTIME_OPTIMIZATION_CONTRACT_VERSION,
+        "mode": "runtime_optimization_compatibility_dry_run",
+        "selectedAdapterId": selected_candidate.get("adapterId"),
+        "selectedRuntimeType": selected_candidate.get("runtimeType"),
+        "requestedOptimizationIds": requested,
+        "compatibleOptimizationIds": compatible,
+        "blockedOptimizationIds": blocked,
+        "unknownOptimizationIds": unknown,
+        "checks": checks,
+        "activationContract": {
+            "automaticActivationAllowed": False,
+            "runtimeMutationAllowed": False,
+            "runtimeFlagWriteAllowed": False,
+            "modelReloadAllowed": False,
+            "benchmarkRequiredBeforeActivation": bool(compatible),
+            "rollbackPlanRequired": bool(compatible),
+            "humanApprovalRequired": bool(compatible or blocked or unknown),
+        },
+        "evidenceRequirements": [
+            "runtime_adapter_selected",
+            "compatibility_check_recorded",
+            "benchmark_before_after_required",
+            "rollback_plan_required",
+            "no_runtime_mutation_during_planning",
+        ],
+        "sideEffects": {
+            "runtimeMutation": False,
+            "runtimeFlagWrite": False,
+            "modelReload": False,
+            "benchmarkRun": False,
+            "generation": False,
+        },
+    }
+
+
 def build_runtime_adapter_registry() -> dict[str, Any]:
     adapters = deepcopy(RUNTIME_ADAPTERS)
     return {
@@ -172,6 +291,8 @@ def build_runtime_adapter_registry() -> dict[str, Any]:
             "frontendMustUseBackend": True,
             "adapterSelectionAudited": True,
             "runtimeFlagsRequireCompatibilityCheck": True,
+            "optimizationCompatibilityContractRequired": True,
+            "optimizationContractVersion": COGNIX_RUNTIME_OPTIMIZATION_CONTRACT_VERSION,
             "networkReachabilityCheckedElsewhere": True,
         },
         "sideEffects": {
@@ -242,6 +363,13 @@ def build_runtime_adapter_plan(
         warnings.append("Ollama ne confirme pas speculative decoding: fallback sans cette optimisation.")
     if selected.get("deploymentTarget") == "server_gpu" and not hardware_gpu:
         warnings.append("Adapter serveur GPU non adapte au materiel local actuel.")
+    optimization_contract = _optimization_contract(
+        selected_adapter = selected_adapter,
+        selected_candidate = selected,
+        optimization_plan = optimization_plan,
+    )
+    if optimization_contract["blockedOptimizationIds"]:
+        warnings.append("Optimisations bloquees par compatibilite runtime: conserver le fallback.")
 
     return {
         "runtimeAdapterVersion": COGNIX_RUNTIME_ADAPTER_VERSION,
@@ -252,6 +380,7 @@ def build_runtime_adapter_plan(
         "requiredCapabilities": sorted(required),
         "candidateAdapters": candidates,
         "adapterPolicies": registry["globalPolicies"],
+        "optimizationContract": optimization_contract,
         "warnings": warnings,
         "reason": "Adapter runtime choisi par compatibilite declarative, sans appel modele.",
         "sideEffects": {
