@@ -508,6 +508,7 @@ def build_execution_plan(
     rag_available: bool | None = None,
     fine_tuning_dataset: dict[str, Any] | None = None,
     user_plan: str | None = None,
+    codex_run_mode: str | None = None,
 ) -> dict[str, Any]:
     hardware = cognix_hardware.get_hardware_profile()
     recommendation_payload = cognix_recommender.build_model_recommendation(
@@ -612,6 +613,7 @@ def build_execution_plan(
         classification = classification,
         task_strategy = task_strategy,
         execution_policy = execution_policy,
+        run_mode = codex_run_mode,
     )
     worker_queue_plan = cognix_worker_queue.build_worker_queue_plan(
         objective = objective,

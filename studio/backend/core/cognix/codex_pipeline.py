@@ -10,6 +10,7 @@ files, create branches, run tests, commit, push, merge, or deploy.
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Any
 
 
@@ -17,6 +18,78 @@ COGNIX_CODEX_PIPELINE_VERSION = "cognix_codex_pipeline_v1"
 COGNIX_CODEX_RUN_CONTRACT_VERSION = "cognix_codex_run_contract_v1"
 COGNIX_CODEX_PREVIEW_CONTRACT_VERSION = "cognix_codex_preview_contract_v1"
 COGNIX_CODEX_APPROVAL_GATE_VERSION = "cognix_codex_approval_gate_v1"
+COGNIX_CODEX_NIGHT_MODE_CONTRACT_VERSION = "cognix_codex_night_mode_contract_v1"
+
+NIGHT_MODE_ALIASES = {"night", "sleep", "mode_nuit", "nuit", "sommeil"}
+NIGHT_MODE_ALLOWED_CATEGORIES = [
+    "security",
+    "performance_optimization",
+    "memory_optimization",
+    "tests",
+    "technical_documentation",
+    "static_analysis",
+    "logs_observability",
+    "permissions_hardening",
+    "non_destructive_cleanup",
+]
+NIGHT_MODE_BLOCKED_CATEGORIES = [
+    "visible_ux_change",
+    "new_visible_feature",
+    "navigation_change",
+    "auth_behavior_change",
+    "billing_or_payment_change",
+    "risky_database_migration",
+    "chat_behavior_change",
+    "production_deployment",
+    "main_branch_merge",
+]
+
+ALLOWED_NIGHT_SIGNALS: list[tuple[str, tuple[str, ...]]] = [
+    ("security", ("security", "securite", "secure", "secret", "vulnerability", "vulnerabilite", "audit", "redaction", "sanitize", "durcir", "durcissement")),
+    ("permissions_hardening", ("permission", "permissions", "rbac", "role", "roles", "admin", "policy", "policies", "guardrail", "garde fou")),
+    ("performance_optimization", ("performance", "optimisation", "optimization", "speed", "vitesse", "latency", "latence", "cache")),
+    ("memory_optimization", ("memory", "memoire", "ram", "gpu memory", "kv cache", "compression")),
+    ("tests", ("test", "tests", "pytest", "coverage", "verification", "smoke")),
+    ("technical_documentation", ("documentation", "docs", "readme", "rapport technique", "technical doc")),
+    ("static_analysis", ("static analysis", "analyse statique", "lint", "type check", "mypy", "bug detection", "detecter bug")),
+    ("logs_observability", ("log", "logs", "observability", "monitoring", "metrics", "trace", "telemetry")),
+    ("non_destructive_cleanup", ("cleanup", "nettoyage", "refactor", "dette", "debt", "non destructive")),
+]
+
+VISIBLE_CHANGE_SIGNALS = (
+    "ux",
+    "ui",
+    "design",
+    "navigation",
+    "interface",
+    "frontend visible",
+    "new feature",
+    "feature visible",
+    "nouvelle fonctionnalite",
+    "fonctionnalite visible",
+    "module visible",
+    "connecteur",
+    "connector",
+    "login",
+    "inscription",
+    "auth",
+    "authentication",
+    "mot de passe",
+    "password",
+    "billing",
+    "payment",
+    "paiement",
+    "pricing",
+    "migration",
+    "database migration",
+    "comportement du chat",
+    "chat behavior",
+    "merge",
+    "deploy",
+    "deployment",
+    "deploiement",
+    "production",
+)
 
 CODEX_PIPELINE_STEPS: list[dict[str, Any]] = [
     {
@@ -78,6 +151,35 @@ def _objective_excerpt(objective: str | None) -> str:
     return re.sub(r"\s+", " ", objective or "").strip()[:500]
 
 
+def _normalized_text(value: str | None) -> str:
+    normalized = unicodedata.normalize("NFKD", value or "").casefold()
+    ascii_text = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    return re.sub(r"\s+", " ", ascii_text).strip()
+
+
+def _matched_signals(text: str, signals: tuple[str, ...]) -> list[str]:
+    return [signal for signal in signals if signal in text]
+
+
+def _night_mode_classification(objective: str | None) -> dict[str, Any]:
+    text = _normalized_text(objective)
+    matched_allowed: list[str] = []
+    selected_category = "unclassified"
+    for category, signals in ALLOWED_NIGHT_SIGNALS:
+        matched = _matched_signals(text, signals)
+        if matched:
+            selected_category = category
+            matched_allowed = matched
+            break
+    visible_signals = _matched_signals(text, VISIBLE_CHANGE_SIGNALS)
+    return {
+        "selectedCategory": selected_category,
+        "matchedAllowedSignals": matched_allowed[:12],
+        "matchedBlockedSignals": visible_signals[:12],
+        "visibleProductChangeRequested": bool(visible_signals),
+    }
+
+
 def _branch_slug(objective: str | None, project_id: str | None) -> str:
     source = project_id or objective or "feature"
     slug = re.sub(r"[^a-z0-9]+", "-", source.casefold()).strip("-")
@@ -120,6 +222,93 @@ def _planned_steps(path: str) -> list[dict[str, Any]]:
         }
         for step in CODEX_PIPELINE_STEPS
     ]
+
+
+def build_codex_night_mode_contract(
+    *,
+    objective: str,
+    run_mode: str | None = None,
+    task_strategy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    normalized_mode = _normalized_text(run_mode or "supervised").replace(" ", "_")
+    night_mode_active = normalized_mode in NIGHT_MODE_ALIASES
+    classification = _night_mode_classification(objective)
+    selected_category = str(classification["selectedCategory"])
+    visible_change_requested = bool(classification["visibleProductChangeRequested"])
+    category_allowed = selected_category in NIGHT_MODE_ALLOWED_CATEGORIES
+    autonomous_night_work_allowed = (
+        not night_mode_active
+        or (category_allowed and not visible_change_requested)
+    )
+    blocked_by_night_mode = night_mode_active and not autonomous_night_work_allowed
+    return {
+        "contractVersion": COGNIX_CODEX_NIGHT_MODE_CONTRACT_VERSION,
+        "mode": "codex_supervision_mode_contract",
+        "runMode": "night" if night_mode_active else "supervised",
+        "nightModeActive": night_mode_active,
+        "taskPath": _as_dict(task_strategy).get("path"),
+        "objectiveExcerpt": _objective_excerpt(objective),
+        "selectedCategory": selected_category,
+        "matchedAllowedSignals": classification["matchedAllowedSignals"],
+        "matchedBlockedSignals": classification["matchedBlockedSignals"],
+        "visibleProductChangeRequested": visible_change_requested,
+        "categoryAllowedInNightMode": category_allowed,
+        "autonomousNightWorkAllowed": autonomous_night_work_allowed,
+        "blockedByNightMode": blocked_by_night_mode,
+        "nativeSourcePatchAllowed": autonomous_night_work_allowed,
+        "visibleUxChangeAllowed": not night_mode_active,
+        "mainBranchMergeAllowed": False,
+        "productionDeploymentAllowed": False,
+        "allowedNightWorkCategories": NIGHT_MODE_ALLOWED_CATEGORIES,
+        "blockedNightWorkCategories": NIGHT_MODE_BLOCKED_CATEGORIES,
+        "requiredReportSections": [
+            "files_modified",
+            "tests_run",
+            "results",
+            "risks_detected",
+            "recommendations_for_human_validation",
+        ]
+        if night_mode_active
+        else [
+            "files_modified",
+            "tests_run",
+            "summary_for_user_validation",
+        ],
+        "policy": {
+            "supervisedModeAllowsVisibleProductWorkWithValidation": True,
+            "nightModeAllowsSecurityOptimizationTestsDocsOnly": True,
+            "nightModeBlocksVisibleUxNavigationAuthBillingChatBehavior": True,
+            "mergeRequiresHumanApproval": True,
+            "deploymentRequiresHumanApproval": True,
+        },
+        "blockedActions": [
+            "main_branch_merge",
+            "production_deployment",
+            "approval_bypass",
+            "payment_change",
+            "auth_behavior_change_without_validation",
+            "database_migration_without_validation",
+        ]
+        + (
+            [
+                "visible_ux_change",
+                "new_visible_feature",
+                "navigation_change",
+                "chat_behavior_change",
+            ]
+            if night_mode_active
+            else []
+        ),
+        "sideEffects": {
+            "fileWrite": False,
+            "codeModification": False,
+            "testExecution": False,
+            "buildExecution": False,
+            "merge": False,
+            "deployment": False,
+            "approvalWrite": False,
+        },
+    }
 
 
 def _status_passed(report: dict[str, Any], *, zero_fields: tuple[str, ...] = ()) -> bool:
@@ -579,6 +768,7 @@ def build_codex_pipeline_plan(
     classification: dict[str, Any] | None = None,
     task_strategy: dict[str, Any] | None = None,
     execution_policy: dict[str, Any] | None = None,
+    run_mode: str | None = None,
 ) -> dict[str, Any]:
     task_strategy = _as_dict(task_strategy)
     classification = _as_dict(classification)
@@ -586,16 +776,28 @@ def build_codex_pipeline_plan(
     applicable = path == "codex_guarded_pipeline"
     risk_level = _risk_level(task_strategy, execution_policy)
     branch_name = _branch_slug(objective, project_id)
+    supervision_contract = build_codex_night_mode_contract(
+        objective = objective,
+        run_mode = run_mode,
+        task_strategy = task_strategy,
+    )
 
     warnings: list[str] = []
     if applicable:
         warnings.append("Pipeline Codex planifie: modification code bloquee sans executor audite.")
     if classification.get("needsClarification"):
         warnings.append("Clarification requise avant modification de code.")
+    if supervision_contract["nightModeActive"]:
+        warnings.append("Mode nuit actif: seuls securite, optimisation, tests, docs, logs et nettoyage non destructif sont autorises.")
+    if supervision_contract["blockedByNightMode"]:
+        warnings.append("Mode nuit bloque cette demande car elle implique un changement produit visible ou non classe.")
 
     return {
         "plannerVersion": COGNIX_CODEX_PIPELINE_VERSION,
+        "nightModeContractVersion": COGNIX_CODEX_NIGHT_MODE_CONTRACT_VERSION,
         "mode": "dry_run",
+        "supervisionMode": supervision_contract["runMode"],
+        "nightModeActive": supervision_contract["nightModeActive"],
         "username": current_subject,
         "projectId": project_id,
         "objectiveExcerpt": _objective_excerpt(objective),
@@ -615,12 +817,15 @@ def build_codex_pipeline_plan(
             "previewRequired": applicable,
             "humanApprovalRequired": applicable,
             "mergeAllowedWithoutApproval": False,
+            "nightModePolicyRequired": supervision_contract["nightModeActive"],
+            "nightModeAllowsAutonomousWork": supervision_contract["autonomousNightWorkAllowed"],
         },
         "runContract": _run_contract(
             applicable=applicable,
             branch_name=branch_name,
             risk_level=risk_level,
         ),
+        "supervisionModeContract": supervision_contract,
         "steps": _planned_steps(path),
         "blockedActions": [
             {
@@ -643,6 +848,16 @@ def build_codex_pipeline_plan(
                 "id": "deployment",
                 "reason": "Aucun deploiement production depuis le planner Codex.",
             },
+            *(
+                [
+                    {
+                        "id": "night_mode_visible_change",
+                        "reason": "Mode nuit: changement visible, navigation, auth, paiement, chat, merge et prod sont bloques.",
+                    }
+                ]
+                if supervision_contract["blockedByNightMode"]
+                else []
+            ),
         ],
         "warnings": warnings,
         "reason": (

@@ -1205,9 +1205,13 @@ class FrontendBoundaryContractRequest(BaseModel):
 
 
 class CodexPipelinePlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
     objective: str = Field(..., min_length = 1, max_length = 4000)
     project_type: str | None = Field(None, max_length = 80)
-    project_id: str | None = Field(None, max_length = 160)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    run_mode: str | None = Field(None, alias = "runMode", max_length = 40)
+    night_mode: bool | None = Field(None, alias = "nightMode")
 
 
 class CodexPreviewContractRequest(BaseModel):
@@ -4547,6 +4551,7 @@ async def codex_pipeline_plan(
     current_subject: str = Depends(get_current_jwt_subject),
 ) -> dict[str, Any]:
     runtime = _current_model_cache_runtime()
+    codex_run_mode = "night" if payload.night_mode is True else payload.run_mode
     plan = cognix_orchestrator.build_execution_plan(
         payload.objective,
         current_subject = current_subject,
@@ -4554,6 +4559,7 @@ async def codex_pipeline_plan(
         project_id = payload.project_id,
         runtime_snapshot = runtime,
         latest_benchmark_run = cognix_db.get_latest_benchmark_run(current_subject),
+        codex_run_mode = codex_run_mode,
     )
     pipeline = plan["codexPipelinePlan"]
     audit = cognix_db.create_audit_log(
@@ -4566,10 +4572,20 @@ async def codex_pipeline_plan(
         metadata = {
             "codexPipelineVersion": pipeline.get("plannerVersion"),
             "runContractVersion": pipeline.get("runContract", {}).get("contractVersion"),
+            "nightModeContractVersion": pipeline.get("nightModeContractVersion"),
+            "supervisionMode": pipeline.get("supervisionMode"),
+            "nightModeActive": pipeline.get("nightModeActive"),
             "applicable": pipeline.get("applicable"),
             "recommendedPath": pipeline.get("recommendedPath"),
             "branchName": pipeline.get("branch", {}).get("recommendedName"),
             "qualityGates": pipeline.get("qualityGates", {}),
+            "supervisionModeContract": {
+                "runMode": pipeline.get("supervisionModeContract", {}).get("runMode"),
+                "selectedCategory": pipeline.get("supervisionModeContract", {}).get("selectedCategory"),
+                "blockedByNightMode": pipeline.get("supervisionModeContract", {}).get("blockedByNightMode"),
+                "visibleProductChangeRequested": pipeline.get("supervisionModeContract", {}).get("visibleProductChangeRequested"),
+                "autonomousNightWorkAllowed": pipeline.get("supervisionModeContract", {}).get("autonomousNightWorkAllowed"),
+            },
             "evidenceRequirements": pipeline.get("runContract", {}).get("evidenceRequirements", []),
             "blockedActionIds": [
                 item.get("id") for item in pipeline.get("blockedActions", []) if isinstance(item, dict)

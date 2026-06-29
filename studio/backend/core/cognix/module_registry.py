@@ -1293,6 +1293,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
             "branch_pipeline",
             "tests_build_preview",
             "codex_run_contract",
+            "codex_night_mode_contract",
             "codex_preview_contract",
             "branch_test_build_preview_gate",
             "codex_human_approval_gate",

@@ -6962,6 +6962,9 @@ def test_codex_pipeline_plans_required_gates_without_modifying_code():
     )
 
     assert plan["plannerVersion"] == "cognix_codex_pipeline_v1"
+    assert plan["nightModeContractVersion"] == "cognix_codex_night_mode_contract_v1"
+    assert plan["supervisionMode"] == "supervised"
+    assert plan["nightModeActive"] is False
     assert plan["applicable"] is True
     assert plan["recommendedPath"] == "codex_guarded_pipeline"
     assert plan["branch"]["recommendedName"] == "cognix/project-code"
@@ -6976,6 +6979,9 @@ def test_codex_pipeline_plans_required_gates_without_modifying_code():
     assert plan["qualityGates"]["testsRequired"] is True
     assert plan["qualityGates"]["buildRequired"] is True
     assert plan["qualityGates"]["humanApprovalRequired"] is True
+    assert plan["qualityGates"]["nightModePolicyRequired"] is False
+    assert plan["supervisionModeContract"]["runMode"] == "supervised"
+    assert plan["supervisionModeContract"]["visibleUxChangeAllowed"] is True
     assert any(step["id"] == "human_approval" for step in plan["steps"])
     assert any(item["id"] == "commit_push_merge" for item in plan["blockedActions"])
     assert "merge" in plan["runContract"]["blockedActions"]
@@ -6983,6 +6989,58 @@ def test_codex_pipeline_plans_required_gates_without_modifying_code():
     assert plan["sideEffects"]["codeModification"] is False
     assert plan["sideEffects"]["merge"] is False
     assert plan["runContract"]["sideEffects"]["testExecution"] is False
+
+
+def test_codex_night_mode_contract_allows_security_optimization_only():
+    plan = cognix_codex_pipeline.build_codex_pipeline_plan(
+        objective = "Durcir la securite backend, redaction des secrets et logs audit.",
+        current_subject = "alice",
+        project_id = "security-hardening",
+        classification = {"selectedDomain": "code"},
+        task_strategy = {"path": "codex_guarded_pipeline"},
+        execution_policy = {"riskLevel": "high"},
+        run_mode = "night",
+    )
+
+    contract = plan["supervisionModeContract"]
+    assert contract["contractVersion"] == "cognix_codex_night_mode_contract_v1"
+    assert contract["runMode"] == "night"
+    assert contract["nightModeActive"] is True
+    assert contract["selectedCategory"] == "security"
+    assert contract["visibleProductChangeRequested"] is False
+    assert contract["autonomousNightWorkAllowed"] is True
+    assert contract["blockedByNightMode"] is False
+    assert contract["nativeSourcePatchAllowed"] is True
+    assert contract["visibleUxChangeAllowed"] is False
+    assert "files_modified" in contract["requiredReportSections"]
+    assert "recommendations_for_human_validation" in contract["requiredReportSections"]
+    assert plan["qualityGates"]["nightModePolicyRequired"] is True
+    assert plan["qualityGates"]["nightModeAllowsAutonomousWork"] is True
+    assert plan["sideEffects"]["codeModification"] is False
+
+
+def test_codex_night_mode_contract_blocks_visible_feature_work():
+    plan = cognix_codex_pipeline.build_codex_pipeline_plan(
+        objective = "Ajoute un nouveau module visible CogniX Chemistry avec navigation et UI.",
+        current_subject = "alice",
+        project_id = "chemistry-ui",
+        classification = {"selectedDomain": "code"},
+        task_strategy = {"path": "codex_guarded_pipeline"},
+        execution_policy = {"riskLevel": "high"},
+        run_mode = "night",
+    )
+
+    contract = plan["supervisionModeContract"]
+    assert contract["runMode"] == "night"
+    assert contract["nightModeActive"] is True
+    assert contract["visibleProductChangeRequested"] is True
+    assert contract["autonomousNightWorkAllowed"] is False
+    assert contract["blockedByNightMode"] is True
+    assert contract["nativeSourcePatchAllowed"] is False
+    assert "visible_ux_change" in contract["blockedActions"]
+    assert any(item["id"] == "night_mode_visible_change" for item in plan["blockedActions"])
+    assert plan["qualityGates"]["nightModeAllowsAutonomousWork"] is False
+    assert any("Mode nuit bloque" in warning for warning in plan["warnings"])
 
 
 def test_codex_pipeline_endpoint_logs_audited_dry_run(monkeypatch):
@@ -7014,6 +7072,7 @@ def test_codex_pipeline_endpoint_logs_audited_dry_run(monkeypatch):
     assert body["plannerVersion"] == "cognix_codex_pipeline_v1"
     assert pipeline["applicable"] is True
     assert pipeline["runContract"]["contractVersion"] == "cognix_codex_run_contract_v1"
+    assert pipeline["supervisionModeContract"]["runMode"] == "supervised"
     assert pipeline["sideEffects"]["branchCreate"] is False
     assert pipeline["sideEffects"]["testExecution"] is False
     assert pipeline["sideEffects"]["codeModification"] is False
@@ -7024,8 +7083,53 @@ def test_codex_pipeline_endpoint_logs_audited_dry_run(monkeypatch):
     assert log["action"] == "codex_pipeline_plan_built"
     assert log["metadata"]["codexPipelineVersion"] == "cognix_codex_pipeline_v1"
     assert log["metadata"]["runContractVersion"] == "cognix_codex_run_contract_v1"
+    assert log["metadata"]["nightModeContractVersion"] == "cognix_codex_night_mode_contract_v1"
+    assert log["metadata"]["supervisionMode"] == "supervised"
+    assert log["metadata"]["nightModeActive"] is False
     assert "native_guard_passed" in log["metadata"]["evidenceRequirements"]
     assert log["metadata"]["sideEffects"]["codeModification"] is False
+
+
+def test_codex_pipeline_endpoint_respects_night_mode_policy(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+
+    body = run_async(
+        cognix_routes.codex_pipeline_plan(
+            cognix_routes.CodexPipelinePlanRequest(
+                objective = "Durcir la securite backend CogniX et les logs audit.",
+                project_type = "code",
+                project_id = "security-hardening",
+                nightMode = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    pipeline = body["codexPipelinePlan"]
+    contract = pipeline["supervisionModeContract"]
+    assert pipeline["nightModeActive"] is True
+    assert contract["runMode"] == "night"
+    assert contract["selectedCategory"] == "security"
+    assert contract["autonomousNightWorkAllowed"] is True
+    assert contract["visibleProductChangeRequested"] is False
+    assert pipeline["qualityGates"]["nightModeAllowsAutonomousWork"] is True
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["metadata"]["nightModeActive"] is True
+    assert log["metadata"]["supervisionModeContract"]["runMode"] == "night"
+    assert log["metadata"]["supervisionModeContract"]["selectedCategory"] == "security"
+    assert log["metadata"]["supervisionModeContract"]["autonomousNightWorkAllowed"] is True
 
 
 def test_codex_preview_contract_blocks_merge_without_test_build_security_gates():
@@ -8832,6 +8936,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/admin/risk-scores" in modules["cognix-admin-security-center"]["routes"]
     assert "/api/cognix/admin/system-health" in modules["cognix-admin-security-center"]["routes"]
     assert "codex_run_contract" in modules["cognix-codex-secure-agent"]["capabilities"]
+    assert "codex_night_mode_contract" in modules["cognix-codex-secure-agent"]["capabilities"]
     assert "codex_preview_contract" in modules["cognix-codex-secure-agent"]["capabilities"]
     assert "branch_test_build_preview_gate" in modules["cognix-codex-secure-agent"]["capabilities"]
     assert "codex_human_approval_gate" in modules["cognix-codex-secure-agent"]["capabilities"]
