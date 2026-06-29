@@ -16,6 +16,7 @@ from typing import Any
 
 COGNIX_WORKER_QUEUE_VERSION = "cognix_worker_queue_v1"
 COGNIX_WORKER_JOB_SPEC_VERSION = "cognix_worker_job_spec_v1"
+COGNIX_WORKER_ENQUEUE_CONTRACT_VERSION = "cognix_worker_enqueue_contract_v1"
 
 QUEUE_DEFINITIONS: list[dict[str, Any]] = [
     {
@@ -164,7 +165,11 @@ def build_worker_queue_registry() -> dict[str, Any]:
             "frontendDirectQueueMutationAllowed": False,
             "backgroundExecutionAllowedFromPlanner": False,
             "jobSpecsRequireApproval": True,
+            "enqueueContractRequired": True,
+            "enqueueContractVersion": COGNIX_WORKER_ENQUEUE_CONTRACT_VERSION,
             "idempotencyKeyRequired": True,
+            "deadLetterQueueRequired": True,
+            "retryBudgetRequired": True,
             "maxConcurrentLocalJobs": 1,
             "auditRequired": True,
             "rateLimitsEnabled": True,
@@ -175,6 +180,216 @@ def build_worker_queue_registry() -> dict[str, Any]:
             "modelDownload": False,
             "modelLoad": False,
             "ragIndexing": False,
+            "cloudTrainingJob": False,
+            "fineTuningJob": False,
+            "benchmarkRun": False,
+            "codeModification": False,
+            "deployment": False,
+        },
+    }
+
+
+def _contract_gate(
+    gate_id: str,
+    *,
+    required: bool,
+    passed: bool,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "id": gate_id,
+        "required": required,
+        "status": "pass" if passed else ("blocked" if required else "not_required"),
+        "passed": passed,
+        "reason": reason,
+    }
+
+
+def _confirmation_for_job(
+    confirmation_ids: dict[str, str] | None,
+    job_id: str,
+    fallback: str | None,
+) -> str | None:
+    if not confirmation_ids:
+        return fallback
+    return confirmation_ids.get(job_id) or confirmation_ids.get("*") or fallback
+
+
+def _job_enqueue_contract(
+    *,
+    spec: dict[str, Any],
+    confirmation_ids: dict[str, str] | None,
+    default_confirmation_id: str | None,
+) -> dict[str, Any]:
+    queue = _queue(str(spec.get("queueId") or "none"))
+    job_id = str(spec.get("jobId") or spec.get("jobType") or "job")
+    job_type = str(spec.get("jobType") or job_id)
+    confirmation_id = _confirmation_for_job(confirmation_ids, job_id, default_confirmation_id)
+    idempotency_key = str(spec.get("idempotencyKey") or "")
+    requires_confirmation = bool(spec.get("requiresHumanConfirmation") or queue.get("requiresHumanConfirmation"))
+    payload_summary = _as_dict(spec.get("payloadSummary"))
+    raw_payload_absent = not bool(payload_summary.get("rawPayloadIncluded")) and not bool(
+        payload_summary.get("rawSourceContentIncluded")
+    )
+    secret_values_absent = not bool(payload_summary.get("rawSecretsIncluded"))
+    queue_accepts_job = job_type in {
+        str(item) for item in _as_list(queue.get("acceptedJobTypes")) if str(item or "").strip()
+    }
+    gates = [
+        _contract_gate(
+            "queue_accepts_job_type",
+            required = True,
+            passed = queue_accepts_job,
+            reason = "Job type must be declared by the target queue.",
+        ),
+        _contract_gate(
+            "idempotency_key_present",
+            required = True,
+            passed = bool(idempotency_key),
+            reason = "Every worker job requires a stable idempotency key.",
+        ),
+        _contract_gate(
+            "audit_required",
+            required = True,
+            passed = bool(spec.get("requiresAudit")),
+            reason = "Long-running jobs must be auditable before enqueue.",
+        ),
+        _contract_gate(
+            "rate_limit_required",
+            required = True,
+            passed = bool(spec.get("requiresRateLimit")),
+            reason = "Queue handoff must force a later rate-limit check.",
+        ),
+        _contract_gate(
+            "human_confirmation",
+            required = requires_confirmation,
+            passed = (not requires_confirmation) or bool(str(confirmation_id or "").strip()),
+            reason = "Human confirmation is required for guarded long-running jobs.",
+        ),
+        _contract_gate(
+            "payload_sanitized",
+            required = True,
+            passed = raw_payload_absent,
+            reason = "Raw documents, datasets and prompt payloads must not be embedded in queue contracts.",
+        ),
+        _contract_gate(
+            "secret_values_absent",
+            required = True,
+            passed = secret_values_absent,
+            reason = "Secret values must be resolved later by the worker, never placed in the contract.",
+        ),
+    ]
+    blocked_gates = [gate["id"] for gate in gates if gate["required"] and not gate["passed"]]
+    blocked_when = sorted(set(blocked_gates + ["worker_executor_required"]))
+    ready_for_queue_review = not blocked_gates
+    return {
+        "jobId": job_id,
+        "jobType": job_type,
+        "queueId": queue.get("id"),
+        "status": "ready_for_queue_review" if ready_for_queue_review else "blocked_missing_gate",
+        "readyForQueueReview": ready_for_queue_review,
+        "readyForJobEnqueue": False,
+        "willEnqueue": False,
+        "willStartWorker": False,
+        "idempotencyKey": idempotency_key,
+        "confirmationId": confirmation_id,
+        "gates": gates,
+        "blockedWhen": blocked_when,
+        "retryPolicy": {
+            "maxAttempts": 3,
+            "backoff": "exponential_jitter",
+            "retryableFailures": ["transient_network", "temporary_resource_pressure", "provider_rate_limit"],
+            "nonRetryableFailures": ["permission_denied", "human_confirmation_missing", "invalid_payload"],
+        },
+        "deadLetterPolicy": {
+            "enabled": True,
+            "queueId": f"{queue.get('id')}_dead_letter",
+            "storeSanitizedPayloadOnly": True,
+            "requiresAudit": True,
+        },
+        "payloadBoundary": {
+            "rawPayloadIncluded": False,
+            "secretValuesIncluded": False,
+            "payloadSummaryOnly": True,
+        },
+    }
+
+
+def build_worker_enqueue_contract(
+    *,
+    job_spec_plan: dict[str, Any],
+    confirmation_id: str | None = None,
+    confirmation_ids: dict[str, str] | None = None,
+    request_id: str | None = None,
+) -> dict[str, Any]:
+    job_specs = [item for item in _as_list(job_spec_plan.get("jobSpecs")) if isinstance(item, dict)]
+    idempotency_keys = [
+        str(spec.get("idempotencyKey") or "")
+        for spec in job_specs
+        if str(spec.get("idempotencyKey") or "").strip()
+    ]
+    contract_id = f"worker_enqueue_{_stable_key(request_id, *idempotency_keys)}"
+    job_contracts = [
+        _job_enqueue_contract(
+            spec = spec,
+            confirmation_ids = confirmation_ids,
+            default_confirmation_id = confirmation_id,
+        )
+        for spec in job_specs
+    ]
+    ready_for_queue_review = bool(job_contracts) and all(
+        bool(contract.get("readyForQueueReview")) for contract in job_contracts
+    )
+    blocked_when = sorted(
+        {
+            str(item)
+            for contract in job_contracts
+            for item in _as_list(contract.get("blockedWhen"))
+            if str(item or "").strip()
+        }
+        | (set() if job_contracts else {"no_job_specs"})
+        | {"worker_executor_required"}
+    )
+    return {
+        "enqueueContractVersion": COGNIX_WORKER_ENQUEUE_CONTRACT_VERSION,
+        "workerQueueVersion": job_spec_plan.get("workerQueueVersion") or COGNIX_WORKER_QUEUE_VERSION,
+        "jobSpecVersion": job_spec_plan.get("jobSpecVersion") or COGNIX_WORKER_JOB_SPEC_VERSION,
+        "mode": "enqueue_contract_dry_run",
+        "contractId": contract_id,
+        "requestId": request_id,
+        "status": "ready_for_queue_review" if ready_for_queue_review else "blocked_missing_gate",
+        "readyForQueueReview": ready_for_queue_review,
+        "readyForJobEnqueue": False,
+        "automaticEnqueueAllowed": False,
+        "frontendDirectQueueMutationAllowed": False,
+        "jobContracts": job_contracts,
+        "blockedWhen": blocked_when,
+        "summary": {
+            "jobCount": len(job_contracts),
+            "readyForQueueReviewCount": sum(1 for item in job_contracts if item.get("readyForQueueReview")),
+            "idempotencyKeys": idempotency_keys,
+            "queueIds": sorted({str(item.get("queueId")) for item in job_contracts if item.get("queueId")}),
+            "readyForJobEnqueue": False,
+        },
+        "policies": {
+            "idempotencyKeyRequired": True,
+            "deadLetterQueueRequired": True,
+            "retryBudgetRequired": True,
+            "executorMustRecheckPermissions": True,
+            "executorMustRecheckRateLimit": True,
+            "humanConfirmationRequiredBeforeEnqueue": True,
+            "rawPayloadStorageAllowed": False,
+            "secretValuesAllowed": False,
+            "maxConcurrentLocalJobs": 1,
+        },
+        "sideEffects": {
+            "jobEnqueue": False,
+            "workerStart": False,
+            "jobPersist": False,
+            "modelDownload": False,
+            "modelLoad": False,
+            "ragIndexing": False,
+            "embeddingGeneration": False,
             "cloudTrainingJob": False,
             "fineTuningJob": False,
             "benchmarkRun": False,

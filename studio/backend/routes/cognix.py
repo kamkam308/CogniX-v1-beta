@@ -1159,6 +1159,20 @@ class WorkerJobSpecPlanRequest(BaseModel):
     target_id: str | None = Field(None, alias = "targetId", max_length = 120)
 
 
+class WorkerEnqueueContractRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    project_type: str | None = Field(None, max_length = 80)
+    project_id: str | None = Field(None, max_length = 160)
+    sources: list[dict[str, Any]] | None = None
+    dataset: dict[str, Any] | None = None
+    target_id: str | None = Field(None, alias = "targetId", max_length = 120)
+    confirmation_id: str | None = Field(None, alias = "confirmationId", max_length = 180)
+    confirmation_ids: dict[str, str] | None = Field(None, alias = "confirmationIds")
+    request_id: str | None = Field(None, alias = "requestId", max_length = 180)
+
+
 class DeploymentPlanRequest(BaseModel):
     model_config = ConfigDict(populate_by_name = True)
 
@@ -4280,6 +4294,111 @@ async def worker_job_spec_plan(
         "auditLogId": audit.get("id"),
         "sideEffects": spec_plan.get("sideEffects", {}),
         "plannerVersion": cognix_worker_queue.COGNIX_WORKER_QUEUE_VERSION,
+    }
+
+
+@router.post("/workers/enqueue-contract")
+async def worker_enqueue_contract(
+    payload: WorkerEnqueueContractRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    runtime = _current_model_cache_runtime()
+    latest_benchmark = cognix_db.get_latest_benchmark_run(current_subject)
+    user_profile = auth_storage.get_user_profile(current_subject) or {}
+    user_plan = _effective_training_plan(current_subject, user_profile)
+    plan = cognix_orchestrator.build_execution_plan(
+        payload.objective,
+        current_subject = current_subject,
+        project_type = payload.project_type,
+        project_id = payload.project_id,
+        runtime_snapshot = runtime,
+        latest_benchmark_run = latest_benchmark,
+        rag_sources = payload.sources or [],
+        rag_available = _rag_available(),
+        fine_tuning_dataset = payload.dataset,
+        user_plan = user_plan,
+    )
+    is_admin = auth_storage.is_admin(current_subject)
+    has_developer_mode = cognix_db.user_has_permission(
+        current_subject,
+        cognix_db.DEVELOPER_MODE_PERMISSION,
+    )
+    rag_indexing_plan: dict[str, Any] = {}
+    if payload.sources:
+        rag_indexing_plan = cognix_rag_planner.build_rag_indexing_plan(
+            username = current_subject,
+            project_id = payload.project_id,
+            sources = payload.sources or [],
+            objective = payload.objective,
+            rag_available = _rag_available(),
+            is_admin = is_admin,
+            has_developer_mode = has_developer_mode,
+            granted_permissions = _granted_permission_keys(current_subject),
+        )
+    cloud_handoff_plan: dict[str, Any] = {}
+    if payload.dataset or plan.get("fineTuningPlan", {}).get("recommendedPath") == "guided_fine_tuning":
+        cloud_handoff_plan = cognix_fine_tuning_planner.build_cloud_training_handoff_plan(
+            username = current_subject,
+            objective = payload.objective,
+            project_id = payload.project_id,
+            target_id = payload.target_id,
+            fine_tuning_plan = plan["fineTuningPlan"],
+            dataset = payload.dataset,
+            user_plan = user_plan,
+        )
+    spec_plan = cognix_worker_queue.build_worker_job_spec_plan(
+        objective = payload.objective,
+        project_id = payload.project_id,
+        worker_queue_plan = plan["workerQueuePlan"],
+        rag_indexing_plan = rag_indexing_plan,
+        cloud_handoff_plan = cloud_handoff_plan,
+        preload_plan = plan["preloadPlan"],
+    )
+    enqueue_contract = cognix_worker_queue.build_worker_enqueue_contract(
+        job_spec_plan = spec_plan,
+        confirmation_id = payload.confirmation_id,
+        confirmation_ids = payload.confirmation_ids,
+        request_id = payload.request_id,
+    )
+    audit_side_effects = {
+        **enqueue_contract.get("sideEffects", {}),
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "worker_enqueue_contract_built",
+        resource_type = "cognix_worker_enqueue_contract",
+        resource_id = str(enqueue_contract.get("contractId") or payload.project_id or "worker_enqueue_contract"),
+        severity = "notice" if enqueue_contract.get("readyForQueueReview") else "warning",
+        metadata = {
+            "workerQueueVersion": enqueue_contract.get("workerQueueVersion"),
+            "jobSpecVersion": enqueue_contract.get("jobSpecVersion"),
+            "enqueueContractVersion": enqueue_contract.get("enqueueContractVersion"),
+            "contractId": enqueue_contract.get("contractId"),
+            "status": enqueue_contract.get("status"),
+            "readyForQueueReview": enqueue_contract.get("readyForQueueReview"),
+            "readyForJobEnqueue": enqueue_contract.get("readyForJobEnqueue"),
+            "jobCount": enqueue_contract.get("summary", {}).get("jobCount"),
+            "queueIds": enqueue_contract.get("summary", {}).get("queueIds", []),
+            "blockedWhen": enqueue_contract.get("blockedWhen", []),
+            "sideEffects": audit_side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "runtimeError": runtime.get("error"),
+        "classification": plan["classification"],
+        "taskStrategy": plan["taskStrategy"],
+        "workerQueuePlan": plan["workerQueuePlan"],
+        "ragIndexingPlan": rag_indexing_plan,
+        "cloudHandoffPlan": cloud_handoff_plan,
+        "workerJobSpecPlan": spec_plan,
+        "workerEnqueueContract": enqueue_contract,
+        "executionPolicy": plan["executionPolicy"],
+        "auditLogId": audit.get("id"),
+        "sideEffects": audit_side_effects,
+        "plannerVersion": cognix_worker_queue.COGNIX_WORKER_ENQUEUE_CONTRACT_VERSION,
     }
 
 

@@ -6269,6 +6269,74 @@ def test_worker_job_spec_plan_materializes_cloud_and_rag_jobs_without_enqueueing
     assert all(spec["idempotencyKey"].startswith("cognix:project-ai:") for spec in spec_plan["jobSpecs"])
 
 
+def test_worker_enqueue_contract_adds_retry_dead_letter_and_idempotency_without_enqueueing():
+    queue_plan = cognix_worker_queue.build_worker_queue_plan(
+        objective = "Prepare RAG indexing and cloud training",
+        project_id = "project-ai",
+        task_strategy = {"path": "rag_first"},
+        rag_plan = {
+            "recommendedPath": "rag_first",
+            "readyForRetrieval": False,
+        },
+        fine_tuning_plan = {
+            "recommendedPath": "guided_fine_tuning",
+            "method": {"type": "cloud_qlora"},
+            "resourceTargetPlan": {"cloudTrainingAllowed": True},
+            "approval": {"readyToRequest": True},
+        },
+        preload_plan = {},
+        codex_pipeline_plan = {},
+        optimization_plan = {},
+        latest_benchmark_run = {"id": "bench-ok", "benchmark": {}},
+    )
+    spec_plan = cognix_worker_queue.build_worker_job_spec_plan(
+        objective = "Prepare RAG indexing and cloud training",
+        project_id = "project-ai",
+        worker_queue_plan = queue_plan,
+        rag_indexing_plan = {
+            "status": "ready",
+            "readyToIndexCount": 1,
+            "summary": {"sourceCount": 1, "estimatedChunkCount": 24},
+        },
+        cloud_handoff_plan = {
+            "status": "ready_for_export",
+            "readyToExport": True,
+            "target": {"id": "kaggle", "exportFormat": "kaggle_kernel_plan"},
+            "artifactManifest": [{"path": "CogniX_training_notebook.ipynb"}],
+        },
+        preload_plan = {},
+    )
+
+    contract = cognix_worker_queue.build_worker_enqueue_contract(
+        job_spec_plan = spec_plan,
+        confirmation_id = "conf_worker_123",
+        request_id = "req_worker_123",
+    )
+
+    assert contract["enqueueContractVersion"] == "cognix_worker_enqueue_contract_v1"
+    assert contract["status"] == "ready_for_queue_review"
+    assert contract["readyForQueueReview"] is True
+    assert contract["readyForJobEnqueue"] is False
+    assert contract["policies"]["idempotencyKeyRequired"] is True
+    assert contract["policies"]["deadLetterQueueRequired"] is True
+    assert contract["policies"]["retryBudgetRequired"] is True
+    assert contract["sideEffects"]["jobEnqueue"] is False
+    assert contract["sideEffects"]["workerStart"] is False
+    assert contract["sideEffects"]["cloudTrainingJob"] is False
+
+    job_contracts = {item["jobType"]: item for item in contract["jobContracts"]}
+    assert {"rag_indexing", "cloud_training_job"}.issubset(job_contracts)
+    cloud = job_contracts["cloud_training_job"]
+    assert cloud["readyForQueueReview"] is True
+    assert cloud["readyForJobEnqueue"] is False
+    assert cloud["retryPolicy"]["maxAttempts"] == 3
+    assert cloud["deadLetterPolicy"]["enabled"] is True
+    assert cloud["payloadBoundary"]["rawPayloadIncluded"] is False
+    assert cloud["payloadBoundary"]["secretValuesIncluded"] is False
+    assert all(gate["passed"] for gate in cloud["gates"])
+    assert all(item.startswith("cognix:project-ai:") for item in contract["summary"]["idempotencyKeys"])
+
+
 def test_worker_queue_endpoint_logs_audited_dry_run(monkeypatch):
     seed_accounts()
     monkeypatch.setattr(
@@ -6383,6 +6451,70 @@ def test_worker_job_spec_endpoint_builds_cloud_specs_without_enqueueing(monkeypa
     assert log["action"] == "worker_job_spec_plan_built"
     assert "cloud_training_job" in log["metadata"]["jobTypes"]
     assert log["metadata"]["sideEffects"]["jobEnqueue"] is False
+
+
+def test_worker_enqueue_contract_endpoint_logs_retry_policy_without_enqueueing(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+
+    body = run_async(
+        cognix_routes.worker_enqueue_contract(
+            cognix_routes.WorkerEnqueueContractRequest(
+                objective = "Je veux fine-tuning LoRA pour specialiser CogniX sur mon style",
+                project_type = "education",
+                project_id = "project-training",
+                target_id = "kaggle",
+                confirmation_id = "conf_cloud_training",
+                request_id = "req_cloud_training",
+                dataset = {
+                    "format": "jsonl",
+                    "sampleCount": 1200,
+                    "estimatedTokens": 500000,
+                    "duplicateRatio": 0.01,
+                    "invalidRows": 0,
+                    "averageResponseTokens": 42,
+                    "license": "mit",
+                    "containsSensitiveData": False,
+                },
+            ),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+
+    contract = body["workerEnqueueContract"]
+    job_contracts = {item["jobType"]: item for item in contract["jobContracts"]}
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_worker_enqueue_contract_v1"
+    assert contract["enqueueContractVersion"] == "cognix_worker_enqueue_contract_v1"
+    assert contract["readyForQueueReview"] is True
+    assert contract["readyForJobEnqueue"] is False
+    assert "cloud_training_job" in job_contracts
+    assert job_contracts["cloud_training_job"]["retryPolicy"]["backoff"] == "exponential_jitter"
+    assert job_contracts["cloud_training_job"]["deadLetterPolicy"]["storeSanitizedPayloadOnly"] is True
+    assert job_contracts["cloud_training_job"]["payloadBoundary"]["secretValuesIncluded"] is False
+    assert contract["sideEffects"]["jobEnqueue"] is False
+    assert body["sideEffects"]["auditWrite"] is True
+    assert body["sideEffects"]["cloudTrainingJob"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "worker_enqueue_contract_built"
+    assert log["resourceType"] == "cognix_worker_enqueue_contract"
+    assert log["metadata"]["enqueueContractVersion"] == "cognix_worker_enqueue_contract_v1"
+    assert log["metadata"]["readyForJobEnqueue"] is False
+    assert log["metadata"]["sideEffects"]["jobEnqueue"] is False
+    assert "secret_value" not in log["metadataJson"].lower()
+    assert "raw_payload" not in log["metadataJson"].lower()
 
 
 def test_memory_manager_plans_central_layers_without_writes():
@@ -7397,11 +7529,15 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/gpts/plan" in modules["cognix-gpts"]["routes"]
     assert "/api/cognix/gpts/{gpt_id}/runtime-plan" in modules["cognix-gpts"]["routes"]
     assert "worker_job_specs" in modules["cognix-worker-queue"]["capabilities"]
+    assert "worker_enqueue_contract" in modules["cognix-worker-queue"]["capabilities"]
+    assert "worker_retry_policy" in modules["cognix-worker-queue"]["capabilities"]
+    assert "worker_dead_letter_policy" in modules["cognix-worker-queue"]["capabilities"]
     assert "cloud_training_job_specs" in modules["cognix-worker-queue"]["capabilities"]
     assert "batching_experiment_job_specs" in modules["cognix-worker-queue"]["capabilities"]
     assert "enterprise_throughput_queue" in modules["cognix-worker-queue"]["capabilities"]
     assert "/api/cognix/workers/registry" in modules["cognix-worker-queue"]["routes"]
     assert "/api/cognix/workers/job-spec-plan" in modules["cognix-worker-queue"]["routes"]
+    assert "/api/cognix/workers/enqueue-contract" in modules["cognix-worker-queue"]["routes"]
     assert "adaptive_quantization" in modules["cognix-optimization-engine"]["capabilities"]
     assert "quantization_advisor" in modules["cognix-optimization-engine"]["capabilities"]
     assert "model_variant_registry" in modules["cognix-optimization-engine"]["capabilities"]
