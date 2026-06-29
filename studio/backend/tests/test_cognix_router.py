@@ -5572,6 +5572,66 @@ def test_context_pack_endpoint_combines_user_memory_and_project_instructions():
     assert body["sideEffects"]["networkModelCall"] is False
 
 
+def test_context_pack_endpoint_injects_project_compressed_context_without_audit_leak():
+    seed_accounts()
+    now_ms = int(time.time() * 1000)
+    studio_db_storage.upsert_chat_project(
+        {
+            "id": "project-context",
+            "name": "Projet Context",
+            "instructions": "Toujours garder les decisions de contexte.",
+            "archived": False,
+            "createdAt": now_ms,
+            "updatedAt": now_ms,
+        },
+        owner_username = "alice",
+    )
+    global_plan = cognix_prompt_compression.build_prompt_compression_plan(
+        username = "alice",
+        context = "Global summary should not override the project summary.",
+        objective = "context",
+        target_tokens = 80,
+    )
+    cognix_db.create_compressed_context("alice", plan = global_plan)
+    project_plan = cognix_prompt_compression.build_prompt_compression_plan(
+        username = "alice",
+        project_id = "project-context",
+        context = "Decision importante: utiliser le resume compresse du projet pour reduire les tokens.",
+        objective = "resume compresse projet",
+        target_tokens = 80,
+    )
+    stored_project_context = cognix_db.create_compressed_context(
+        "alice",
+        plan = project_plan,
+        project_id = "project-context",
+    )
+
+    body = run_async(
+        cognix_routes.build_context_pack(
+            cognix_routes.ContextPackRequest(
+                objective = "Continue le projet avec le bon contexte",
+                project_id = "project-context",
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    assert body["compressedContext"]["id"] == stored_project_context["id"]
+    assert "conversation_summary" in body["includedSectionIds"]
+    assert "conversation_summary" in body["contextPlan"]["includedChannelIds"]
+    assert body["contextPlan"]["tokenBudget"]["rawHistoryAllowed"] is False
+    assert "resume compresse du projet" in body["systemInstruction"]
+    assert "Global summary" not in body["systemInstruction"]
+    assert body["sideEffects"]["networkModelCall"] is False
+    assert body["sideEffects"]["contextMutation"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = next(item for item in admin_read["logs"] if item["id"] == body["auditLogId"])
+    assert log["metadata"]["compressedContextId"] == stored_project_context["id"]
+    assert log["metadata"]["hasConversationSummary"] is True
+    assert "resume compresse du projet" not in log["metadataJson"]
+
+
 def test_context_pack_writes_sanitized_audit_log():
     seed_accounts()
     cognix_db.update_context_memory(
@@ -5769,6 +5829,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "prompt_compression" in modules["cognix-prompt-compression"]["capabilities"]
     assert "importance_ranking" in modules["cognix-prompt-compression"]["capabilities"]
     assert "compression_evaluation" in modules["cognix-prompt-compression"]["capabilities"]
+    assert "compressed_context_injection" in modules["cognix-prompt-compression"]["capabilities"]
     assert "/api/cognix/prompt-compression/plan" in modules["cognix-prompt-compression"]["routes"]
     assert "/api/cognix/prompt-compression/contexts" in modules["cognix-prompt-compression"]["routes"]
     assert modules["cognix-context-heatmap"]["dependencyState"]["ready"] is True
@@ -5840,6 +5901,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/context/graph/snapshots" in modules["cognix-context-graph"]["routes"]
     assert modules["cognix-memory-manager"]["activationState"] == "ready"
     assert "central_memory_layers" in modules["cognix-memory-manager"]["capabilities"]
+    assert "compressed_context_injection" in modules["cognix-memory-manager"]["capabilities"]
     assert "/api/cognix/memory/plan" in modules["cognix-memory-manager"]["routes"]
     assert modules["cognix-long-term-skill-memory"]["dependencyState"]["ready"] is True
     assert "skill_memory_candidates" in modules["cognix-long-term-skill-memory"]["capabilities"]

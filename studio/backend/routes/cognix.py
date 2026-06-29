@@ -8902,12 +8902,17 @@ async def build_context_pack(
             warnings.append("Project context unavailable for this user.")
         else:
             project_dna = cognix_db.get_project_dna(current_subject, payload.project_id)
+    compressed_context = cognix_db.get_latest_compressed_context(
+        current_subject,
+        project_id = payload.project_id if project is not None else None,
+    )
 
     packet = cognix_context_manager.build_context_packet(
         current_subject = current_subject,
         user_memory = cognix_db.get_context_memory(current_subject),
         project = project,
         project_dna = project_dna,
+        compressed_context = compressed_context,
         project_id = payload.project_id,
         objective = payload.objective,
         warnings = warnings,
@@ -8927,6 +8932,8 @@ async def build_context_pack(
             "rawHistoryAllowed": packet.get("contextPlan", {}).get("tokenBudget", {}).get("rawHistoryAllowed"),
             "sectionIds": packet.get("includedSectionIds", []),
             "channelIds": packet.get("contextPlan", {}).get("includedChannelIds", []),
+            "compressedContextId": (packet.get("compressedContext") or {}).get("id"),
+            "hasConversationSummary": "conversation_summary" in packet.get("includedSectionIds", []),
             "warnings": warnings,
             "sideEffects": packet.get("sideEffects", {}),
         },

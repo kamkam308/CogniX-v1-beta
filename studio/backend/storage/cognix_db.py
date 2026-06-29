@@ -8331,6 +8331,58 @@ def list_compressed_contexts(
         conn.close()
 
 
+def get_latest_compressed_context(
+    username: str,
+    *,
+    project_id: str | None = None,
+    include_global_fallback: bool = True,
+) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        if project_id:
+            row = conn.execute(
+                """
+                SELECT * FROM cognix_compressed_contexts
+                WHERE username = ? AND project_id = ? AND status = 'active'
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT 1
+                """,
+                (username, project_id),
+            ).fetchone()
+            if row is not None:
+                return _hydrate_compressed_context(row_to_dict(row) or {})
+            if not include_global_fallback:
+                return None
+
+        if project_id:
+            row = conn.execute(
+                """
+                SELECT * FROM cognix_compressed_contexts
+                WHERE username = ?
+                    AND status = 'active'
+                    AND (project_id IS NULL OR project_id = '')
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT 1
+                """,
+                (username,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
+                SELECT * FROM cognix_compressed_contexts
+                WHERE username = ? AND status = 'active'
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT 1
+                """,
+                (username,),
+            ).fetchone()
+        if row is None:
+            return None
+        return _hydrate_compressed_context(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
 def get_compressed_context(username: str, context_id: str) -> dict[str, Any] | None:
     conn = get_connection()
     try:

@@ -371,6 +371,8 @@ def build_context_packet(
     user_memory: dict[str, Any] | None = None,
     project: dict[str, Any] | None = None,
     project_dna: dict[str, Any] | None = None,
+    compressed_context: dict[str, Any] | None = None,
+    conversation_summary: str | None = None,
     project_id: str | None = None,
     objective: str | None = None,
     warnings: list[str] | None = None,
@@ -379,6 +381,12 @@ def build_context_packet(
     project_dna_content = _render_project_dna(project_dna)
     project_instructions = _normalize_text((project or {}).get("instructions"))
     project_name = _normalize_text((project or {}).get("name"))
+    compressed_context = _as_dict(compressed_context)
+    summary_content = _normalize_text(
+        conversation_summary
+        or compressed_context.get("compressedContext")
+        or compressed_context.get("compressed_context")
+    )
     objective_excerpt = _clip_text(_normalize_text(objective)[:500], 500)[0]
 
     sections: list[dict[str, Any]] = []
@@ -413,16 +421,39 @@ def build_context_packet(
                 priority = 15,
             )
         )
+    if summary_content:
+        sections.append(
+            _section(
+                section_id = "conversation_summary",
+                label = "Conversation summary",
+                source = "cognix_compressed_context",
+                content = summary_content,
+                priority = 30,
+            )
+        )
 
     context_plan = build_context_plan(
         current_subject = current_subject,
         user_memory = user_memory,
         project = project,
         project_dna = project_dna,
+        conversation_summary = summary_content,
         project_id = project_id,
         objective = objective,
         warnings = warnings,
     )
+
+    compressed_context_meta: dict[str, Any] | None = None
+    if compressed_context:
+        compressed_context_meta = {
+            "id": compressed_context.get("id"),
+            "projectId": compressed_context.get("project_id") or compressed_context.get("projectId"),
+            "originalTokenCount": compressed_context.get("original_token_count")
+            or compressed_context.get("originalTokenCount"),
+            "compressedTokenCount": compressed_context.get("compressed_token_count")
+            or compressed_context.get("compressedTokenCount"),
+            "reductionRatio": compressed_context.get("reduction_ratio") or compressed_context.get("reductionRatio"),
+        }
 
     return {
         "username": current_subject,
@@ -430,6 +461,7 @@ def build_context_packet(
         "mode": "minimal",
         "projectId": project_id,
         "objectiveExcerpt": objective_excerpt,
+        "compressedContext": compressed_context_meta,
         "sections": sections,
         "systemInstruction": _render_instruction(sections),
         "contextPlan": context_plan,
