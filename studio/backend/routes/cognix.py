@@ -1121,6 +1121,19 @@ class RuntimePlanRequest(BaseModel):
     project_id: str | None = Field(None, max_length = 160)
 
 
+class RuntimeFallbackPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    project_type: str | None = Field(None, alias = "projectType", max_length = 80)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    runtime_adapter: dict[str, Any] | None = Field(None, alias = "runtimeAdapter")
+    required_capabilities: list[str] | None = Field(None, alias = "requiredCapabilities")
+    requested_optimization_ids: list[str] | None = Field(None, alias = "requestedOptimizationIds")
+    allow_cloud_fallback: bool = Field(False, alias = "allowCloudFallback")
+    data_sensitivity: str | None = Field(None, alias = "dataSensitivity", max_length = 80)
+
+
 class CodexPipelinePlanRequest(BaseModel):
     objective: str = Field(..., min_length = 1, max_length = 4000)
     project_type: str | None = Field(None, max_length = 80)
@@ -3979,6 +3992,74 @@ async def runtime_plan(
         "auditLogId": audit.get("id"),
         "sideEffects": adapter_plan.get("sideEffects", {}),
         "plannerVersion": cognix_runtime_adapter.COGNIX_RUNTIME_ADAPTER_VERSION,
+    }
+
+
+@router.post("/runtime/fallback-plan")
+async def runtime_fallback_plan(
+    payload: RuntimeFallbackPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    runtime = _current_model_cache_runtime()
+    hardware = cognix_hardware.get_hardware_profile()
+    latest_benchmark = cognix_db.get_latest_benchmark_run(current_subject)
+    plan: dict[str, Any] = {}
+    if payload.runtime_adapter:
+        adapter_plan = payload.runtime_adapter
+    else:
+        plan = cognix_orchestrator.build_execution_plan(
+            payload.objective,
+            current_subject = current_subject,
+            project_type = payload.project_type,
+            project_id = payload.project_id,
+            runtime_snapshot = runtime,
+            latest_benchmark_run = latest_benchmark,
+            rag_available = _rag_available(),
+        )
+        adapter_plan = plan["runtimeAdapterPlan"]
+    fallback_plan = cognix_runtime_adapter.build_runtime_fallback_plan(
+        runtime_adapter_plan = adapter_plan,
+        hardware = hardware,
+        task_strategy = plan.get("taskStrategy"),
+        rag_plan = plan.get("ragPlan"),
+        fine_tuning_plan = plan.get("fineTuningPlan"),
+        optimization_plan = plan.get("optimizationPlan"),
+        required_capabilities = payload.required_capabilities,
+        requested_optimization_ids = payload.requested_optimization_ids,
+        allow_cloud_fallback = payload.allow_cloud_fallback,
+        data_sensitivity = payload.data_sensitivity,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "runtime_fallback_plan_built",
+        resource_type = "cognix_runtime_fallback_plan",
+        resource_id = str(fallback_plan.get("primaryAdapterId") or "none"),
+        severity = "warning" if fallback_plan.get("warnings") else "notice",
+        metadata = {
+            "runtimeFallbackContractVersion": fallback_plan.get("contractVersion"),
+            "runtimeAdapterVersion": fallback_plan.get("runtimeAdapterVersion"),
+            "primaryAdapterId": fallback_plan.get("primaryAdapterId"),
+            "primaryRuntimeType": fallback_plan.get("primaryRuntimeType"),
+            "fallbackAdapterIds": [
+                item.get("adapterId") for item in fallback_plan.get("fallbackChain", []) if isinstance(item, dict)
+            ],
+            "requiredCapabilities": fallback_plan.get("requiredCapabilities", []),
+            "requestedOptimizationIds": fallback_plan.get("requestedOptimizationIds", []),
+            "allowCloudFallback": payload.allow_cloud_fallback,
+            "dataSensitivity": str(payload.data_sensitivity or "internal").strip().lower(),
+            "sideEffects": fallback_plan.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "runtimeError": runtime.get("error"),
+        "runtimeFallbackPlan": fallback_plan,
+        "runtimeAdapterPlan": adapter_plan,
+        "executionPolicy": plan.get("executionPolicy"),
+        "auditLogId": audit.get("id"),
+        "sideEffects": fallback_plan.get("sideEffects", {}),
+        "plannerVersion": cognix_runtime_adapter.COGNIX_RUNTIME_FALLBACK_CONTRACT_VERSION,
     }
 
 

@@ -16,6 +16,7 @@ from typing import Any
 
 COGNIX_RUNTIME_ADAPTER_VERSION = "cognix_runtime_adapter_v1"
 COGNIX_RUNTIME_OPTIMIZATION_CONTRACT_VERSION = "cognix_runtime_optimization_contract_v1"
+COGNIX_RUNTIME_FALLBACK_CONTRACT_VERSION = "cognix_runtime_fallback_contract_v1"
 
 
 OPTIMIZATION_CAPABILITY_MAP: dict[str, dict[str, Any]] = {
@@ -101,6 +102,31 @@ RUNTIME_ADAPTERS: list[dict[str, Any]] = [
         "riskLevel": "medium",
     },
     {
+        "id": "tensorrt-llm",
+        "label": "TensorRT-LLM",
+        "runtimeType": "tensorrt-llm",
+        "deploymentTarget": "server_gpu",
+        "modelFormats": ["engine_plan", "safetensors", "hf_transformers"],
+        "strengths": [
+            "nvidia_gpu_latency",
+            "paged_attention",
+            "multi_user_serving",
+            "quantized_engine_runtime",
+        ],
+        "supports": {
+            "streaming": True,
+            "toolCalling": True,
+            "ragContextInjection": True,
+            "promptCaching": True,
+            "kvCacheTuning": True,
+            "speculativeDecoding": True,
+            "multiUserBatching": True,
+            "fineTuning": False,
+        },
+        "requires": ["nvidia_gpu", "engine_build", "benchmark_before_activation"],
+        "riskLevel": "high",
+    },
+    {
         "id": "transformers",
         "label": "Transformers local",
         "runtimeType": "transformers",
@@ -152,6 +178,24 @@ def _as_list(value: Any) -> list[Any]:
 def _capability_score(adapter: dict[str, Any], required: set[str]) -> int:
     supports = _as_dict(adapter.get("supports"))
     return sum(1 for capability in required if bool(supports.get(capability)))
+
+
+def _unique_strings(values: Any) -> list[str]:
+    items: list[str] = []
+    for value in _as_list(values):
+        item = str(value or "").strip()
+        if item and item not in items:
+            items.append(item)
+    return items
+
+
+def _optimization_capabilities(optimization_ids: list[str]) -> set[str]:
+    required: set[str] = set()
+    for optimization_id in optimization_ids:
+        definition = OPTIMIZATION_CAPABILITY_MAP.get(optimization_id)
+        if definition:
+            required.add(str(definition["capability"]))
+    return required
 
 
 def _required_capabilities(
@@ -293,6 +337,9 @@ def build_runtime_adapter_registry() -> dict[str, Any]:
             "runtimeFlagsRequireCompatibilityCheck": True,
             "optimizationCompatibilityContractRequired": True,
             "optimizationContractVersion": COGNIX_RUNTIME_OPTIMIZATION_CONTRACT_VERSION,
+            "fallbackChainContractRequired": True,
+            "fallbackContractVersion": COGNIX_RUNTIME_FALLBACK_CONTRACT_VERSION,
+            "automaticRuntimeFailoverRequiresApproval": True,
             "networkReachabilityCheckedElsewhere": True,
         },
         "sideEffects": {
@@ -300,6 +347,246 @@ def build_runtime_adapter_registry() -> dict[str, Any]:
             "generation": False,
             "networkModelCall": False,
             "runtimeMutation": False,
+        },
+    }
+
+
+def _fallback_entry(
+    *,
+    candidate: dict[str, Any],
+    adapter: dict[str, Any],
+    rank: int,
+    selected_adapter_id: str,
+    hardware_gpu: bool,
+    allow_cloud_fallback: bool,
+    data_sensitivity: str,
+    requested_optimization_ids: list[str],
+) -> dict[str, Any]:
+    adapter_id = str(candidate.get("adapterId") or adapter.get("id") or "")
+    deployment_target = str(candidate.get("deploymentTarget") or adapter.get("deploymentTarget") or "")
+    missing = _unique_strings(candidate.get("missingCapabilities"))
+    supports = _as_dict(adapter.get("supports"))
+    requires = _unique_strings(adapter.get("requires"))
+    hardware_compatible = not (deployment_target == "server_gpu" and not hardware_gpu)
+    cloud_allowed = deployment_target != "cloud" or allow_cloud_fallback
+    needs_sensitivity_review = deployment_target == "cloud" and data_sensitivity in {"confidential", "restricted"}
+    blocked_optimizations: list[str] = []
+    compatible_optimizations: list[str] = []
+    for optimization_id in requested_optimization_ids:
+        definition = OPTIMIZATION_CAPABILITY_MAP.get(optimization_id)
+        if not definition:
+            blocked_optimizations.append(optimization_id)
+            continue
+        if bool(supports.get(str(definition["capability"]))):
+            compatible_optimizations.append(optimization_id)
+        else:
+            blocked_optimizations.append(optimization_id)
+
+    status = "candidate_requires_benchmark"
+    reason = "Runtime compatible declarativement; benchmark, rollback et approbation restent requis."
+    if missing:
+        status = "blocked_missing_capabilities"
+        reason = "Runtime garde des capacites avancees desactivees car elles ne sont pas declarees."
+    elif not hardware_compatible:
+        status = "blocked_missing_gpu_or_server"
+        reason = "Runtime GPU serveur planifie, mais aucun profil GPU local compatible n'est disponible."
+    elif not cloud_allowed:
+        status = "blocked_cloud_fallback_disabled"
+        reason = "Fallback cloud desactive pour eviter toute sortie reseau non approuvee."
+    elif needs_sensitivity_review:
+        status = "blocked_sensitivity_review"
+        reason = "Fallback cloud possible seulement apres revue de sensibilite des donnees."
+
+    role = "primary" if adapter_id == selected_adapter_id else "fallback"
+    allowed_when = ["human_approval_recorded", "benchmark_passed", "rollback_plan_ready"]
+    if deployment_target == "server_gpu":
+        allowed_when.append("server_gpu_profile_available")
+    if deployment_target == "cloud":
+        allowed_when.extend(["cloud_fallback_enabled", "provider_contract_reviewed"])
+    if "engine_build" in requires:
+        allowed_when.append("engine_build_completed_outside_planner")
+
+    return {
+        "rank": rank,
+        "adapterId": adapter_id,
+        "label": candidate.get("label") or adapter.get("label"),
+        "runtimeType": candidate.get("runtimeType") or adapter.get("runtimeType"),
+        "deploymentTarget": deployment_target,
+        "role": role,
+        "status": status,
+        "reason": reason,
+        "riskLevel": candidate.get("riskLevel") or adapter.get("riskLevel"),
+        "score": candidate.get("score"),
+        "hardwareCompatible": hardware_compatible,
+        "cloudFallbackAllowed": cloud_allowed,
+        "sensitivityReviewRequired": needs_sensitivity_review,
+        "requires": requires,
+        "supportedCapabilities": _unique_strings(candidate.get("supportedCapabilities")),
+        "missingCapabilities": missing,
+        "compatibleOptimizationIds": compatible_optimizations,
+        "blockedOptimizationIds": blocked_optimizations,
+        "activationAllowedHere": False,
+        "runtimeMutationAllowed": False,
+        "benchmarkRequired": bool(compatible_optimizations) or adapter.get("riskLevel") in {"medium", "high"},
+        "allowedWhen": allowed_when,
+    }
+
+
+def build_runtime_fallback_plan(
+    *,
+    runtime_adapter_plan: dict[str, Any] | None = None,
+    recommendation: dict[str, Any] | None = None,
+    hardware: dict[str, Any] | None = None,
+    task_strategy: dict[str, Any] | None = None,
+    rag_plan: dict[str, Any] | None = None,
+    fine_tuning_plan: dict[str, Any] | None = None,
+    optimization_plan: dict[str, Any] | None = None,
+    required_capabilities: list[str] | None = None,
+    requested_optimization_ids: list[str] | None = None,
+    allow_cloud_fallback: bool = False,
+    data_sensitivity: str | None = None,
+) -> dict[str, Any]:
+    """Build a declarative runtime failover contract without touching runtimes."""
+
+    hardware = _as_dict(hardware)
+    optimization_plan = _as_dict(optimization_plan)
+    if runtime_adapter_plan is None:
+        runtime_adapter_plan = build_runtime_adapter_plan(
+            recommendation = _as_dict(recommendation),
+            hardware = hardware,
+            task_strategy = _as_dict(task_strategy),
+            rag_plan = _as_dict(rag_plan),
+            fine_tuning_plan = _as_dict(fine_tuning_plan),
+            optimization_plan = optimization_plan,
+        )
+    requested_optimizations = _requested_optimizations(optimization_plan)
+    for optimization_id in requested_optimization_ids or []:
+        normalized = str(optimization_id or "").strip()
+        if normalized and normalized not in requested_optimizations:
+            requested_optimizations.append(normalized)
+
+    required = set(_unique_strings(runtime_adapter_plan.get("requiredCapabilities")))
+    required.update(_unique_strings(required_capabilities))
+    required.update(_optimization_capabilities(requested_optimizations))
+
+    registry = build_runtime_adapter_registry()
+    adapter_lookup = {str(adapter.get("id")): adapter for adapter in registry["adapters"]}
+    hardware_gpu = bool(_as_dict(hardware.get("gpu")).get("available"))
+    selected_adapter_id = str(_as_dict(runtime_adapter_plan.get("selectedAdapter")).get("adapterId") or "")
+    candidates = [deepcopy(item) for item in _as_list(runtime_adapter_plan.get("candidateAdapters"))]
+    known_ids = {str(candidate.get("adapterId") or "") for candidate in candidates}
+    for adapter in registry["adapters"]:
+        adapter_id = str(adapter.get("id") or "")
+        if adapter_id in known_ids:
+            continue
+        supports = _as_dict(adapter.get("supports"))
+        missing = sorted(capability for capability in required if not bool(supports.get(capability)))
+        candidates.append(
+            {
+                "adapterId": adapter_id,
+                "label": adapter.get("label"),
+                "runtimeType": adapter.get("runtimeType"),
+                "deploymentTarget": adapter.get("deploymentTarget"),
+                "score": _capability_score(adapter, required),
+                "runtimeMatch": False,
+                "missingCapabilities": missing,
+                "supportedCapabilities": sorted(
+                    capability for capability in required if bool(supports.get(capability))
+                ),
+                "riskLevel": adapter.get("riskLevel"),
+            }
+        )
+    for candidate in candidates:
+        adapter = adapter_lookup.get(str(candidate.get("adapterId") or ""), {})
+        supports = _as_dict(adapter.get("supports"))
+        candidate["missingCapabilities"] = sorted(capability for capability in required if not bool(supports.get(capability)))
+        candidate["supportedCapabilities"] = sorted(
+            capability for capability in required if bool(supports.get(capability))
+        )
+
+    def sort_key(candidate: dict[str, Any]) -> tuple[int, int, int, int]:
+        adapter_id = str(candidate.get("adapterId") or "")
+        target = str(candidate.get("deploymentTarget") or "")
+        missing_count = len(_as_list(candidate.get("missingCapabilities")))
+        target_penalty = 1 if target == "cloud" and not allow_cloud_fallback else 0
+        hardware_penalty = 1 if target == "server_gpu" and not hardware_gpu else 0
+        primary_bonus = 1 if adapter_id == selected_adapter_id else 0
+        return (
+            primary_bonus,
+            -target_penalty - hardware_penalty,
+            -missing_count,
+            int(candidate.get("score") or 0),
+        )
+
+    candidates.sort(key = sort_key, reverse = True)
+    chain: list[dict[str, Any]] = []
+    for candidate in candidates:
+        adapter = adapter_lookup.get(str(candidate.get("adapterId") or ""), {})
+        if not adapter:
+            continue
+        chain.append(
+            _fallback_entry(
+                candidate = candidate,
+                adapter = adapter,
+                rank = len(chain) + 1,
+                selected_adapter_id = selected_adapter_id,
+                hardware_gpu = hardware_gpu,
+                allow_cloud_fallback = allow_cloud_fallback,
+                data_sensitivity = str(data_sensitivity or "internal").strip().lower(),
+                requested_optimization_ids = requested_optimizations,
+            )
+        )
+
+    warnings = list(runtime_adapter_plan.get("warnings") or [])
+    if any(item["status"].startswith("blocked_") for item in chain):
+        warnings.append("Certains fallbacks restent bloques jusqu'a validation materiel, cloud ou capacites.")
+    if not chain:
+        warnings.append("Aucun adapter runtime declaratif disponible pour construire le fallback.")
+
+    primary = chain[0] if chain else {}
+    return {
+        "contractVersion": COGNIX_RUNTIME_FALLBACK_CONTRACT_VERSION,
+        "mode": "runtime_fallback_chain_dry_run",
+        "runtimeAdapterVersion": runtime_adapter_plan.get("runtimeAdapterVersion"),
+        "primaryAdapterId": primary.get("adapterId"),
+        "primaryRuntimeType": primary.get("runtimeType"),
+        "requiredCapabilities": sorted(required),
+        "requestedOptimizationIds": requested_optimizations,
+        "fallbackChain": chain,
+        "status": "ready_for_review" if chain else "blocked_no_adapter",
+        "warnings": warnings,
+        "policies": {
+            "frontendDirectCallAllowed": False,
+            "automaticFailoverAllowed": False,
+            "runtimeMutationAllowed": False,
+            "runtimeFlagWriteAllowed": False,
+            "serverStartAllowed": False,
+            "modelLoadAllowed": False,
+            "cloudFallbackAllowedByRequest": allow_cloud_fallback,
+            "benchmarkBeforeActivationRequired": True,
+            "rollbackPlanRequired": True,
+            "humanApprovalRequired": True,
+            "tensorrtEngineBuildAllowedHere": False,
+        },
+        "evidenceRequirements": [
+            "ordered_fallback_chain_recorded",
+            "runtime_capability_check_recorded",
+            "before_after_benchmark_required",
+            "rollback_plan_required",
+            "hardware_or_cloud_target_reviewed",
+            "no_runtime_mutation_during_planning",
+        ],
+        "sideEffects": {
+            "modelLoad": False,
+            "generation": False,
+            "networkModelCall": False,
+            "runtimeMutation": False,
+            "runtimeFlagWrite": False,
+            "serverStart": False,
+            "benchmarkRun": False,
+            "engineBuild": False,
+            "jobEnqueue": False,
+            "cloudProviderCall": False,
         },
     }
 

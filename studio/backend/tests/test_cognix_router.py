@@ -2923,6 +2923,65 @@ def test_runtime_adapter_optimization_contract_allows_llama_cpp_after_benchmark_
     assert contract["sideEffects"]["benchmarkRun"] is False
 
 
+def test_runtime_adapter_registry_declares_tensorrt_llm_without_side_effects():
+    registry = cognix_runtime_adapter.build_runtime_adapter_registry()
+    adapters = {item["id"]: item for item in registry["adapters"]}
+
+    tensorrt = adapters["tensorrt-llm"]
+    assert tensorrt["label"] == "TensorRT-LLM"
+    assert tensorrt["deploymentTarget"] == "server_gpu"
+    assert "nvidia_gpu" in tensorrt["requires"]
+    assert "engine_build" in tensorrt["requires"]
+    assert tensorrt["supports"]["toolCalling"] is True
+    assert tensorrt["supports"]["speculativeDecoding"] is True
+    assert tensorrt["supports"]["multiUserBatching"] is True
+    assert registry["globalPolicies"]["fallbackChainContractRequired"] is True
+    assert registry["globalPolicies"]["fallbackContractVersion"] == "cognix_runtime_fallback_contract_v1"
+    assert registry["sideEffects"]["networkModelCall"] is False
+    assert registry["sideEffects"]["runtimeMutation"] is False
+
+
+def test_runtime_fallback_plan_builds_ordered_chain_without_runtime_mutation():
+    adapter_plan = cognix_runtime_adapter.build_runtime_adapter_plan(
+        recommendation = {"providerType": "tensorrt-llm"},
+        hardware = stub_hardware_profile(),
+        task_strategy = {"path": "tool_plan"},
+        rag_plan = {"readyForRetrieval": True},
+        fine_tuning_plan = {"recommendedPath": "no_fine_tuning_needed"},
+        optimization_plan = {"recommendedOptimizationIds": ["batching", "speculative_decoding"]},
+    )
+
+    fallback = cognix_runtime_adapter.build_runtime_fallback_plan(
+        runtime_adapter_plan = adapter_plan,
+        hardware = stub_hardware_profile(),
+        required_capabilities = ["streaming", "toolCalling", "ragContextInjection", "multiUserBatching"],
+        requested_optimization_ids = ["batching", "speculative_decoding"],
+        allow_cloud_fallback = False,
+        data_sensitivity = "confidential",
+    )
+
+    chain = fallback["fallbackChain"]
+    assert fallback["contractVersion"] == "cognix_runtime_fallback_contract_v1"
+    assert fallback["status"] == "ready_for_review"
+    assert fallback["primaryAdapterId"] == "tensorrt-llm"
+    assert chain[0]["adapterId"] == "tensorrt-llm"
+    assert chain[0]["activationAllowedHere"] is False
+    assert chain[0]["hardwareCompatible"] is False
+    assert any(item["adapterId"] == "vllm" for item in chain)
+    assert any(item["adapterId"] == "cloud-openai-compatible" for item in chain)
+    assert any(item["adapterId"] == "llama-cpp" for item in chain)
+    cloud = next(item for item in chain if item["adapterId"] == "cloud-openai-compatible")
+    assert cloud["status"].startswith("blocked_")
+    assert cloud["cloudFallbackAllowed"] is False
+    assert fallback["policies"]["automaticFailoverAllowed"] is False
+    assert fallback["policies"]["tensorrtEngineBuildAllowedHere"] is False
+    assert fallback["sideEffects"]["modelLoad"] is False
+    assert fallback["sideEffects"]["serverStart"] is False
+    assert fallback["sideEffects"]["networkModelCall"] is False
+    assert fallback["sideEffects"]["runtimeMutation"] is False
+    assert fallback["sideEffects"]["engineBuild"] is False
+
+
 def test_runtime_adapter_plan_endpoint_logs_audited_dry_run(monkeypatch):
     seed_accounts()
     monkeypatch.setattr(
@@ -2961,6 +3020,52 @@ def test_runtime_adapter_plan_endpoint_logs_audited_dry_run(monkeypatch):
     assert log["metadata"]["runtimeAdapterVersion"] == "cognix_runtime_adapter_v1"
     assert log["metadata"]["optimizationContractVersion"] == "cognix_runtime_optimization_contract_v1"
     assert log["metadata"]["sideEffects"]["runtimeMutation"] is False
+
+
+def test_runtime_fallback_plan_endpoint_logs_sanitized_dry_run(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+
+    body = run_async(
+        cognix_routes.runtime_fallback_plan(
+            cognix_routes.RuntimeFallbackPlanRequest(
+                objective = "Planifier un fallback runtime confidentiel sans fuite dans l'audit",
+                project_type = "enterprise",
+                required_capabilities = ["streaming", "ragContextInjection", "multiUserBatching"],
+                requested_optimization_ids = ["batching"],
+                allow_cloud_fallback = False,
+                data_sensitivity = "confidential",
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    fallback = body["runtimeFallbackPlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_runtime_fallback_contract_v1"
+    assert fallback["contractVersion"] == "cognix_runtime_fallback_contract_v1"
+    assert fallback["policies"]["frontendDirectCallAllowed"] is False
+    assert fallback["sideEffects"]["runtimeMutation"] is False
+    assert fallback["sideEffects"]["networkModelCall"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "runtime_fallback_plan_built"
+    assert log["resourceType"] == "cognix_runtime_fallback_plan"
+    assert log["metadata"]["runtimeFallbackContractVersion"] == "cognix_runtime_fallback_contract_v1"
+    assert log["metadata"]["sideEffects"]["serverStart"] is False
+    metadata_json = str(log["metadata"])
+    assert "Planifier un fallback runtime confidentiel" not in metadata_json
 
 
 def test_onboarding_planner_recommends_small_local_pack_without_side_effects():
@@ -7057,8 +7162,12 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "architecture_decision_contract" in modules["cognix-local-core"]["capabilities"]
     assert "orchestrator_runtime_plan" in modules["cognix-local-core"]["capabilities"]
     assert "runtime_optimization_contract" in modules["cognix-local-core"]["capabilities"]
+    assert "runtime_fallback_chain" in modules["cognix-local-core"]["capabilities"]
+    assert "runtime_failover_contract" in modules["cognix-local-core"]["capabilities"]
+    assert "tensorrt_llm_adapter" in modules["cognix-local-core"]["capabilities"]
     assert "/api/cognix/orchestrator/plan" in modules["cognix-local-core"]["routes"]
     assert "/api/cognix/runtime/plan" in modules["cognix-local-core"]["routes"]
+    assert "/api/cognix/runtime/fallback-plan" in modules["cognix-local-core"]["routes"]
     assert "/api/cognix/modules/manifests" in modules["cognix-local-core"]["routes"]
     assert "project_dna" in modules["cognix-projects"]["capabilities"]
     assert "project_dna_context_injection" in modules["cognix-projects"]["capabilities"]
