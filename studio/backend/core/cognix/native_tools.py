@@ -15,11 +15,13 @@ from typing import Any, Callable
 
 
 COGNIX_NATIVE_CALCULATOR_VERSION = "cognix_native_calculator_v1"
+COGNIX_NATIVE_PHYSICS_SOLVER_VERSION = "cognix_native_physics_solver_v1"
 
 MAX_CALCULATOR_EXPRESSION_LENGTH = 300
 MAX_CALCULATOR_AST_NODES = 80
 MAX_CALCULATOR_ABS_VALUE = 1_000_000_000_000
 MAX_CALCULATOR_EXPONENT_ABS = 12
+MAX_PHYSICS_ABS_VALUE = 1_000_000_000_000
 
 CONSTANTS = {
     "pi": math.pi,
@@ -44,6 +46,88 @@ FUNCTIONS: dict[str, Callable[..., float]] = {
 
 class CalculatorValidationError(ValueError):
     """Raised when a calculator expression is not safe or valid."""
+
+
+class PhysicsSolverValidationError(ValueError):
+    """Raised when a physics formula request is not safe or solvable."""
+
+
+PHYSICS_FORMULAS: dict[str, dict[str, Any]] = {
+    "speed": {
+        "label": "Speed",
+        "variables": ["speed", "distance", "time"],
+        "units": {"speed": "m/s", "distance": "m", "time": "s"},
+        "solve": {
+            "speed": lambda v: v["distance"] / v["time"],
+            "distance": lambda v: v["speed"] * v["time"],
+            "time": lambda v: v["distance"] / v["speed"],
+        },
+    },
+    "force": {
+        "label": "Newton second law",
+        "variables": ["force", "mass", "acceleration"],
+        "units": {"force": "N", "mass": "kg", "acceleration": "m/s^2"},
+        "solve": {
+            "force": lambda v: v["mass"] * v["acceleration"],
+            "mass": lambda v: v["force"] / v["acceleration"],
+            "acceleration": lambda v: v["force"] / v["mass"],
+        },
+    },
+    "ohm_law": {
+        "label": "Ohm law",
+        "variables": ["voltage", "current", "resistance"],
+        "units": {"voltage": "V", "current": "A", "resistance": "ohm"},
+        "solve": {
+            "voltage": lambda v: v["current"] * v["resistance"],
+            "current": lambda v: v["voltage"] / v["resistance"],
+            "resistance": lambda v: v["voltage"] / v["current"],
+        },
+    },
+    "kinetic_energy": {
+        "label": "Kinetic energy",
+        "variables": ["kinetic_energy", "mass", "velocity"],
+        "units": {"kinetic_energy": "J", "mass": "kg", "velocity": "m/s"},
+        "solve": {
+            "kinetic_energy": lambda v: 0.5 * v["mass"] * v["velocity"] ** 2,
+            "mass": lambda v: (2 * v["kinetic_energy"]) / (v["velocity"] ** 2),
+            "velocity": lambda v: math.sqrt((2 * v["kinetic_energy"]) / v["mass"]),
+        },
+    },
+    "momentum": {
+        "label": "Momentum",
+        "variables": ["momentum", "mass", "velocity"],
+        "units": {"momentum": "kg*m/s", "mass": "kg", "velocity": "m/s"},
+        "solve": {
+            "momentum": lambda v: v["mass"] * v["velocity"],
+            "mass": lambda v: v["momentum"] / v["velocity"],
+            "velocity": lambda v: v["momentum"] / v["mass"],
+        },
+    },
+    "density": {
+        "label": "Density",
+        "variables": ["density", "mass", "volume"],
+        "units": {"density": "kg/m^3", "mass": "kg", "volume": "m^3"},
+        "solve": {
+            "density": lambda v: v["mass"] / v["volume"],
+            "mass": lambda v: v["density"] * v["volume"],
+            "volume": lambda v: v["mass"] / v["density"],
+        },
+    },
+    "work": {
+        "label": "Mechanical work",
+        "variables": ["work", "force", "distance"],
+        "units": {"work": "J", "force": "N", "distance": "m"},
+        "solve": {
+            "work": lambda v: v["force"] * v["distance"],
+            "force": lambda v: v["work"] / v["distance"],
+            "distance": lambda v: v["work"] / v["force"],
+        },
+    },
+}
+
+
+def _normalize_key(value: Any) -> str:
+    return str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
 
 
 def _finite_number(value: Any) -> float | int:
@@ -105,6 +189,17 @@ def _format_result(value: float | int, precision: int) -> str:
     return f"{float(value):.{precision}g}"
 
 
+def _finite_physics_number(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise PhysicsSolverValidationError("Physics variables must be finite numbers.")
+    number = float(value)
+    if not math.isfinite(number):
+        raise PhysicsSolverValidationError("Physics variables must be finite.")
+    if abs(number) > MAX_PHYSICS_ABS_VALUE:
+        raise PhysicsSolverValidationError("Physics value exceeds the safety bound.")
+    return number
+
+
 def evaluate_calculator_expression(expression: str, *, precision: int = 12) -> dict[str, Any]:
     cleaned = " ".join(str(expression or "").strip().split())
     if not cleaned:
@@ -137,6 +232,68 @@ def evaluate_calculator_expression(expression: str, *, precision: int = 12) -> d
         },
         "sideEffects": {
             "calculatorEvaluation": True,
+            "modelLoad": False,
+            "generation": False,
+            "networkToolCall": False,
+            "externalWrite": False,
+            "secretRead": False,
+            "secretWrite": False,
+        },
+    }
+
+
+def solve_physics_formula(
+    *,
+    formula_id: str,
+    variables: dict[str, Any],
+    precision: int = 12,
+) -> dict[str, Any]:
+    formula_key = _normalize_key(formula_id)
+    formula = PHYSICS_FORMULAS.get(formula_key)
+    if formula is None:
+        raise PhysicsSolverValidationError("Unknown physics formula.")
+    allowed_variables = list(formula["variables"])
+    provided: dict[str, float] = {}
+    for raw_key, raw_value in (variables or {}).items():
+        key = _normalize_key(raw_key)
+        if key not in allowed_variables:
+            raise PhysicsSolverValidationError("Unknown variable for this physics formula.")
+        if raw_value is None:
+            continue
+        provided[key] = _finite_physics_number(raw_value)
+    missing = [key for key in allowed_variables if key not in provided]
+    if len(missing) != 1:
+        raise PhysicsSolverValidationError("Exactly one formula variable must be missing.")
+    target = missing[0]
+    try:
+        result = _finite_physics_number(formula["solve"][target](provided))
+    except (ZeroDivisionError, ValueError, OverflowError) as exc:
+        raise PhysicsSolverValidationError("Formula cannot be solved with the provided values.") from exc
+    precision = max(1, min(int(precision), 16))
+    units = dict(formula["units"])
+    return {
+        "physicsSolverVersion": COGNIX_NATIVE_PHYSICS_SOLVER_VERSION,
+        "mode": "native_deterministic_physics_solver",
+        "status": "solved",
+        "formulaId": formula_key,
+        "formulaLabel": formula["label"],
+        "targetVariable": target,
+        "targetUnit": units.get(target),
+        "providedVariableIds": sorted(provided),
+        "result": result,
+        "resultText": _format_result(result, precision),
+        "precision": precision,
+        "units": units,
+        "formulaHash": sha256(
+            f"{formula_key}|{target}|{sorted(provided.items())}".encode("utf-8")
+        ).hexdigest()[:18],
+        "safety": {
+            "maxAbsValue": MAX_PHYSICS_ABS_VALUE,
+            "availableFormulaIds": sorted(PHYSICS_FORMULAS),
+            "requiresExactlyOneMissingVariable": True,
+        },
+        "sideEffects": {
+            "physicsSolve": True,
             "modelLoad": False,
             "generation": False,
             "networkToolCall": False,

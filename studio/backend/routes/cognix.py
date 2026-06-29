@@ -1321,6 +1321,14 @@ class ToolCalculatorEvaluateRequest(BaseModel):
     precision: int = Field(12, ge = 1, le = 16)
 
 
+class ToolPhysicsSolveRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    formula_id: str = Field(..., alias = "formulaId", min_length = 1, max_length = 120)
+    variables: dict[str, Any] = Field(default_factory = dict)
+    precision: int = Field(12, ge = 1, le = 16)
+
+
 class ToolExecutionHandoffRequest(BaseModel):
     model_config = ConfigDict(populate_by_name = True)
 
@@ -5793,6 +5801,108 @@ async def tool_calculator_evaluate(
         "auditLogId": audit.get("id"),
         "sideEffects": side_effects,
         "plannerVersion": cognix_native_tools.COGNIX_NATIVE_CALCULATOR_VERSION,
+    }
+
+
+@router.post("/tools/physics/solve")
+async def tool_physics_solve(
+    payload: ToolPhysicsSolveRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    is_admin = auth_storage.is_admin(current_subject)
+    has_developer_mode = cognix_db.user_has_permission(
+        current_subject,
+        cognix_db.DEVELOPER_MODE_PERMISSION,
+    )
+    plan = cognix_tool_registry.plan_tool_action(
+        tool_id = "physics-solver",
+        action_id = "solve_formula",
+        username = current_subject,
+        is_admin = is_admin,
+        has_developer_mode = has_developer_mode,
+        granted_permissions = _granted_permission_keys(current_subject),
+    )
+    rate_limit = None
+    rate_limit_policy = plan.get("rateLimitPolicy")
+    rate_limit_key = plan.get("rateLimitKey")
+    if isinstance(rate_limit_policy, dict) and rate_limit_key:
+        try:
+            rate_limit = cognix_db.check_rate_limit(
+                username = current_subject,
+                rate_limit_key = str(rate_limit_key),
+                action = "tool_physics_solver_solved",
+                window_seconds = int(rate_limit_policy.get("windowSeconds") or 60),
+                max_events = int(rate_limit_policy.get("maxEvents") or 60),
+                consume = True,
+            )
+        except ValueError:
+            rate_limit = {
+                "allowed": False,
+                "rateLimitKey": rate_limit_key,
+                "reason": "Invalid rate limit key",
+            }
+        plan = cognix_tool_registry.apply_rate_limit_result(plan, rate_limit)
+
+    result: dict[str, Any] | None = None
+    error: str | None = None
+    error_type: str | None = None
+    if plan.get("allowed") and (rate_limit is None or rate_limit.get("allowed")):
+        try:
+            result = cognix_native_tools.solve_physics_formula(
+                formula_id = payload.formula_id,
+                variables = payload.variables,
+                precision = payload.precision,
+            )
+        except (ValueError, ArithmeticError, OverflowError) as exc:
+            error = str(exc)
+            error_type = type(exc).__name__
+    side_effects = {
+        "physicsSolve": result is not None,
+        "modelLoad": False,
+        "generation": False,
+        "networkToolCall": False,
+        "externalWrite": False,
+        "secretRead": False,
+        "secretWrite": False,
+        "auditWrite": True,
+    }
+    status_value = "solved" if result is not None else ("blocked_invalid_formula" if error else "blocked_by_tool_guard")
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "tool_physics_solver_solved",
+        resource_type = "cognix_native_physics_solver",
+        resource_id = str(result.get("formulaHash") if result else "blocked"),
+        severity = "notice" if result is not None else "warning",
+        metadata = {
+            "physicsSolverVersion": (
+                result.get("physicsSolverVersion")
+                if result
+                else cognix_native_tools.COGNIX_NATIVE_PHYSICS_SOLVER_VERSION
+            ),
+            "toolRegistryVersion": plan.get("registryVersion"),
+            "toolId": plan.get("toolId"),
+            "actionId": plan.get("actionId"),
+            "status": status_value,
+            "formulaId": result.get("formulaId") if result else payload.formula_id,
+            "targetVariable": result.get("targetVariable") if result else None,
+            "providedVariableIds": result.get("providedVariableIds") if result else sorted(payload.variables),
+            "formulaHash": result.get("formulaHash") if result else None,
+            "precision": payload.precision,
+            "rateLimit": rate_limit,
+            "errorType": error_type,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "status": status_value,
+        "toolPlan": plan,
+        "physicsResult": result,
+        "error": error,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_native_tools.COGNIX_NATIVE_PHYSICS_SOLVER_VERSION,
     }
 
 

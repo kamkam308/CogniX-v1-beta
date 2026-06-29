@@ -38,6 +38,7 @@ DEFAULT_RATE_LIMIT_POLICY = {
 
 RATE_LIMIT_POLICIES: dict[str, dict[str, int]] = {
     "calculator:evaluate": {"windowSeconds": 60, "maxEvents": 240},
+    "physics:solve": {"windowSeconds": 60, "maxEvents": 180},
     "github:read": {"windowSeconds": 60, "maxEvents": 120},
     "github:write": {"windowSeconds": 60, "maxEvents": 20},
     "github:merge": {"windowSeconds": 300, "maxEvents": 3},
@@ -120,6 +121,30 @@ TOOL_MANIFESTS: list[dict[str, Any]] = [
                 "auditRequired": True,
                 "sandboxRequired": False,
                 "rateLimitKey": "calculator:evaluate",
+                "secretsRequired": False,
+            },
+        ],
+    },
+    {
+        "id": "physics-solver",
+        "name": "CogniX Physics Solver",
+        "category": "physics",
+        "description": "Resolution deterministe de formules physiques de base sans modele ni reseau.",
+        "connector": "local-physics-solver",
+        "enabled": True,
+        "dataIsolation": "none",
+        "actions": [
+            {
+                "id": "solve_formula",
+                "label": "Resoudre une formule",
+                "description": "Resoudre une variable manquante dans une formule physique bornee.",
+                "mode": "execute",
+                "permissions": [IMPLICIT_AUTHENTICATED_PERMISSION],
+                "riskLevel": "low",
+                "requiresConfirmation": False,
+                "auditRequired": True,
+                "sandboxRequired": False,
+                "rateLimitKey": "physics:solve",
                 "secretsRequired": False,
             },
         ],

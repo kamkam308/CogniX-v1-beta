@@ -5131,9 +5131,19 @@ def test_tool_discovery_capability_registry_blocks_auto_installation():
 
     assert registry["capabilityRegistryVersion"] == "cognix_tool_capability_registry_v1"
     assert registry["toolDiscoveryVersion"] == "cognix_tool_discovery_v1"
-    assert {"calculator", "latex-renderer", "python-runtime", "pytorch", "ollama", "google-drive"}.issubset(tools)
+    assert {
+        "calculator",
+        "physics-solver",
+        "latex-renderer",
+        "python-runtime",
+        "pytorch",
+        "ollama",
+        "google-drive",
+    }.issubset(tools)
     assert tools["calculator"]["enabledByDefault"] is True
     assert tools["calculator"]["connectorBacked"] is False
+    assert tools["physics-solver"]["enabledByDefault"] is True
+    assert tools["physics-solver"]["connectorBacked"] is False
     assert registry["summary"]["automaticInstallAllowed"] is False
     assert registry["policies"]["automaticInstallationAllowed"] is False
     assert registry["policies"]["frontendDirectInstallationAllowed"] is False
@@ -5184,8 +5194,8 @@ def test_tool_discovery_endpoint_stores_recommendations_and_ignore_is_user_scope
     tool_ids = {item["toolId"] for item in body["toolDiscoveryPlan"]["recommendations"]}
     stored_ids = {item["toolId"] for item in body["storedRecommendations"]}
     assert body["auditLogId"].startswith("aud_")
-    assert {"calculator", "latex-renderer", "rag-indexer"}.issubset(tool_ids)
-    assert {"calculator", "latex-renderer", "rag-indexer"}.issubset(stored_ids)
+    assert {"calculator", "physics-solver", "latex-renderer", "rag-indexer"}.issubset(tool_ids)
+    assert {"calculator", "physics-solver", "latex-renderer", "rag-indexer"}.issubset(stored_ids)
     assert body["sideEffects"]["recommendationWrite"] is True
     assert body["sideEffects"]["installedToolWrite"] is True
     assert body["sideEffects"]["installation"] is False
@@ -8559,12 +8569,14 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "tool_secret_policy" in modules["cognix-integrations"]["capabilities"]
     assert "native_calculator_tool" in modules["cognix-integrations"]["capabilities"]
     assert "safe_math_evaluation" in modules["cognix-integrations"]["capabilities"]
+    assert "native_physics_solver_tool" in modules["cognix-integrations"]["capabilities"]
+    assert "safe_physics_formula_solving" in modules["cognix-integrations"]["capabilities"]
     assert "connector_preflight_contract" in modules["cognix-integrations"]["capabilities"]
     assert "integration_activation_contract" in modules["cognix-integrations"]["capabilities"]
     assert "enterprise_connector_manifests" in modules["cognix-integrations"]["capabilities"]
     assert "education_connector_manifests" in modules["cognix-integrations"]["capabilities"]
     assert "business_system_connector_manifests" in modules["cognix-integrations"]["capabilities"]
-    assert {"calculator", "sharepoint", "microsoft-teams", "slack", "moodle", "crm", "erp"}.issubset(
+    assert {"calculator", "physics-solver", "sharepoint", "microsoft-teams", "slack", "moodle", "crm", "erp"}.issubset(
         set(modules["cognix-integrations"]["tools"])
     )
     assert "/api/cognix/integrations/plan" in modules["cognix-integrations"]["routes"]
@@ -8573,6 +8585,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/tools/permission-matrix" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/tools/plan" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/tools/calculator/evaluate" in modules["cognix-integrations"]["routes"]
+    assert "/api/cognix/tools/physics/solve" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/tools/execution-handoff" in modules["cognix-integrations"]["routes"]
     assert modules["cognix-plugin-marketplace"]["dependencyState"]["ready"] is True
     assert "plugin_manifest_validation" in modules["cognix-plugin-marketplace"]["capabilities"]
@@ -9303,6 +9316,7 @@ def test_tool_registry_declares_permissions_and_guardrails():
     tools = {tool["id"]: tool for tool in registry["tools"]}
     assert {
         "calculator",
+        "physics-solver",
         "github",
         "google-drive",
         "gmail",
@@ -9329,6 +9343,17 @@ def test_tool_registry_declares_permissions_and_guardrails():
     assert cognix_tool_registry.rate_limit_policy_for_key(evaluate["rateLimitKey"]) == {
         "windowSeconds": 60,
         "maxEvents": 240,
+    }
+    physics_actions = {action["id"]: action for action in tools["physics-solver"]["actions"]}
+    solve_formula = physics_actions["solve_formula"]
+    assert tools["physics-solver"]["enabled"] is True
+    assert solve_formula["riskLevel"] == "low"
+    assert solve_formula["requiresConfirmation"] is False
+    assert solve_formula["secretPolicy"]["requiresSecret"] is False
+    assert solve_formula["secretPolicy"]["rawSecretExposureAllowed"] is False
+    assert cognix_tool_registry.rate_limit_policy_for_key(solve_formula["rateLimitKey"]) == {
+        "windowSeconds": 60,
+        "maxEvents": 180,
     }
     gmail_actions = {action["id"]: action for action in tools["gmail"]["actions"]}
     send_mail = gmail_actions["send_mail"]
@@ -9388,6 +9413,32 @@ def test_native_calculator_evaluates_expression_without_model_or_network():
 def test_native_calculator_blocks_unsafe_ast_without_execution_side_effects():
     with pytest.raises(cognix_native_tools.CalculatorValidationError):
         cognix_native_tools.evaluate_calculator_expression("__import__('os').system('id')")
+
+
+def test_native_physics_solver_solves_missing_force_without_model_or_network():
+    result = cognix_native_tools.solve_physics_formula(
+        formula_id = "force",
+        variables = {"mass": 12, "acceleration": 2.5},
+        precision = 12,
+    )
+
+    assert result["physicsSolverVersion"] == "cognix_native_physics_solver_v1"
+    assert result["status"] == "solved"
+    assert result["targetVariable"] == "force"
+    assert result["targetUnit"] == "N"
+    assert result["resultText"] == "30"
+    assert result["sideEffects"]["physicsSolve"] is True
+    assert result["sideEffects"]["modelLoad"] is False
+    assert result["sideEffects"]["generation"] is False
+    assert result["sideEffects"]["networkToolCall"] is False
+
+
+def test_native_physics_solver_blocks_ambiguous_formula_without_execution_side_effects():
+    with pytest.raises(cognix_native_tools.PhysicsSolverValidationError):
+        cognix_native_tools.solve_physics_formula(
+            formula_id = "speed",
+            variables = {"speed": 10, "distance": 100, "time": 10},
+        )
 
 
 def test_tool_action_plan_builds_execution_contract_without_execution():
@@ -9839,6 +9890,48 @@ def test_tool_calculator_endpoint_evaluates_and_logs_sanitized_expression():
     assert log["metadata"]["expressionLength"] == len("sqrt(144) + 3 * 7")
     assert log["metadata"]["sideEffects"]["calculatorEvaluation"] is True
     assert "sqrt(144)" not in log["metadataJson"]
+
+
+def test_tool_physics_solver_endpoint_solves_and_logs_sanitized_values():
+    seed_accounts()
+
+    body = run_async(
+        cognix_routes.tool_physics_solve(
+            cognix_routes.ToolPhysicsSolveRequest(
+                formula_id = "ohm_law",
+                variables = {"current": 2, "resistance": 5},
+                precision = 12,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    result = body["physicsResult"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["status"] == "solved"
+    assert body["plannerVersion"] == "cognix_native_physics_solver_v1"
+    assert result["formulaId"] == "ohm_law"
+    assert result["targetVariable"] == "voltage"
+    assert result["resultText"] == "10"
+    assert body["toolPlan"]["toolId"] == "physics-solver"
+    assert body["toolPlan"]["rateLimit"]["allowed"] is True
+    assert body["sideEffects"]["physicsSolve"] is True
+    assert body["sideEffects"]["networkToolCall"] is False
+    assert body["sideEffects"]["generation"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "tool_physics_solver_solved"
+    assert log["resourceType"] == "cognix_native_physics_solver"
+    assert log["metadata"]["physicsSolverVersion"] == "cognix_native_physics_solver_v1"
+    assert log["metadata"]["formulaId"] == "ohm_law"
+    assert log["metadata"]["targetVariable"] == "voltage"
+    assert log["metadata"]["providedVariableIds"] == ["current", "resistance"]
+    assert "variables" not in log["metadata"]
+    assert log["metadata"]["sideEffects"]["physicsSolve"] is True
+    assert "current" in log["metadataJson"]
+    assert '"variables"' not in log["metadataJson"]
 
 
 def test_tool_rate_limit_storage_blocks_after_capacity():
