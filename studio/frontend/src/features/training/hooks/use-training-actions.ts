@@ -2,7 +2,7 @@
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
 import { primeNativeNotificationPermission } from "@/lib/native-notifications";
-import { fetchDeviceType, isCloudTrainingAccess, usePlatformStore } from "@/config/env";
+import { fetchDeviceType, isCloudOnlyTrainingMode, usePlatformStore } from "@/config/env";
 import { confirmRemoteCodeIfNeeded } from "@/features/security";
 import { useCallback } from "react";
 import { toast } from "@/lib/toast";
@@ -62,13 +62,7 @@ export function useTrainingActions() {
 
     await fetchDeviceType({ force: true }).catch(() => undefined);
     const platform = usePlatformStore.getState();
-    const cloudOnlyTraining =
-      !platform.trainingLocalAvailable &&
-      (
-        platform.trainingCloudAvailable ||
-        platform.cloudTrainingUnlocked ||
-        isCloudTrainingAccess(platform.trainingAccess)
-      );
+    const cloudOnlyTraining = isCloudOnlyTrainingMode(platform);
 
     runtimeStore.setStartResources(
       config.selectedModel ?? null,

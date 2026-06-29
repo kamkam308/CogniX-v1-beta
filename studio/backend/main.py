@@ -253,15 +253,27 @@ def build_training_access_payload(subject: str) -> dict[str, object]:
     has_cloud_training = auth_storage.has_ceo_training_entitlement(subject, profile)
     cloud_training_unlocked = bool(has_cloud_training)
     local_training_available = not bool(_hw_module.CHAT_ONLY)
-    training_access = "local"
-    if cloud_training_unlocked and not local_training_available:
-        training_access = "cloud_ceo"
-    elif cloud_training_unlocked and local_training_available:
+    training_access = "locked"
+    training_mode = "locked"
+    training_mode_unlocked = False
+    if cloud_training_unlocked and local_training_available:
         training_access = "local_plus_cloud_ceo"
+        training_mode = "local_plus_cloud"
+        training_mode_unlocked = True
+    elif cloud_training_unlocked:
+        training_access = "cloud_ceo"
+        training_mode = "cloud"
+        training_mode_unlocked = True
+    elif local_training_available:
+        training_access = "local"
+        training_mode = "local"
+        training_mode_unlocked = True
     return {
         "cloud_training_unlocked": cloud_training_unlocked,
         "cloud_training_providers": CLOUD_TRAINING_PROVIDERS,
         "training_access": training_access,
+        "training_mode": training_mode,
+        "training_mode_unlocked": training_mode_unlocked,
         "training_local_available": local_training_available,
         "training_cloud_available": cloud_training_unlocked,
     }

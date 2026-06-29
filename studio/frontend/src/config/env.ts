@@ -14,10 +14,39 @@ export const env = {
 // Platform / device type
 
 export type DeviceType = "mac" | "windows" | "linux" | string;
-type TrainingAccess = "local" | "cloud_ceo" | "local_plus_cloud_ceo" | string;
+type TrainingAccess = "locked" | "local" | "cloud_ceo" | "local_plus_cloud_ceo" | string;
+type TrainingMode = "locked" | "local" | "cloud" | "local_plus_cloud" | string;
+
+type TrainingCapabilitySnapshot = {
+  trainingLocalAvailable?: boolean;
+  trainingCloudAvailable?: boolean;
+  cloudTrainingUnlocked?: boolean;
+  trainingAccess?: TrainingAccess | null;
+  trainingModeUnlocked?: boolean;
+};
 
 export function isCloudTrainingAccess(access: TrainingAccess | null | undefined): boolean {
   return access === "cloud_ceo" || access === "local_plus_cloud_ceo";
+}
+
+export function hasCloudTrainingCapability(state: TrainingCapabilitySnapshot): boolean {
+  return (
+    state.trainingCloudAvailable === true ||
+    state.cloudTrainingUnlocked === true ||
+    isCloudTrainingAccess(state.trainingAccess)
+  );
+}
+
+export function isTrainingModeUnlocked(state: TrainingCapabilitySnapshot): boolean {
+  return (
+    state.trainingModeUnlocked === true ||
+    state.trainingLocalAvailable === true ||
+    hasCloudTrainingCapability(state)
+  );
+}
+
+export function isCloudOnlyTrainingMode(state: TrainingCapabilitySnapshot): boolean {
+  return state.trainingLocalAvailable !== true && hasCloudTrainingCapability(state);
 }
 
 interface PlatformState {
@@ -35,6 +64,8 @@ interface PlatformState {
   cloudTrainingUnlocked: boolean;
   cloudTrainingProviders: string[];
   trainingAccess: TrainingAccess;
+  trainingMode: TrainingMode;
+  trainingModeUnlocked: boolean;
   trainingLocalAvailable: boolean;
   trainingCloudAvailable: boolean;
   fetched: boolean;
@@ -64,18 +95,14 @@ export const usePlatformStore = create<PlatformState>()((_, get) => ({
   cloudTrainingUnlocked: false,
   cloudTrainingProviders: [],
   trainingAccess: "local",
+  trainingMode: localDeviceType === "mac" ? "locked" : "local",
+  trainingModeUnlocked: localDeviceType !== "mac",
   trainingLocalAvailable: localDeviceType !== "mac",
   trainingCloudAvailable: false,
   fetched: false,
   isChatOnly: () => get().chatOnly,
   isTrainingAccessible: () => {
-    const state = get();
-    return (
-      state.trainingLocalAvailable ||
-      state.trainingCloudAvailable ||
-      state.cloudTrainingUnlocked ||
-      isCloudTrainingAccess(state.trainingAccess)
-    );
+    return isTrainingModeUnlocked(get());
   },
 }));
 
@@ -108,6 +135,8 @@ export async function fetchDeviceType(options?: {
         cloud_training_unlocked?: boolean;
         cloud_training_providers?: string[];
         training_access?: string;
+        training_mode?: string;
+        training_mode_unlocked?: boolean;
         training_local_available?: boolean;
         training_cloud_available?: boolean;
       };
@@ -121,6 +150,21 @@ export async function fetchDeviceType(options?: {
       const cloudTrainingUnlocked =
         data.cloud_training_unlocked === true ||
         isCloudTrainingAccess(trainingAccess);
+      const trainingModeUnlocked =
+        data.training_mode_unlocked ??
+        isTrainingModeUnlocked({
+          trainingLocalAvailable: data.training_local_available ?? !chatOnly,
+          trainingCloudAvailable: data.training_cloud_available ?? cloudTrainingUnlocked,
+          cloudTrainingUnlocked,
+          trainingAccess,
+        });
+      const trainingMode =
+        data.training_mode ??
+        (
+          data.training_local_available ?? !chatOnly
+            ? cloudTrainingUnlocked ? "local_plus_cloud" : "local"
+            : cloudTrainingUnlocked ? "cloud" : "locked"
+        );
       // Cache only a server-reported platform. Unauthenticated responses fall
       // back to the browser platform, which can differ from the host (WSL,
       // SSH); keeping fetched=false retries once a token exists.
@@ -134,6 +178,8 @@ export async function fetchDeviceType(options?: {
         cloudTrainingUnlocked,
         cloudTrainingProviders,
         trainingAccess,
+        trainingMode,
+        trainingModeUnlocked,
         trainingLocalAvailable: data.training_local_available ?? !chatOnly,
         trainingCloudAvailable: data.training_cloud_available ?? cloudTrainingUnlocked,
         fetched: data.device_type !== undefined,
@@ -152,6 +198,8 @@ export async function fetchDeviceType(options?: {
       cloudTrainingUnlocked: false,
       cloudTrainingProviders: [],
       trainingAccess: "local",
+      trainingMode: chatOnly ? "locked" : "local",
+      trainingModeUnlocked: !chatOnly,
       trainingLocalAvailable: !chatOnly,
       trainingCloudAvailable: false,
       fetched: false,

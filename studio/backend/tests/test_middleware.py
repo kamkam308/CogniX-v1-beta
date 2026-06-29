@@ -763,6 +763,8 @@ class TestHealthAuthGate:
         assert body["training_cloud_available"] is True
         assert body["training_local_available"] is False
         assert body["training_access"] == "cloud_ceo"
+        assert body["training_mode"] == "cloud"
+        assert body["training_mode_unlocked"] is True
         assert body["cloud_training_providers"] == ["google_colab", "kaggle", "cloud_gpu"]
 
     def test_health_keeps_admin_cloud_training_when_plan_is_restored_free(self, health_app, monkeypatch):
@@ -794,3 +796,5 @@ class TestHealthAuthGate:
         assert body["training_cloud_available"] is True
         assert body["training_local_available"] is False
         assert body["training_access"] == "cloud_ceo"
+        assert body["training_mode"] == "cloud"
+        assert body["training_mode_unlocked"] is True
