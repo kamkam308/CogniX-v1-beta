@@ -3923,10 +3923,12 @@ async def codex_pipeline_plan(
         severity = "warning" if pipeline.get("applicable") else "notice",
         metadata = {
             "codexPipelineVersion": pipeline.get("plannerVersion"),
+            "runContractVersion": pipeline.get("runContract", {}).get("contractVersion"),
             "applicable": pipeline.get("applicable"),
             "recommendedPath": pipeline.get("recommendedPath"),
             "branchName": pipeline.get("branch", {}).get("recommendedName"),
             "qualityGates": pipeline.get("qualityGates", {}),
+            "evidenceRequirements": pipeline.get("runContract", {}).get("evidenceRequirements", []),
             "blockedActionIds": [
                 item.get("id") for item in pipeline.get("blockedActions", []) if isinstance(item, dict)
             ],

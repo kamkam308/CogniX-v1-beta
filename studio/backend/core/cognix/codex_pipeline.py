@@ -14,6 +14,7 @@ from typing import Any
 
 
 COGNIX_CODEX_PIPELINE_VERSION = "cognix_codex_pipeline_v1"
+COGNIX_CODEX_RUN_CONTRACT_VERSION = "cognix_codex_run_contract_v1"
 
 CODEX_PIPELINE_STEPS: list[dict[str, Any]] = [
     {
@@ -119,6 +120,100 @@ def _planned_steps(path: str) -> list[dict[str, Any]]:
     ]
 
 
+def _run_contract(*, applicable: bool, branch_name: str, risk_level: str) -> dict[str, Any]:
+    requires_security_review = risk_level in {"high", "critical"}
+    command_plan = [
+        {
+            "id": "inspect_worktree",
+            "command": "git status --short",
+            "required": True,
+            "willRunHere": False,
+            "evidence": "worktree_status_captured",
+        },
+        {
+            "id": "compile_backend",
+            "command": "PYTHONPATH=studio/backend python -m py_compile <changed-python-files>",
+            "required": True,
+            "willRunHere": False,
+            "evidence": "python_compile_passed",
+        },
+        {
+            "id": "targeted_tests",
+            "command": "PYTHONPATH=studio/backend python -m pytest -q <targeted-tests>",
+            "required": True,
+            "willRunHere": False,
+            "evidence": "targeted_tests_passed",
+        },
+        {
+            "id": "native_guard",
+            "command": "npm run cognix:check",
+            "required": True,
+            "willRunHere": False,
+            "evidence": "native_guard_passed",
+        },
+        {
+            "id": "runtime_smoke",
+            "command": "curl -ksS https://cognix.local:4321/<changed-endpoint>",
+            "required": True,
+            "willRunHere": False,
+            "evidence": "runtime_endpoint_verified",
+        },
+    ]
+    evidence_requirements = [
+        "changed_files_scoped",
+        "tests_passed",
+        "native_guard_passed",
+        "runtime_verified_when_api_changes",
+        "git_commit_created",
+        "github_push_completed",
+    ]
+    if requires_security_review:
+        evidence_requirements.append("security_review_notes")
+    return {
+        "contractVersion": COGNIX_CODEX_RUN_CONTRACT_VERSION,
+        "mode": "codex_run_contract_dry_run",
+        "applicable": applicable,
+        "targetBranch": branch_name,
+        "branchCreateAllowedHere": False,
+        "codeModificationAllowedHere": False,
+        "testExecutionAllowedHere": False,
+        "buildExecutionAllowedHere": False,
+        "commitAllowedHere": False,
+        "pushAllowedHere": False,
+        "mergeAllowedHere": False,
+        "deploymentAllowedHere": False,
+        "commandPlan": command_plan if applicable else [],
+        "evidenceRequirements": evidence_requirements if applicable else [],
+        "mergeGate": {
+            "humanApprovalRequired": True,
+            "requiresPassingTests": True,
+            "requiresBuildOrNativeGuard": True,
+            "requiresSecurityReview": requires_security_review,
+            "mergeAllowedWithoutApproval": False,
+        },
+        "blockedActions": [
+            "branch_create",
+            "file_write",
+            "test_execution",
+            "build_execution",
+            "commit",
+            "push",
+            "merge",
+            "deployment",
+        ],
+        "sideEffects": {
+            "branchCreate": False,
+            "fileWrite": False,
+            "testExecution": False,
+            "buildExecution": False,
+            "commit": False,
+            "push": False,
+            "merge": False,
+            "deployment": False,
+        },
+    }
+
+
 def build_codex_pipeline_plan(
     *,
     objective: str,
@@ -133,6 +228,7 @@ def build_codex_pipeline_plan(
     path = str(task_strategy.get("path") or "expert_chat")
     applicable = path == "codex_guarded_pipeline"
     risk_level = _risk_level(task_strategy, execution_policy)
+    branch_name = _branch_slug(objective, project_id)
 
     warnings: list[str] = []
     if applicable:
@@ -151,7 +247,7 @@ def build_codex_pipeline_plan(
         "targetDomain": classification.get("selectedDomain") or "general",
         "riskLevel": risk_level,
         "branch": {
-            "recommendedName": _branch_slug(objective, project_id),
+            "recommendedName": branch_name,
             "willCreate": False,
             "reason": "La branche est planifiee mais jamais creee par ce planner.",
         },
@@ -163,6 +259,11 @@ def build_codex_pipeline_plan(
             "humanApprovalRequired": applicable,
             "mergeAllowedWithoutApproval": False,
         },
+        "runContract": _run_contract(
+            applicable=applicable,
+            branch_name=branch_name,
+            risk_level=risk_level,
+        ),
         "steps": _planned_steps(path),
         "blockedActions": [
             {

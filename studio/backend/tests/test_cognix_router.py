@@ -5128,14 +5128,23 @@ def test_codex_pipeline_plans_required_gates_without_modifying_code():
     assert plan["recommendedPath"] == "codex_guarded_pipeline"
     assert plan["branch"]["recommendedName"] == "cognix/project-code"
     assert plan["branch"]["willCreate"] is False
+    assert plan["runContract"]["contractVersion"] == "cognix_codex_run_contract_v1"
+    assert plan["runContract"]["targetBranch"] == "cognix/project-code"
+    assert plan["runContract"]["mergeAllowedHere"] is False
+    assert plan["runContract"]["mergeGate"]["humanApprovalRequired"] is True
+    assert plan["runContract"]["mergeGate"]["requiresSecurityReview"] is True
+    assert "native_guard_passed" in plan["runContract"]["evidenceRequirements"]
+    assert any(item["id"] == "native_guard" for item in plan["runContract"]["commandPlan"])
     assert plan["qualityGates"]["testsRequired"] is True
     assert plan["qualityGates"]["buildRequired"] is True
     assert plan["qualityGates"]["humanApprovalRequired"] is True
     assert any(step["id"] == "human_approval" for step in plan["steps"])
     assert any(item["id"] == "commit_push_merge" for item in plan["blockedActions"])
+    assert "merge" in plan["runContract"]["blockedActions"]
     assert plan["sideEffects"]["fileWrite"] is False
     assert plan["sideEffects"]["codeModification"] is False
     assert plan["sideEffects"]["merge"] is False
+    assert plan["runContract"]["sideEffects"]["testExecution"] is False
 
 
 def test_codex_pipeline_endpoint_logs_audited_dry_run(monkeypatch):
@@ -5166,6 +5175,7 @@ def test_codex_pipeline_endpoint_logs_audited_dry_run(monkeypatch):
     assert body["auditLogId"].startswith("aud_")
     assert body["plannerVersion"] == "cognix_codex_pipeline_v1"
     assert pipeline["applicable"] is True
+    assert pipeline["runContract"]["contractVersion"] == "cognix_codex_run_contract_v1"
     assert pipeline["sideEffects"]["branchCreate"] is False
     assert pipeline["sideEffects"]["testExecution"] is False
     assert pipeline["sideEffects"]["codeModification"] is False
@@ -5175,6 +5185,8 @@ def test_codex_pipeline_endpoint_logs_audited_dry_run(monkeypatch):
     assert log["id"] == body["auditLogId"]
     assert log["action"] == "codex_pipeline_plan_built"
     assert log["metadata"]["codexPipelineVersion"] == "cognix_codex_pipeline_v1"
+    assert log["metadata"]["runContractVersion"] == "cognix_codex_run_contract_v1"
+    assert "native_guard_passed" in log["metadata"]["evidenceRequirements"]
     assert log["metadata"]["sideEffects"]["codeModification"] is False
 
 
@@ -6456,6 +6468,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/admin/security-threats/blueprint" in modules["cognix-admin-security-center"]["routes"]
     assert "/api/cognix/admin/risk-scores" in modules["cognix-admin-security-center"]["routes"]
     assert "/api/cognix/admin/system-health" in modules["cognix-admin-security-center"]["routes"]
+    assert "codex_run_contract" in modules["cognix-codex-secure-agent"]["capabilities"]
+    assert "/api/cognix/codex/pipeline-plan" in modules["cognix-codex-secure-agent"]["routes"]
     assert modules["cognix-deployment-manager"]["dependencyState"]["ready"] is True
     assert "cognix-integrations" in modules["cognix-codex-secure-agent"]["dependencyState"]["dependencies"]
 
