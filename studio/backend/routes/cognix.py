@@ -66,6 +66,7 @@ from core.cognix import research_watch as cognix_research_watch
 from core.cognix import response_reflection as cognix_response_reflection
 from core.cognix import runtime_adapter as cognix_runtime_adapter
 from core.cognix import sandbox as cognix_sandbox
+from core.cognix import scheduled as cognix_scheduled
 from core.cognix import skill_memory as cognix_skill_memory
 from core.cognix import simulation as cognix_simulation
 from core.cognix import thinking_status as cognix_thinking_status
@@ -1655,14 +1656,26 @@ def _agent_plan(goal: str, mode: str) -> list[str]:
 
 
 def _scheduled_action_type(prompt: str) -> str:
-    text = prompt.lower()
-    if any(word in text for word in ("news", "actualite", "actualité", "veille", "surveille")):
-        return "news"
-    if any(word in text for word in ("recherche", "research", "analyse", "rapport", "source")):
-        return "research"
-    if any(word in text for word in ("agent", "action", "automatisation", "execute", "exécute")):
-        return "agent"
-    return "report"
+    return str(cognix_scheduled.classify_scheduled_action(prompt).get("id") or "report")
+
+
+def _build_scheduled_task_plan(
+    current_subject: str,
+    *,
+    title: str,
+    prompt: str,
+    schedule_text: str,
+    existing_task: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return cognix_scheduled.build_scheduled_task_plan(
+        username = current_subject,
+        title = title,
+        prompt = prompt,
+        schedule_text = schedule_text,
+        granted_permissions = _granted_permission_keys(current_subject),
+        admin = auth_storage.is_admin(current_subject),
+        existing_task = existing_task,
+    )
 
 
 def _execute_scheduled_task(username: str, task: dict[str, Any]) -> dict[str, Any]:
@@ -1719,6 +1732,10 @@ def _execute_scheduled_task(username: str, task: dict[str, Any]) -> dict[str, An
         artifact_type = "agent_run"
         artifact_id = str(run.get("id") or "")
         result = f"Agent planifie avec {len(plan)} etapes."
+    elif action_type in {"benchmark", "index_documents", "security_audit"}:
+        stub = cognix_scheduled.build_run_result_stub(action_type, prompt or str(task.get("title") or ""))
+        artifact_type = str(stub.get("artifactType") or "") or None
+        result = str(stub.get("result") or "Execution planifiee.")
     else:
         item = cognix_db.create_library_item(
             username,
@@ -8180,9 +8197,40 @@ async def create_library_item(
 
 @router.get("/scheduled-tasks")
 async def my_scheduled_tasks(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    tasks = _rows(cognix_db.list_scheduled_tasks(current_subject))
+    runs = _rows(cognix_db.list_scheduled_task_runs(current_subject))
     return {
-        "tasks": _rows(cognix_db.list_scheduled_tasks(current_subject)),
-        "runs": _rows(cognix_db.list_scheduled_task_runs(current_subject)),
+        "tasks": tasks,
+        "runs": runs,
+        "blueprint": cognix_scheduled.build_scheduled_blueprint(),
+    }
+
+
+@router.get("/scheduled-tasks/blueprint")
+async def scheduled_tasks_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_scheduled.build_scheduled_blueprint()
+    return {
+        "username": current_subject,
+        "blueprint": blueprint,
+        "sideEffects": blueprint["sideEffects"],
+    }
+
+
+@router.post("/scheduled-tasks/plan")
+async def plan_scheduled_task(
+    payload: ScheduledTaskCreateRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    plan = _build_scheduled_task_plan(
+        current_subject,
+        title = payload.title,
+        prompt = payload.prompt,
+        schedule_text = payload.schedule_text,
+    )
+    return {
+        "username": current_subject,
+        "scheduledTaskPlan": plan,
+        "sideEffects": plan["sideEffects"],
     }
 
 
@@ -8191,13 +8239,52 @@ async def create_scheduled_task(
     payload: ScheduledTaskCreateRequest,
     current_subject: str = Depends(get_current_jwt_subject),
 ) -> dict[str, Any]:
+    plan = _build_scheduled_task_plan(
+        current_subject,
+        title = payload.title,
+        prompt = payload.prompt,
+        schedule_text = payload.schedule_text,
+    )
     task = cognix_db.create_scheduled_task(
         current_subject,
-        payload.title,
-        payload.prompt,
-        payload.schedule_text,
+        plan["title"],
+        plan["prompt"],
+        plan["scheduleText"],
     )
-    return {"task": _row(task)}
+    stored_plan = _build_scheduled_task_plan(
+        current_subject,
+        title = str(task.get("title") or payload.title),
+        prompt = str(task.get("prompt") or payload.prompt),
+        schedule_text = str(task.get("schedule_text") or payload.schedule_text),
+        existing_task = task,
+    )
+    side_effects = {
+        **stored_plan["sideEffects"],
+        "taskWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "scheduled_task_created",
+        resource_type = "cognix_scheduled_task",
+        resource_id = str(task.get("id") or ""),
+        severity = "warning" if stored_plan["permissionPlan"]["missingPermissions"] else "notice",
+        metadata = {
+            "scheduledVersion": stored_plan.get("scheduledVersion"),
+            "actionType": stored_plan["action"]["actionType"],
+            "riskLevel": stored_plan["action"]["riskLevel"],
+            "missingPermissions": stored_plan["permissionPlan"]["missingPermissions"],
+            "queuePlan": stored_plan["queuePlan"],
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "task": _row(task),
+        "scheduledTaskPlan": stored_plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+    }
 
 
 @router.patch("/scheduled-tasks/{task_id}")
@@ -8212,7 +8299,47 @@ async def update_scheduled_task(
         raise HTTPException(status_code = 400, detail = str(exc)) from exc
     if task is None:
         raise HTTPException(status_code = 404, detail = "Scheduled task not found")
-    return {"task": _row(task)}
+    side_effects = {
+        **cognix_scheduled.build_scheduled_blueprint()["sideEffects"],
+        "taskWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "scheduled_task_status_updated",
+        resource_type = "cognix_scheduled_task",
+        resource_id = task_id,
+        severity = "notice",
+        metadata = {
+            "status": payload.status,
+            "sideEffects": side_effects,
+        },
+    )
+    return {"task": _row(task), "auditLogId": audit.get("id"), "sideEffects": side_effects}
+
+
+@router.get("/scheduled-tasks/{task_id}/run-plan")
+async def scheduled_task_run_plan(
+    task_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    task = cognix_db.get_scheduled_task(current_subject, task_id)
+    if not task:
+        raise HTTPException(status_code = 404, detail = "Scheduled task not found")
+    plan = _build_scheduled_task_plan(
+        current_subject,
+        title = str(task.get("title") or ""),
+        prompt = str(task.get("prompt") or ""),
+        schedule_text = str(task.get("schedule_text") or ""),
+        existing_task = task,
+    )
+    return {
+        "username": current_subject,
+        "task": _row(task),
+        "scheduledTaskPlan": plan,
+        "sideEffects": plan["sideEffects"],
+    }
 
 
 @router.post("/scheduled-tasks/{task_id}/run")
@@ -8225,6 +8352,47 @@ async def run_scheduled_task(
         raise HTTPException(status_code = 404, detail = "Scheduled task not found")
     if task.get("status") not in {"active", "paused"}:
         raise HTTPException(status_code = 400, detail = "Scheduled task cannot run in this state")
+    plan = _build_scheduled_task_plan(
+        current_subject,
+        title = str(task.get("title") or ""),
+        prompt = str(task.get("prompt") or ""),
+        schedule_text = str(task.get("schedule_text") or ""),
+        existing_task = task,
+    )
+    if plan["permissionPlan"]["missingPermissions"]:
+        run = cognix_db.create_scheduled_task_run(
+            current_subject,
+            task_id,
+            plan["action"]["actionType"],
+            "Execution bloquee: permissions manquantes "
+            + ", ".join(plan["permissionPlan"]["missingPermissions"]),
+            status = "failed",
+        )
+        side_effects = {
+            **plan["sideEffects"],
+            "taskRunWrite": True,
+            "auditWrite": True,
+        }
+        audit = cognix_db.create_audit_log(
+            username = current_subject,
+            actor_username = current_subject,
+            action = "scheduled_task_run_blocked",
+            resource_type = "cognix_scheduled_task",
+            resource_id = task_id,
+            severity = "warning",
+            metadata = {
+                "scheduledVersion": plan.get("scheduledVersion"),
+                "actionType": plan["action"]["actionType"],
+                "missingPermissions": plan["permissionPlan"]["missingPermissions"],
+                "sideEffects": side_effects,
+            },
+        )
+        return {
+            "run": _row(run),
+            "scheduledTaskPlan": plan,
+            "auditLogId": audit.get("id"),
+            "sideEffects": side_effects,
+        }
     try:
         run = _execute_scheduled_task(current_subject, task)
     except Exception as exc:
@@ -8235,7 +8403,38 @@ async def run_scheduled_task(
             str(exc),
             status = "failed",
         )
-    return {"run": _row(run)}
+    side_effects = {
+        **plan["sideEffects"],
+        "taskRunWrite": True,
+        "auditWrite": True,
+        "networkCall": bool(plan["action"]["networkRequired"]),
+        "libraryWrite": plan["action"]["outputType"] == "library_item",
+        "newsWrite": plan["action"]["outputType"] == "news",
+        "researchWrite": plan["action"]["outputType"] == "research_report",
+        "agentRunWrite": plan["action"]["outputType"] == "agent_run",
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "scheduled_task_run_completed" if run.get("status") == "complete" else "scheduled_task_run_failed",
+        resource_type = "cognix_scheduled_task",
+        resource_id = task_id,
+        severity = "notice" if run.get("status") == "complete" else "warning",
+        metadata = {
+            "scheduledVersion": plan.get("scheduledVersion"),
+            "actionType": plan["action"]["actionType"],
+            "runStatus": run.get("status"),
+            "artifactType": run.get("artifact_type"),
+            "artifactId": run.get("artifact_id"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "run": _row(run),
+        "scheduledTaskPlan": plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+    }
 
 
 @router.get("/apps")

@@ -56,6 +56,7 @@ from core.cognix import research_watch as cognix_research_watch
 from core.cognix import response_reflection as cognix_response_reflection
 from core.cognix import runtime_adapter as cognix_runtime_adapter
 from core.cognix import sandbox as cognix_sandbox
+from core.cognix import scheduled as cognix_scheduled
 from core.cognix import skill_memory as cognix_skill_memory
 from core.cognix import simulation as cognix_simulation
 from core.cognix import thinking_status as cognix_thinking_status
@@ -5450,6 +5451,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-local-core",
         "cognix-pulse",
         "cognix-library",
+        "cognix-scheduled",
         "cognix-model-lifecycle",
         "cognix-live-model-comparison",
         "cognix-model-translator",
@@ -5496,6 +5498,11 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "library_search" in modules["cognix-library"]["capabilities"]
     assert "asset_permission_scope" in modules["cognix-library"]["capabilities"]
     assert "/api/cognix/library/search" in modules["cognix-library"]["routes"]
+    assert modules["cognix-scheduled"]["status"] == "enabled"
+    assert "queue_first_execution" in modules["cognix-scheduled"]["capabilities"]
+    assert "creator_permission_ceiling" in modules["cognix-scheduled"]["capabilities"]
+    assert "/api/cognix/scheduled-tasks/plan" in modules["cognix-scheduled"]["routes"]
+    assert "/api/cognix/scheduled-tasks/{task_id}/run-plan" in modules["cognix-scheduled"]["routes"]
     assert modules["cognix-local-core"]["activationState"] == "ready"
     assert "module_manifest_registry" in modules["cognix-local-core"]["capabilities"]
     assert "/api/cognix/modules/manifests" in modules["cognix-local-core"]["routes"]
@@ -5990,6 +5997,105 @@ def test_library_native_blueprint_search_and_audited_asset_creation():
     assert admin_read["logs"][0]["action"] == "library_item_created"
     assert admin_read["logs"][0]["metadata"]["classification"]["assetFamily"] == "behavior"
     assert admin_read["logs"][0]["metadata"]["sideEffects"]["assetWrite"] is True
+
+
+def test_scheduled_native_plan_permission_ceiling_and_audited_runs():
+    seed_accounts()
+
+    blueprint = run_async(cognix_routes.scheduled_tasks_blueprint(current_subject = "alice"))
+    assert blueprint["blueprint"]["scheduledVersion"] == cognix_scheduled.COGNIX_SCHEDULED_VERSION
+    assert blueprint["blueprint"]["securityPolicy"]["creatorPermissionCeiling"] is True
+    assert blueprint["sideEffects"]["taskWrite"] is False
+
+    plan = run_async(
+        cognix_routes.plan_scheduled_task(
+            cognix_routes.ScheduledTaskCreateRequest(
+                title = "Audit securite nocturne",
+                prompt = "verifier les vulnerabilites chaque nuit",
+                schedule_text = "tous les jours a 02:30",
+            ),
+            current_subject = "alice",
+        )
+    )
+    security_plan = plan["scheduledTaskPlan"]
+    assert security_plan["action"]["actionType"] == "security_audit"
+    assert security_plan["schedule"]["cadence"] == "daily"
+    assert security_plan["schedule"]["hour"] == 2
+    assert security_plan["permissionPlan"]["missingPermissions"] == ["security:audit"]
+    assert security_plan["executionPlan"]["canRunNow"] is False
+    assert security_plan["sideEffects"]["securityScan"] is False
+
+    created_security = run_async(
+        cognix_routes.create_scheduled_task(
+            cognix_routes.ScheduledTaskCreateRequest(
+                title = "Audit securite nocturne",
+                prompt = "verifier les vulnerabilites chaque nuit",
+                schedule_text = "tous les jours a 02:30",
+            ),
+            current_subject = "alice",
+        )
+    )
+    assert created_security["task"]["id"].startswith("tsk_")
+    assert created_security["scheduledTaskPlan"]["permissionPlan"]["missingPermissions"] == ["security:audit"]
+    assert created_security["sideEffects"]["taskWrite"] is True
+    assert created_security["sideEffects"]["auditWrite"] is True
+
+    blocked = run_async(
+        cognix_routes.run_scheduled_task(
+            created_security["task"]["id"],
+            current_subject = "alice",
+        )
+    )
+    assert blocked["run"]["status"] == "failed"
+    assert blocked["scheduledTaskPlan"]["action"]["actionType"] == "security_audit"
+    assert blocked["sideEffects"]["taskRunWrite"] is True
+    assert blocked["sideEffects"]["securityScan"] is False
+    assert "security:audit" in blocked["run"]["result"]
+
+    created_report = run_async(
+        cognix_routes.create_scheduled_task(
+            cognix_routes.ScheduledTaskCreateRequest(
+                title = "Resume quotidien",
+                prompt = "resume les nouveaux documents du projet",
+                schedule_text = "tous les jours a 08:00",
+            ),
+            current_subject = "alice",
+        )
+    )
+    assert created_report["scheduledTaskPlan"]["action"]["actionType"] == "report"
+    assert created_report["scheduledTaskPlan"]["permissionPlan"]["missingPermissions"] == []
+
+    report_run_plan = run_async(
+        cognix_routes.scheduled_task_run_plan(
+            created_report["task"]["id"],
+            current_subject = "alice",
+        )
+    )
+    assert report_run_plan["scheduledTaskPlan"]["executionPlan"]["canRunNow"] is True
+    assert report_run_plan["scheduledTaskPlan"]["queuePlan"]["queueName"] == "scheduled_reports"
+
+    report_run = run_async(
+        cognix_routes.run_scheduled_task(
+            created_report["task"]["id"],
+            current_subject = "alice",
+        )
+    )
+    assert report_run["run"]["status"] == "complete"
+    assert report_run["run"]["artifactType"] == "library_item"
+    assert report_run["sideEffects"]["libraryWrite"] is True
+    assert report_run["sideEffects"]["networkCall"] is False
+    assert report_run["sideEffects"]["modelLoad"] is False
+
+    listing = run_async(cognix_routes.my_scheduled_tasks(current_subject = "alice"))
+    assert listing["blueprint"]["scheduledVersion"] == "cognix_scheduled_v1"
+    assert len(listing["tasks"]) == 2
+    assert len(listing["runs"]) == 2
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    actions = [log["action"] for log in admin_read["logs"][:6]]
+    assert "scheduled_task_run_completed" in actions
+    assert "scheduled_task_run_blocked" in actions
+    assert any(log["metadata"].get("scheduledVersion") == "cognix_scheduled_v1" for log in admin_read["logs"])
 
 
 def test_tool_registry_declares_permissions_and_guardrails():
