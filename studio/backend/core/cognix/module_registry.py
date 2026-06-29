@@ -1350,6 +1350,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
             "tests_build_preview",
             "codex_run_contract",
             "codex_night_mode_contract",
+            "codex_night_report_contract",
             "codex_preview_contract",
             "branch_test_build_preview_gate",
             "codex_human_approval_gate",
@@ -1358,6 +1359,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "routes": [
             "/api/cognix/tools/plan",
             "/api/cognix/codex/pipeline-plan",
+            "/api/cognix/codex/night-report-contract",
             "/api/cognix/codex/preview-contract",
             "/api/cognix/codex/approval-gate",
         ],

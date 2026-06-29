@@ -19,6 +19,7 @@ COGNIX_CODEX_RUN_CONTRACT_VERSION = "cognix_codex_run_contract_v1"
 COGNIX_CODEX_PREVIEW_CONTRACT_VERSION = "cognix_codex_preview_contract_v1"
 COGNIX_CODEX_APPROVAL_GATE_VERSION = "cognix_codex_approval_gate_v1"
 COGNIX_CODEX_NIGHT_MODE_CONTRACT_VERSION = "cognix_codex_night_mode_contract_v1"
+COGNIX_CODEX_NIGHT_REPORT_CONTRACT_VERSION = "cognix_codex_night_report_contract_v1"
 
 NIGHT_MODE_ALIASES = {"night", "sleep", "mode_nuit", "nuit", "sommeil"}
 NIGHT_MODE_ALLOWED_CATEGORIES = [
@@ -147,6 +148,10 @@ def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _as_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
 def _objective_excerpt(objective: str | None) -> str:
     return re.sub(r"\s+", " ", objective or "").strip()[:500]
 
@@ -158,7 +163,18 @@ def _normalized_text(value: str | None) -> str:
 
 
 def _matched_signals(text: str, signals: tuple[str, ...]) -> list[str]:
-    return [signal for signal in signals if signal in text]
+    matches: list[str] = []
+    for signal in signals:
+        normalized = signal.strip()
+        if not normalized:
+            continue
+        if re.fullmatch(r"[a-z0-9 ]+", normalized):
+            pattern = rf"(?<![a-z0-9]){re.escape(normalized)}(?![a-z0-9])"
+            if re.search(pattern, text):
+                matches.append(signal)
+        elif normalized in text:
+            matches.append(signal)
+    return matches
 
 
 def _night_mode_classification(objective: str | None) -> dict[str, Any]:
@@ -307,6 +323,131 @@ def build_codex_night_mode_contract(
             "merge": False,
             "deployment": False,
             "approvalWrite": False,
+        },
+    }
+
+
+def _section_present(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, dict):
+        return bool(value)
+    if isinstance(value, list):
+        return any(_section_present(item) for item in value)
+    return True
+
+
+def _report_section(
+    section_id: str,
+    value: Any,
+    *,
+    required: bool = True,
+    present_override: bool | None = None,
+) -> dict[str, Any]:
+    present = bool(present_override) if present_override is not None else _section_present(value)
+    item_count = len(value) if isinstance(value, list) else len(value) if isinstance(value, dict) else int(present)
+    return {
+        "id": section_id,
+        "required": required,
+        "present": present,
+        "status": "present" if present else "missing" if required else "optional_missing",
+        "itemCount": item_count,
+        "rawContentIncluded": False,
+    }
+
+
+def build_codex_night_report_contract(
+    *,
+    objective: str,
+    run_mode: str | None = None,
+    files_modified: list[Any] | None = None,
+    tests_run: list[Any] | None = None,
+    results: dict[str, Any] | str | None = None,
+    risks_detected: list[Any] | None = None,
+    recommendations_for_human_validation: list[Any] | None = None,
+    supervision_mode_contract: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    supervision = _as_dict(supervision_mode_contract) or build_codex_night_mode_contract(
+        objective = objective,
+        run_mode = run_mode,
+    )
+    required_sections = [
+        str(item)
+        for item in _as_list(supervision.get("requiredReportSections"))
+        if str(item or "").strip()
+    ]
+    section_values = {
+        "files_modified": (files_modified or [], None),
+        "tests_run": (tests_run or [], None),
+        "results": (results, None),
+        "risks_detected": (risks_detected or [], risks_detected is not None),
+        "recommendations_for_human_validation": (recommendations_for_human_validation or [], None),
+        "summary_for_user_validation": (results, None),
+    }
+    sections = [
+        _report_section(
+            section_id,
+            section_values.get(section_id, (None, None))[0],
+            required = section_id in required_sections,
+            present_override = section_values.get(section_id, (None, None))[1],
+        )
+        for section_id in sorted(set(required_sections) | set(section_values))
+    ]
+    missing_sections = [
+        section["id"]
+        for section in sections
+        if section.get("required") and not section.get("present")
+    ]
+    blocked_by_night_mode = bool(supervision.get("blockedByNightMode"))
+    ready_for_human_validation = not missing_sections and not blocked_by_night_mode
+    risk_count = len(risks_detected or [])
+    return {
+        "contractVersion": COGNIX_CODEX_NIGHT_REPORT_CONTRACT_VERSION,
+        "nightModeContractVersion": supervision.get("contractVersion"),
+        "mode": "codex_night_report_contract_dry_run",
+        "runMode": supervision.get("runMode") or "supervised",
+        "nightModeActive": bool(supervision.get("nightModeActive")),
+        "objectiveExcerpt": _objective_excerpt(objective),
+        "status": "ready_for_human_validation" if ready_for_human_validation else "blocked_missing_report_evidence",
+        "readyForHumanValidation": ready_for_human_validation,
+        "blockedByNightMode": blocked_by_night_mode,
+        "missingRequiredSections": missing_sections,
+        "requiredSections": required_sections,
+        "sections": sections,
+        "qualitySignals": {
+            "filesModifiedCount": len(files_modified or []),
+            "testsRunCount": len(tests_run or []),
+            "riskCount": risk_count,
+            "recommendationCount": len(recommendations_for_human_validation or []),
+            "risksDetected": risk_count > 0,
+        },
+        "mergePolicy": {
+            "automaticMergeAllowed": False,
+            "mainBranchMergeAllowed": False,
+            "productionDeploymentAllowed": False,
+            "humanValidationRequired": True,
+            "readyForHumanValidation": ready_for_human_validation,
+        },
+        "blockedActions": [
+            "merge",
+            "main_branch_write",
+            "production_deployment",
+            "approval_bypass",
+            "report_evidence_mutation",
+        ],
+        "sideEffects": {
+            "fileRead": False,
+            "fileWrite": False,
+            "codeModification": False,
+            "testExecution": False,
+            "buildExecution": False,
+            "securityScanRun": False,
+            "reportWrite": False,
+            "auditWrite": False,
+            "merge": False,
+            "deployment": False,
         },
     }
 

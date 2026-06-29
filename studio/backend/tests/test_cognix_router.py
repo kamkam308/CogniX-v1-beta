@@ -7047,6 +7047,81 @@ def test_codex_night_mode_contract_blocks_visible_feature_work():
     assert any("Mode nuit bloque" in warning for warning in plan["warnings"])
 
 
+def test_codex_night_report_contract_requires_sections_without_writes():
+    contract = cognix_codex_pipeline.build_codex_night_report_contract(
+        objective = "Durcir la securite backend et optimiser les logs audit.",
+        run_mode = "night",
+        files_modified = ["studio/backend/core/cognix/security_policy.py"],
+        tests_run = [{"command": "pytest -q studio/backend/tests/test_cognix_router.py", "status": "passed"}],
+        results = {"summary": "Security policy tests passed."},
+        risks_detected = [],
+        recommendations_for_human_validation = ["Review the security policy diff before merge."],
+    )
+
+    assert contract["contractVersion"] == "cognix_codex_night_report_contract_v1"
+    assert contract["nightModeContractVersion"] == "cognix_codex_night_mode_contract_v1"
+    assert contract["runMode"] == "night"
+    assert contract["nightModeActive"] is True
+    assert contract["readyForHumanValidation"] is True
+    assert contract["missingRequiredSections"] == []
+    assert contract["mergePolicy"]["automaticMergeAllowed"] is False
+    assert contract["mergePolicy"]["productionDeploymentAllowed"] is False
+    assert contract["sideEffects"]["fileWrite"] is False
+    assert contract["sideEffects"]["codeModification"] is False
+    assert contract["sideEffects"]["testExecution"] is False
+    assert contract["sideEffects"]["auditWrite"] is False
+
+
+def test_codex_night_report_contract_blocks_incomplete_or_visible_work():
+    missing_report = cognix_codex_pipeline.build_codex_night_report_contract(
+        objective = "Durcir la securite backend.",
+        run_mode = "night",
+        files_modified = ["studio/backend/routes/cognix.py"],
+        tests_run = [{"command": "pytest", "status": "passed"}],
+        results = {"summary": "ok"},
+    )
+    visible_report = cognix_codex_pipeline.build_codex_night_report_contract(
+        objective = "Ajoute une nouvelle interface visible avec navigation.",
+        run_mode = "night",
+        files_modified = ["studio/frontend/src/App.tsx"],
+        tests_run = [{"command": "npm test", "status": "passed"}],
+        results = {"summary": "ok"},
+        risks_detected = [],
+        recommendations_for_human_validation = ["Wait for human validation."],
+    )
+
+    assert missing_report["readyForHumanValidation"] is False
+    assert "recommendations_for_human_validation" in missing_report["missingRequiredSections"]
+    assert visible_report["blockedByNightMode"] is True
+    assert visible_report["readyForHumanValidation"] is False
+    assert visible_report["sideEffects"]["reportWrite"] is False
+
+
+def test_codex_night_report_endpoint_returns_dry_run_contract():
+    body = run_async(
+        cognix_routes.codex_night_report_contract(
+            cognix_routes.CodexNightReportContractRequest(
+                objective = "Durcir la securite CogniX pendant la nuit.",
+                nightMode = True,
+                filesModified = ["studio/backend/core/cognix/codex_pipeline.py"],
+                testsRun = [{"command": "pytest -q", "status": "passed"}],
+                results = {"summary": "ok"},
+                risksDetected = [],
+                recommendationsForHumanValidation = ["Review before merge."],
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    contract = body["codexNightReportContract"]
+    assert body["plannerVersion"] == "cognix_codex_night_report_contract_v1"
+    assert body["username"] == "alice"
+    assert contract["readyForHumanValidation"] is True
+    assert body["sideEffects"]["fileWrite"] is False
+    assert body["sideEffects"]["reportWrite"] is False
+    assert body["sideEffects"]["merge"] is False
+
+
 def test_codex_pipeline_endpoint_logs_audited_dry_run(monkeypatch):
     seed_accounts()
     monkeypatch.setattr(
@@ -9334,11 +9409,13 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/admin/system-health" in modules["cognix-admin-security-center"]["routes"]
     assert "codex_run_contract" in modules["cognix-codex-secure-agent"]["capabilities"]
     assert "codex_night_mode_contract" in modules["cognix-codex-secure-agent"]["capabilities"]
+    assert "codex_night_report_contract" in modules["cognix-codex-secure-agent"]["capabilities"]
     assert "codex_preview_contract" in modules["cognix-codex-secure-agent"]["capabilities"]
     assert "branch_test_build_preview_gate" in modules["cognix-codex-secure-agent"]["capabilities"]
     assert "codex_human_approval_gate" in modules["cognix-codex-secure-agent"]["capabilities"]
     assert "codex_merge_gate_contract" in modules["cognix-codex-secure-agent"]["capabilities"]
     assert "/api/cognix/codex/pipeline-plan" in modules["cognix-codex-secure-agent"]["routes"]
+    assert "/api/cognix/codex/night-report-contract" in modules["cognix-codex-secure-agent"]["routes"]
     assert "/api/cognix/codex/preview-contract" in modules["cognix-codex-secure-agent"]["routes"]
     assert "/api/cognix/codex/approval-gate" in modules["cognix-codex-secure-agent"]["routes"]
     assert modules["cognix-deployment-manager"]["dependencyState"]["ready"] is True

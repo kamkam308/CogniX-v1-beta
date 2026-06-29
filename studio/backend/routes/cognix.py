@@ -1231,6 +1231,22 @@ class CodexPreviewContractRequest(BaseModel):
     preview_target: str | None = Field(None, alias = "previewTarget", max_length = 120)
 
 
+class CodexNightReportContractRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    run_mode: str | None = Field(None, alias = "runMode", max_length = 40)
+    night_mode: bool | None = Field(None, alias = "nightMode")
+    files_modified: list[Any] | None = Field(None, alias = "filesModified")
+    tests_run: list[Any] | None = Field(None, alias = "testsRun")
+    results: dict[str, Any] | str | None = None
+    risks_detected: list[Any] | None = Field(None, alias = "risksDetected")
+    recommendations_for_human_validation: list[Any] | None = Field(
+        None,
+        alias = "recommendationsForHumanValidation",
+    )
+
+
 class CodexApprovalGateRequest(BaseModel):
     model_config = ConfigDict(populate_by_name = True)
 
@@ -4716,6 +4732,29 @@ async def codex_preview_contract(
         "sideEffects": contract.get("sideEffects", {}),
         "plannerVersion": cognix_codex_pipeline.COGNIX_CODEX_PIPELINE_VERSION,
         "contractVersion": cognix_codex_pipeline.COGNIX_CODEX_PREVIEW_CONTRACT_VERSION,
+    }
+
+
+@router.post("/codex/night-report-contract")
+async def codex_night_report_contract(
+    payload: CodexNightReportContractRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    codex_run_mode = "night" if payload.night_mode is True else payload.run_mode
+    contract = cognix_codex_pipeline.build_codex_night_report_contract(
+        objective = payload.objective,
+        run_mode = codex_run_mode,
+        files_modified = payload.files_modified,
+        tests_run = payload.tests_run,
+        results = payload.results,
+        risks_detected = payload.risks_detected,
+        recommendations_for_human_validation = payload.recommendations_for_human_validation,
+    )
+    return {
+        "username": current_subject,
+        "codexNightReportContract": contract,
+        "sideEffects": contract.get("sideEffects", {}),
+        "plannerVersion": cognix_codex_pipeline.COGNIX_CODEX_NIGHT_REPORT_CONTRACT_VERSION,
     }
 
 
