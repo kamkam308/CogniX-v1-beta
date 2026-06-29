@@ -23,6 +23,36 @@ AUDIT_LOG_RETENTION_LIMIT = 5000
 PERMISSION_KEY_PATTERN = re.compile(r"^[a-z0-9:_-]{1,160}$")
 RATE_LIMIT_KEY_PATTERN = re.compile(r"^[a-z0-9:_-]{1,160}$")
 RATE_LIMIT_EVENT_RETENTION_DAYS = 7
+AUDIT_REDACTED_VALUE = "<redacted>"
+AUDIT_REDACTED_TOKEN = "<redacted token>"
+AUDIT_SENSITIVE_KEYS = {
+    "access_token",
+    "api_key",
+    "apikey",
+    "authorization",
+    "bearer_token",
+    "client_secret",
+    "credential",
+    "credentials",
+    "current_password",
+    "hf_token",
+    "id_token",
+    "kaggle_key",
+    "new_password",
+    "password",
+    "private_key",
+    "refresh_token",
+    "secret",
+    "secret_value",
+    "server_secret",
+    "token",
+    "wandb_token",
+}
+AUDIT_TOKEN_VALUE_RE = re.compile(r"(?i)\b(Bearer)\s+[A-Za-z0-9._~+/=-]{16,}")
+AUDIT_API_KEY_VALUE_RE = re.compile(r"\b(sk-[A-Za-z0-9_-]{12,}|hf_[A-Za-z0-9]{12,})\b")
+AUDIT_ASSIGNMENT_VALUE_RE = re.compile(
+    r"(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|hf[_-]?token|password|secret)\s*[:=]\s*[^,\s;]+"
+)
 
 KNOWN_ATTACK_SIGNATURES: list[dict[str, str]] = [
     {
@@ -82,6 +112,49 @@ def _now() -> str:
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
+
+
+def _audit_key_to_snake(key: str) -> str:
+    normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(key))
+    return normalized.replace("-", "_").strip().lower()
+
+
+def _audit_key_is_sensitive(key: str) -> bool:
+    normalized = _audit_key_to_snake(key)
+    if normalized in AUDIT_SENSITIVE_KEYS:
+        return True
+    if normalized.endswith("_token") and not normalized.endswith("_tokens"):
+        return True
+    if normalized.endswith("_api_key") or normalized.endswith("_secret"):
+        return True
+    return "password" in normalized or "private_key" in normalized
+
+
+def _redact_audit_string(value: str) -> str:
+    redacted = AUDIT_TOKEN_VALUE_RE.sub(r"\1 " + AUDIT_REDACTED_TOKEN, value)
+    redacted = AUDIT_API_KEY_VALUE_RE.sub(AUDIT_REDACTED_VALUE, redacted)
+    return AUDIT_ASSIGNMENT_VALUE_RE.sub(lambda match: f"{match.group(1)}={AUDIT_REDACTED_VALUE}", redacted)
+
+
+def redact_audit_metadata(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        removed = 0
+        for key, item in value.items():
+            if _audit_key_is_sensitive(str(key)):
+                removed += 1
+                continue
+            redacted[str(key)] = redact_audit_metadata(item)
+        if removed:
+            redacted["redactedSensitiveFieldCount"] = removed
+        return redacted
+    if isinstance(value, list):
+        return [redact_audit_metadata(item) for item in value]
+    if isinstance(value, tuple):
+        return [redact_audit_metadata(item) for item in value]
+    if isinstance(value, str):
+        return _redact_audit_string(value)
+    return value
 
 
 def get_connection() -> sqlite3.Connection:
@@ -5228,6 +5301,7 @@ def create_audit_log(
     normalized_severity = severity.strip().lower() or "info"
     if normalized_severity not in {"info", "notice", "warning", "critical"}:
         normalized_severity = "info"
+    safe_metadata = redact_audit_metadata(metadata or {})
     conn = get_connection()
     try:
         conn.execute(
@@ -5254,7 +5328,7 @@ def create_audit_log(
                 resource_type.strip()[:120],
                 (resource_id or None),
                 normalized_severity,
-                json.dumps(metadata or {}, ensure_ascii = False),
+                json.dumps(safe_metadata, ensure_ascii = False),
                 created_at,
             ),
         )

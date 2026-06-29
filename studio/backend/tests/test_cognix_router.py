@@ -6069,6 +6069,40 @@ def test_audit_log_retention_prunes_old_entries():
     assert set(created_ids[:2]).isdisjoint(kept_ids)
 
 
+def test_audit_log_redacts_sensitive_metadata_before_storage():
+    seed_accounts()
+
+    log = cognix_db.create_audit_log(
+        username = "alice",
+        actor_username = "alice",
+        action = "secret_redaction_test",
+        resource_type = "test",
+        metadata = {
+            "access_token": "tok_live_secret_value",
+            "apiKey": "sk-testabcdefghijklmnop",
+            "safeLabel": "kept",
+            "nested": {
+                "password": "plain-password",
+                "note": "Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456",
+            },
+        },
+    )
+
+    stored = cognix_db.list_audit_logs(action = "secret_redaction_test", limit = 1)[0]
+    metadata_json = stored["metadata_json"].lower()
+    assert stored["id"] == log["id"]
+    assert stored["metadata"]["safeLabel"] == "kept"
+    assert stored["metadata"]["redactedSensitiveFieldCount"] == 2
+    assert stored["metadata"]["nested"]["redactedSensitiveFieldCount"] == 1
+    assert "tok_live_secret_value" not in metadata_json
+    assert "sk-test" not in metadata_json
+    assert "plain-password" not in metadata_json
+    assert "access_token" not in metadata_json
+    assert "apikey" not in metadata_json
+    assert "password" not in metadata_json
+    assert "<redacted token>" in metadata_json
+
+
 def test_module_registry_declares_modular_cognix_capabilities():
     registry = cognix_module_registry.build_module_registry()
 
