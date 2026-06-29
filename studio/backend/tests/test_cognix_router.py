@@ -3453,6 +3453,72 @@ def test_deployment_manager_plans_enterprise_target_without_provisioning():
     assert plan["sideEffects"]["networkExposure"] is False
 
 
+def test_gpu_scheduler_contract_admits_enterprise_workloads_without_enqueueing():
+    hardware = stub_gpu_hardware_profile()
+    deployment = cognix_deployment_manager.build_deployment_plan(
+        username = "alice",
+        objective = "Planifier un scheduler GPU enterprise",
+        hardware = hardware,
+        recommendation = stub_recommendation(hardware)["recommendation"],
+        target_type = "on_premise",
+        edition = "enterprise",
+        expected_users = 40,
+        data_sensitivity = "confidential",
+        requested_features = ["autoscaling"],
+        latest_benchmark_run = {"id": "bench-1"},
+    )
+    contract = cognix_deployment_manager.build_gpu_scheduler_contract(
+        username = "alice",
+        hardware = hardware,
+        deployment_plan = deployment,
+        gpu_nodes = [
+            {"nodeId": "gpu-a", "name": "A6000", "backend": "vllm", "vramTotalGb": 48, "vramReservedGb": 8},
+            {"nodeId": "gpu-b", "name": "A6000", "backend": "vllm", "vramTotalGb": 48, "vramReservedGb": 4},
+        ],
+        workloads = [
+            {"workloadType": "chat", "count": 4, "requiredVramGb": 10},
+            {"workloadType": "batch", "count": 2, "requiredVramGb": 16},
+        ],
+        expected_users = 40,
+        tenant_policy = {"isolationMode": "tenant_queues", "maxConcurrentPerTenant": 3},
+    )
+
+    assert contract["schedulerContractVersion"] == "cognix_gpu_scheduler_contract_v1"
+    assert contract["status"] == "ready_for_admin_review"
+    assert contract["readyForAdminReview"] is True
+    assert contract["readyForSchedulerActivation"] is False
+    assert contract["gpuPool"]["availableNodeCount"] == 2
+    assert contract["admissionPlan"]["totalRequested"] == 6
+    assert contract["admissionPlan"]["totalAdmitted"] >= 2
+    assert contract["queuePlan"]["workerStartAllowed"] is False
+    assert contract["tenantIsolation"]["crossTenantMemorySharingAllowed"] is False
+    assert contract["tenantIsolation"]["perTenantAuditRequired"] is True
+    assert any(item["id"] == "job_enqueue" for item in contract["blockedActions"])
+    assert contract["sideEffects"]["schedulerActivation"] is False
+    assert contract["sideEffects"]["gpuReservation"] is False
+    assert contract["sideEffects"]["jobEnqueue"] is False
+    assert contract["sideEffects"]["workerStart"] is False
+
+
+def test_gpu_scheduler_contract_blocks_without_gpu_capacity():
+    contract = cognix_deployment_manager.build_gpu_scheduler_contract(
+        username = "alice",
+        hardware = stub_hardware_profile(),
+        deployment_plan = {},
+        gpu_nodes = [],
+        workloads = [{"workloadType": "fine_tuning", "count": 1, "requiredVramGb": 24}],
+        expected_users = 5,
+    )
+
+    assert contract["status"] == "blocked_capacity"
+    assert "gpu_nodes_available" in contract["summary"]["blockedGateIds"]
+    assert "capacity_for_workloads" in contract["summary"]["blockedGateIds"]
+    assert contract["readyForSchedulerActivation"] is False
+    assert contract["admissionPlan"]["willEnqueueNow"] is False
+    assert contract["sideEffects"]["serverStart"] is False
+    assert contract["sideEffects"]["jobEnqueue"] is False
+
+
 def test_deployment_plan_endpoint_logs_audited_dry_run(monkeypatch):
     seed_accounts()
     monkeypatch.setattr(
@@ -3496,6 +3562,58 @@ def test_deployment_plan_endpoint_logs_audited_dry_run(monkeypatch):
     assert log["metadata"]["deploymentManagerVersion"] == "cognix_deployment_manager_v1"
     assert log["metadata"]["expectedUsers"] == 12
     assert log["metadata"]["sideEffects"]["deployment"] is False
+
+
+def test_gpu_scheduler_contract_endpoint_logs_audited_dry_run(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_routes.cognix_hardware,
+        "get_hardware_profile",
+        stub_gpu_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_routes.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+
+    body = run_async(
+        cognix_routes.gpu_scheduler_contract(
+            cognix_routes.GpuSchedulerContractRequest(
+                objective = "Planifie un scheduler GPU Business pour plusieurs utilisateurs",
+                targetType = "on_premise",
+                edition = "business",
+                expectedUsers = 16,
+                dataSensitivity = "confidential",
+                gpuNodes = [
+                    {"nodeId": "gpu-a", "name": "RTX 4090", "backend": "vllm", "vramTotalGb": 24, "vramReservedGb": 4},
+                ],
+                workloads = [
+                    {"workloadType": "chat", "count": 2, "requiredVramGb": 8},
+                    {"workloadType": "rag", "count": 1, "requiredVramGb": 4},
+                ],
+                tenantPolicy = {"isolationMode": "tenant_queues"},
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    contract = body["gpuSchedulerContract"]
+    assert body["auditLogId"].startswith("aud_")
+    assert contract["schedulerContractVersion"] == "cognix_gpu_scheduler_contract_v1"
+    assert contract["mode"] == "gpu_scheduler_contract_dry_run"
+    assert contract["readyForSchedulerActivation"] is False
+    assert contract["sideEffects"]["jobEnqueue"] is False
+    assert contract["sideEffects"]["workerStart"] is False
+    assert contract["sideEffects"]["gpuReservation"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "gpu_scheduler_contract_built"
+    assert log["metadata"]["schedulerContractVersion"] == "cognix_gpu_scheduler_contract_v1"
+    assert log["metadata"]["sideEffects"]["jobEnqueue"] is False
+    assert log["metadata"]["sideEffects"]["workerStart"] is False
 
 
 def test_governance_manager_plans_university_rbac_sso_without_mutation():
@@ -8211,6 +8329,9 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "codex_run_contract" in modules["cognix-codex-secure-agent"]["capabilities"]
     assert "/api/cognix/codex/pipeline-plan" in modules["cognix-codex-secure-agent"]["routes"]
     assert modules["cognix-deployment-manager"]["dependencyState"]["ready"] is True
+    assert "gpu_scheduler_contract" in modules["cognix-deployment-manager"]["capabilities"]
+    assert "gpu_pool_admission_control" in modules["cognix-deployment-manager"]["capabilities"]
+    assert "/api/cognix/deployments/gpu-scheduler-contract" in modules["cognix-deployment-manager"]["routes"]
     assert "cognix-integrations" in modules["cognix-codex-secure-agent"]["dependencyState"]["dependencies"]
 
 

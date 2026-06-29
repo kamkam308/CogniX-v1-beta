@@ -1243,6 +1243,20 @@ class DeploymentPlanRequest(BaseModel):
     requested_features: list[str] | None = Field(None, alias = "requestedFeatures")
 
 
+class GpuSchedulerContractRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    target_type: str | None = Field(None, alias = "targetType", max_length = 120)
+    edition: str | None = Field(None, max_length = 80)
+    expected_users: int | None = Field(None, alias = "expectedUsers", ge = 1, le = 100000)
+    data_sensitivity: str | None = Field(None, alias = "dataSensitivity", max_length = 120)
+    requested_features: list[str] | None = Field(None, alias = "requestedFeatures")
+    gpu_nodes: list[dict[str, Any]] | None = Field(None, alias = "gpuNodes")
+    workloads: list[dict[str, Any]] | None = None
+    tenant_policy: dict[str, Any] | None = Field(None, alias = "tenantPolicy")
+
+
 class GovernancePlanRequest(BaseModel):
     model_config = ConfigDict(populate_by_name = True)
 
@@ -4182,6 +4196,70 @@ async def deployment_plan(
         "deploymentPlan": plan,
         "auditLogId": audit.get("id"),
         "sideEffects": plan.get("sideEffects", {}),
+        "plannerVersion": cognix_deployment_manager.COGNIX_DEPLOYMENT_MANAGER_VERSION,
+    }
+
+
+@router.post("/deployments/gpu-scheduler-contract")
+async def gpu_scheduler_contract(
+    payload: GpuSchedulerContractRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    hardware = cognix_hardware.get_hardware_profile()
+    latest_benchmark = cognix_db.get_latest_benchmark_run(current_subject)
+    recommendation_payload = cognix_recommender.build_model_recommendation(
+        hardware,
+        latest_benchmark_run = latest_benchmark,
+    )
+    deployment = cognix_deployment_manager.build_deployment_plan(
+        username = current_subject,
+        objective = payload.objective,
+        hardware = hardware,
+        recommendation = recommendation_payload["recommendation"],
+        target_type = payload.target_type,
+        edition = payload.edition,
+        expected_users = payload.expected_users,
+        data_sensitivity = payload.data_sensitivity,
+        requested_features = payload.requested_features,
+        latest_benchmark_run = latest_benchmark,
+    )
+    contract = cognix_deployment_manager.build_gpu_scheduler_contract(
+        username = current_subject,
+        hardware = hardware,
+        deployment_plan = deployment,
+        gpu_nodes = payload.gpu_nodes,
+        workloads = payload.workloads,
+        expected_users = payload.expected_users,
+        tenant_policy = payload.tenant_policy,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "gpu_scheduler_contract_built",
+        resource_type = "cognix_gpu_scheduler_contract",
+        resource_id = str(contract.get("target", {}).get("targetId") or "unknown"),
+        severity = "notice" if contract.get("readyForAdminReview") else "warning",
+        metadata = {
+            "deploymentManagerVersion": contract.get("deploymentManagerVersion"),
+            "schedulerContractVersion": contract.get("schedulerContractVersion"),
+            "status": contract.get("status"),
+            "targetId": contract.get("target", {}).get("targetId"),
+            "nodeCount": contract.get("gpuPool", {}).get("nodeCount"),
+            "availableNodeCount": contract.get("gpuPool", {}).get("availableNodeCount"),
+            "totalRequested": contract.get("admissionPlan", {}).get("totalRequested"),
+            "totalAdmitted": contract.get("admissionPlan", {}).get("totalAdmitted"),
+            "blockedGateIds": contract.get("summary", {}).get("blockedGateIds", []),
+            "warningGateIds": contract.get("summary", {}).get("warningGateIds", []),
+            "sideEffects": contract.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "hardware": hardware,
+        "deploymentPlan": deployment,
+        "gpuSchedulerContract": contract,
+        "auditLogId": audit.get("id"),
+        "sideEffects": contract.get("sideEffects", {}),
         "plannerVersion": cognix_deployment_manager.COGNIX_DEPLOYMENT_MANAGER_VERSION,
     }
 

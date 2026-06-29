@@ -16,6 +16,15 @@ from typing import Any
 
 
 COGNIX_DEPLOYMENT_MANAGER_VERSION = "cognix_deployment_manager_v1"
+COGNIX_GPU_SCHEDULER_CONTRACT_VERSION = "cognix_gpu_scheduler_contract_v1"
+
+WORKLOAD_PROFILES: dict[str, dict[str, Any]] = {
+    "chat": {"queueId": "interactive_inference", "priority": 40, "defaultVramGb": 6.0, "maxConcurrentPerGpu": 2},
+    "rag": {"queueId": "rag_indexing", "priority": 35, "defaultVramGb": 4.0, "maxConcurrentPerGpu": 2},
+    "batch": {"queueId": "enterprise_throughput", "priority": 25, "defaultVramGb": 8.0, "maxConcurrentPerGpu": 1},
+    "fine_tuning": {"queueId": "gpu_long_running", "priority": 15, "defaultVramGb": 12.0, "maxConcurrentPerGpu": 1},
+    "cloud_training": {"queueId": "cloud_training", "priority": 10, "defaultVramGb": 0.0, "maxConcurrentPerGpu": 0},
+}
 
 DEPLOYMENT_TARGETS: list[dict[str, Any]] = [
     {
@@ -139,6 +148,120 @@ def _as_float(value: Any) -> float | None:
 
 def _normalize(value: Any) -> str:
     return str(value or "").strip().casefold().replace(" ", "_").replace("-", "_")
+
+
+def _as_int(value: Any) -> int | None:
+    parsed = _as_float(value)
+    return int(parsed) if parsed is not None else None
+
+
+def _gpu_devices_from_hardware(hardware: dict[str, Any]) -> list[dict[str, Any]]:
+    gpu = _as_dict(hardware.get("gpu"))
+    devices = [
+        item for item in gpu.get("devices", []) if isinstance(item, dict)
+    ]
+    normalized: list[dict[str, Any]] = []
+    for index, device in enumerate(devices):
+        vram = _as_float(device.get("vramTotalGb") or device.get("memoryGb")) or 0.0
+        name = str(device.get("name") or device.get("model") or f"GPU {index + 1}").strip()
+        normalized.append(
+            {
+                "nodeId": f"local_gpu_{index + 1}",
+                "name": name,
+                "backend": gpu.get("backend") or hardware.get("deviceBackend") or "local",
+                "vramTotalGb": round(vram, 2),
+                "vramReservedGb": 0.0,
+                "status": "available" if bool(gpu.get("available")) and vram > 0 else "unavailable",
+                "source": "hardware_profile",
+            }
+        )
+    return normalized
+
+
+def _normalize_scheduler_nodes(
+    *,
+    hardware: dict[str, Any],
+    gpu_nodes: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    raw_nodes = gpu_nodes if isinstance(gpu_nodes, list) and gpu_nodes else _gpu_devices_from_hardware(hardware)
+    nodes: list[dict[str, Any]] = []
+    for index, node in enumerate(raw_nodes):
+        if not isinstance(node, dict):
+            continue
+        total = _as_float(node.get("vramTotalGb") or node.get("vramGb") or node.get("memoryGb")) or 0.0
+        reserved = _as_float(node.get("vramReservedGb") or node.get("reservedGb")) or 0.0
+        available = max(0.0, total - reserved)
+        node_id = str(node.get("nodeId") or node.get("id") or f"gpu_node_{index + 1}").strip()[:160]
+        nodes.append(
+            {
+                "nodeId": node_id,
+                "name": str(node.get("name") or node_id).strip()[:160],
+                "backend": str(node.get("backend") or node.get("runtimeBackend") or "unknown").strip()[:80],
+                "status": str(node.get("status") or "available").strip().lower(),
+                "vramTotalGb": round(total, 2),
+                "vramReservedGb": round(min(reserved, total), 2),
+                "vramAvailableGb": round(available, 2),
+                "tenantId": str(node.get("tenantId") or "shared").strip()[:120],
+                "source": str(node.get("source") or "provided").strip()[:80],
+            }
+        )
+    return nodes
+
+
+def _normalize_scheduler_workloads(workloads: list[dict[str, Any]] | None, expected_users: int) -> list[dict[str, Any]]:
+    if not isinstance(workloads, list) or not workloads:
+        workloads = [
+            {"workloadType": "chat", "count": max(1, min(expected_users, 8))},
+            {"workloadType": "rag", "count": 1 if expected_users >= 2 else 0},
+        ]
+    normalized: list[dict[str, Any]] = []
+    for index, workload in enumerate(workloads):
+        if not isinstance(workload, dict):
+            continue
+        workload_type = _normalize(workload.get("workloadType") or workload.get("type") or "chat")
+        profile = WORKLOAD_PROFILES.get(workload_type, WORKLOAD_PROFILES["chat"])
+        count = max(0, min(_as_int(workload.get("count")) or 1, 100_000))
+        if count == 0:
+            continue
+        required_vram = _as_float(workload.get("requiredVramGb")) or float(profile["defaultVramGb"])
+        normalized.append(
+            {
+                "workloadId": str(workload.get("workloadId") or workload.get("id") or f"workload_{index + 1}").strip()[:160],
+                "workloadType": workload_type,
+                "count": count,
+                "requiredVramGb": round(required_vram, 2),
+                "priority": _as_int(workload.get("priority")) or int(profile["priority"]),
+                "queueId": str(workload.get("queueId") or profile["queueId"]).strip()[:120],
+                "maxConcurrentPerGpu": int(profile["maxConcurrentPerGpu"]),
+            }
+        )
+    return sorted(normalized, key = lambda item: int(item.get("priority") or 0), reverse = True)
+
+
+def _admission_for_workload(workload: dict[str, Any], nodes: list[dict[str, Any]]) -> dict[str, Any]:
+    required_vram = _as_float(workload.get("requiredVramGb")) or 0.0
+    available_nodes = [
+        node
+        for node in nodes
+        if node.get("status") == "available" and (_as_float(node.get("vramAvailableGb")) or 0.0) >= required_vram
+    ]
+    max_per_gpu = max(0, int(workload.get("maxConcurrentPerGpu") or 0))
+    admitted_capacity = len(available_nodes) * max_per_gpu
+    requested = int(workload.get("count") or 0)
+    admitted = min(requested, admitted_capacity) if max_per_gpu else 0
+    overflow = max(0, requested - admitted)
+    return {
+        "workloadId": workload.get("workloadId"),
+        "workloadType": workload.get("workloadType"),
+        "queueId": workload.get("queueId"),
+        "requestedCount": requested,
+        "admittedCount": admitted,
+        "overflowCount": overflow,
+        "eligibleNodeIds": [node["nodeId"] for node in available_nodes],
+        "status": "admitted" if overflow == 0 and admitted > 0 else "partial" if admitted > 0 else "blocked_capacity",
+        "willEnqueueNow": False,
+        "willReserveGpuNow": False,
+    }
 
 
 def _hardware_summary(hardware: dict[str, Any]) -> dict[str, Any]:
@@ -331,6 +454,160 @@ def build_deployment_target_registry() -> dict[str, Any]:
             "dnsChange": False,
             "secretWrite": False,
             "networkExposure": False,
+        },
+    }
+
+
+def build_gpu_scheduler_contract(
+    *,
+    username: str,
+    hardware: dict[str, Any],
+    deployment_plan: dict[str, Any] | None = None,
+    gpu_nodes: list[dict[str, Any]] | None = None,
+    workloads: list[dict[str, Any]] | None = None,
+    expected_users: int | None = None,
+    tenant_policy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    plan = _as_dict(deployment_plan)
+    request = _as_dict(plan.get("request"))
+    user_count = max(1, min(int(expected_users or request.get("expectedUsers") or 1), 100_000))
+    nodes = _normalize_scheduler_nodes(hardware = hardware, gpu_nodes = gpu_nodes)
+    normalized_workloads = _normalize_scheduler_workloads(workloads, user_count)
+    admissions = [_admission_for_workload(workload, nodes) for workload in normalized_workloads]
+    available_nodes = [node for node in nodes if node.get("status") == "available"]
+    total_vram = round(sum(_as_float(node.get("vramTotalGb")) or 0.0 for node in nodes), 2)
+    available_vram = round(sum(_as_float(node.get("vramAvailableGb")) or 0.0 for node in available_nodes), 2)
+    tenant = _as_dict(tenant_policy)
+    isolation_mode = str(tenant.get("isolationMode") or "shared_queue").strip()[:80]
+    per_tenant_limit = max(1, min(_as_int(tenant.get("maxConcurrentPerTenant")) or 2, 10_000))
+    scheduler_plan = _as_dict(plan.get("schedulerPlan"))
+    selected_target = _as_dict(plan.get("recommendedTarget"))
+    target_id = str(selected_target.get("targetId") or "unknown")
+    scheduler_declared = bool(scheduler_plan.get("gpuIsolationRequired") or scheduler_plan.get("scheduler") in {"gpu_pool_scheduler", "single_gpu_guarded_queue"})
+    capacity_ready = bool(available_nodes and any(item.get("admittedCount", 0) for item in admissions))
+    gates = [
+        {
+            "id": "deployment_plan_declared",
+            "status": "pass" if plan else "warning",
+            "severity": "info" if plan else "warning",
+            "reason": "Deployment plan supplied." if plan else "Scheduler can plan from hardware only, but deployment plan is recommended.",
+        },
+        {
+            "id": "gpu_nodes_available",
+            "status": "pass" if available_nodes else "blocked",
+            "severity": "info" if available_nodes else "error",
+            "reason": "At least one GPU node is available." if available_nodes else "No available GPU node declared.",
+            "detail": [node["nodeId"] for node in available_nodes],
+        },
+        {
+            "id": "capacity_for_workloads",
+            "status": "pass" if capacity_ready else "blocked",
+            "severity": "info" if capacity_ready else "error",
+            "reason": "GPU capacity can admit at least one workload." if capacity_ready else "GPU capacity is insufficient for declared workloads.",
+        },
+        {
+            "id": "scheduler_declared",
+            "status": "pass" if scheduler_declared else "warning",
+            "severity": "info" if scheduler_declared else "warning",
+            "reason": "Deployment plan declares a GPU scheduler." if scheduler_declared else "Deployment plan does not yet require a GPU scheduler.",
+            "detail": scheduler_plan.get("scheduler"),
+        },
+        {
+            "id": "tenant_isolation_declared",
+            "status": "pass",
+            "severity": "info",
+            "reason": "Tenant isolation policy is declared for scheduler planning.",
+            "detail": isolation_mode,
+        },
+        {
+            "id": "human_approval_required",
+            "status": "warning",
+            "severity": "warning",
+            "reason": "GPU scheduler activation requires human approval and a guarded executor.",
+        },
+    ]
+    blocked_gate_ids = [str(item["id"]) for item in gates if item.get("severity") == "error"]
+    warning_gate_ids = [str(item["id"]) for item in gates if item.get("severity") == "warning"]
+    ready_for_admin_review = not blocked_gate_ids
+    return {
+        "deploymentManagerVersion": COGNIX_DEPLOYMENT_MANAGER_VERSION,
+        "schedulerContractVersion": COGNIX_GPU_SCHEDULER_CONTRACT_VERSION,
+        "mode": "gpu_scheduler_contract_dry_run",
+        "username": username,
+        "status": "ready_for_admin_review" if ready_for_admin_review else "blocked_capacity",
+        "readyForAdminReview": ready_for_admin_review,
+        "readyForSchedulerActivation": False,
+        "target": {
+            "targetId": target_id,
+            "scheduler": scheduler_plan.get("scheduler") or "gpu_pool_scheduler",
+            "expectedUsers": user_count,
+        },
+        "gpuPool": {
+            "nodeCount": len(nodes),
+            "availableNodeCount": len(available_nodes),
+            "totalVramGb": total_vram,
+            "availableVramGb": available_vram,
+            "nodes": nodes,
+        },
+        "workloads": normalized_workloads,
+        "admissionPlan": {
+            "admissions": admissions,
+            "totalRequested": sum(int(item.get("requestedCount") or 0) for item in admissions),
+            "totalAdmitted": sum(int(item.get("admittedCount") or 0) for item in admissions),
+            "totalOverflow": sum(int(item.get("overflowCount") or 0) for item in admissions),
+            "willReserveGpuNow": False,
+            "willEnqueueNow": False,
+        },
+        "queuePlan": {
+            "queueIds": sorted({str(item.get("queueId")) for item in normalized_workloads if item.get("queueId")}),
+            "workerQueueRequired": True,
+            "workerStartAllowed": False,
+            "schedulerActivationAllowed": False,
+        },
+        "tenantIsolation": {
+            "mode": isolation_mode,
+            "maxConcurrentPerTenant": per_tenant_limit,
+            "crossTenantMemorySharingAllowed": False,
+            "crossUserReadAllowed": False,
+            "perTenantAuditRequired": True,
+        },
+        "gates": gates,
+        "summary": {
+            "blockedGateIds": blocked_gate_ids,
+            "warningGateIds": warning_gate_ids,
+            "targetId": target_id,
+            "capacityReady": capacity_ready,
+        },
+        "blockedActions": [
+            {
+                "id": "scheduler_activation",
+                "reason": "This contract does not start or enable the GPU scheduler.",
+            },
+            {
+                "id": "gpu_reservation",
+                "reason": "No GPU memory is reserved during dry-run planning.",
+            },
+            {
+                "id": "job_enqueue",
+                "reason": "No inference, RAG, or training jobs are enqueued by this contract.",
+            },
+            {
+                "id": "worker_start",
+                "reason": "No worker process is started by this contract.",
+            },
+        ],
+        "sideEffects": {
+            "schedulerActivation": False,
+            "gpuReservation": False,
+            "jobEnqueue": False,
+            "workerStart": False,
+            "serverStart": False,
+            "containerStart": False,
+            "modelLoad": False,
+            "generation": False,
+            "secretRead": False,
+            "networkCall": False,
+            "auditWrite": False,
         },
     }
 
