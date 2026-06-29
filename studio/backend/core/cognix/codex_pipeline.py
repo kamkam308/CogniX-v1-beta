@@ -15,6 +15,7 @@ from typing import Any
 
 COGNIX_CODEX_PIPELINE_VERSION = "cognix_codex_pipeline_v1"
 COGNIX_CODEX_RUN_CONTRACT_VERSION = "cognix_codex_run_contract_v1"
+COGNIX_CODEX_PREVIEW_CONTRACT_VERSION = "cognix_codex_preview_contract_v1"
 
 CODEX_PIPELINE_STEPS: list[dict[str, Any]] = [
     {
@@ -118,6 +119,182 @@ def _planned_steps(path: str) -> list[dict[str, Any]]:
         }
         for step in CODEX_PIPELINE_STEPS
     ]
+
+
+def _status_passed(report: dict[str, Any], *, zero_fields: tuple[str, ...] = ()) -> bool:
+    status = str(report.get("status") or report.get("state") or report.get("result") or "").casefold()
+    explicit_pass = report.get("passed") is True or status in {
+        "ok",
+        "pass",
+        "passed",
+        "success",
+        "succeeded",
+        "green",
+        "clean",
+    }
+    if not explicit_pass:
+        return False
+    for field in zero_fields:
+        try:
+            if int(report.get(field) or 0) > 0:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
+def _preview_gate(gate_id: str, label: str, passed: bool, evidence: str) -> dict[str, Any]:
+    return {
+        "id": gate_id,
+        "label": label,
+        "required": True,
+        "passed": passed,
+        "status": "passed" if passed else "blocked",
+        "evidence": evidence,
+    }
+
+
+def build_codex_preview_contract(
+    *,
+    username: str,
+    feature_request: dict[str, Any] | None = None,
+    pipeline_plan: dict[str, Any] | None = None,
+    branch_name: str | None = None,
+    test_results: dict[str, Any] | None = None,
+    build_result: dict[str, Any] | None = None,
+    security_scan: dict[str, Any] | None = None,
+    preview_target: str | None = None,
+) -> dict[str, Any]:
+    feature_request = _as_dict(feature_request)
+    pipeline_plan = _as_dict(pipeline_plan)
+    test_results = _as_dict(test_results)
+    build_result = _as_dict(build_result)
+    security_scan = _as_dict(security_scan)
+    branch = (
+        branch_name
+        or _as_dict(pipeline_plan.get("branch")).get("recommendedName")
+        or pipeline_plan.get("targetBranch")
+        or ""
+    )
+    feature_declared = bool(
+        feature_request.get("id")
+        or feature_request.get("title")
+        or feature_request.get("summary")
+        or feature_request.get("type")
+    )
+    branch_declared = bool(str(branch).strip())
+    tests_passed = _status_passed(test_results, zero_fields = ("failed", "failures", "errors"))
+    build_passed = _status_passed(build_result, zero_fields = ("failed", "failures", "errors"))
+    security_passed = _status_passed(security_scan, zero_fields = ("critical", "high", "errors"))
+    gates = [
+        _preview_gate(
+            "feature_request_declared",
+            "Feature request declaree",
+            feature_declared,
+            "feature_request_metadata_present",
+        ),
+        _preview_gate(
+            "branch_declared",
+            "Branche Git declaree",
+            branch_declared,
+            "branch_name_present",
+        ),
+        _preview_gate(
+            "tests_passed",
+            "Tests automatiques valides",
+            tests_passed,
+            "test_report_status_passed",
+        ),
+        _preview_gate(
+            "build_passed",
+            "Build valide",
+            build_passed,
+            "build_report_status_passed",
+        ),
+        _preview_gate(
+            "security_scan_passed",
+            "Scan securite valide",
+            security_passed,
+            "security_scan_has_no_critical_or_high_findings",
+        ),
+        {
+            "id": "human_approval_required",
+            "label": "Validation humaine obligatoire",
+            "required": True,
+            "passed": True,
+            "status": "required",
+            "evidence": "approval_must_happen_outside_this_contract",
+        },
+    ]
+    blocked_gate_ids = [
+        gate["id"] for gate in gates if gate.get("required") and gate.get("status") == "blocked"
+    ]
+    ready_for_review = not blocked_gate_ids
+    return {
+        "contractVersion": COGNIX_CODEX_PREVIEW_CONTRACT_VERSION,
+        "mode": "codex_preview_contract_dry_run",
+        "username": username,
+        "status": "ready_for_preview_review" if ready_for_review else "blocked_missing_gate",
+        "readyForPreviewReview": ready_for_review,
+        "readyForPreviewStart": False,
+        "readyForMerge": False,
+        "blockedGateIds": blocked_gate_ids,
+        "featureRequest": {
+            "declared": feature_declared,
+            "metadataKeys": sorted(feature_request.keys())[:12],
+        },
+        "branch": {
+            "name": str(branch).strip() or None,
+            "declared": branch_declared,
+            "willCreate": False,
+        },
+        "qualityReports": {
+            "tests": {"declared": bool(test_results), "passed": tests_passed},
+            "build": {"declared": bool(build_result), "passed": build_passed},
+            "security": {"declared": bool(security_scan), "passed": security_passed},
+        },
+        "previewPlan": {
+            "target": preview_target or "local_preview",
+            "readyForManualReview": ready_for_review,
+            "willStartPreview": False,
+            "previewUrlGenerated": False,
+            "requiresHumanApprovalBeforeMerge": True,
+        },
+        "mergePolicy": {
+            "automaticMergeAllowed": False,
+            "humanApprovalRequired": True,
+            "mainBranchWriteAllowed": False,
+            "mergeAllowedWithoutApproval": False,
+            "readyForHumanMergeApproval": ready_for_review,
+        },
+        "gates": gates,
+        "blockedActions": [
+            "branch_create",
+            "code_write",
+            "test_run",
+            "build_run",
+            "security_scan_run",
+            "preview_start",
+            "merge",
+            "git_push",
+            "network_call",
+            "file_write",
+            "tool_execution",
+        ],
+        "sideEffects": {
+            "branchCreate": False,
+            "codeWrite": False,
+            "testRun": False,
+            "buildRun": False,
+            "securityScanRun": False,
+            "previewStart": False,
+            "merge": False,
+            "gitPush": False,
+            "networkCall": False,
+            "fileWrite": False,
+            "toolExecution": False,
+        },
+    }
 
 
 def _run_contract(*, applicable: bool, branch_name: str, risk_level: str) -> dict[str, Any]:

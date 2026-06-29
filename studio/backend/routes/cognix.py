@@ -1199,6 +1199,20 @@ class CodexPipelinePlanRequest(BaseModel):
     project_id: str | None = Field(None, max_length = 160)
 
 
+class CodexPreviewContractRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    project_type: str | None = Field(None, max_length = 80)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    branch_name: str | None = Field(None, alias = "branchName", max_length = 180)
+    feature_request: dict[str, Any] | None = Field(None, alias = "featureRequest")
+    test_results: dict[str, Any] | None = Field(None, alias = "testResults")
+    build_result: dict[str, Any] | None = Field(None, alias = "buildResult")
+    security_scan: dict[str, Any] | None = Field(None, alias = "securityScan")
+    preview_target: str | None = Field(None, alias = "previewTarget", max_length = 120)
+
+
 class WorkerQueuePlanRequest(BaseModel):
     objective: str = Field(..., min_length = 1, max_length = 4000)
     project_type: str | None = Field(None, max_length = 80)
@@ -4482,6 +4496,67 @@ async def codex_pipeline_plan(
         "auditLogId": audit.get("id"),
         "sideEffects": pipeline.get("sideEffects", {}),
         "plannerVersion": cognix_codex_pipeline.COGNIX_CODEX_PIPELINE_VERSION,
+    }
+
+
+@router.post("/codex/preview-contract")
+async def codex_preview_contract(
+    payload: CodexPreviewContractRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    runtime = _current_model_cache_runtime()
+    plan = cognix_orchestrator.build_execution_plan(
+        payload.objective,
+        current_subject = current_subject,
+        project_type = payload.project_type,
+        project_id = payload.project_id,
+        runtime_snapshot = runtime,
+        latest_benchmark_run = cognix_db.get_latest_benchmark_run(current_subject),
+    )
+    pipeline = plan["codexPipelinePlan"]
+    contract = cognix_codex_pipeline.build_codex_preview_contract(
+        username = current_subject,
+        feature_request = payload.feature_request,
+        pipeline_plan = pipeline,
+        branch_name = payload.branch_name,
+        test_results = payload.test_results,
+        build_result = payload.build_result,
+        security_scan = payload.security_scan,
+        preview_target = payload.preview_target,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "codex_preview_contract_built",
+        resource_type = "cognix_codex_preview_contract",
+        resource_id = str(payload.project_id or contract.get("branch", {}).get("name") or "none"),
+        severity = "notice" if contract.get("readyForPreviewReview") else "warning",
+        metadata = {
+            "codexPipelineVersion": pipeline.get("plannerVersion"),
+            "previewContractVersion": contract.get("contractVersion"),
+            "status": contract.get("status"),
+            "readyForPreviewReview": contract.get("readyForPreviewReview"),
+            "readyForPreviewStart": contract.get("readyForPreviewStart"),
+            "readyForMerge": contract.get("readyForMerge"),
+            "blockedGateIds": contract.get("blockedGateIds", []),
+            "featureRequestKeys": contract.get("featureRequest", {}).get("metadataKeys", []),
+            "qualityReports": contract.get("qualityReports", {}),
+            "mergePolicy": contract.get("mergePolicy", {}),
+            "sideEffects": contract.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "runtimeError": runtime.get("error"),
+        "classification": plan["classification"],
+        "taskStrategy": plan["taskStrategy"],
+        "codexPipelinePlan": pipeline,
+        "codexPreviewContract": contract,
+        "executionPolicy": plan["executionPolicy"],
+        "auditLogId": audit.get("id"),
+        "sideEffects": contract.get("sideEffects", {}),
+        "plannerVersion": cognix_codex_pipeline.COGNIX_CODEX_PIPELINE_VERSION,
+        "contractVersion": cognix_codex_pipeline.COGNIX_CODEX_PREVIEW_CONTRACT_VERSION,
     }
 
 

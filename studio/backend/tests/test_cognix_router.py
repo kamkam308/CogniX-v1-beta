@@ -6813,6 +6813,105 @@ def test_codex_pipeline_endpoint_logs_audited_dry_run(monkeypatch):
     assert log["metadata"]["sideEffects"]["codeModification"] is False
 
 
+def test_codex_preview_contract_blocks_merge_without_test_build_security_gates():
+    contract = cognix_codex_pipeline.build_codex_preview_contract(
+        username = "alice",
+        feature_request = {"title": "CogniX Chemistry"},
+        pipeline_plan = {"branch": {"recommendedName": "cognix/chemistry"}},
+        test_results = {"status": "failed", "failed": 1},
+        build_result = {"status": "passed", "failed": 0},
+        security_scan = {"status": "failed", "critical": 1, "high": 0},
+        preview_target = "local_preview",
+    )
+
+    assert contract["contractVersion"] == "cognix_codex_preview_contract_v1"
+    assert contract["status"] == "blocked_missing_gate"
+    assert contract["readyForPreviewReview"] is False
+    assert contract["readyForPreviewStart"] is False
+    assert contract["readyForMerge"] is False
+    assert {"tests_passed", "security_scan_passed"}.issubset(contract["blockedGateIds"])
+    assert contract["mergePolicy"]["automaticMergeAllowed"] is False
+    assert contract["mergePolicy"]["humanApprovalRequired"] is True
+    assert contract["sideEffects"]["previewStart"] is False
+    assert contract["sideEffects"]["merge"] is False
+    assert contract["sideEffects"]["codeWrite"] is False
+
+
+def test_codex_preview_contract_prepares_preview_without_starting_or_merging():
+    contract = cognix_codex_pipeline.build_codex_preview_contract(
+        username = "alice",
+        feature_request = {"id": "feat-chemistry", "title": "CogniX Chemistry"},
+        branch_name = "feature/cognix-chemistry",
+        test_results = {"status": "passed", "passed": True, "failed": 0, "errors": 0},
+        build_result = {"status": "success", "failed": 0, "errors": 0},
+        security_scan = {"status": "clean", "critical": 0, "high": 0, "errors": 0},
+        preview_target = "https://cognix.local:4321",
+    )
+
+    assert contract["status"] == "ready_for_preview_review"
+    assert contract["readyForPreviewReview"] is True
+    assert contract["previewPlan"]["readyForManualReview"] is True
+    assert contract["previewPlan"]["willStartPreview"] is False
+    assert contract["previewPlan"]["previewUrlGenerated"] is False
+    assert contract["mergePolicy"]["readyForHumanMergeApproval"] is True
+    assert contract["mergePolicy"]["mainBranchWriteAllowed"] is False
+    assert contract["blockedGateIds"] == []
+    assert all(value is False for value in contract["sideEffects"].values())
+
+
+def test_codex_preview_contract_endpoint_logs_sanitized_dry_run(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+
+    body = run_async(
+        cognix_routes.codex_preview_contract(
+            cognix_routes.CodexPreviewContractRequest(
+                objective = "Ajoute un module CogniX Chemistry dans mon backend",
+                project_type = "code",
+                project_id = "project-code",
+                branch_name = "feature/cognix-chemistry",
+                feature_request = {
+                    "title": "CogniX Chemistry",
+                    "description": "secret codex idea should never be logged",
+                },
+                test_results = {"status": "passed", "passed": True, "failed": 0, "errors": 0},
+                build_result = {"status": "passed", "failed": 0, "errors": 0},
+                security_scan = {"status": "passed", "critical": 0, "high": 0, "errors": 0},
+                preview_target = "local_preview",
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    contract = body["codexPreviewContract"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["contractVersion"] == "cognix_codex_preview_contract_v1"
+    assert contract["readyForPreviewReview"] is True
+    assert contract["readyForPreviewStart"] is False
+    assert contract["readyForMerge"] is False
+    assert contract["sideEffects"]["toolExecution"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "codex_preview_contract_built"
+    assert log["metadata"]["previewContractVersion"] == "cognix_codex_preview_contract_v1"
+    assert log["metadata"]["readyForPreviewReview"] is True
+    assert log["metadata"]["readyForPreviewStart"] is False
+    assert log["metadata"]["readyForMerge"] is False
+    assert log["metadata"]["sideEffects"]["previewStart"] is False
+    assert "secret codex idea" not in log["metadataJson"]
+
+
 def test_worker_queue_plans_long_running_jobs_without_enqueueing():
     plan = cognix_worker_queue.build_worker_queue_plan(
         objective = "Corrige ce bug Python et prepare mes PDF pour RAG",
@@ -8327,7 +8426,10 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/admin/risk-scores" in modules["cognix-admin-security-center"]["routes"]
     assert "/api/cognix/admin/system-health" in modules["cognix-admin-security-center"]["routes"]
     assert "codex_run_contract" in modules["cognix-codex-secure-agent"]["capabilities"]
+    assert "codex_preview_contract" in modules["cognix-codex-secure-agent"]["capabilities"]
+    assert "branch_test_build_preview_gate" in modules["cognix-codex-secure-agent"]["capabilities"]
     assert "/api/cognix/codex/pipeline-plan" in modules["cognix-codex-secure-agent"]["routes"]
+    assert "/api/cognix/codex/preview-contract" in modules["cognix-codex-secure-agent"]["routes"]
     assert modules["cognix-deployment-manager"]["dependencyState"]["ready"] is True
     assert "gpu_scheduler_contract" in modules["cognix-deployment-manager"]["capabilities"]
     assert "gpu_pool_admission_control" in modules["cognix-deployment-manager"]["capabilities"]
