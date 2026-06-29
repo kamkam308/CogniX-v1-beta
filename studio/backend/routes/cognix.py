@@ -6204,6 +6204,7 @@ async def model_preload_plan(
         latest_benchmark_run = cognix_db.get_latest_benchmark_run(current_subject),
     )
     preload_plan = plan["preloadPlan"]
+    preload_queue_contract = preload_plan.get("preloadQueueContract", {})
     audit = cognix_db.create_audit_log(
         username = current_subject,
         actor_username = current_subject,
@@ -6221,6 +6222,11 @@ async def model_preload_plan(
             "loadPredictionStatus": preload_plan.get("loadPrediction", {}).get("status"),
             "warmupContractVersion": preload_plan.get("warmupContract", {}).get("contractVersion"),
             "warmupNextRequiredGate": preload_plan.get("warmupContract", {}).get("nextRequiredGate"),
+            "preloadQueueContractVersion": preload_queue_contract.get("contractVersion"),
+            "preloadQueueStatus": preload_queue_contract.get("status"),
+            "preloadQueueCandidateCount": preload_queue_contract.get("candidateCount"),
+            "preloadQueueDepth": preload_queue_contract.get("queueDepth"),
+            "preloadQueueWillLoadNow": preload_queue_contract.get("executionGate", {}).get("willLoadNow"),
             "recommendedWindowSeconds": preload_plan.get("schedule", {}).get("recommendedWindowSeconds"),
             "requiredEvictionCount": preload_plan.get("cachePreflight", {}).get("requiredEvictionCount"),
             "actionTypes": [

@@ -114,6 +114,8 @@ def _architecture_decision(
     context_budget = _as_dict(context_plan.get("tokenBudget"))
     fine_tuning_method = _as_dict(fine_tuning_plan.get("method"))
     worker_summary = _as_dict(worker_queue_plan.get("summary"))
+    preload_queue_contract = _as_dict(preload_plan.get("preloadQueueContract"))
+    preload_execution_gate = _as_dict(preload_queue_contract.get("executionGate"))
     side_effects = {
         "modelLoad": False,
         "generation": False,
@@ -200,6 +202,12 @@ def _architecture_decision(
             "warmupContractVersion": _as_dict(preload_plan.get("warmupContract")).get("contractVersion"),
             "warmupNextRequiredGate": _as_dict(preload_plan.get("warmupContract")).get("nextRequiredGate"),
             "willWarmupNow": bool(_as_dict(preload_plan.get("warmupContract")).get("willWarmupNow")),
+            "preloadQueueContractVersion": preload_queue_contract.get("contractVersion"),
+            "preloadQueueStatus": preload_queue_contract.get("status"),
+            "preloadQueueCandidateCount": preload_queue_contract.get("candidateCount"),
+            "preloadQueueDepth": preload_queue_contract.get("queueDepth"),
+            "willLoadNow": bool(preload_execution_gate.get("willLoadNow")),
+            "frontendDirectModelLoadAllowed": False,
         },
         "projectExpert": {
             "expertId": selected_expert.get("expertId"),
@@ -600,6 +608,8 @@ def build_execution_plan(
         latest_benchmark_run = latest_benchmark_run,
     )
     external_moe_plan = _as_dict(classification.get("externalMoePlan"))
+    preload_queue_contract = _as_dict(preload_plan.get("preloadQueueContract"))
+    preload_queue_gate = _as_dict(preload_queue_contract.get("executionGate"))
 
     execution_strategy = {
         "status": status,
@@ -620,6 +630,10 @@ def build_execution_plan(
         "securityRiskLevel": execution_policy.get("riskLevel"),
         "preloadAction": (preload_plan.get("actions") or [{}])[0].get("type"),
         "preloadTargetModelId": preload_plan.get("target", {}).get("modelId"),
+        "preloadQueueStatus": preload_queue_contract.get("status"),
+        "preloadQueueCandidateCount": preload_queue_contract.get("candidateCount"),
+        "preloadQueueDepth": preload_queue_contract.get("queueDepth"),
+        "preloadQueueWillLoadNow": bool(preload_queue_gate.get("willLoadNow")),
         "projectExpertId": project_expert_plan.get("primaryExpert", {}).get("expertId"),
         "projectExpertDomain": project_expert_plan.get("primaryExpert", {}).get("domain"),
         "projectExpertModelId": project_expert_plan.get("primaryExpert", {}).get("selectedModel", {}).get("modelId"),

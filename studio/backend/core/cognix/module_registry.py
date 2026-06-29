@@ -287,6 +287,8 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
             "preload_execution_contract",
             "load_prediction",
             "model_warmup_contract",
+            "external_moe_preload_queue",
+            "intelligent_preload_queue_contract",
             "hardware_fit",
             "cache_policy",
         ],

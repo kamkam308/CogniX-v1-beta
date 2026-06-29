@@ -316,6 +316,9 @@ def test_orchestrator_builds_dry_run_plan_without_loading(monkeypatch):
     assert plan["architectureDecision"]["preload"]["loadPredictionStatus"] == "predicted"
     assert plan["architectureDecision"]["preload"]["warmupContractVersion"] == "cognix_model_warmup_contract_v1"
     assert plan["architectureDecision"]["preload"]["willWarmupNow"] is False
+    assert plan["architectureDecision"]["preload"]["preloadQueueContractVersion"] == "cognix_preload_queue_contract_v1"
+    assert plan["architectureDecision"]["preload"]["preloadQueueStatus"] == "queue_ready"
+    assert plan["architectureDecision"]["preload"]["willLoadNow"] is False
     assert plan["architectureDecision"]["security"]["frontendDirectModelCallAllowed"] is False
     assert plan["architectureDecision"]["sideEffects"]["modelLoad"] is False
     assert plan["architectureDecision"]["sideEffects"]["generation"] is False
@@ -330,10 +333,16 @@ def test_orchestrator_builds_dry_run_plan_without_loading(monkeypatch):
     assert plan["taskStrategy"]["path"] == "codex_guarded_pipeline"
     assert plan["executionStrategy"]["recommendedPath"] == "codex_guarded_pipeline"
     assert plan["executionStrategy"]["primaryCapability"] == "codex_secure_agent"
+    assert plan["executionStrategy"]["preloadQueueStatus"] == "queue_ready"
+    assert plan["executionStrategy"]["preloadQueueWillLoadNow"] is False
     assert plan["preloadPlan"]["plannerVersion"] == "cognix_preload_planner_v1"
     assert plan["preloadPlan"]["target"]["domain"] == "code"
     assert plan["preloadPlan"]["loadPrediction"]["predictionVersion"] == "cognix_load_prediction_v1"
     assert plan["preloadPlan"]["warmupContract"]["contractVersion"] == "cognix_model_warmup_contract_v1"
+    assert plan["preloadPlan"]["preloadQueueContract"]["contractVersion"] == "cognix_preload_queue_contract_v1"
+    assert plan["preloadPlan"]["preloadQueueContract"]["selectedCandidate"]["expertId"] == "cognix-code"
+    assert plan["preloadPlan"]["preloadQueueContract"]["selectedCandidate"]["modelId"] == plan["preloadPlan"]["target"]["modelId"]
+    assert plan["preloadPlan"]["preloadQueueContract"]["executionGate"]["willLoadNow"] is False
     assert plan["preloadPlan"]["sideEffects"]["modelLoad"] is False
     assert plan["projectExpertPlan"]["projectExpertsVersion"] == "cognix_project_experts_v1"
     assert plan["projectExpertPlan"]["primaryExpert"]["expertId"] == "cognix-code"
@@ -455,6 +464,17 @@ def test_preload_planner_builds_auditable_lru_contract_without_loading():
     assert plan["warmupContract"]["preconditions"]["evictionsPlanned"] == 1
     assert plan["warmupContract"]["sideEffects"]["modelLoad"] is False
     assert "model_load" in plan["warmupContract"]["blockedActions"]
+    queue_contract = plan["preloadQueueContract"]
+    assert queue_contract["contractVersion"] == "cognix_preload_queue_contract_v1"
+    assert queue_contract["status"] == "approval_required"
+    assert queue_contract["selectedCandidate"]["expertId"] == "cognix-code"
+    assert queue_contract["selectedCandidate"]["modelId"] == plan["target"]["modelId"]
+    assert queue_contract["selectedCandidate"]["requiresHumanConfirmation"] is True
+    assert queue_contract["executionGate"]["willLoadNow"] is False
+    assert queue_contract["executionGate"]["automaticPreloadAllowed"] is False
+    assert queue_contract["executionGate"]["frontendDirectModelLoadAllowed"] is False
+    assert queue_contract["sideEffects"]["modelLoad"] is False
+    assert "model_load" in queue_contract["blockedActions"]
     assert plan["executionContract"]["observeOnly"] is True
     assert plan["executionContract"]["automaticExecutionAllowed"] is False
     assert plan["executionContract"]["requiresHumanConfirmation"] is True
@@ -510,9 +530,14 @@ def test_model_preload_plan_endpoint_logs_execution_contract_without_loading(mon
     assert plan["warmupContract"]["contractVersion"] == "cognix_model_warmup_contract_v1"
     assert plan["warmupContract"]["willWarmupNow"] is False
     assert plan["warmupContract"]["sideEffects"]["jobEnqueue"] is False
+    assert plan["preloadQueueContract"]["contractVersion"] == "cognix_preload_queue_contract_v1"
+    assert plan["preloadQueueContract"]["status"] == "queue_ready"
+    assert plan["preloadQueueContract"]["executionGate"]["willLoadNow"] is False
+    assert plan["preloadQueueContract"]["sideEffects"]["jobEnqueue"] is False
     assert plan["actions"][0]["type"] == "would_preload"
     assert plan["actions"][0]["requiresExecutor"] is True
     assert plan["actions"][0]["warmupContractVersion"] == "cognix_model_warmup_contract_v1"
+    assert plan["actions"][0]["preloadQueueContractVersion"] == "cognix_preload_queue_contract_v1"
     assert plan["cachePreflight"]["requiredEvictionCount"] == 0
     assert plan["schedule"]["runOnlyWhenIdle"] is True
     assert body["sideEffects"]["modelLoad"] is False
@@ -527,6 +552,9 @@ def test_model_preload_plan_endpoint_logs_execution_contract_without_loading(mon
     assert log["metadata"]["loadPredictionVersion"] == "cognix_load_prediction_v1"
     assert log["metadata"]["loadPredictionStatus"] == "predicted"
     assert log["metadata"]["warmupContractVersion"] == "cognix_model_warmup_contract_v1"
+    assert log["metadata"]["preloadQueueContractVersion"] == "cognix_preload_queue_contract_v1"
+    assert log["metadata"]["preloadQueueStatus"] == "queue_ready"
+    assert log["metadata"]["preloadQueueWillLoadNow"] is False
     assert log["metadata"]["decisionScore"] == plan["target"]["decisionScore"]
     assert log["metadata"]["recommendedWindowSeconds"] == plan["schedule"]["recommendedWindowSeconds"]
     assert log["metadata"]["requiredEvictionCount"] == 0
@@ -8384,6 +8412,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "preload_execution_contract" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "load_prediction" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "model_warmup_contract" in modules["cognix-model-lifecycle"]["capabilities"]
+    assert "external_moe_preload_queue" in modules["cognix-model-lifecycle"]["capabilities"]
+    assert "intelligent_preload_queue_contract" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "model_install_contract" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "hugging_face_install_contract" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "download_worker_handoff" in modules["cognix-model-lifecycle"]["capabilities"]

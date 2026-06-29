@@ -161,6 +161,9 @@ def test_preload_planner_defers_on_small_local_profile():
     assert plan["target"]["modelRole"] == "code_expert"
     assert plan["actions"][0]["type"] == "defer_preload"
     assert plan["actions"][0]["automatic"] is False
+    assert plan["preloadQueueContract"]["contractVersion"] == "cognix_preload_queue_contract_v1"
+    assert plan["preloadQueueContract"]["status"] == "deferred"
+    assert plan["preloadQueueContract"]["executionGate"]["willLoadNow"] is False
     assert plan["limits"]["preloadEnabled"] is False
     assert plan["sideEffects"]["modelLoad"] is False
     assert plan["sideEffects"]["cacheMutation"] is False
@@ -348,6 +351,9 @@ def test_preload_plan_endpoint_returns_audited_dry_run_plan(client, monkeypatch)
     assert body["preloadPlan"]["target"]["domain"] == "code"
     assert body["preloadPlan"]["actions"][0]["type"] == "would_preload"
     assert body["preloadPlan"]["actions"][0]["automatic"] is False
+    assert body["preloadPlan"]["preloadQueueContract"]["contractVersion"] == "cognix_preload_queue_contract_v1"
+    assert body["preloadPlan"]["preloadQueueContract"]["status"] == "queue_ready"
+    assert body["preloadPlan"]["preloadQueueContract"]["executionGate"]["willLoadNow"] is False
     assert body["sideEffects"]["modelLoad"] is False
     assert body["sideEffects"]["networkModelCall"] is False
 
@@ -358,4 +364,6 @@ def test_preload_plan_endpoint_returns_audited_dry_run_plan(client, monkeypatch)
     assert log["id"] == body["auditLogId"]
     assert log["action"] == "preload_plan_built"
     assert log["metadata"]["plannerVersion"] == "cognix_preload_planner_v1"
+    assert log["metadata"]["preloadQueueContractVersion"] == "cognix_preload_queue_contract_v1"
+    assert log["metadata"]["preloadQueueWillLoadNow"] is False
     assert log["metadata"]["sideEffects"]["modelLoad"] is False

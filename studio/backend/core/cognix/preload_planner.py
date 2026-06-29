@@ -16,6 +16,7 @@ from typing import Any
 COGNIX_PRELOAD_PLANNER_VERSION = "cognix_preload_planner_v1"
 COGNIX_LOAD_PREDICTION_VERSION = "cognix_load_prediction_v1"
 COGNIX_MODEL_WARMUP_CONTRACT_VERSION = "cognix_model_warmup_contract_v1"
+COGNIX_PRELOAD_QUEUE_CONTRACT_VERSION = "cognix_preload_queue_contract_v1"
 
 DOMAIN_MODEL_ROLES = {
     "general": {"role": "generalist", "fallbackLabel": "CogniX General 3B"},
@@ -25,6 +26,12 @@ DOMAIN_MODEL_ROLES = {
     "business": {"role": "business_expert", "fallbackLabel": "CogniX Business 3B"},
     "research": {"role": "research_expert", "fallbackLabel": "CogniX Research 3B"},
     "education": {"role": "education_expert", "fallbackLabel": "CogniX Education 3B"},
+}
+
+PRELOAD_PRIORITY_BONUS = {
+    "high": 14,
+    "normal": 8,
+    "low": 2,
 }
 
 
@@ -516,6 +523,261 @@ def _warmup_contract(
     }
 
 
+def _candidate_priority(
+    *,
+    base_priority: int,
+    cache_intent: dict[str, Any],
+    candidate_score: float,
+    primary: bool,
+) -> int:
+    priority_label = str(cache_intent.get("preloadPriority") or "normal")
+    priority_bonus = PRELOAD_PRIORITY_BONUS.get(priority_label, PRELOAD_PRIORITY_BONUS["normal"])
+    primary_bonus = 14 if primary else 5
+    score_bonus = round(candidate_score * 10)
+    return min(98, max(1, base_priority + priority_bonus + primary_bonus + score_bonus - 20))
+
+
+def _external_moe_candidates(
+    *,
+    classification: dict[str, Any],
+    target: dict[str, Any],
+    base_priority: int,
+) -> list[dict[str, Any]]:
+    external_moe = _as_dict(classification.get("externalMoePlan"))
+    cache_intent = _as_dict(external_moe.get("cacheIntent"))
+    entries: list[tuple[dict[str, Any], bool, str]] = []
+    primary_expert = _as_dict(external_moe.get("primaryExpert"))
+    if primary_expert:
+        entries.append((primary_expert, True, "external_moe_primary"))
+    for item in _as_list(external_moe.get("secondaryExperts")):
+        if isinstance(item, dict):
+            entries.append((item, False, "external_moe_secondary"))
+    if not entries:
+        entries.append(
+            (
+                {
+                    "rank": 1,
+                    "expertId": classification.get("recommendedExpertId"),
+                    "domain": target.get("domain") or classification.get("selectedDomain") or "general",
+                    "role": target.get("modelRole"),
+                    "modelId": classification.get("recommendedModelId") or target.get("modelId"),
+                    "modelLabel": classification.get("recommendedModelLabel") or target.get("modelLabel"),
+                    "score": classification.get("confidence"),
+                },
+                True,
+                "router_target",
+            )
+        )
+
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[str | None, str | None]] = set()
+    for entry, primary, source in entries:
+        domain = str(entry.get("domain") or target.get("domain") or "general")
+        role = str(entry.get("role") or DOMAIN_MODEL_ROLES.get(domain, DOMAIN_MODEL_ROLES["general"])["role"])
+        expert_model_id = _clean_model_id(entry.get("modelId"))
+        model_id = expert_model_id
+        model_label = entry.get("modelLabel")
+        if primary:
+            model_id = _clean_model_id(target.get("modelId")) or expert_model_id
+            model_label = target.get("modelLabel") or model_label
+        score = _confidence(entry.get("score"), _confidence(classification.get("confidence"), 0.42))
+        expert_id = str(entry.get("expertId") or classification.get("recommendedExpertId") or "cognix-general")
+        dedupe_key = (expert_id, model_id)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        candidates.append(
+            {
+                "rank": _as_int(entry.get("rank"), len(candidates) + 1),
+                "expertId": expert_id,
+                "domain": domain,
+                "modelRole": role,
+                "modelId": model_id,
+                "expertModelId": expert_model_id,
+                "modelLabel": model_label or DOMAIN_MODEL_ROLES.get(domain, DOMAIN_MODEL_ROLES["general"])["fallbackLabel"],
+                "primary": primary,
+                "source": source,
+                "score": score,
+                "priority": _candidate_priority(
+                    base_priority = base_priority,
+                    cache_intent = cache_intent,
+                    candidate_score = score,
+                    primary = primary,
+                ),
+                "willPreloadNow": False,
+                "willLoad": False,
+                "willGenerate": False,
+            }
+        )
+    candidates.sort(key = lambda item: (not bool(item.get("primary")), int(item.get("rank") or 99)))
+    return candidates
+
+
+def _queue_status(action_type: str, queued: list[dict[str, Any]], classification: dict[str, Any]) -> str:
+    if queued:
+        return "approval_required" if action_type == "would_preload_after_lru" else "queue_ready"
+    if action_type == "keep_loaded":
+        return "already_resident"
+    if classification.get("needsClarification"):
+        return "blocked_clarification"
+    return "deferred"
+
+
+def _defer_candidate(
+    candidate: dict[str, Any],
+    *,
+    reason: str,
+    cache_preflight: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        **candidate,
+        "queueState": "deferred",
+        "deferReason": reason,
+        "cachePreflight": cache_preflight,
+        "requiresExecutor": False,
+        "automaticPreloadAllowed": False,
+        "frontendDirectModelLoadAllowed": False,
+        "willLoadNow": False,
+    }
+
+
+def _preload_queue_contract(
+    *,
+    classification: dict[str, Any],
+    target: dict[str, Any],
+    action: dict[str, Any],
+    cache: dict[str, Any],
+    cache_preflight: dict[str, Any],
+    schedule: dict[str, Any],
+    execution_contract: dict[str, Any],
+    priority: int,
+) -> dict[str, Any]:
+    action_type = str(action.get("type") or "")
+    candidates = _external_moe_candidates(
+        classification = classification,
+        target = target,
+        base_priority = priority,
+    )
+    max_queue_depth = min(3, max(1, _as_int(cache_preflight.get("maxResidentModels"), 1)))
+    queue_allowed = action_type in {"would_preload", "would_preload_after_lru"}
+    queued: list[dict[str, Any]] = []
+    deferred: list[dict[str, Any]] = []
+
+    for candidate in candidates:
+        candidate_target = {
+            "modelId": candidate.get("modelId"),
+            "modelRole": candidate.get("modelRole"),
+            "domain": candidate.get("domain"),
+        }
+        candidate_preflight = _cache_preflight(
+            cache = cache,
+            target = candidate_target,
+            action = action,
+        )
+        defer_reason = ""
+        if not queue_allowed:
+            defer_reason = action_type or "preload_not_selected"
+        elif not candidate.get("modelId"):
+            defer_reason = "missing_model_id"
+        elif candidate_preflight.get("alreadyResident"):
+            defer_reason = "model_already_resident"
+        elif len(queued) >= max_queue_depth:
+            defer_reason = "queue_depth_limit"
+        elif candidate_preflight.get("requiredEvictionCount") and not candidate_preflight.get("proposedEvictions"):
+            defer_reason = "missing_lru_eviction_candidate"
+
+        if defer_reason:
+            deferred.append(
+                _defer_candidate(
+                    candidate,
+                    reason = defer_reason,
+                    cache_preflight = candidate_preflight,
+                )
+            )
+            continue
+
+        queued.append(
+            {
+                **candidate,
+                "queueState": "planned",
+                "cachePreflight": candidate_preflight,
+                "schedule": {
+                    "earliestAfter": schedule.get("earliestAfter"),
+                    "recommendedWindowSeconds": schedule.get("recommendedWindowSeconds"),
+                    "expiresInSeconds": schedule.get("expiresInSeconds"),
+                    "runOnlyWhenIdle": bool(schedule.get("runOnlyWhenIdle")),
+                },
+                "requiresExecutor": bool(execution_contract.get("executorRequired")),
+                "requiresHumanConfirmation": action_type == "would_preload_after_lru",
+                "automaticPreloadAllowed": False,
+                "frontendDirectModelLoadAllowed": False,
+                "willLoadNow": False,
+            }
+        )
+
+    selected_candidate = queued[0] if queued else None
+    return {
+        "contractVersion": COGNIX_PRELOAD_QUEUE_CONTRACT_VERSION,
+        "mode": "external_moe_preload_queue_dry_run",
+        "status": _queue_status(action_type, queued, classification),
+        "externalMoeRouterVersion": _as_dict(classification.get("externalMoePlan")).get("routerVersion"),
+        "preloadExecutionContractVersion": execution_contract.get("contractVersion"),
+        "actionType": action_type,
+        "candidateCount": len(candidates),
+        "queueDepth": len(queued),
+        "maxQueueDepth": max_queue_depth,
+        "selectedCandidate": selected_candidate,
+        "queuedCandidates": queued,
+        "deferredCandidates": deferred,
+        "cacheGuard": {
+            "policyTier": cache_preflight.get("policyTier"),
+            "preloadEnabled": bool(cache_preflight.get("preloadEnabled")),
+            "evictionStrategy": cache_preflight.get("evictionStrategy"),
+            "maxResidentModels": cache_preflight.get("maxResidentModels"),
+            "residentCount": cache_preflight.get("residentCount"),
+            "projectedResidentCount": cache_preflight.get("projectedResidentCount"),
+            "requiredEvictionCount": cache_preflight.get("requiredEvictionCount"),
+            "proposedEvictions": cache_preflight.get("proposedEvictions", []),
+        },
+        "executionGate": {
+            "backendExecutorRequired": bool(queued),
+            "plannedExecutor": "cognix_worker_queue:model_preload" if queued else None,
+            "queueAllowedAfterPolicy": bool(queued),
+            "automaticPreloadAllowed": False,
+            "willLoadNow": False,
+            "willMutateCacheNow": False,
+            "frontendDirectModelLoadAllowed": False,
+            "requiresHumanConfirmation": action_type == "would_preload_after_lru",
+            "runOnlyWhenIdle": bool(schedule.get("runOnlyWhenIdle")),
+        },
+        "policies": {
+            "boundedQueue": True,
+            "maxPrimaryExperts": 1,
+            "secondaryExpertsAllowed": True,
+            "frontendMayDisplayRawScores": False,
+            "queueMayTriggerDirectLoad": False,
+        },
+        "blockedActions": [
+            "model_load",
+            "model_unload",
+            "runtime_mutation",
+            "cache_mutation",
+            "generation",
+            "network_model_call",
+            "frontend_direct_model_load",
+        ],
+        "sideEffects": {
+            "modelLoad": False,
+            "modelUnload": False,
+            "cacheMutation": False,
+            "runtimeMutation": False,
+            "generation": False,
+            "networkModelCall": False,
+            "jobEnqueue": False,
+        },
+    }
+
+
 def _action_for_target(
     *,
     target: dict[str, Any],
@@ -647,6 +909,16 @@ def build_preload_plan(
         schedule = schedule,
         execution_contract = execution_contract,
     )
+    preload_queue_contract = _preload_queue_contract(
+        classification = classification,
+        target = target,
+        action = action,
+        cache = cache,
+        cache_preflight = cache_preflight,
+        schedule = schedule,
+        execution_contract = execution_contract,
+        priority = priority,
+    )
 
     warnings: list[str] = []
     if action["type"].startswith("defer"):
@@ -673,6 +945,9 @@ def build_preload_plan(
                 "decisionScore": target["decisionScore"],
                 "loadPredictionStatus": load_prediction.get("status"),
                 "warmupContractVersion": warmup_contract.get("contractVersion"),
+                "preloadQueueContractVersion": preload_queue_contract.get("contractVersion"),
+                "preloadQueueStatus": preload_queue_contract.get("status"),
+                "queuedCandidateCount": preload_queue_contract.get("queueDepth"),
                 "schedule": schedule,
                 "requiresExecutor": bool(execution_contract.get("executorRequired")),
                 "blockedBy": execution_contract.get("blockedWhen", []),
@@ -684,6 +959,7 @@ def build_preload_plan(
         "schedule": schedule,
         "executionContract": execution_contract,
         "warmupContract": warmup_contract,
+        "preloadQueueContract": preload_queue_contract,
         "limits": {
             "maxResidentModels": _as_dict(cache.get("policy")).get("maxResidentModels"),
             "residentCount": _as_dict(cache.get("runtime")).get("residentCount"),
