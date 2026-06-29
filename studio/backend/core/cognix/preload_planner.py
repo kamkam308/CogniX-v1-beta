@@ -14,6 +14,8 @@ from typing import Any
 
 
 COGNIX_PRELOAD_PLANNER_VERSION = "cognix_preload_planner_v1"
+COGNIX_LOAD_PREDICTION_VERSION = "cognix_load_prediction_v1"
+COGNIX_MODEL_WARMUP_CONTRACT_VERSION = "cognix_model_warmup_contract_v1"
 
 DOMAIN_MODEL_ROLES = {
     "general": {"role": "generalist", "fallbackLabel": "CogniX General 3B"},
@@ -357,6 +359,163 @@ def _execution_contract(
     }
 
 
+def _load_prediction(
+    *,
+    target: dict[str, Any],
+    recommendation: dict[str, Any],
+    classification: dict[str, Any],
+    signals: list[dict[str, Any]],
+    decision_score: float,
+) -> dict[str, Any]:
+    predicted_model_id = _clean_model_id(target.get("modelId"))
+    candidates: list[dict[str, Any]] = []
+    if predicted_model_id:
+        candidates.append(
+            {
+                "modelId": predicted_model_id,
+                "modelLabel": target.get("modelLabel"),
+                "modelRole": target.get("modelRole"),
+                "domain": target.get("domain"),
+                "source": target.get("source"),
+                "confidence": decision_score,
+                "reason": "Candidat principal choisi par routage, recommandation et signaux cache.",
+            }
+        )
+    recommended_model_id = _clean_model_id(recommendation.get("modelId"))
+    if recommended_model_id and recommended_model_id != predicted_model_id:
+        candidates.append(
+            {
+                "modelId": recommended_model_id,
+                "modelLabel": recommendation.get("modelLabel"),
+                "modelRole": "runtime_recommendation",
+                "domain": classification.get("selectedDomain") or "general",
+                "source": "recommendation",
+                "confidence": _confidence(recommendation.get("confidence"), 0.45),
+                "reason": "Fallback recommande par le Model Recommender.",
+            }
+        )
+    signal_ids = [str(item.get("id")) for item in signals if isinstance(item, dict) and item.get("id")]
+    blocked_signal_ids = [
+        str(item.get("id"))
+        for item in signals
+        if isinstance(item, dict) and str(item.get("status") or "").startswith("blocked")
+    ]
+    status = "predicted" if predicted_model_id and decision_score >= 0.5 and not blocked_signal_ids else "defer_prediction"
+    return {
+        "predictionVersion": COGNIX_LOAD_PREDICTION_VERSION,
+        "mode": "observe_only",
+        "status": status,
+        "predictedNextModelId": predicted_model_id,
+        "confidence": decision_score,
+        "candidateCount": len(candidates),
+        "candidates": candidates,
+        "signalIds": signal_ids,
+        "blockedSignalIds": blocked_signal_ids,
+        "policies": {
+            "singleBestPrediction": True,
+            "fallbackCandidateAllowed": True,
+            "frontendMayDisplayRawScores": False,
+            "predictionMayTriggerDirectLoad": False,
+        },
+        "sideEffects": {
+            "modelLoad": False,
+            "cacheMutation": False,
+            "runtimeMutation": False,
+            "preloadEventWrite": False,
+        },
+    }
+
+
+def _warmup_contract(
+    *,
+    action: dict[str, Any],
+    target: dict[str, Any],
+    load_prediction: dict[str, Any],
+    cache_preflight: dict[str, Any],
+    schedule: dict[str, Any],
+    execution_contract: dict[str, Any],
+) -> dict[str, Any]:
+    action_type = str(action.get("type") or "")
+    can_prepare = action_type in {"would_preload", "would_preload_after_lru"}
+    blocked_when = [
+        str(item)
+        for item in execution_contract.get("blockedWhen", [])
+        if str(item or "").strip()
+    ]
+    if load_prediction.get("status") != "predicted":
+        blocked_when.append("load_prediction_not_ready")
+    if _as_float(load_prediction.get("confidence")) < 0.55:
+        blocked_when.append("prediction_confidence_below_threshold")
+    if bool(cache_preflight.get("alreadyResident")):
+        blocked_when.append("model_already_resident")
+    if not schedule.get("runOnlyWhenIdle"):
+        blocked_when.append("idle_window_required")
+    blocked_when = sorted(set(blocked_when))
+    allowed_to_queue = can_prepare and not blocked_when
+    return {
+        "contractVersion": COGNIX_MODEL_WARMUP_CONTRACT_VERSION,
+        "mode": "warmup_contract_dry_run",
+        "targetModelId": target.get("modelId"),
+        "targetModelRole": target.get("modelRole"),
+        "predictionVersion": load_prediction.get("predictionVersion"),
+        "preloadExecutionContractVersion": execution_contract.get("contractVersion"),
+        "allowedToPrepareWarmup": can_prepare,
+        "readyForWarmup": False,
+        "wouldQueueWarmupAfterApproval": allowed_to_queue,
+        "willWarmupNow": False,
+        "automaticWarmupAllowed": False,
+        "frontendDirectWarmupAllowed": False,
+        "plannedExecutor": "cognix_worker_queue:model_warmup" if can_prepare else None,
+        "nextRequiredGate": blocked_when[0] if blocked_when else "idle_executor_approval",
+        "preconditions": {
+            "modelIdResolved": bool(target.get("modelId")),
+            "loadPredictionReady": load_prediction.get("status") == "predicted",
+            "predictionConfidence": load_prediction.get("confidence"),
+            "minimumPredictionConfidence": 0.55,
+            "cachePolicyAllowsPreload": bool(cache_preflight.get("preloadEnabled")),
+            "alreadyResident": bool(cache_preflight.get("alreadyResident")),
+            "evictionsPlanned": len(cache_preflight.get("proposedEvictions") or []),
+            "idleWindowRequired": True,
+            "runOnlyWhenIdle": bool(schedule.get("runOnlyWhenIdle")),
+            "humanApprovalRequired": action_type == "would_preload_after_lru",
+        },
+        "schedule": {
+            "earliestAfter": schedule.get("earliestAfter"),
+            "recommendedWindowSeconds": schedule.get("recommendedWindowSeconds"),
+            "expiresInSeconds": schedule.get("expiresInSeconds"),
+            "cancelIfUserSwitchesDomain": bool(schedule.get("cancelIfUserSwitchesDomain")),
+        },
+        "allowedActions": [
+            "record_warmup_intent",
+            "verify_cache_preflight",
+            "verify_prediction_still_valid",
+            "queue_warmup_after_idle_policy",
+        ]
+        if can_prepare
+        else ["record_warmup_intent"],
+        "blockedActions": [
+            "model_load",
+            "model_unload",
+            "runtime_mutation",
+            "cache_mutation",
+            "generation",
+            "network_model_call",
+            "frontend_direct_warmup",
+        ],
+        "blockedWhen": blocked_when,
+        "sideEffects": {
+            "modelLoad": False,
+            "modelUnload": False,
+            "cacheMutation": False,
+            "runtimeMutation": False,
+            "generation": False,
+            "networkModelCall": False,
+            "preloadEventWrite": False,
+            "jobEnqueue": False,
+        },
+    }
+
+
 def _action_for_target(
     *,
     target: dict[str, Any],
@@ -456,6 +615,13 @@ def build_preload_plan(
     target["state"] = action["type"]
     target["reason"] = action["reason"]
     target["decisionScore"] = _preload_score(signals, priority)
+    load_prediction = _load_prediction(
+        target = target,
+        recommendation = recommendation,
+        classification = classification,
+        signals = signals,
+        decision_score = target["decisionScore"],
+    )
     cache_preflight = _cache_preflight(
         cache = cache,
         target = target,
@@ -472,6 +638,14 @@ def build_preload_plan(
         target = target,
         recommendation = recommendation,
         cache_preflight = cache_preflight,
+    )
+    warmup_contract = _warmup_contract(
+        action = action,
+        target = target,
+        load_prediction = load_prediction,
+        cache_preflight = cache_preflight,
+        schedule = schedule,
+        execution_contract = execution_contract,
     )
 
     warnings: list[str] = []
@@ -497,15 +671,19 @@ def build_preload_plan(
                 "modelRole": target.get("modelRole"),
                 "priority": priority,
                 "decisionScore": target["decisionScore"],
+                "loadPredictionStatus": load_prediction.get("status"),
+                "warmupContractVersion": warmup_contract.get("contractVersion"),
                 "schedule": schedule,
                 "requiresExecutor": bool(execution_contract.get("executorRequired")),
                 "blockedBy": execution_contract.get("blockedWhen", []),
             }
         ],
         "triggerSignals": signals,
+        "loadPrediction": load_prediction,
         "cachePreflight": cache_preflight,
         "schedule": schedule,
         "executionContract": execution_contract,
+        "warmupContract": warmup_contract,
         "limits": {
             "maxResidentModels": _as_dict(cache.get("policy")).get("maxResidentModels"),
             "residentCount": _as_dict(cache.get("runtime")).get("residentCount"),
@@ -523,5 +701,6 @@ def build_preload_plan(
             "cacheMutation": False,
             "runtimeMutation": False,
             "preloadEventWrite": False,
+            "jobEnqueue": False,
         },
     }

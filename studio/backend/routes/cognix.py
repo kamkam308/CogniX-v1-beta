@@ -4890,6 +4890,10 @@ async def model_preload_plan(
             "modelRole": preload_plan.get("target", {}).get("modelRole"),
             "decisionScore": preload_plan.get("target", {}).get("decisionScore"),
             "executionContractVersion": preload_plan.get("executionContract", {}).get("contractVersion"),
+            "loadPredictionVersion": preload_plan.get("loadPrediction", {}).get("predictionVersion"),
+            "loadPredictionStatus": preload_plan.get("loadPrediction", {}).get("status"),
+            "warmupContractVersion": preload_plan.get("warmupContract", {}).get("contractVersion"),
+            "warmupNextRequiredGate": preload_plan.get("warmupContract", {}).get("nextRequiredGate"),
             "recommendedWindowSeconds": preload_plan.get("schedule", {}).get("recommendedWindowSeconds"),
             "requiredEvictionCount": preload_plan.get("cachePreflight", {}).get("requiredEvictionCount"),
             "actionTypes": [

@@ -183,6 +183,10 @@ def _architecture_decision(
             "action": _as_dict((preload_plan.get("actions") or [{}])[0]).get("type"),
             "targetModelId": _as_dict(preload_plan.get("target")).get("modelId"),
             "automatic": bool(_as_dict((preload_plan.get("actions") or [{}])[0]).get("automatic")),
+            "loadPredictionStatus": _as_dict(preload_plan.get("loadPrediction")).get("status"),
+            "warmupContractVersion": _as_dict(preload_plan.get("warmupContract")).get("contractVersion"),
+            "warmupNextRequiredGate": _as_dict(preload_plan.get("warmupContract")).get("nextRequiredGate"),
+            "willWarmupNow": bool(_as_dict(preload_plan.get("warmupContract")).get("willWarmupNow")),
         },
         "projectExpert": {
             "expertId": selected_expert.get("expertId"),

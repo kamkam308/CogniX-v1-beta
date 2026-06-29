@@ -281,6 +281,9 @@ def test_orchestrator_builds_dry_run_plan_without_loading(monkeypatch):
     assert plan["architectureDecision"]["runtime"]["adapterId"] == "ollama"
     assert plan["architectureDecision"]["context"]["rawHistoryAllowed"] is False
     assert plan["architectureDecision"]["cache"]["cacheMutationAllowed"] is False
+    assert plan["architectureDecision"]["preload"]["loadPredictionStatus"] == "predicted"
+    assert plan["architectureDecision"]["preload"]["warmupContractVersion"] == "cognix_model_warmup_contract_v1"
+    assert plan["architectureDecision"]["preload"]["willWarmupNow"] is False
     assert plan["architectureDecision"]["security"]["frontendDirectModelCallAllowed"] is False
     assert plan["architectureDecision"]["sideEffects"]["modelLoad"] is False
     assert plan["architectureDecision"]["sideEffects"]["generation"] is False
@@ -292,6 +295,8 @@ def test_orchestrator_builds_dry_run_plan_without_loading(monkeypatch):
     assert plan["executionStrategy"]["primaryCapability"] == "codex_secure_agent"
     assert plan["preloadPlan"]["plannerVersion"] == "cognix_preload_planner_v1"
     assert plan["preloadPlan"]["target"]["domain"] == "code"
+    assert plan["preloadPlan"]["loadPrediction"]["predictionVersion"] == "cognix_load_prediction_v1"
+    assert plan["preloadPlan"]["warmupContract"]["contractVersion"] == "cognix_model_warmup_contract_v1"
     assert plan["preloadPlan"]["sideEffects"]["modelLoad"] is False
     assert plan["projectExpertPlan"]["projectExpertsVersion"] == "cognix_project_experts_v1"
     assert plan["projectExpertPlan"]["primaryExpert"]["expertId"] == "cognix-code"
@@ -400,6 +405,19 @@ def test_preload_planner_builds_auditable_lru_contract_without_loading():
     assert plan["cachePreflight"]["proposedEvictions"][0]["modelId"] == "cognix-general-3b-q4"
     assert plan["schedule"]["earliestAfter"] == "project_open_idle"
     assert plan["executionContract"]["contractVersion"] == "cognix_preload_execution_contract_v1"
+    assert plan["loadPrediction"]["predictionVersion"] == "cognix_load_prediction_v1"
+    assert plan["loadPrediction"]["status"] == "predicted"
+    assert plan["loadPrediction"]["predictedNextModelId"] == plan["target"]["modelId"]
+    assert plan["loadPrediction"]["policies"]["predictionMayTriggerDirectLoad"] is False
+    assert plan["warmupContract"]["contractVersion"] == "cognix_model_warmup_contract_v1"
+    assert plan["warmupContract"]["predictionVersion"] == "cognix_load_prediction_v1"
+    assert plan["warmupContract"]["allowedToPrepareWarmup"] is True
+    assert plan["warmupContract"]["readyForWarmup"] is False
+    assert plan["warmupContract"]["willWarmupNow"] is False
+    assert plan["warmupContract"]["automaticWarmupAllowed"] is False
+    assert plan["warmupContract"]["preconditions"]["evictionsPlanned"] == 1
+    assert plan["warmupContract"]["sideEffects"]["modelLoad"] is False
+    assert "model_load" in plan["warmupContract"]["blockedActions"]
     assert plan["executionContract"]["observeOnly"] is True
     assert plan["executionContract"]["automaticExecutionAllowed"] is False
     assert plan["executionContract"]["requiresHumanConfirmation"] is True
@@ -450,8 +468,14 @@ def test_model_preload_plan_endpoint_logs_execution_contract_without_loading(mon
     assert plan["executionContract"]["contractVersion"] == "cognix_preload_execution_contract_v1"
     assert plan["executionContract"]["observeOnly"] is True
     assert plan["executionContract"]["automaticExecutionAllowed"] is False
+    assert plan["loadPrediction"]["predictionVersion"] == "cognix_load_prediction_v1"
+    assert plan["loadPrediction"]["status"] == "predicted"
+    assert plan["warmupContract"]["contractVersion"] == "cognix_model_warmup_contract_v1"
+    assert plan["warmupContract"]["willWarmupNow"] is False
+    assert plan["warmupContract"]["sideEffects"]["jobEnqueue"] is False
     assert plan["actions"][0]["type"] == "would_preload"
     assert plan["actions"][0]["requiresExecutor"] is True
+    assert plan["actions"][0]["warmupContractVersion"] == "cognix_model_warmup_contract_v1"
     assert plan["cachePreflight"]["requiredEvictionCount"] == 0
     assert plan["schedule"]["runOnlyWhenIdle"] is True
     assert body["sideEffects"]["modelLoad"] is False
@@ -463,6 +487,9 @@ def test_model_preload_plan_endpoint_logs_execution_contract_without_loading(mon
     assert log["id"] == body["auditLogId"]
     assert log["action"] == "preload_plan_built"
     assert log["metadata"]["executionContractVersion"] == "cognix_preload_execution_contract_v1"
+    assert log["metadata"]["loadPredictionVersion"] == "cognix_load_prediction_v1"
+    assert log["metadata"]["loadPredictionStatus"] == "predicted"
+    assert log["metadata"]["warmupContractVersion"] == "cognix_model_warmup_contract_v1"
     assert log["metadata"]["decisionScore"] == plan["target"]["decisionScore"]
     assert log["metadata"]["recommendedWindowSeconds"] == plan["schedule"]["recommendedWindowSeconds"]
     assert log["metadata"]["requiredEvictionCount"] == 0
@@ -6283,6 +6310,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "load_unload_planning" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "cache_load_planning" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "preload_execution_contract" in modules["cognix-model-lifecycle"]["capabilities"]
+    assert "load_prediction" in modules["cognix-model-lifecycle"]["capabilities"]
+    assert "model_warmup_contract" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "/api/cognix/models/lifecycle-plan" in modules["cognix-model-lifecycle"]["routes"]
     assert "/api/cognix/models/cache/load-plan" in modules["cognix-model-lifecycle"]["routes"]
     assert "/api/cognix/models/preload-plan" in modules["cognix-model-lifecycle"]["routes"]
