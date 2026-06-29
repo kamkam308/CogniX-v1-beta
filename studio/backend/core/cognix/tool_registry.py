@@ -16,6 +16,7 @@ from typing import Any
 
 TOOL_REGISTRY_VERSION = "cognix_tool_registry_v1"
 TOOL_EXECUTION_CONTRACT_VERSION = "cognix_tool_execution_contract_v1"
+TOOL_SECRET_POLICY_VERSION = "cognix_tool_secret_policy_v1"
 
 RISK_ORDER = {
     "low": 1,
@@ -50,6 +51,14 @@ RATE_LIMIT_POLICIES: dict[str, dict[str, int]] = {
     "codex:merge": {"windowSeconds": 600, "maxEvents": 2},
     "security:scan": {"windowSeconds": 600, "maxEvents": 5},
     "security:active": {"windowSeconds": 1800, "maxEvents": 1},
+}
+
+
+SECRET_SOURCE_BY_CONNECTOR: dict[str, list[str]] = {
+    "github": ["connector_oauth_token", "encrypted_user_token"],
+    "google-drive": ["connector_oauth_token", "encrypted_user_token"],
+    "gmail": ["connector_oauth_token", "encrypted_user_token"],
+    "notion": ["connector_oauth_token", "encrypted_user_token"],
 }
 
 
@@ -387,6 +396,49 @@ def _permission_set_from_context(context: dict[str, Any]) -> set[str]:
     }
 
 
+def _secret_policy(tool: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    requires_secret = bool(action.get("secretsRequired"))
+    connector = str(tool.get("connector") or "unknown")
+    risk_level = str(action.get("riskLevel") or "medium").lower()
+    return {
+        "policyVersion": TOOL_SECRET_POLICY_VERSION,
+        "mode": "server_side_secret_resolution_only",
+        "toolId": tool.get("id"),
+        "connector": connector,
+        "actionId": action.get("id"),
+        "requiresSecret": requires_secret,
+        "serverSideResolutionRequired": requires_secret,
+        "secretReadAllowedHere": False,
+        "rawSecretExposureAllowed": False,
+        "clientSecretTransmitAllowed": False,
+        "auditSecretValueAllowed": False,
+        "executorLogSecretValueAllowed": False,
+        "logRedactionRequired": requires_secret,
+        "rotationRecommended": requires_secret and _risk_at_least(risk_level, "high"),
+        "allowedSecretSources": deepcopy(SECRET_SOURCE_BY_CONNECTOR.get(connector, [])) if requires_secret else [],
+        "secretResolutionAllowedOnlyAfter": [
+            "connector_enabled",
+            "permissions_resolved",
+            "rate_limit_checked",
+            "human_confirmation_if_required",
+        ]
+        if requires_secret
+        else [],
+        "blockedActions": [
+            "frontend_secret_access",
+            "client_secret_transmit",
+            "raw_secret_read",
+            "audit_secret_value",
+            "executor_log_secret_value",
+        ],
+        "sideEffects": {
+            "secretRead": False,
+            "secretWrite": False,
+            "secretExposure": False,
+        },
+    }
+
+
 def _action_decision(
     *,
     tool: dict[str, Any],
@@ -449,6 +501,7 @@ def _action_decision(
             str(rate_limit_key) if rate_limit_key else None
         ),
         "secretsRequired": bool(action.get("secretsRequired")),
+        "secretPolicy": _secret_policy(tool, action),
         "dataIsolation": tool.get("dataIsolation"),
         "adminRequired": admin_required,
         "guardrails": {
@@ -457,6 +510,7 @@ def _action_decision(
             "rateLimitRequired": bool(rate_limit_key),
             "sandboxRequired": bool(action.get("sandboxRequired")),
             "secretsStayServerSide": bool(action.get("secretsRequired")),
+            "secretPolicyRequired": True,
             "adminRequired": admin_required,
             "frontendDirectExecutionAllowed": False,
         },
@@ -498,6 +552,9 @@ def _execution_contract(
     allowed_to_prepare = bool(decision.get("allowed"))
     blocked_when = _contract_blocked_when(decision)
     connector = str(tool.get("connector") or "unknown")
+    secret_policy = decision.get("secretPolicy")
+    if not isinstance(secret_policy, dict):
+        secret_policy = _secret_policy(tool, action)
     return {
         "contractVersion": TOOL_EXECUTION_CONTRACT_VERSION,
         "mode": "guarded_plan_only",
@@ -545,6 +602,7 @@ def _execution_contract(
             "rateLimitAllowed": None,
             "secretsRequired": bool(decision.get("secretsRequired")),
             "secretsStayServerSide": True,
+            "secretPolicyVersion": secret_policy.get("policyVersion"),
             "adminRequired": bool(decision.get("adminRequired")),
         },
         "permissionContext": {
@@ -556,8 +614,13 @@ def _execution_contract(
         "dataBoundary": {
             "dataIsolation": tool.get("dataIsolation"),
             "secretsStayServerSide": True,
+            "secretPolicyVersion": secret_policy.get("policyVersion"),
+            "rawSecretExposureAllowed": False,
+            "clientSecretTransmitAllowed": False,
             "auditRawPayloadAllowed": False,
+            "auditSecretValueAllowed": False,
         },
+        "secretPolicy": secret_policy,
         "blockedWhen": blocked_when,
         "sideEffects": {
             "toolExecution": False,
@@ -571,6 +634,9 @@ def _execution_contract(
 
 def build_tool_registry() -> dict[str, Any]:
     tools = deepcopy(TOOL_MANIFESTS)
+    for tool in tools:
+        for action in tool.get("actions") or []:
+            action["secretPolicy"] = _secret_policy(tool, action)
     action_count = sum(len(tool.get("actions") or []) for tool in tools)
     high_risk_count = sum(
         1
@@ -595,6 +661,8 @@ def build_tool_registry() -> dict[str, Any]:
             "auditRequired": True,
             "rateLimitsEnabled": True,
             "executionContractRequired": True,
+            "secretPolicyRequired": True,
+            "secretPolicyVersion": TOOL_SECRET_POLICY_VERSION,
             "secretsMustStayServerSide": True,
             "permissionMatrixAvailable": True,
             "frontendDirectExecutionAllowed": False,
@@ -681,6 +749,8 @@ def build_tool_permission_matrix(
             "adminOnlyForRiskAtLeast": "critical",
             "auditRequired": True,
             "rateLimitsEnabled": True,
+            "secretPolicyRequired": True,
+            "secretPolicyVersion": TOOL_SECRET_POLICY_VERSION,
             "secretsMustStayServerSide": True,
             "frontendDirectExecutionAllowed": False,
         },
@@ -727,6 +797,7 @@ def plan_tool_action(
         return {
             "registryVersion": TOOL_REGISTRY_VERSION,
             "executionContractVersion": TOOL_EXECUTION_CONTRACT_VERSION,
+            "secretPolicyVersion": TOOL_SECRET_POLICY_VERSION,
             "username": username,
             "toolId": tool_id,
             "actionId": action_id,
@@ -743,6 +814,10 @@ def plan_tool_action(
                 "secretRead": False,
                 "permissionWrite": False,
             },
+            "secretPolicy": _secret_policy(
+                {"id": tool_id, "connector": "unknown"},
+                {"id": action_id, "secretsRequired": False},
+            ),
             "executionContract": {
                 "contractVersion": TOOL_EXECUTION_CONTRACT_VERSION,
                 "mode": "guarded_plan_only",

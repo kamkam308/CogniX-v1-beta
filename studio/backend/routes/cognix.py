@@ -4758,6 +4758,13 @@ async def plan_tool_action(
             "riskLevel": plan.get("riskLevel"),
             "requiresConfirmation": plan.get("requiresConfirmation"),
             "guardrails": plan.get("guardrails", {}),
+            "secretPolicyVersion": plan.get("secretPolicy", {}).get("policyVersion"),
+            "secretPolicy": {
+                "requiresSecret": plan.get("secretPolicy", {}).get("requiresSecret"),
+                "secretReadAllowedHere": plan.get("secretPolicy", {}).get("secretReadAllowedHere"),
+                "rawSecretExposureAllowed": plan.get("secretPolicy", {}).get("rawSecretExposureAllowed"),
+                "auditSecretValueAllowed": plan.get("secretPolicy", {}).get("auditSecretValueAllowed"),
+            },
             "contract": {
                 "allowedToPrepare": plan.get("executionContract", {}).get("allowedToPrepare"),
                 "readyForExecution": plan.get("executionContract", {}).get("readyForExecution"),

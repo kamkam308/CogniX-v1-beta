@@ -6400,6 +6400,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/evolution/proposals" in modules["cognix-ai-evolution-engine"]["routes"]
     assert "tool_permission_matrix" in modules["cognix-integrations"]["capabilities"]
     assert "tool_execution_contract" in modules["cognix-integrations"]["capabilities"]
+    assert "tool_secret_policy" in modules["cognix-integrations"]["capabilities"]
     assert "integration_activation_contract" in modules["cognix-integrations"]["capabilities"]
     assert "/api/cognix/integrations/plan" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/integrations/activation-contract" in modules["cognix-integrations"]["routes"]
@@ -7018,6 +7019,8 @@ def test_tool_registry_declares_permissions_and_guardrails():
     assert registry["globalPolicies"]["rateLimitsEnabled"] is True
     assert registry["globalPolicies"]["permissionMatrixAvailable"] is True
     assert registry["globalPolicies"]["executionContractRequired"] is True
+    assert registry["globalPolicies"]["secretPolicyRequired"] is True
+    assert registry["globalPolicies"]["secretPolicyVersion"] == "cognix_tool_secret_policy_v1"
     assert registry["sideEffects"]["toolExecution"] is False
 
     tools = {tool["id"]: tool for tool in registry["tools"]}
@@ -7029,6 +7032,10 @@ def test_tool_registry_declares_permissions_and_guardrails():
     assert send_mail["riskLevel"] == "high"
     assert send_mail["requiresConfirmation"] is True
     assert send_mail["auditRequired"] is True
+    assert send_mail["secretPolicy"]["policyVersion"] == "cognix_tool_secret_policy_v1"
+    assert send_mail["secretPolicy"]["requiresSecret"] is True
+    assert send_mail["secretPolicy"]["rawSecretExposureAllowed"] is False
+    assert send_mail["secretPolicy"]["auditSecretValueAllowed"] is False
     assert cognix_tool_registry.rate_limit_policy_for_key(send_mail["rateLimitKey"]) == {
         "windowSeconds": 300,
         "maxEvents": 5,
@@ -7050,6 +7057,8 @@ def test_tool_action_plan_builds_execution_contract_without_execution():
 
     contract = plan["executionContract"]
     assert plan["executionContractVersion"] == "cognix_tool_execution_contract_v1"
+    assert plan["secretPolicy"]["policyVersion"] == "cognix_tool_secret_policy_v1"
+    assert plan["secretPolicy"]["requiresSecret"] is False
     assert plan["allowed"] is True
     assert contract["contractVersion"] == "cognix_tool_execution_contract_v1"
     assert contract["mode"] == "guarded_plan_only"
@@ -7061,6 +7070,9 @@ def test_tool_action_plan_builds_execution_contract_without_execution():
     assert contract["preconditions"]["humanConfirmationRequired"] is True
     assert contract["preconditions"]["sandboxRequired"] is True
     assert contract["preconditions"]["rateLimitRequired"] is True
+    assert contract["preconditions"]["secretPolicyVersion"] == "cognix_tool_secret_policy_v1"
+    assert contract["dataBoundary"]["rawSecretExposureAllowed"] is False
+    assert contract["secretPolicy"]["clientSecretTransmitAllowed"] is False
     assert "human_confirmation_required" in contract["blockedWhen"]
     assert "sandbox_required" in contract["blockedWhen"]
     assert "rate_limit_check_required" in contract["blockedWhen"]
@@ -7380,9 +7392,16 @@ def test_tool_plan_uses_database_permissions_for_connector_actions():
     assert "github:read" in body["permissionContext"]["explicitPermissions"]
     assert body["guardrails"]["auditRequired"] is True
     assert body["guardrails"]["frontendDirectExecutionAllowed"] is False
+    assert body["guardrails"]["secretPolicyRequired"] is True
+    assert body["secretPolicy"]["policyVersion"] == "cognix_tool_secret_policy_v1"
+    assert body["secretPolicy"]["requiresSecret"] is True
+    assert body["secretPolicy"]["secretReadAllowedHere"] is False
+    assert body["secretPolicy"]["rawSecretExposureAllowed"] is False
     assert body["executionContract"]["contractVersion"] == "cognix_tool_execution_contract_v1"
     assert body["executionContract"]["preconditions"]["secretsRequired"] is True
+    assert body["executionContract"]["preconditions"]["secretPolicyVersion"] == "cognix_tool_secret_policy_v1"
     assert body["executionContract"]["dataBoundary"]["secretsStayServerSide"] is True
+    assert body["executionContract"]["dataBoundary"]["clientSecretTransmitAllowed"] is False
     assert body["sideEffects"]["secretRead"] is False
     assert body["sideEffects"]["toolExecution"] is False
 
@@ -7391,6 +7410,8 @@ def test_tool_plan_uses_database_permissions_for_connector_actions():
     assert log["action"] == "tool_action_planned"
     assert log["metadata"]["missingPermissions"] == []
     assert log["metadata"]["executionContractVersion"] == "cognix_tool_execution_contract_v1"
+    assert log["metadata"]["secretPolicyVersion"] == "cognix_tool_secret_policy_v1"
+    assert log["metadata"]["secretPolicy"]["rawSecretExposureAllowed"] is False
     assert log["metadata"]["contract"]["readyForExecution"] is False
     assert "connector_disabled" in log["metadata"]["contract"]["blockedWhen"]
     assert log["metadata"]["guardrails"]["frontendDirectExecutionAllowed"] is False
