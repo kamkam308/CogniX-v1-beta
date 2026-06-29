@@ -203,6 +203,68 @@ const checks: Check[] = [
     ],
   },
   {
+    file: "../backend/core/cognix/model_comparison.py",
+    includes: [
+      "COGNIX_MODEL_COMPARISON_SERVICE_VERSION",
+      '"cognix_model_comparison_service_v1"',
+      "COGNIX_PARALLEL_INFERENCE_RUNNER_VERSION",
+      "COGNIX_RESPONSE_EVALUATOR_VERSION",
+      "ModelComparisonService",
+      "ParallelInferenceRunner",
+      "ResponseEvaluator",
+      "build_model_comparison_plan",
+      "willCallModelsNow",
+      '"generation": False',
+      '"parallelModelCall": False',
+    ],
+  },
+  {
+    file: "../backend/storage/cognix_db.py",
+    includes: [
+      "cognix_model_comparisons",
+      "cognix_comparison_outputs",
+      "cognix_user_model_preferences",
+      "def create_model_comparison",
+      "def get_model_comparison",
+      "def choose_model_comparison_output",
+    ],
+  },
+  {
+    file: "../backend/routes/cognix.py",
+    includes: [
+      "from core.cognix import model_comparison as cognix_model_comparison",
+      "class ModelComparisonPlanRequest",
+      '"/models/comparison/blueprint"',
+      '"/models/comparison/plan"',
+      '"/models/comparisons/{comparison_id}/preference"',
+      "model_comparison_plan_built",
+      "model_comparison_preference_recorded",
+    ],
+  },
+  {
+    file: "../backend/core/cognix/module_registry.py",
+    includes: [
+      '"cognix-live-model-comparison"',
+      '"side_by_side_model_comparison"',
+      '"parallel_inference_planning"',
+      '"response_collection"',
+      '"user_best_response_selection"',
+      '"/api/cognix/models/comparison/plan"',
+      '"/api/cognix/models/comparisons/{comparison_id}/preference"',
+    ],
+  },
+  {
+    file: "../backend/tests/test_cognix_router.py",
+    includes: [
+      "from core.cognix import model_comparison as cognix_model_comparison",
+      "test_model_comparison_plan_compares_outputs_without_generation",
+      "test_model_comparison_endpoint_stores_outputs_and_user_preference",
+      '"cognix-live-model-comparison"',
+      "model_comparison_plan_built",
+      "model_comparison_preference_recorded",
+    ],
+  },
+  {
     file: "src/features/auth/components/auth-form.tsx",
     includes: [
       "cognix-auth-mode-pill",

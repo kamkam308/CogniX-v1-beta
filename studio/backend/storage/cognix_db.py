@@ -1464,6 +1464,57 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_project_model_defaults_owner
             ON cognix_project_model_defaults(owner_username, updated_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_model_comparisons (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            project_id TEXT,
+            prompt_excerpt TEXT NOT NULL DEFAULT '',
+            prompt_hash TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'planned',
+            selected_output_id TEXT,
+            comparison_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_model_comparisons_username_created
+            ON cognix_model_comparisons(username, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_model_comparisons_project
+            ON cognix_model_comparisons(username, project_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_comparison_outputs (
+            id TEXT PRIMARY KEY,
+            comparison_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            model_id TEXT NOT NULL,
+            model_label TEXT NOT NULL,
+            provider_type TEXT NOT NULL DEFAULT 'local',
+            output_text TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'awaiting_generation',
+            evaluation_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_comparison_outputs_comparison
+            ON cognix_comparison_outputs(username, comparison_id, model_id);
+
+        CREATE TABLE IF NOT EXISTS cognix_user_model_preferences (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            model_id TEXT NOT NULL,
+            preference_type TEXT NOT NULL DEFAULT 'chosen_best_response',
+            comparison_id TEXT,
+            output_id TEXT,
+            reason TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(username, model_id, preference_type)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_user_model_preferences_username
+            ON cognix_user_model_preferences(username, preference_type, updated_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_project_dna (
             project_id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -7536,6 +7587,229 @@ def delete_model_pin(username: str, model_id: str) -> None:
             (username, model_id),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def _hydrate_model_comparison(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["comparison"] = _json_or_default(item.get("comparison_json"), {})
+    return item
+
+
+def _hydrate_comparison_output(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["evaluation"] = _json_or_default(item.get("evaluation_json"), {})
+    return item
+
+
+def _hydrate_user_model_preference(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def _attach_comparison_outputs(conn: sqlite3.Connection, comparison: dict[str, Any]) -> dict[str, Any]:
+    comparison_id = str(comparison.get("id") or "")
+    username = str(comparison.get("username") or "")
+    rows = conn.execute(
+        """
+        SELECT * FROM cognix_comparison_outputs
+        WHERE username = ? AND comparison_id = ?
+        ORDER BY created_at ASC
+        """,
+        (username, comparison_id),
+    ).fetchall()
+    comparison["outputs"] = [_hydrate_comparison_output(row) for row in _rows_to_dicts(rows)]
+    return comparison
+
+
+def create_model_comparison(
+    username: str,
+    *,
+    plan: dict[str, Any],
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    now = _now()
+    comparison_id = _new_id("mcmp")
+    models = [item for item in plan.get("models", []) if isinstance(item, dict)]
+    status_value = "ready_for_choice" if any(item.get("outputText") for item in models) else "planned"
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_model_comparisons
+                (
+                    id, username, project_id, prompt_excerpt, prompt_hash,
+                    status, selected_output_id, comparison_json, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+            """,
+            (
+                comparison_id,
+                username,
+                project_id or plan.get("projectId"),
+                str(plan.get("promptExcerpt") or "")[:1000],
+                str(plan.get("promptHash") or "")[:80],
+                status_value,
+                json.dumps({**plan, "comparisonId": comparison_id}, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        for model in models:
+            conn.execute(
+                """
+                INSERT INTO cognix_comparison_outputs
+                    (
+                        id, comparison_id, username, model_id, model_label,
+                        provider_type, output_text, status, evaluation_json, created_at
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _new_id("cout"),
+                    comparison_id,
+                    username,
+                    str(model.get("modelId") or "")[:180],
+                    str(model.get("modelLabel") or model.get("modelId") or "")[:240],
+                    str(model.get("providerType") or "local")[:80],
+                    str(model.get("outputText") or ""),
+                    str(model.get("status") or "awaiting_generation")[:80],
+                    json.dumps(model.get("evaluation") or {}, ensure_ascii = False),
+                    now,
+                ),
+            )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM cognix_model_comparisons WHERE id = ? AND username = ?",
+            (comparison_id, username),
+        ).fetchone()
+        return _attach_comparison_outputs(conn, _hydrate_model_comparison(row_to_dict(row) or {}))
+    finally:
+        conn.close()
+
+
+def list_model_comparisons(username: str, *, project_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 100), 1), 300)
+    conn = get_connection()
+    try:
+        if project_id:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_model_comparisons
+                WHERE username = ? AND project_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, project_id, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_model_comparisons
+                WHERE username = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, safe_limit),
+            ).fetchall()
+        return [_hydrate_model_comparison(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def get_model_comparison(username: str, comparison_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM cognix_model_comparisons WHERE username = ? AND id = ?",
+            (username, comparison_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return _attach_comparison_outputs(conn, _hydrate_model_comparison(row_to_dict(row) or {}))
+    finally:
+        conn.close()
+
+
+def choose_model_comparison_output(
+    username: str,
+    comparison_id: str,
+    output_id: str,
+    *,
+    reason: str | None = None,
+) -> dict[str, Any] | None:
+    now = _now()
+    conn = get_connection()
+    try:
+        output_row = conn.execute(
+            """
+            SELECT * FROM cognix_comparison_outputs
+            WHERE username = ? AND comparison_id = ? AND id = ?
+            """,
+            (username, comparison_id, output_id),
+        ).fetchone()
+        if output_row is None:
+            return None
+        output = row_to_dict(output_row) or {}
+        model_id = str(output.get("model_id") or "")
+        conn.execute(
+            """
+            UPDATE cognix_model_comparisons
+            SET selected_output_id = ?, status = 'choice_recorded', updated_at = ?
+            WHERE username = ? AND id = ?
+            """,
+            (output_id, now, username, comparison_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO cognix_user_model_preferences
+                (
+                    id, username, model_id, preference_type, comparison_id,
+                    output_id, reason, metadata_json, created_at, updated_at
+                )
+            VALUES (?, ?, ?, 'chosen_best_response', ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(username, model_id, preference_type) DO UPDATE SET
+                comparison_id = excluded.comparison_id,
+                output_id = excluded.output_id,
+                reason = excluded.reason,
+                metadata_json = excluded.metadata_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                _new_id("mpref"),
+                username,
+                model_id,
+                comparison_id,
+                output_id,
+                str(reason or "")[:1000],
+                json.dumps(
+                    {
+                        "modelLabel": output.get("model_label"),
+                        "providerType": output.get("provider_type"),
+                        "evaluation": _json_or_default(output.get("evaluation_json"), {}),
+                    },
+                    ensure_ascii = False,
+                ),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        comparison = get_model_comparison(username, comparison_id)
+        preference_row = conn.execute(
+            """
+            SELECT * FROM cognix_user_model_preferences
+            WHERE username = ? AND model_id = ? AND preference_type = 'chosen_best_response'
+            """,
+            (username, model_id),
+        ).fetchone()
+        return {
+            "comparison": comparison,
+            "output": _hydrate_comparison_output(output),
+            "preference": _hydrate_user_model_preference(row_to_dict(preference_row) or {}),
+        }
     finally:
         conn.close()
 

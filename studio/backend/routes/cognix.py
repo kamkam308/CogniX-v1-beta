@@ -40,6 +40,7 @@ from core.cognix import integration_manager as cognix_integration_manager
 from core.cognix import intent_prediction as cognix_intent_prediction
 from core.cognix import memory_manager as cognix_memory_manager
 from core.cognix import memory_editor as cognix_memory_editor
+from core.cognix import model_comparison as cognix_model_comparison
 from core.cognix import model_lifecycle as cognix_model_lifecycle
 from core.cognix import model_translator as cognix_model_translator
 from core.cognix import module_registry as cognix_module_registry
@@ -417,6 +418,24 @@ class ModelLifecyclePlanRequest(BaseModel):
     execution_target: str | None = Field(None, alias = "executionTarget", max_length = 120)
     quality_priority: str | None = Field(None, alias = "qualityPriority", max_length = 80)
     offline_required: bool = Field(False, alias = "offlineRequired")
+
+
+class ModelComparisonPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    prompt: str = Field(..., min_length = 1, max_length = 12000)
+    models: list[dict[str, Any]] = Field(..., min_length = 2, max_length = 8)
+    outputs: list[dict[str, Any]] | None = None
+    evaluator_enabled: bool = Field(True, alias = "evaluatorEnabled")
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    store_comparison: bool = Field(True, alias = "storeComparison")
+
+
+class ModelComparisonPreferenceRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    output_id: str = Field(..., alias = "outputId", min_length = 1, max_length = 180)
+    reason: str | None = Field(None, max_length = 1000)
 
 
 class ModelConversionPlanRequest(BaseModel):
@@ -915,6 +934,16 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "model_id": "modelId",
         "provider_type": "providerType",
         "provider_id": "providerId",
+        "prompt_hash": "promptHash",
+        "prompt_excerpt": "promptExcerpt",
+        "selected_output_id": "selectedOutputId",
+        "comparison_json": "comparisonJson",
+        "comparison_id": "comparisonId",
+        "model_label": "modelLabel",
+        "output_text": "outputText",
+        "evaluation_json": "evaluationJson",
+        "preference_type": "preferenceType",
+        "output_id": "outputId",
         "project_id": "projectId",
         "owner_username": "ownerUsername",
         "collaborator_username": "collaboratorUsername",
@@ -1178,6 +1207,8 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         out["styleProfiles"] = [_row(item) if isinstance(item, dict) else item for item in out["styleProfiles"]]
     if isinstance(out.get("personalizationRules"), list):
         out["personalizationRules"] = [_row(item) if isinstance(item, dict) else item for item in out["personalizationRules"]]
+    if isinstance(out.get("outputs"), list):
+        out["outputs"] = [_row(item) if isinstance(item, dict) else item for item in out["outputs"]]
     return out
 
 
@@ -2181,6 +2212,178 @@ async def model_packs(current_subject: str = Depends(get_current_jwt_subject)) -
         "modelRegistry": registry,
         "registry": cognix_model_lifecycle.build_model_pack_registry(model_registry = registry),
         "plannerVersion": cognix_model_lifecycle.COGNIX_MODEL_LIFECYCLE_VERSION,
+    }
+
+
+@router.get("/models/comparison/blueprint")
+async def model_comparison_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_model_comparison.build_model_comparison_blueprint()
+    return {
+        "username": current_subject,
+        "modelComparisonBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_model_comparison.COGNIX_MODEL_COMPARISON_SERVICE_VERSION,
+    }
+
+
+@router.post("/models/comparison/plan")
+async def model_comparison_plan(
+    payload: ModelComparisonPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_model_comparison.build_model_comparison_plan(
+        prompt = payload.prompt,
+        models = payload.models,
+        outputs = payload.outputs,
+        evaluator_enabled = payload.evaluator_enabled,
+        project_id = payload.project_id,
+    )
+    stored = (
+        cognix_db.create_model_comparison(
+            current_subject,
+            plan = plan,
+            project_id = payload.project_id,
+        )
+        if payload.store_comparison
+        else None
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "comparisonWrite": stored is not None,
+        "outputWrite": bool((stored or {}).get("outputs")),
+        "preferenceWrite": False,
+        "parallelModelCall": False,
+        "modelLoad": False,
+        "generation": False,
+        "networkModelCall": False,
+        "toolExecution": False,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "model_comparison_plan_built",
+        resource_type = "cognix_model_comparison",
+        resource_id = str((stored or {}).get("id") or plan.get("promptHash") or current_subject),
+        severity = "notice",
+        metadata = {
+            "modelComparisonServiceVersion": plan.get("modelComparisonServiceVersion"),
+            "modelCount": plan.get("summary", {}).get("modelCount"),
+            "collectedOutputCount": plan.get("summary", {}).get("collectedOutputCount"),
+            "awaitingGenerationCount": plan.get("summary", {}).get("awaitingGenerationCount"),
+            "recommendedModelId": plan.get("evaluator", {}).get("recommendedModelId"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "modelComparisonPlan": plan,
+        "comparison": _row(stored) if stored else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_model_comparison.COGNIX_MODEL_COMPARISON_SERVICE_VERSION,
+    }
+
+
+@router.get("/models/comparisons")
+async def model_comparisons(
+    project_id: str | None = None,
+    limit: int = 100,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if project_id:
+        _require_owned_project(project_id, current_subject)
+    comparisons = cognix_db.list_model_comparisons(current_subject, project_id = project_id, limit = limit)
+    return {
+        "username": current_subject,
+        "comparisons": _rows(comparisons),
+        "count": len(comparisons),
+        "sideEffects": {
+            "comparisonWrite": False,
+            "outputWrite": False,
+            "preferenceWrite": False,
+            "parallelModelCall": False,
+            "modelLoad": False,
+            "generation": False,
+            "networkModelCall": False,
+            "toolExecution": False,
+        },
+    }
+
+
+@router.get("/models/comparisons/{comparison_id}")
+async def model_comparison_detail(
+    comparison_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    comparison = cognix_db.get_model_comparison(current_subject, comparison_id)
+    if comparison is None:
+        raise HTTPException(status_code = status.HTTP_404_NOT_FOUND, detail = "Model comparison not found")
+    return {
+        "username": current_subject,
+        "comparison": _row(comparison),
+        "sideEffects": {
+            "comparisonWrite": False,
+            "outputWrite": False,
+            "preferenceWrite": False,
+            "parallelModelCall": False,
+            "modelLoad": False,
+            "generation": False,
+            "networkModelCall": False,
+            "toolExecution": False,
+        },
+    }
+
+
+@router.post("/models/comparisons/{comparison_id}/preference")
+async def model_comparison_preference(
+    comparison_id: str,
+    payload: ModelComparisonPreferenceRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    result = cognix_db.choose_model_comparison_output(
+        current_subject,
+        comparison_id,
+        payload.output_id,
+        reason = payload.reason,
+    )
+    if result is None:
+        raise HTTPException(status_code = status.HTTP_404_NOT_FOUND, detail = "Comparison output not found")
+    side_effects = {
+        "comparisonWrite": True,
+        "outputWrite": False,
+        "preferenceWrite": True,
+        "parallelModelCall": False,
+        "modelLoad": False,
+        "generation": False,
+        "networkModelCall": False,
+        "toolExecution": False,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "model_comparison_preference_recorded",
+        resource_type = "cognix_model_comparison",
+        resource_id = comparison_id,
+        severity = "notice",
+        metadata = {
+            "outputId": payload.output_id,
+            "modelId": (result.get("output") or {}).get("model_id"),
+            "preferenceId": (result.get("preference") or {}).get("id"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "comparison": _row(result.get("comparison") or {}),
+        "output": _row(result.get("output") or {}),
+        "preference": _row(result.get("preference") or {}),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_model_comparison.COGNIX_MODEL_COMPARISON_SERVICE_VERSION,
     }
 
 

@@ -34,6 +34,7 @@ from core.cognix import intent_prediction as cognix_intent_prediction
 from core.cognix import memory_editor as cognix_memory_editor
 from core.cognix import memory_manager as cognix_memory_manager
 from core.cognix import model_lifecycle as cognix_model_lifecycle
+from core.cognix import model_comparison as cognix_model_comparison
 from core.cognix import model_translator as cognix_model_translator
 from core.cognix import module_registry as cognix_module_registry
 from core.cognix import onboarding as cognix_onboarding
@@ -2302,6 +2303,101 @@ def test_model_lifecycle_endpoint_logs_audited_dry_run(monkeypatch):
     assert log["metadata"]["modelLifecycleVersion"] == "cognix_model_lifecycle_v1"
     assert log["metadata"]["selectedPackId"] == "ollama-qwen-4b-local"
     assert log["metadata"]["sideEffects"]["modelLoad"] is False
+
+
+def test_model_comparison_plan_compares_outputs_without_generation():
+    plan = cognix_model_comparison.build_model_comparison_plan(
+        prompt = "Explique comment tester un petit modele local et un expert code.",
+        models = [
+            {"modelId": "cognix-general-small", "label": "General Small", "providerType": "local", "role": "general"},
+            {"modelId": "cognix-code-4b-q4", "label": "Code Expert", "providerType": "local", "role": "code"},
+            {"modelId": "cloud-reasoner", "label": "Cloud Reasoner", "providerType": "cloud", "role": "general"},
+        ],
+        outputs = [
+            {
+                "modelId": "cognix-general-small",
+                "outputText": "Tester le modele avec un prompt simple, mesurer la latence et comparer la clarte.",
+            },
+            {
+                "modelId": "cognix-code-4b-q4",
+                "outputText": "Utilise un script Python, lance pytest, puis compare les erreurs et les temps de reponse.",
+            },
+        ],
+    )
+    models = {item["modelId"]: item for item in plan["models"]}
+
+    assert plan["modelComparisonServiceVersion"] == "cognix_model_comparison_service_v1"
+    assert plan["parallelInferenceRunnerVersion"] == "cognix_parallel_inference_runner_v1"
+    assert plan["responseEvaluatorVersion"] == "cognix_response_evaluator_v1"
+    assert plan["summary"]["modelCount"] == 3
+    assert plan["summary"]["collectedOutputCount"] == 2
+    assert plan["summary"]["awaitingGenerationCount"] == 1
+    assert models["cloud-reasoner"]["requiresBackendGeneration"] is True
+    assert models["cloud-reasoner"]["willGenerateNow"] is False
+    assert models["cognix-code-4b-q4"]["evaluation"]["score"] > 0
+    assert plan["parallelCallPlan"]["willCallModelsNow"] is False
+    assert plan["sideEffects"]["parallelModelCall"] is False
+    assert plan["sideEffects"]["modelLoad"] is False
+    assert plan["sideEffects"]["generation"] is False
+    assert plan["sideEffects"]["networkModelCall"] is False
+
+
+def test_model_comparison_endpoint_stores_outputs_and_user_preference():
+    seed_accounts()
+
+    body = run_async(
+        cognix_routes.model_comparison_plan(
+            cognix_routes.ModelComparisonPlanRequest(
+                prompt = "Compare un petit modele local, un modele cloud et un expert code.",
+                models = [
+                    {"modelId": "local-small", "label": "Local Small", "providerType": "local", "role": "general"},
+                    {"modelId": "cloud-qwen", "label": "Cloud Qwen", "providerType": "cloud", "role": "general"},
+                    {"modelId": "code-expert", "label": "Code Expert", "providerType": "local", "role": "code"},
+                ],
+                outputs = [
+                    {"modelId": "local-small", "outputText": "Reponse courte mais utile pour comparer rapidement."},
+                    {"modelId": "cloud-qwen", "outputText": "Reponse plus detaillee, structuree, avec avantages et limites."},
+                    {
+                        "modelId": "code-expert",
+                        "outputText": "Pour le code, lance ```pytest``` et inspecte les logs avant de choisir.",
+                    },
+                ],
+                storeComparison = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    comparison = body["comparison"]
+    output_id = next(item["id"] for item in comparison["outputs"] if item["modelId"] == "code-expert")
+    detail = run_async(cognix_routes.model_comparison_detail(comparison["id"], current_subject = "alice"))
+    preference = run_async(
+        cognix_routes.model_comparison_preference(
+            comparison["id"],
+            cognix_routes.ModelComparisonPreferenceRequest(outputId = output_id, reason = "Meilleur format code."),
+            current_subject = "alice",
+        )
+    )
+    listed = run_async(cognix_routes.model_comparisons(current_subject = "alice"))
+    bob_listed = run_async(cognix_routes.model_comparisons(current_subject = "bob"))
+
+    assert body["auditLogId"].startswith("aud_")
+    assert body["sideEffects"]["comparisonWrite"] is True
+    assert body["sideEffects"]["outputWrite"] is True
+    assert body["sideEffects"]["parallelModelCall"] is False
+    assert body["sideEffects"]["generation"] is False
+    assert comparison["id"].startswith("mcmp_")
+    assert len(comparison["outputs"]) == 3
+    assert detail["comparison"]["id"] == comparison["id"]
+    assert preference["comparison"]["selectedOutputId"] == output_id
+    assert preference["preference"]["modelId"] == "code-expert"
+    assert preference["sideEffects"]["preferenceWrite"] is True
+    assert preference["sideEffects"]["generation"] is False
+    assert [item["id"] for item in listed["comparisons"]] == [comparison["id"]]
+    assert bob_listed["comparisons"] == []
+
+    logs = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))["logs"]
+    actions = {item["action"] for item in logs}
+    assert {"model_comparison_plan_built", "model_comparison_preference_recorded"}.issubset(actions)
 
 
 def test_model_translator_plans_gguf_to_ollama_without_conversion_job():
@@ -5261,6 +5357,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert {
         "cognix-local-core",
         "cognix-model-lifecycle",
+        "cognix-live-model-comparison",
         "cognix-model-translator",
         "cognix-optimization-engine",
         "cognix-performance-monitor",
@@ -5308,6 +5405,13 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "cache_load_planning" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "/api/cognix/models/lifecycle-plan" in modules["cognix-model-lifecycle"]["routes"]
     assert "/api/cognix/models/cache/load-plan" in modules["cognix-model-lifecycle"]["routes"]
+    assert modules["cognix-live-model-comparison"]["dependencyState"]["ready"] is True
+    assert "side_by_side_model_comparison" in modules["cognix-live-model-comparison"]["capabilities"]
+    assert "parallel_inference_planning" in modules["cognix-live-model-comparison"]["capabilities"]
+    assert "response_collection" in modules["cognix-live-model-comparison"]["capabilities"]
+    assert "user_best_response_selection" in modules["cognix-live-model-comparison"]["capabilities"]
+    assert "/api/cognix/models/comparison/plan" in modules["cognix-live-model-comparison"]["routes"]
+    assert "/api/cognix/models/comparisons/{comparison_id}/preference" in modules["cognix-live-model-comparison"]["routes"]
     assert modules["cognix-model-translator"]["dependencyState"]["ready"] is True
     assert "model_conversion_planning" in modules["cognix-model-translator"]["capabilities"]
     assert "compatibility_checking" in modules["cognix-model-translator"]["capabilities"]
