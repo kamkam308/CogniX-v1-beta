@@ -47,6 +47,7 @@ from core.cognix import performance_monitor as cognix_performance_monitor
 from core.cognix import plugin_marketplace as cognix_plugin_marketplace
 from core.cognix import project_dna as cognix_project_dna
 from core.cognix import project_experts as cognix_project_experts
+from core.cognix import pulse as cognix_pulse
 from core.cognix import prompt_compression as cognix_prompt_compression
 from core.cognix import quantization_advisor as cognix_quantization_advisor
 from core.cognix import rag_planner as cognix_rag_planner
@@ -5446,6 +5447,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     modules = {item["id"]: item for item in registry["modules"]}
     assert {
         "cognix-local-core",
+        "cognix-pulse",
         "cognix-model-lifecycle",
         "cognix-live-model-comparison",
         "cognix-model-translator",
@@ -5483,6 +5485,11 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-admin-security-center",
         "cognix-deployment-manager",
     }.issubset(modules)
+    assert modules["cognix-pulse"]["status"] == "enabled"
+    assert "daily_digest" in modules["cognix-pulse"]["capabilities"]
+    assert "local_privacy_preserving_summary" in modules["cognix-pulse"]["capabilities"]
+    assert "/api/cognix/pulse/preview" in modules["cognix-pulse"]["routes"]
+    assert "/api/cognix/pulse/generate" in modules["cognix-pulse"]["routes"]
     assert modules["cognix-local-core"]["activationState"] == "ready"
     assert "module_manifest_registry" in modules["cognix-local-core"]["capabilities"]
     assert "/api/cognix/modules/manifests" in modules["cognix-local-core"]["routes"]
@@ -5814,6 +5821,112 @@ def test_module_plan_endpoint_writes_sanitized_audit_log():
     assert log["resourceType"] == "cognix_module"
     assert log["metadata"]["moduleRegistryVersion"] == "cognix_module_registry_v1"
     assert log["metadata"]["sideEffects"]["moduleActivation"] is False
+
+
+def test_pulse_preview_and_generate_use_native_isolated_activity_feed():
+    seed_accounts()
+    now_ms = int(time.time() * 1000)
+    studio_db_storage.upsert_chat_thread(
+        {
+            "id": "thread-alice",
+            "title": "Projet physique CogniX",
+            "modelType": "local",
+            "modelId": "qwen-test",
+            "createdAt": now_ms,
+            "archived": False,
+        },
+        owner_username = "alice",
+    )
+    studio_db_storage.upsert_chat_thread(
+        {
+            "id": "thread-bob",
+            "title": "Conversation Bob secrete",
+            "modelType": "local",
+            "modelId": "private",
+            "createdAt": now_ms,
+            "archived": False,
+        },
+        owner_username = "bob",
+    )
+    cognix_db.create_library_item(
+        "alice",
+        kind = "document",
+        name = "Cours mecanique.pdf",
+        source = "manual",
+    )
+    task = cognix_db.create_scheduled_task(
+        "alice",
+        "Resume quotidien",
+        "resumer les nouveaux documents",
+        "tous les jours a 08:00",
+    )
+    cognix_db.create_scheduled_task_run(
+        "alice",
+        task["id"],
+        "report",
+        "Erreur de test recuperee",
+        status = "failed",
+    )
+    cognix_db.create_research_report(
+        "alice",
+        "Qwen local",
+        "Recherche Qwen",
+        "Notes sur le modele local.",
+        [{"title": "Qwen", "url": "https://example.test/qwen", "source": "test"}],
+    )
+    cognix_db.create_agent_run(
+        "alice",
+        "Analyser les options cloud training",
+        "research",
+        ["collecter", "verifier"],
+        "Plan prepare.",
+        status = "complete",
+    )
+    cognix_db.create_image_request("alice", "schema architecture CogniX", "local-placeholder")
+    cognix_db.create_audit_log(
+        username = "alice",
+        actor_username = "alice",
+        action = "scheduled_task_failed",
+        resource_type = "cognix_scheduled_task",
+        resource_id = task["id"],
+        severity = "warning",
+        metadata = {"safe": True},
+    )
+
+    blueprint = run_async(cognix_routes.pulse_blueprint(current_subject = "alice"))
+    assert blueprint["blueprint"]["pulseVersion"] == "cognix_pulse_v1"
+    assert blueprint["sideEffects"]["pulseReportWrite"] is False
+    assert blueprint["blueprint"]["privacyPolicy"]["crossAccountAggregationAllowed"] is False
+
+    preview = run_async(cognix_routes.preview_pulse(current_subject = "alice"))
+    plan = preview["pulsePlan"]
+    assert plan["pulseVersion"] == cognix_pulse.COGNIX_PULSE_VERSION
+    assert plan["summary"]["eventCount"] >= 6
+    assert plan["summary"]["criticalCount"] >= 1
+    assert plan["privacy"]["crossAccountAggregation"] is False
+    assert plan["sideEffects"]["modelLoad"] is False
+    assert plan["sideEffects"]["networkCall"] is False
+    source_ids = {event["sourceId"] for event in plan["digest"]["recentEvents"]}
+    titles = {event["title"] for event in plan["digest"]["recentEvents"]}
+    assert "thread-alice" in source_ids
+    assert "thread-bob" not in source_ids
+    assert "Conversation Bob secrete" not in titles
+
+    generated = run_async(cognix_routes.generate_pulse(current_subject = "alice"))
+    assert generated["report"]["id"].startswith("pul_")
+    assert generated["report"]["sourceThreadIds"] == ["thread-alice"]
+    assert "Projet physique CogniX" in generated["report"]["topics"]
+    assert generated["sideEffects"]["pulseReportWrite"] is True
+    assert generated["sideEffects"]["auditWrite"] is True
+    assert generated["sideEffects"]["modelLoad"] is False
+    assert generated["sideEffects"]["crossUserRead"] is False
+
+    reports = run_async(cognix_routes.my_pulse(current_subject = "alice"))
+    assert reports["blueprint"]["pulseVersion"] == "cognix_pulse_v1"
+    assert reports["reports"][0]["id"] == generated["report"]["id"]
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    assert admin_read["logs"][0]["action"] == "pulse_report_generated"
+    assert admin_read["logs"][0]["metadata"]["sideEffects"]["pulseReportWrite"] is True
 
 
 def test_tool_registry_declares_permissions_and_guardrails():

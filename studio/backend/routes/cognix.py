@@ -9,7 +9,7 @@ import re
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta, timezone
+from datetime import timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Literal
 
@@ -55,6 +55,7 @@ from core.cognix import performance_monitor as cognix_performance_monitor
 from core.cognix import plugin_marketplace as cognix_plugin_marketplace
 from core.cognix import project_dna as cognix_project_dna
 from core.cognix import project_experts as cognix_project_experts
+from core.cognix import pulse as cognix_pulse
 from core.cognix import prompt_compression as cognix_prompt_compression
 from core.cognix import quantization_advisor as cognix_quantization_advisor
 from core.cognix import rag_planner as cognix_rag_planner
@@ -1719,6 +1720,37 @@ def _execute_scheduled_task(username: str, task: dict[str, Any]) -> dict[str, An
         result,
         artifact_type = artifact_type,
         artifact_id = artifact_id,
+    )
+
+
+def _build_pulse_plan(current_subject: str, *, hours: int = 24) -> dict[str, Any]:
+    threads = list_chat_threads(
+        include_archived = True,
+        owner_username = current_subject,
+        include_all = False,
+    )
+    projects = list_chat_projects(
+        include_archived = True,
+        owner_username = current_subject,
+        include_all = False,
+    )
+    events = cognix_pulse.collect_pulse_events(
+        username = current_subject,
+        threads = threads,
+        projects = projects,
+        library_items = cognix_db.list_library_items(current_subject),
+        scheduled_tasks = cognix_db.list_scheduled_tasks(current_subject),
+        scheduled_runs = cognix_db.list_scheduled_task_runs(current_subject),
+        news_items = cognix_db.list_news_items(current_subject),
+        research_reports = cognix_db.list_research_reports(current_subject),
+        agent_runs = cognix_db.list_agent_runs(current_subject),
+        image_history = cognix_db.list_image_history(current_subject),
+        audit_logs = cognix_db.list_audit_logs(username = current_subject, limit = 80),
+    )
+    return cognix_pulse.build_pulse_plan(
+        username = current_subject,
+        events = events,
+        hours = hours,
     )
 
 
@@ -8561,14 +8593,6 @@ async def revoke_project_share(
     return {"share": _row(share)}
 
 
-def _thread_created_at_ms(thread: dict[str, Any]) -> int:
-    value = thread.get("createdAt") or thread.get("created_at") or 0
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
-
-
 @router.get("/news")
 async def my_news(
     topic: str = "intelligence artificielle",
@@ -8738,43 +8762,75 @@ async def play_game_move(
 
 @router.get("/pulse")
 async def my_pulse(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
-    return {"reports": _rows(cognix_db.list_pulse_reports(current_subject))}
+    return {
+        "reports": _rows(cognix_db.list_pulse_reports(current_subject)),
+        "blueprint": cognix_pulse.build_pulse_blueprint(),
+    }
+
+
+@router.get("/pulse/blueprint")
+async def pulse_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_pulse.build_pulse_blueprint()
+    return {
+        "username": current_subject,
+        "blueprint": blueprint,
+        "sideEffects": blueprint["sideEffects"],
+    }
+
+
+@router.get("/pulse/preview")
+async def preview_pulse(
+    hours: int = 24,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    plan = _build_pulse_plan(current_subject, hours = hours)
+    return {
+        "username": current_subject,
+        "pulsePlan": plan,
+        "sideEffects": plan["sideEffects"],
+    }
 
 
 @router.post("/pulse/generate")
-async def generate_pulse(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
-    threads = list_chat_threads(
-        include_archived = True,
-        owner_username = current_subject,
-    )
-    cutoff_ms = int((datetime.now(timezone.utc) - timedelta(hours = 24)).timestamp() * 1000)
-    recent_threads = [
-        thread
-        for thread in threads
-        if _thread_created_at_ms(thread) >= cutoff_ms
-    ]
-    source_threads = recent_threads[:12] if recent_threads else threads[:6]
-    topics = [
-        str(thread.get("title") or "Conversation").strip()[:80]
-        for thread in source_threads
-        if str(thread.get("title") or "").strip()
-    ]
-    if not topics:
-        topics = ["Activite CogniX", "Suivi personnel", "Idees a reprendre"]
-    summary = (
-        "Pulse a rassemble les conversations recentes et prepare une base de recherche "
-        "sur les sujets suivants: "
-        + ", ".join(topics[:6])
-        + "."
-    )
+async def generate_pulse(
+    hours: int = 24,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    plan = _build_pulse_plan(current_subject, hours = hours)
+    report_payload = plan["reportPayload"]
     report = cognix_db.create_pulse_report(
         current_subject,
-        "Pulse des dernieres 24h",
-        summary,
-        topics[:12],
-        [str(thread.get("id")) for thread in source_threads if thread.get("id")],
+        report_payload["title"],
+        report_payload["summary"],
+        report_payload["topics"],
+        report_payload["sourceThreadIds"],
     )
-    return {"report": _row(report)}
+    side_effects = {
+        **plan["sideEffects"],
+        "pulseReportWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "pulse_report_generated",
+        resource_type = "cognix_pulse",
+        resource_id = str(report.get("id") or ""),
+        severity = "notice" if plan["summary"]["criticalCount"] == 0 else "warning",
+        metadata = {
+            "pulseVersion": plan.get("pulseVersion"),
+            "eventCount": plan["summary"]["eventCount"],
+            "criticalCount": plan["summary"]["criticalCount"],
+            "sourceCounts": plan["summary"]["sourceCounts"],
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "report": _row(report),
+        "pulsePlan": plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+    }
 
 
 @router.get("/images")
