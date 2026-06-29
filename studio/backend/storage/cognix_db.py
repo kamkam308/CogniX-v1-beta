@@ -150,6 +150,56 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_user_activity_events_username_created
             ON cognix_user_activity_events(username, created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_user_activity_daily (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            day TEXT NOT NULL,
+            message_count INTEGER NOT NULL DEFAULT 0,
+            model_count INTEGER NOT NULL DEFAULT 0,
+            tool_call_count INTEGER NOT NULL DEFAULT 0,
+            document_access_count INTEGER NOT NULL DEFAULT 0,
+            active_project_count INTEGER NOT NULL DEFAULT 0,
+            token_total INTEGER NOT NULL DEFAULT 0,
+            error_count INTEGER NOT NULL DEFAULT 0,
+            sensitive_action_count INTEGER NOT NULL DEFAULT 0,
+            active_minutes INTEGER NOT NULL DEFAULT 0,
+            activity_score REAL NOT NULL DEFAULT 0,
+            models_json TEXT NOT NULL DEFAULT '[]',
+            projects_json TEXT NOT NULL DEFAULT '[]',
+            actions_json TEXT NOT NULL DEFAULT '[]',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL,
+            UNIQUE(username, day)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_user_activity_daily_username_day
+            ON cognix_user_activity_daily(username, day DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_user_activity_daily_day
+            ON cognix_user_activity_daily(day DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_organization_activity_daily (
+            id TEXT PRIMARY KEY,
+            day TEXT NOT NULL UNIQUE,
+            active_user_count INTEGER NOT NULL DEFAULT 0,
+            message_count INTEGER NOT NULL DEFAULT 0,
+            token_total INTEGER NOT NULL DEFAULT 0,
+            model_count INTEGER NOT NULL DEFAULT 0,
+            tool_call_count INTEGER NOT NULL DEFAULT 0,
+            document_access_count INTEGER NOT NULL DEFAULT 0,
+            active_project_count INTEGER NOT NULL DEFAULT 0,
+            error_count INTEGER NOT NULL DEFAULT 0,
+            sensitive_action_count INTEGER NOT NULL DEFAULT 0,
+            active_minutes INTEGER NOT NULL DEFAULT 0,
+            top_users_json TEXT NOT NULL DEFAULT '[]',
+            models_json TEXT NOT NULL DEFAULT '[]',
+            projects_json TEXT NOT NULL DEFAULT '[]',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_organization_activity_daily_day
+            ON cognix_organization_activity_daily(day DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_token_usage_events (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -2382,6 +2432,240 @@ def list_user_activity_events(username: str | None = None, *, limit: int = 200) 
         for item in items:
             item["metadata"] = _json_or_default(item.get("metadata_json"), {})
         return items
+    finally:
+        conn.close()
+
+
+def _hydrate_user_activity_daily(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    item = dict(row)
+    item["models"] = _json_or_default(item.get("models_json"), [])
+    item["projects"] = _json_or_default(item.get("projects_json"), [])
+    item["actions"] = _json_or_default(item.get("actions_json"), [])
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def upsert_user_activity_daily(record: dict[str, Any]) -> dict[str, Any]:
+    username = str(record.get("username") or "").strip()
+    day = str(record.get("day") or "").strip()
+    if not username or not day:
+        raise ValueError("User activity daily rollup requires username and day")
+    now = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_user_activity_daily
+                (
+                    id,
+                    username,
+                    day,
+                    message_count,
+                    model_count,
+                    tool_call_count,
+                    document_access_count,
+                    active_project_count,
+                    token_total,
+                    error_count,
+                    sensitive_action_count,
+                    active_minutes,
+                    activity_score,
+                    models_json,
+                    projects_json,
+                    actions_json,
+                    metadata_json,
+                    updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(username, day) DO UPDATE SET
+                message_count = excluded.message_count,
+                model_count = excluded.model_count,
+                tool_call_count = excluded.tool_call_count,
+                document_access_count = excluded.document_access_count,
+                active_project_count = excluded.active_project_count,
+                token_total = excluded.token_total,
+                error_count = excluded.error_count,
+                sensitive_action_count = excluded.sensitive_action_count,
+                active_minutes = excluded.active_minutes,
+                activity_score = excluded.activity_score,
+                models_json = excluded.models_json,
+                projects_json = excluded.projects_json,
+                actions_json = excluded.actions_json,
+                metadata_json = excluded.metadata_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                _new_id("uactd"),
+                username[:160],
+                day[:20],
+                max(0, int(record.get("messageCount") or record.get("message_count") or 0)),
+                max(0, int(record.get("modelCount") or record.get("model_count") or 0)),
+                max(0, int(record.get("toolCallCount") or record.get("tool_call_count") or 0)),
+                max(0, int(record.get("documentAccessCount") or record.get("document_access_count") or 0)),
+                max(0, int(record.get("activeProjectCount") or record.get("active_project_count") or 0)),
+                max(0, int(record.get("tokenTotal") or record.get("token_total") or 0)),
+                max(0, int(record.get("errorCount") or record.get("error_count") or 0)),
+                max(0, int(record.get("sensitiveActionCount") or record.get("sensitive_action_count") or 0)),
+                max(0, int(record.get("activeMinutes") or record.get("active_minutes") or 0)),
+                max(0.0, float(record.get("activityScore") or record.get("activity_score") or 0)),
+                json.dumps(record.get("models") or [], ensure_ascii = False),
+                json.dumps(record.get("projects") or [], ensure_ascii = False),
+                json.dumps(record.get("actions") or [], ensure_ascii = False),
+                json.dumps(record.get("metadata") or {}, ensure_ascii = False),
+                now,
+            ),
+        )
+        conn.commit()
+        return _hydrate_user_activity_daily(
+            conn.execute(
+                "SELECT * FROM cognix_user_activity_daily WHERE username = ? AND day = ?",
+                (username[:160], day[:20]),
+            ).fetchone()
+        ) or {}
+    finally:
+        conn.close()
+
+
+def list_user_activity_daily(username: str | None = None, *, limit: int = 365) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        safe_limit = max(1, min(int(limit or 365), 1000))
+        if username:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_user_activity_daily
+                WHERE username = ?
+                ORDER BY day DESC
+                LIMIT ?
+                """,
+                (username, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_user_activity_daily
+                ORDER BY day DESC, username ASC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+        return [
+            item
+            for item in (_hydrate_user_activity_daily(row) for row in rows)
+            if item is not None
+        ]
+    finally:
+        conn.close()
+
+
+def _hydrate_organization_activity_daily(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    item = dict(row)
+    item["topUsers"] = _json_or_default(item.get("top_users_json"), [])
+    item["models"] = _json_or_default(item.get("models_json"), [])
+    item["projects"] = _json_or_default(item.get("projects_json"), [])
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def upsert_organization_activity_daily(record: dict[str, Any]) -> dict[str, Any]:
+    day = str(record.get("day") or "").strip()
+    if not day:
+        raise ValueError("Organization activity daily rollup requires day")
+    now = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_organization_activity_daily
+                (
+                    id,
+                    day,
+                    active_user_count,
+                    message_count,
+                    token_total,
+                    model_count,
+                    tool_call_count,
+                    document_access_count,
+                    active_project_count,
+                    error_count,
+                    sensitive_action_count,
+                    active_minutes,
+                    top_users_json,
+                    models_json,
+                    projects_json,
+                    metadata_json,
+                    updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(day) DO UPDATE SET
+                active_user_count = excluded.active_user_count,
+                message_count = excluded.message_count,
+                token_total = excluded.token_total,
+                model_count = excluded.model_count,
+                tool_call_count = excluded.tool_call_count,
+                document_access_count = excluded.document_access_count,
+                active_project_count = excluded.active_project_count,
+                error_count = excluded.error_count,
+                sensitive_action_count = excluded.sensitive_action_count,
+                active_minutes = excluded.active_minutes,
+                top_users_json = excluded.top_users_json,
+                models_json = excluded.models_json,
+                projects_json = excluded.projects_json,
+                metadata_json = excluded.metadata_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                _new_id("oactd"),
+                day[:20],
+                max(0, int(record.get("activeUserCount") or record.get("active_user_count") or 0)),
+                max(0, int(record.get("messageCount") or record.get("message_count") or 0)),
+                max(0, int(record.get("tokenTotal") or record.get("token_total") or 0)),
+                max(0, int(record.get("modelCount") or record.get("model_count") or 0)),
+                max(0, int(record.get("toolCallCount") or record.get("tool_call_count") or 0)),
+                max(0, int(record.get("documentAccessCount") or record.get("document_access_count") or 0)),
+                max(0, int(record.get("activeProjectCount") or record.get("active_project_count") or 0)),
+                max(0, int(record.get("errorCount") or record.get("error_count") or 0)),
+                max(0, int(record.get("sensitiveActionCount") or record.get("sensitive_action_count") or 0)),
+                max(0, int(record.get("activeMinutes") or record.get("active_minutes") or 0)),
+                json.dumps(record.get("topUsers") or record.get("top_users") or [], ensure_ascii = False),
+                json.dumps(record.get("models") or [], ensure_ascii = False),
+                json.dumps(record.get("projects") or [], ensure_ascii = False),
+                json.dumps(record.get("metadata") or {}, ensure_ascii = False),
+                now,
+            ),
+        )
+        conn.commit()
+        return _hydrate_organization_activity_daily(
+            conn.execute(
+                "SELECT * FROM cognix_organization_activity_daily WHERE day = ?",
+                (day[:20],),
+            ).fetchone()
+        ) or {}
+    finally:
+        conn.close()
+
+
+def list_organization_activity_daily(*, limit: int = 365) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        safe_limit = max(1, min(int(limit or 365), 1000))
+        rows = conn.execute(
+            """
+            SELECT * FROM cognix_organization_activity_daily
+            ORDER BY day DESC
+            LIMIT ?
+            """,
+            (safe_limit,),
+        ).fetchall()
+        return [
+            item
+            for item in (_hydrate_organization_activity_daily(row) for row in rows)
+            if item is not None
+        ]
     finally:
         conn.close()
 

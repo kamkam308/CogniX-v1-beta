@@ -1179,6 +1179,9 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "capabilities": [
             "admin_user_service",
             "user_activity_monitoring",
+            "activity_daily_rollups",
+            "organization_activity_daily",
+            "admin_activity_dashboard",
             "user_limit_management",
             "token_usage_dashboard",
             "model_usage_dashboard",
@@ -1191,6 +1194,8 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
             "/api/cognix/admin/users/{username}/limits",
             "/api/cognix/admin/users/{username}/limits/{limit_key}",
             "/api/cognix/admin/activity",
+            "/api/cognix/admin/activity/blueprint",
+            "/api/cognix/admin/activity/aggregate",
             "/api/cognix/admin/usage",
         ],
         "permissions": ["admin", "admin:users:read", "admin:users:update", "admin:limits:update"],

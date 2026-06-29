@@ -14,6 +14,7 @@ if str(_BACKEND_ROOT) not in sys.path:
 
 from auth import storage
 from auth.authentication import get_current_jwt_subject
+from core.cognix import admin_activity as cognix_admin_activity
 from core.cognix import admin_chat as cognix_admin_chat
 from core.cognix import admin_users as cognix_admin_users
 from core.cognix import apps as cognix_apps
@@ -5955,8 +5956,11 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert modules["cognix-admin-operations"]["status"] == "enabled"
     assert modules["cognix-admin-operations"]["dependencyState"]["ready"] is True
     assert "admin_user_service" in modules["cognix-admin-operations"]["capabilities"]
+    assert "activity_daily_rollups" in modules["cognix-admin-operations"]["capabilities"]
+    assert "organization_activity_daily" in modules["cognix-admin-operations"]["capabilities"]
     assert "token_usage_dashboard" in modules["cognix-admin-operations"]["capabilities"]
     assert "/api/cognix/admin/users" in modules["cognix-admin-operations"]["routes"]
+    assert "/api/cognix/admin/activity/aggregate" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/usage" in modules["cognix-admin-operations"]["routes"]
     assert modules["cognix-admin-chat-access"]["status"] == "enabled"
     assert modules["cognix-admin-chat-access"]["dependencyState"]["ready"] is True
@@ -6931,6 +6935,165 @@ def test_admin_users_service_aggregates_permissions_limits_activity_and_usage():
     assert alice["activity"]["activityEvents"] == 1
     assert directory["sideEffects"]["permissionGrant"] is False
     assert directory["sideEffects"]["generation"] is False
+
+
+def test_admin_activity_rollups_combine_events_usage_chats_and_audits():
+    users = [{"username": "alice"}, {"username": "kamil"}]
+    thread = {
+        "id": "thread-activity-core",
+        "title": "Activity",
+        "modelType": "ollama",
+        "modelId": "qwen-local",
+        "projectId": "project-1",
+        "ownerUsername": "alice",
+        "createdAt": 1782700000000,
+    }
+    messages = [
+        {
+            "id": "msg-activity-1",
+            "threadId": "thread-activity-core",
+            "role": "user",
+            "content": [{"type": "text", "text": "hello"}],
+            "createdAt": 1782700001000,
+        },
+        {
+            "id": "msg-activity-2",
+            "threadId": "thread-activity-core",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "hi"}],
+            "createdAt": 1782700002000,
+        },
+    ]
+    rollups = cognix_admin_activity.build_activity_rollups(
+        users = users,
+        activity_events = [
+            {
+                "username": "alice",
+                "event_type": "tool_error",
+                "resource_type": "tool",
+                "created_at": "2026-06-29T10:00:00+00:00",
+            }
+        ],
+        token_events = [
+            {
+                "username": "alice",
+                "model_id": "qwen-local",
+                "total_tokens": 42,
+                "created_at": "2026-06-29T10:01:00+00:00",
+            }
+        ],
+        threads = [thread],
+        messages = messages,
+        audit_logs = [
+            {
+                "username": "alice",
+                "actor_username": "kamil",
+                "action": "permission_granted",
+                "severity": "warning",
+                "created_at": "2026-06-29T10:02:00+00:00",
+            }
+        ],
+        conversation_metadata = [
+            {
+                "username": "alice",
+                "thread_id": "thread-activity-core",
+                "project_id": "project-1",
+                "model_id": "qwen-local",
+                "tool_call_count": 2,
+                "document_access_count": 3,
+                "updated_at": "2026-06-29T10:03:00+00:00",
+            }
+        ],
+    )
+    alice = next(item for item in rollups["userDaily"] if item["username"] == "alice")
+
+    assert rollups["activityMonitoringVersion"] == "cognix_activity_monitoring_v2"
+    assert alice["messageCount"] == 2
+    assert alice["tokenTotal"] == 42
+    assert alice["toolCallCount"] == 2
+    assert alice["documentAccessCount"] == 3
+    assert alice["activeProjectCount"] == 1
+    assert alice["errorCount"] >= 2
+    assert alice["sensitiveActionCount"] >= 1
+    assert alice["activityScore"] > 0
+    assert rollups["organizationDaily"][0]["activeUserCount"] == 1
+    assert rollups["sideEffects"]["modelLoad"] is False
+    assert rollups["sideEffects"]["toolExecution"] is False
+
+
+def test_admin_activity_monitoring_routes_are_admin_only_and_persist_rollups():
+    seed_accounts()
+    now = int(time.time())
+    studio_db_storage.upsert_chat_thread(
+        {
+            "id": "thread-activity-1",
+            "title": "Activity route",
+            "modelType": "ollama",
+            "modelId": "qwen-local",
+            "createdAt": now,
+        },
+        owner_username = "alice",
+    )
+    studio_db_storage.upsert_chat_message(
+        {
+            "id": "msg-activity-route-1",
+            "threadId": "thread-activity-1",
+            "role": "user",
+            "content": [{"type": "text", "text": "route activity"}],
+            "metadata": {"toolCalls": [{"name": "library_search"}], "documents": ["doc-1"]},
+            "createdAt": now + 1,
+        }
+    )
+    cognix_db.create_user_activity_event(
+        "alice",
+        event_type = "document_consulted",
+        resource_type = "library",
+        resource_id = "doc-1",
+    )
+    cognix_db.create_token_usage_event(
+        "alice",
+        model_id = "qwen-local",
+        provider = "ollama",
+        input_tokens = 30,
+        output_tokens = 12,
+    )
+    cognix_db.create_audit_log(
+        username = "alice",
+        actor_username = storage.DEFAULT_ADMIN_USERNAME,
+        action = "permission_granted",
+        resource_type = "permission",
+        severity = "warning",
+    )
+
+    with pytest.raises(HTTPException) as user_read:
+        run_async(cognix_routes.admin_activity_blueprint(current_subject = "alice"))
+    assert user_read.value.status_code == 403
+
+    blueprint = run_async(cognix_routes.admin_activity_blueprint(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    assert blueprint["activityMonitoringBlueprint"]["tables"] == [
+        "cognix_user_activity_events",
+        "cognix_user_activity_daily",
+        "cognix_organization_activity_daily",
+    ]
+
+    aggregate = run_async(cognix_routes.admin_activity_aggregate(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    assert aggregate["activityDashboard"]["summary"]["messageCount"] >= 1
+    assert aggregate["activityDashboard"]["summary"]["tokenTotal"] == 42
+    assert aggregate["userDaily"]
+    assert aggregate["organizationDaily"]
+    assert aggregate["sideEffects"]["userDailyWrite"] is True
+    assert aggregate["sideEffects"]["organizationDailyWrite"] is True
+    assert cognix_db.list_user_activity_daily("alice")
+    assert cognix_db.list_organization_activity_daily()
+
+    activity = run_async(cognix_routes.admin_activity(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    assert activity["activityDashboard"]["summary"]["messageCount"] >= 1
+    assert activity["userDaily"]
+    assert activity["organizationDaily"]
+    assert activity["plannerVersion"] == "cognix_activity_monitoring_v2"
+
+    actions = [log["action"] for log in cognix_db.list_audit_logs(limit = 20)]
+    assert "admin_activity_aggregated" in actions
 
 
 def test_admin_users_endpoints_are_admin_only_audited_and_persist_limits():

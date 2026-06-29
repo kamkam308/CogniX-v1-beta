@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from auth import storage as auth_storage
 from auth.authentication import get_current_jwt_subject
+from core.cognix import admin_activity as cognix_admin_activity
 from core.cognix import admin_chat as cognix_admin_chat
 from core.cognix import admin_security as cognix_admin_security
 from core.cognix import admin_users as cognix_admin_users
@@ -1177,6 +1178,69 @@ def _build_admin_chat_bundle(
     }
 
 
+def _persist_activity_rollups(rollups: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    user_daily = [
+        cognix_db.upsert_user_activity_daily(record)
+        for record in rollups.get("userDaily", [])
+    ]
+    organization_daily = [
+        cognix_db.upsert_organization_activity_daily(record)
+        for record in rollups.get("organizationDaily", [])
+    ]
+    return {
+        "userDaily": user_daily,
+        "organizationDaily": organization_daily,
+    }
+
+
+def _build_admin_activity_bundle(*, refresh_rollups: bool = False) -> dict[str, Any]:
+    users = auth_storage.list_user_profiles()
+    threads = list_chat_threads(
+        include_archived = True,
+        owner_username = "",
+        include_all = True,
+    )
+    projects = list_chat_projects(
+        include_archived = True,
+        owner_username = "",
+        include_all = True,
+    )
+    messages = list_chat_messages_for_threads([str(thread.get("id")) for thread in threads if thread.get("id")])
+    token_events = cognix_db.list_token_usage_events(limit = 5000)
+    conversation_metadata = _refresh_conversation_audit_metadata(threads, messages, token_events)
+    activity_events = cognix_db.list_user_activity_events(limit = 1000)
+    audit_logs = cognix_db.list_audit_logs(limit = 500)
+    rollups = cognix_admin_activity.build_activity_rollups(
+        users = users,
+        activity_events = activity_events,
+        token_events = token_events,
+        threads = threads,
+        messages = messages,
+        audit_logs = audit_logs,
+        conversation_metadata = conversation_metadata,
+    )
+    persisted = (
+        _persist_activity_rollups(rollups)
+        if refresh_rollups
+        else {
+            "userDaily": cognix_db.list_user_activity_daily(limit = 1000),
+            "organizationDaily": cognix_db.list_organization_activity_daily(limit = 365),
+        }
+    )
+    return {
+        "users": users,
+        "threads": threads,
+        "projects": projects,
+        "messages": messages,
+        "tokenEvents": token_events,
+        "conversationMetadata": conversation_metadata,
+        "activityEvents": activity_events,
+        "auditLogs": audit_logs,
+        "rollups": rollups,
+        "persisted": persisted,
+    }
+
+
 def _row(row: dict[str, Any]) -> dict[str, Any]:
     """Return a frontend-friendly copy while keeping raw fields available."""
 
@@ -1366,9 +1430,20 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "access_mode": "accessMode",
         "content_visible": "contentVisible",
         "message_count": "messageCount",
+        "model_count": "modelCount",
         "token_total": "tokenTotal",
         "tool_call_count": "toolCallCount",
         "document_access_count": "documentAccessCount",
+        "active_project_count": "activeProjectCount",
+        "error_count": "errorCount",
+        "sensitive_action_count": "sensitiveActionCount",
+        "active_minutes": "activeMinutes",
+        "activity_score": "activityScore",
+        "models_json": "modelsJson",
+        "projects_json": "projectsJson",
+        "actions_json": "actionsJson",
+        "active_user_count": "activeUserCount",
+        "top_users_json": "topUsersJson",
         "gpt_id": "gptId",
         "runtime_plan_json": "runtimePlanJson",
         "privacy_level": "privacyLevel",
@@ -10052,12 +10127,69 @@ async def admin_update_user_limit(
 async def admin_activity(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
     _require_admin(current_subject)
     bundle = _build_admin_user_bundle()
+    activity_bundle = _build_admin_activity_bundle(refresh_rollups = True)
+    side_effects = {
+        **cognix_admin_activity.build_activity_monitoring_blueprint()["sideEffects"],
+        "userDailyWrite": True,
+        "organizationDailyWrite": True,
+    }
     return {
         "username": current_subject,
         "activityEvents": _rows(bundle["activityEvents"]),
+        "activityDashboard": activity_bundle["rollups"],
+        "userDaily": _rows(activity_bundle["persisted"]["userDaily"]),
+        "organizationDaily": _rows(activity_bundle["persisted"]["organizationDaily"]),
         "directorySummary": bundle["directory"].get("summary", {}),
-        "sideEffects": cognix_admin_users.build_admin_users_blueprint()["sideEffects"],
-        "plannerVersion": cognix_admin_users.COGNIX_ACTIVITY_MONITORING_VERSION,
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_admin_activity.COGNIX_ACTIVITY_MONITORING_VERSION,
+    }
+
+
+@router.get("/admin/activity/blueprint")
+async def admin_activity_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    blueprint = cognix_admin_activity.build_activity_monitoring_blueprint()
+    return {
+        "username": current_subject,
+        "activityMonitoringBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+    }
+
+
+@router.post("/admin/activity/aggregate")
+async def admin_activity_aggregate(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    activity_bundle = _build_admin_activity_bundle(refresh_rollups = True)
+    side_effects = {
+        **activity_bundle["rollups"].get("sideEffects", {}),
+        "userDailyWrite": True,
+        "organizationDailyWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = None,
+        actor_username = current_subject,
+        action = "admin_activity_aggregated",
+        resource_type = "cognix_activity_rollups",
+        resource_id = None,
+        severity = "notice",
+        metadata = {
+            "activityMonitoringVersion": cognix_admin_activity.COGNIX_ACTIVITY_MONITORING_VERSION,
+            "activityAggregatorVersion": cognix_admin_activity.COGNIX_ACTIVITY_AGGREGATOR_VERSION,
+            "userDailyRows": len(activity_bundle["persisted"]["userDaily"]),
+            "organizationDailyRows": len(activity_bundle["persisted"]["organizationDaily"]),
+            "summary": activity_bundle["rollups"].get("summary", {}),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "activityDashboard": activity_bundle["rollups"],
+        "userDaily": _rows(activity_bundle["persisted"]["userDaily"]),
+        "organizationDaily": _rows(activity_bundle["persisted"]["organizationDaily"]),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_admin_activity.COGNIX_ACTIVITY_AGGREGATOR_VERSION,
     }
 
 
