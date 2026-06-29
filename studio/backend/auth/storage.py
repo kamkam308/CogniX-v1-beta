@@ -686,6 +686,13 @@ def has_ceo_training_entitlement(username: str, profile: Optional[dict] = None) 
     )
 
 
+def is_training_operator(username: str) -> bool:
+    """Return whether a user can operate local or CEO cloud training flows."""
+
+    profile = get_user_profile(username) or {}
+    return has_ceo_training_entitlement(username, profile)
+
+
 def get_login_lockout_state(username: str) -> Optional[dict]:
     conn = get_connection()
     try:

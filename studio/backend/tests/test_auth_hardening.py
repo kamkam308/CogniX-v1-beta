@@ -73,6 +73,31 @@ def test_default_admin_bootstrap_uses_cognix_username():
     assert storage.get_user_and_secret("unsloth") is None
 
 
+def test_ceo_plan_is_training_operator_without_admin_role():
+    storage.create_user(
+        username = "ceo_user",
+        email = "ceo@example.com",
+        password = "human-password-123",
+        plan = storage.CEO_PLAN,
+    )
+
+    profile = storage.get_user_profile("ceo_user")
+
+    assert profile is not None
+    assert profile["role"] == "user"
+    assert profile["plan"] == storage.CEO_PLAN
+    assert storage.is_admin("ceo_user") is False
+    assert storage.has_ceo_training_entitlement("ceo_user", profile) is True
+    assert storage.is_training_operator("ceo_user") is True
+
+
+def test_free_user_is_not_training_operator():
+    seed_user("freeuser")
+
+    assert storage.has_ceo_training_entitlement("freeuser") is False
+    assert storage.is_training_operator("freeuser") is False
+
+
 def test_auth_status_does_not_disclose_admin_username_after_initialization(client):
     seed_admin()
 

@@ -50,6 +50,11 @@ def _patch_run(monkeypatch: pytest.MonkeyPatch, payload: TrainingRunUpdateReques
         fake_update_run_display_name,
     )
     monkeypatch.setattr(training_history, "can_resume_run", lambda run: True)
+    monkeypatch.setattr(
+        training_history.auth_storage,
+        "is_training_operator",
+        lambda subject: subject == "test-user",
+    )
 
     result = asyncio.run(
         training_history.update_training_run(

@@ -70,9 +70,9 @@ router = APIRouter()
 logger = get_logger(__name__)
 
 
-def _require_admin(current_subject: str) -> None:
-    if not auth_storage.is_admin(current_subject):
-        raise HTTPException(status_code = 403, detail = "Admin access required")
+def _require_training_operator(current_subject: str) -> None:
+    if not auth_storage.is_training_operator(current_subject):
+        raise HTTPException(status_code = 403, detail = "Training access required")
 
 
 def _validate_local_dataset_paths(paths: list[str], label: str = "Local dataset") -> list[str]:
@@ -103,14 +103,14 @@ async def get_hardware_utilization(current_subject: str = Depends(get_current_jw
 
     Polled by the frontend during training.
     """
-    _require_admin(current_subject)
+    _require_training_operator(current_subject)
     from utils.hardware import get_gpu_utilization
     return get_gpu_utilization()
 
 
 @router.get("/hardware/visible")
 async def get_visible_hardware_utilization(current_subject: str = Depends(get_current_jwt_subject)):
-    _require_admin(current_subject)
+    _require_training_operator(current_subject)
     from utils.hardware import get_visible_gpu_utilization
     return get_visible_gpu_utilization()
 
@@ -125,7 +125,7 @@ async def start_training(
     Initiates training in the background and returns immediately. Use /status
     to check progress.
     """
-    _require_admin(current_subject)
+    _require_training_operator(current_subject)
     try:
         logger.info(f"Starting training job with model: {request.model_name}")
 
@@ -461,7 +461,7 @@ async def stop_training(
     Body:
         save (bool): If True (default), save the model at the current checkpoint.
     """
-    _require_admin(current_subject)
+    _require_training_operator(current_subject)
     try:
         backend = get_training_backend()
         is_active = backend.is_training_active()
@@ -492,7 +492,7 @@ async def stop_training(
 @router.post("/reset")
 async def reset_training(current_subject: str = Depends(get_current_jwt_subject)):
     """Reset training state so the user can return to configuration."""
-    _require_admin(current_subject)
+    _require_training_operator(current_subject)
     try:
         backend = get_training_backend()
         is_active = backend.is_training_active()
@@ -544,7 +544,7 @@ async def get_training_status(current_subject: str = Depends(get_current_jwt_sub
     """
     Get the current training status.
     """
-    _require_admin(current_subject)
+    _require_training_operator(current_subject)
     try:
         backend = get_training_backend()
         job_id: str = getattr(backend, "current_job_id", "") or ""
@@ -633,7 +633,7 @@ async def get_training_metrics(current_subject: str = Depends(get_current_jwt_su
     """
     Get training metrics (loss, learning rate, steps).
     """
-    _require_admin(current_subject)
+    _require_training_operator(current_subject)
     try:
         backend = get_training_backend()
 
@@ -681,7 +681,7 @@ async def stream_training_progress(
       - Named `event:` types (progress, heartbeat, complete, error).
       - Reads `Last-Event-ID` on reconnect to replay missed steps.
     """
-    _require_admin(current_subject)
+    _require_training_operator(current_subject)
     # Read Last-Event-ID header for reconnection resume.
     last_event_id = request.headers.get("last-event-id")
     resume_from_step: Optional[int] = None
