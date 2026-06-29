@@ -116,6 +116,7 @@ def _architecture_decision(
     context_budget = _as_dict(context_plan.get("tokenBudget"))
     context_boundary = _as_dict(context_plan.get("contextBoundaryContract"))
     context_gate = _as_dict(context_boundary.get("executionGate"))
+    knowledge_strategy = _as_dict(task_strategy.get("knowledgeStrategyContract"))
     fine_tuning_method = _as_dict(fine_tuning_plan.get("method"))
     worker_summary = _as_dict(worker_queue_plan.get("summary"))
     preload_queue_contract = _as_dict(preload_plan.get("preloadQueueContract"))
@@ -190,6 +191,10 @@ def _architecture_decision(
             "ragRetrievalAllowedNow": bool(context_gate.get("ragRetrievalAllowedNow")),
         },
         "rag": {
+            "knowledgeStrategyContractVersion": knowledge_strategy.get("contractVersion"),
+            "selectedKnowledgeStrategy": knowledge_strategy.get("selectedStrategy"),
+            "ragBeforeFineTuning": bool(knowledge_strategy.get("ragBeforeFineTuning")),
+            "fineTuningDeferred": bool(knowledge_strategy.get("fineTuningDeferred")),
             "recommendedPath": rag_plan.get("recommendedPath"),
             "readyForRetrieval": bool(rag_plan.get("readyForRetrieval")),
             "strategy": _as_dict(rag_plan.get("retrieval")).get("strategy"),
@@ -626,6 +631,7 @@ def build_execution_plan(
     project_session_routing = _as_dict(project_session_contract.get("routingPolicy"))
     context_boundary = _as_dict(context_plan.get("contextBoundaryContract"))
     context_gate = _as_dict(context_boundary.get("executionGate"))
+    knowledge_strategy = _as_dict(task_strategy.get("knowledgeStrategyContract"))
 
     execution_strategy = {
         "status": status,
@@ -641,6 +647,10 @@ def build_execution_plan(
         "recommendedExpertId": classification.get("recommendedExpertId"),
         "recommendedPath": task_strategy.get("path"),
         "primaryCapability": task_strategy.get("primaryCapability"),
+        "knowledgeStrategyContractVersion": knowledge_strategy.get("contractVersion"),
+        "selectedKnowledgeStrategy": knowledge_strategy.get("selectedStrategy"),
+        "ragBeforeFineTuning": bool(knowledge_strategy.get("ragBeforeFineTuning")),
+        "fineTuningDeferred": bool(knowledge_strategy.get("fineTuningDeferred")),
         "requiresHumanConfirmation": task_strategy.get("requiresHumanConfirmation"),
         "automaticExecutionAllowed": execution_policy.get("automaticExecutionAllowed"),
         "securityRiskLevel": execution_policy.get("riskLevel"),

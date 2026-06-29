@@ -224,6 +224,24 @@ def build_decision_explanation(
                 evidence = {"requiresHumanConfirmation": True},
             )
         )
+    knowledge_strategy = _as_dict(decision.get("knowledgeStrategyContract"))
+    if knowledge_strategy:
+        reasons.append(
+            _reason(
+                "knowledge_strategy_contract",
+                "RAG ou fine-tuning",
+                str(
+                    knowledge_strategy.get("explanation")
+                    or "CogniX compare RAG et fine-tuning avec un contrat explicite avant toute indexation ou entrainement."
+                ),
+                evidence = {
+                    "contractVersion": knowledge_strategy.get("contractVersion"),
+                    "selectedStrategy": knowledge_strategy.get("selectedStrategy"),
+                    "ragBeforeFineTuning": knowledge_strategy.get("ragBeforeFineTuning"),
+                    "fineTuningDeferred": knowledge_strategy.get("fineTuningDeferred"),
+                },
+            )
+        )
     if side_effects:
         reasons.append(
             _reason(

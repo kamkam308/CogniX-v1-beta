@@ -448,6 +448,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
             "router_decision_explanations",
             "why_this_model",
             "why_rag_or_fine_tuning",
+            "knowledge_strategy_contract",
             "human_readable_trace",
         ],
         "routes": [

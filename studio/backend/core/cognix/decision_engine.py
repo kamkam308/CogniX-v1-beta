@@ -15,6 +15,7 @@ from typing import Any
 
 
 COGNIX_DECISION_ENGINE_VERSION = "cognix_decision_engine_v1"
+COGNIX_KNOWLEDGE_STRATEGY_CONTRACT_VERSION = "cognix_knowledge_strategy_contract_v1"
 
 
 KEYWORD_WEIGHTS: dict[str, tuple[tuple[str, float], ...]] = {
@@ -198,6 +199,105 @@ def _tool_candidates(objective: str) -> list[str]:
     return candidates
 
 
+def _knowledge_strategy_contract(
+    *,
+    path: str,
+    score_map: dict[str, float],
+    selected_domain: str,
+    confidence: float,
+) -> dict[str, Any]:
+    rag_score = float(score_map.get("rag") or 0.0)
+    fine_tuning_score = float(score_map.get("fine_tuning") or 0.0)
+    if path == "rag_first":
+        selected_strategy = "rag_first"
+        reason_code = "documents_or_sources_before_training"
+        recommended_first_step = "collect_documents"
+        fine_tuning_deferred = fine_tuning_score > 0
+    elif path == "guided_fine_tuning":
+        selected_strategy = "guided_fine_tuning"
+        reason_code = "dataset_or_behavior_training_goal"
+        recommended_first_step = "validate_dataset"
+        fine_tuning_deferred = False
+    else:
+        selected_strategy = "no_knowledge_workflow_needed"
+        reason_code = "direct_expert_or_tool_strategy"
+        recommended_first_step = "build_context"
+        fine_tuning_deferred = False
+
+    return {
+        "contractVersion": COGNIX_KNOWLEDGE_STRATEGY_CONTRACT_VERSION,
+        "mode": "knowledge_strategy_dry_run",
+        "selectedStrategy": selected_strategy,
+        "selectedDomain": selected_domain,
+        "confidence": confidence,
+        "reasonCode": reason_code,
+        "recommendedFirstStep": recommended_first_step,
+        "fineTuningDeferred": fine_tuning_deferred,
+        "ragBeforeFineTuning": path == "rag_first",
+        "scores": {
+            "rag": round(rag_score, 3),
+            "fineTuning": round(fine_tuning_score, 3),
+        },
+        "decisionMatrix": [
+            {
+                "id": "rag",
+                "label": "RAG",
+                "score": round(rag_score, 3),
+                "selected": path == "rag_first",
+                "bestFor": [
+                    "documents",
+                    "sources",
+                    "fresh_or_project_knowledge",
+                    "auditable_citations",
+                ],
+                "willIndexNow": False,
+                "willRetrieveNow": False,
+            },
+            {
+                "id": "fine_tuning",
+                "label": "Fine-tuning",
+                "score": round(fine_tuning_score, 3),
+                "selected": path == "guided_fine_tuning",
+                "deferredByRag": fine_tuning_deferred,
+                "bestFor": [
+                    "stable_behavior",
+                    "response_style",
+                    "format_learning",
+                    "large_curated_dataset",
+                ],
+                "willTrainNow": False,
+                "willValidateDatasetNow": False,
+            },
+        ],
+        "explanation": (
+            "RAG est prioritaire quand la demande depend de documents, sources ou cours; le fine-tuning reste differe."
+            if path == "rag_first"
+            else "Fine-tuning guide quand la demande cible un comportement durable, un style ou un dataset."
+            if path == "guided_fine_tuning"
+            else "Aucun workflow connaissance lourd n'est dominant; CogniX garde le contexte compact et le routage expert."
+        ),
+        "blockedActions": [
+            "rag_indexing",
+            "rag_retrieval",
+            "embedding_generation",
+            "fine_tuning_job",
+            "dataset_upload",
+            "model_generation",
+            "network_model_call",
+        ],
+        "sideEffects": {
+            "modelLoad": False,
+            "generation": False,
+            "networkModelCall": False,
+            "ragIndexing": False,
+            "ragRetrieval": False,
+            "embeddingGeneration": False,
+            "fineTuningJob": False,
+            "datasetMutation": False,
+        },
+    }
+
+
 def build_task_strategy(
     objective: str,
     *,
@@ -235,6 +335,12 @@ def build_task_strategy(
         deferred.append("Fine-tuning differe: RAG recommande d'abord pour les documents.")
     if path in {"tool_plan", "codex_guarded_pipeline", "guided_fine_tuning"}:
         risks.append("Action potentiellement sensible: rester en planification jusqu'aux garde-fous.")
+    knowledge_strategy_contract = _knowledge_strategy_contract(
+        path = path,
+        score_map = score_map,
+        selected_domain = selected_domain,
+        confidence = confidence,
+    )
 
     labels = {
         "rag_first": "RAG avant fine-tuning",
@@ -272,6 +378,7 @@ def build_task_strategy(
             "guided_fine_tuning",
         },
         "uses": uses,
+        "knowledgeStrategyContract": knowledge_strategy_contract,
         "toolCandidates": _tool_candidates(objective),
         "contextPlan": {
             "includeUserMemory": True,

@@ -269,6 +269,12 @@ def test_decision_engine_prefers_rag_before_fine_tuning_for_documents():
     assert strategy["decisionEngineVersion"] == "cognix_decision_engine_v1"
     assert strategy["path"] == "rag_first"
     assert strategy["primaryCapability"] == "rag"
+    assert strategy["knowledgeStrategyContract"]["contractVersion"] == "cognix_knowledge_strategy_contract_v1"
+    assert strategy["knowledgeStrategyContract"]["selectedStrategy"] == "rag_first"
+    assert strategy["knowledgeStrategyContract"]["ragBeforeFineTuning"] is True
+    assert strategy["knowledgeStrategyContract"]["fineTuningDeferred"] is True
+    assert strategy["knowledgeStrategyContract"]["sideEffects"]["fineTuningJob"] is False
+    assert "fine_tuning_job" in strategy["knowledgeStrategyContract"]["blockedActions"]
     assert strategy["uses"]["rag"] is True
     assert strategy["uses"]["fineTuning"] is False
     assert strategy["contextPlan"]["includeRagChunks"] is True
@@ -313,6 +319,8 @@ def test_orchestrator_builds_dry_run_plan_without_loading(monkeypatch):
     assert plan["architectureDecision"]["routing"]["frontendDirectModelCallAllowed"] is False
     assert plan["architectureDecision"]["context"]["rawHistoryAllowed"] is False
     assert plan["architectureDecision"]["cache"]["cacheMutationAllowed"] is False
+    assert plan["architectureDecision"]["rag"]["knowledgeStrategyContractVersion"] == "cognix_knowledge_strategy_contract_v1"
+    assert plan["architectureDecision"]["rag"]["selectedKnowledgeStrategy"] == "no_knowledge_workflow_needed"
     assert plan["architectureDecision"]["preload"]["loadPredictionStatus"] == "predicted"
     assert plan["architectureDecision"]["preload"]["warmupContractVersion"] == "cognix_model_warmup_contract_v1"
     assert plan["architectureDecision"]["preload"]["willWarmupNow"] is False
@@ -333,6 +341,8 @@ def test_orchestrator_builds_dry_run_plan_without_loading(monkeypatch):
     assert plan["taskStrategy"]["path"] == "codex_guarded_pipeline"
     assert plan["executionStrategy"]["recommendedPath"] == "codex_guarded_pipeline"
     assert plan["executionStrategy"]["primaryCapability"] == "codex_secure_agent"
+    assert plan["executionStrategy"]["knowledgeStrategyContractVersion"] == "cognix_knowledge_strategy_contract_v1"
+    assert plan["executionStrategy"]["selectedKnowledgeStrategy"] == "no_knowledge_workflow_needed"
     assert plan["executionStrategy"]["preloadQueueStatus"] == "queue_ready"
     assert plan["executionStrategy"]["preloadQueueWillLoadNow"] is False
     assert plan["preloadPlan"]["plannerVersion"] == "cognix_preload_planner_v1"
@@ -3016,6 +3026,13 @@ def test_decision_explainer_builds_reason_codes_without_generation():
                 "networkModelCall": False,
                 "toolExecution": False,
             },
+            "knowledgeStrategyContract": {
+                "contractVersion": "cognix_knowledge_strategy_contract_v1",
+                "selectedStrategy": "rag_first",
+                "ragBeforeFineTuning": True,
+                "fineTuningDeferred": True,
+                "explanation": "RAG est prioritaire pour repondre depuis un PDF.",
+            },
         },
         source_type = "orchestrator_log",
         source_id = "orl-test",
@@ -3027,6 +3044,7 @@ def test_decision_explainer_builds_reason_codes_without_generation():
     assert explanation["routerDecisionExplainerVersion"] == "cognix_router_decision_explainer_v1"
     assert explanation["trace"]["recommendedPath"] == "rag_first"
     assert any(reason["code"] == "strategy_rag_first" for reason in explanation["reasonCodes"])
+    assert any(reason["code"] == "knowledge_strategy_contract" for reason in explanation["reasonCodes"])
     assert explanation["display"]["rawReasoningVisible"] is False
     assert explanation["sideEffects"]["generation"] is False
     assert explanation["sideEffects"]["rawReasoningExposure"] is False
@@ -8509,6 +8527,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "decision_logs" in modules["cognix-explain-decisions"]["capabilities"]
     assert "reason_codes" in modules["cognix-explain-decisions"]["capabilities"]
     assert "router_decision_explanations" in modules["cognix-explain-decisions"]["capabilities"]
+    assert "knowledge_strategy_contract" in modules["cognix-explain-decisions"]["capabilities"]
     assert "/api/cognix/decisions/explain" in modules["cognix-explain-decisions"]["routes"]
     assert "/api/cognix/decisions/{decision_id}" in modules["cognix-explain-decisions"]["routes"]
     assert modules["cognix-prompt-compression"]["dependencyState"]["ready"] is True
