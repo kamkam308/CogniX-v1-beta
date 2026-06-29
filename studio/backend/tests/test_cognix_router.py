@@ -14,6 +14,7 @@ if str(_BACKEND_ROOT) not in sys.path:
 
 from auth import storage
 from auth.authentication import get_current_jwt_subject
+from core.cognix import apps as cognix_apps
 from core.cognix import background_agents as cognix_background_agents
 from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import codex_pipeline as cognix_codex_pipeline
@@ -5454,6 +5455,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-library",
         "cognix-scheduled",
         "cognix-images",
+        "cognix-apps",
         "cognix-model-lifecycle",
         "cognix-live-model-comparison",
         "cognix-model-translator",
@@ -5509,6 +5511,10 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "image_safety_check" in modules["cognix-images"]["capabilities"]
     assert "image_asset_library_link" in modules["cognix-images"]["capabilities"]
     assert "/api/cognix/images/plan" in modules["cognix-images"]["routes"]
+    assert modules["cognix-apps"]["status"] == "enabled"
+    assert "app_permission_scanning" in modules["cognix-apps"]["capabilities"]
+    assert "token_safe_registry" in modules["cognix-apps"]["capabilities"]
+    assert "/api/cognix/apps/plan" in modules["cognix-apps"]["routes"]
     assert modules["cognix-local-core"]["activationState"] == "ready"
     assert "module_manifest_registry" in modules["cognix-local-core"]["capabilities"]
     assert "/api/cognix/modules/manifests" in modules["cognix-local-core"]["routes"]
@@ -6185,6 +6191,103 @@ def test_images_native_plan_safety_library_link_and_permission_ceiling():
     assert admin_read["logs"][0]["action"] == "image_request_created"
     assert admin_read["logs"][0]["metadata"]["imagesVersion"] == "cognix_images_v1"
     assert admin_read["logs"][0]["metadata"]["sideEffects"]["generation"] is False
+
+
+def test_apps_native_registry_permission_scan_and_audited_connection():
+    seed_accounts()
+
+    blueprint = run_async(cognix_routes.apps_blueprint(current_subject = "alice"))
+    assert blueprint["blueprint"]["appsVersion"] == cognix_apps.COGNIX_APPS_VERSION
+    assert blueprint["blueprint"]["securityPolicy"]["manifestRequired"] is True
+    assert blueprint["blueprint"]["securityPolicy"]["tokenReadAllowedInRegistry"] is False
+    assert blueprint["sideEffects"]["tokenRead"] is False
+
+    registry = run_async(cognix_routes.apps_registry(current_subject = "alice"))
+    app_registry = registry["appRegistry"]
+    apps = {item["id"]: item for item in app_registry["apps"]}
+    assert app_registry["summary"]["appCount"] >= 6
+    assert apps["github"]["permissionScan"]["maxRiskLevel"] == "high"
+    assert apps["github"]["permissionScan"]["missingRequiredPermissions"] == ["github:read"]
+    assert registry["sideEffects"]["tokenRead"] is False
+
+    plan = run_async(
+        cognix_routes.plan_app_connection(
+            cognix_routes.AppConnectionRequest(
+                app_id = "github",
+                app_name = "GitHub",
+                status = "connected",
+            ),
+            current_subject = "alice",
+        )
+    )
+    github_plan = plan["appConnectionPlan"]
+    assert github_plan["allowed"] is False
+    assert github_plan["status"] == "missing_permissions"
+    assert github_plan["securityReview"]["missingRequiredPermissions"] == ["github:read"]
+    assert github_plan["sideEffects"]["connectionWrite"] is False
+
+    with pytest.raises(HTTPException) as blocked:
+        run_async(
+            cognix_routes.set_app_connection(
+                cognix_routes.AppConnectionRequest(
+                    app_id = "github",
+                    app_name = "GitHub",
+                    status = "connected",
+                ),
+                current_subject = "alice",
+            )
+        )
+    assert blocked.value.status_code == 403
+    assert cognix_db.list_app_connections("alice") == []
+
+    cognix_db.grant_user_permission(
+        "alice",
+        "github:read",
+        granted_by = storage.DEFAULT_ADMIN_USERNAME,
+    )
+    connected = run_async(
+        cognix_routes.set_app_connection(
+            cognix_routes.AppConnectionRequest(
+                app_id = "github",
+                app_name = "GitHub",
+                status = "connected",
+            ),
+            current_subject = "alice",
+        )
+    )
+    assert connected["connection"]["appId"] == "github"
+    assert connected["connection"]["status"] == "connected"
+    assert connected["appConnectionPlan"]["allowed"] is True
+    assert connected["appConnectionPlan"]["permissionScan"]["missingRequiredPermissions"] == []
+    assert connected["sideEffects"]["connectionWrite"] is True
+    assert connected["sideEffects"]["tokenRead"] is False
+    assert connected["sideEffects"]["tokenWrite"] is False
+    assert connected["sideEffects"]["toolExecution"] is False
+
+    apps_read = run_async(cognix_routes.my_apps(current_subject = "alice"))
+    assert apps_read["blueprint"]["appsVersion"] == "cognix_apps_v1"
+    assert apps_read["appRegistry"]["summary"]["connectedCount"] == 1
+    github = next(item for item in apps_read["appRegistry"]["apps"] if item["id"] == "github")
+    assert github["connection"]["connected"] is True
+
+    disabled = run_async(
+        cognix_routes.set_app_connection(
+            cognix_routes.AppConnectionRequest(
+                app_id = "github",
+                app_name = "GitHub",
+                status = "disabled",
+            ),
+            current_subject = "alice",
+        )
+    )
+    assert disabled["connection"]["status"] == "disabled"
+    assert disabled["appConnectionPlan"]["connectionPlan"]["revocation"] is True
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    actions = [log["action"] for log in admin_read["logs"][:5]]
+    assert "app_connection_updated" in actions
+    assert "app_connection_blocked" in [log["action"] for log in admin_read["logs"]]
+    assert any(log["metadata"].get("appsVersion") == "cognix_apps_v1" for log in admin_read["logs"])
 
 
 def test_tool_registry_declares_permissions_and_guardrails():

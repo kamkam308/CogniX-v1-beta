@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from auth import storage as auth_storage
 from auth.authentication import get_current_jwt_subject
 from core.cognix import admin_security as cognix_admin_security
+from core.cognix import apps as cognix_apps
 from core.cognix import benchmark as cognix_benchmark
 from core.cognix import background_agents as cognix_background_agents
 from core.cognix import cache_manager as cognix_cache_manager
@@ -8446,9 +8447,57 @@ async def run_scheduled_task(
 
 @router.get("/apps")
 async def my_apps(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    connections = _rows(cognix_db.list_app_connections(current_subject))
     return {
         "catalog": APP_CATALOG,
-        "connections": _rows(cognix_db.list_app_connections(current_subject)),
+        "connections": connections,
+        "appRegistry": cognix_apps.build_app_registry(
+            catalog = APP_CATALOG,
+            connections = connections,
+        ),
+        "blueprint": cognix_apps.build_apps_blueprint(),
+    }
+
+
+@router.get("/apps/blueprint")
+async def apps_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_apps.build_apps_blueprint()
+    return {
+        "username": current_subject,
+        "blueprint": blueprint,
+        "sideEffects": blueprint["sideEffects"],
+    }
+
+
+@router.get("/apps/registry")
+async def apps_registry(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    registry = cognix_apps.build_app_registry(
+        catalog = APP_CATALOG,
+        connections = _rows(cognix_db.list_app_connections(current_subject)),
+    )
+    return {
+        "username": current_subject,
+        "appRegistry": registry,
+        "sideEffects": registry["sideEffects"],
+    }
+
+
+@router.post("/apps/plan")
+async def plan_app_connection(
+    payload: AppConnectionRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    plan = cognix_apps.build_app_connection_plan(
+        app_id = payload.app_id,
+        requested_status = payload.status,
+        catalog = APP_CATALOG,
+        granted_permissions = _granted_permission_keys(current_subject),
+        admin = auth_storage.is_admin(current_subject),
+    )
+    return {
+        "username": current_subject,
+        "appConnectionPlan": plan,
+        "sideEffects": plan["sideEffects"],
     }
 
 
@@ -8457,16 +8506,79 @@ async def set_app_connection(
     payload: AppConnectionRequest,
     current_subject: str = Depends(get_current_jwt_subject),
 ) -> dict[str, Any]:
+    plan = cognix_apps.build_app_connection_plan(
+        app_id = payload.app_id,
+        requested_status = payload.status,
+        catalog = APP_CATALOG,
+        granted_permissions = _granted_permission_keys(current_subject),
+        admin = auth_storage.is_admin(current_subject),
+    )
+    if not plan["allowed"]:
+        side_effects = {
+            **plan["sideEffects"],
+            "auditWrite": True,
+        }
+        audit = cognix_db.create_audit_log(
+            username = current_subject,
+            actor_username = current_subject,
+            action = "app_connection_blocked",
+            resource_type = "cognix_app",
+            resource_id = payload.app_id,
+            severity = "warning",
+            metadata = {
+                "appsVersion": plan.get("appsVersion"),
+                "status": plan.get("status"),
+                "riskLevel": plan.get("securityReview", {}).get("riskLevel"),
+                "missingRequiredPermissions": plan.get("securityReview", {}).get("missingRequiredPermissions", []),
+                "sideEffects": side_effects,
+            },
+        )
+        raise HTTPException(
+            status_code = 403,
+            detail = {
+                "message": "Missing app permissions",
+                "missingPermissions": plan.get("securityReview", {}).get("missingRequiredPermissions", []),
+                "auditLogId": audit.get("id"),
+            },
+        )
+    app = plan["app"] or {}
+    app_name = app.get("name") or payload.app_name
     try:
         connection = cognix_db.set_app_connection(
             current_subject,
-            payload.app_id,
-            payload.app_name,
+            str(app.get("id") or payload.app_id),
+            str(app_name),
             payload.status,
         )
     except ValueError as exc:
         raise HTTPException(status_code = 400, detail = str(exc)) from exc
-    return {"connection": _row(connection)}
+    side_effects = {
+        **plan["sideEffects"],
+        "connectionWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "app_connection_updated",
+        resource_type = "cognix_app",
+        resource_id = str(app.get("id") or payload.app_id),
+        severity = "warning" if plan.get("securityReview", {}).get("riskLevel") == "high" else "notice",
+        metadata = {
+            "appsVersion": plan.get("appsVersion"),
+            "requestedStatus": payload.status,
+            "riskLevel": plan.get("securityReview", {}).get("riskLevel"),
+            "permissionScan": plan.get("permissionScan"),
+            "runtimeAdapter": plan.get("connectionPlan", {}).get("runtimeAdapter"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "connection": _row(connection),
+        "appConnectionPlan": plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+    }
 
 
 @router.get("/social/messages")
