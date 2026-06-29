@@ -71,6 +71,7 @@ from core.cognix import response_reflection as cognix_response_reflection
 from core.cognix import runtime_adapter as cognix_runtime_adapter
 from core.cognix import sandbox as cognix_sandbox
 from core.cognix import scheduled as cognix_scheduled
+from core.cognix import semantic_cache as cognix_semantic_cache
 from core.cognix import skill_memory as cognix_skill_memory
 from core.cognix import simulation as cognix_simulation
 from core.cognix import thinking_status as cognix_thinking_status
@@ -4537,6 +4538,89 @@ def test_prompt_compression_endpoint_stores_lists_deletes_and_audits():
     assert {"prompt_compression_plan_built", "prompt_compression_context_deleted"}.issubset(actions)
 
 
+def test_semantic_cache_plan_builds_privacy_safe_lookup_contract_without_cache_io():
+    plan = cognix_semantic_cache.build_semantic_cache_plan(
+        username = "alice",
+        prompt = "Explique le RAG PDF avec citations et une fiche de revision QCM.",
+        project_id = "project-rag",
+        project_type = "education",
+        task_type = "education",
+        model_id = "cognix-education-3b-q4",
+        requires_sources = True,
+        context_hashes = ["ctx_a", "ctx_b"],
+    )
+
+    assert plan["semanticCacheVersion"] == "cognix_semantic_cache_v1"
+    assert plan["policyVersion"] == "cognix_semantic_cache_policy_v1"
+    assert plan["reuseContract"]["contractVersion"] == "cognix_semantic_reuse_contract_v1"
+    assert plan["scope"]["crossUserReuseAllowed"] is False
+    assert plan["cacheKeyPlan"]["rawPromptStoredInKey"] is False
+    assert plan["cacheKeyPlan"]["contextHashCount"] == 2
+    assert plan["lookupPlan"]["readyForLookup"] is True
+    assert plan["lookupPlan"]["willLookupNow"] is False
+    assert plan["lookupPlan"]["embeddingGenerationAllowedHere"] is False
+    assert plan["writePlan"]["writeEligibleAfterValidation"] is True
+    assert plan["writePlan"]["willWriteNow"] is False
+    assert plan["reuseContract"]["automaticReuseAllowed"] is False
+    assert plan["reuseContract"]["requiresSourceRevalidation"] is True
+    assert plan["sideEffects"]["cacheLookup"] is False
+    assert plan["sideEffects"]["cacheWrite"] is False
+    assert plan["sideEffects"]["embeddingGeneration"] is False
+    assert plan["sideEffects"]["rawPromptStorage"] is False
+
+
+def test_semantic_cache_plan_blocks_sensitive_prompts_without_raw_prompt_storage():
+    plan = cognix_semantic_cache.build_semantic_cache_plan(
+        username = "alice",
+        prompt = "Resume ce token secret et mon mot de passe admin.",
+        sensitivity_level = "confidential",
+    )
+
+    assert plan["sensitivity"]["level"] == "restricted"
+    assert "secret" in plan["sensitivity"]["matchedSensitiveTermIds"]
+    assert plan["lookupPlan"]["readyForLookup"] is False
+    assert plan["writePlan"]["writeEligibleAfterValidation"] is False
+    assert plan["reuseContract"]["nextRequiredGate"] == "sensitivity_review"
+    assert "raw_prompt_storage" in plan["reuseContract"]["blockedActions"]
+    assert plan["sideEffects"]["rawPromptStorage"] is False
+    assert plan["sideEffects"]["crossUserRead"] is False
+
+
+def test_semantic_cache_plan_endpoint_logs_sanitized_audit_without_cache_io():
+    seed_accounts()
+
+    body = run_async(
+        cognix_routes.semantic_cache_plan(
+            cognix_routes.SemanticCachePlanRequest(
+                prompt = "Explique le RAG PDF avec citations et QCM.",
+                projectType = "education",
+                taskType = "education",
+                modelId = "cognix-education-3b-q4",
+                requiresSources = True,
+                contextHashes = ["ctx_a"],
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    plan = body["semanticCachePlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_semantic_cache_v1"
+    assert plan["lookupPlan"]["readyForLookup"] is True
+    assert body["sideEffects"]["cacheLookup"] is False
+    assert body["sideEffects"]["cacheWrite"] is False
+    assert body["sideEffects"]["embeddingGeneration"] is False
+
+    log = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "semantic_cache_plan_built"
+    assert log["metadata"]["semanticCacheVersion"] == "cognix_semantic_cache_v1"
+    assert log["metadata"]["requestSignature"] == plan["requestSignature"]
+    assert log["metadata"]["sideEffects"]["cacheWrite"] is False
+    assert "Explique le RAG" not in log["metadataJson"]
+    assert "citations et QCM" not in log["metadataJson"]
+
+
 def test_context_heatmap_scores_used_and_archive_candidates_without_generation():
     plan = cognix_context_heatmap.build_context_heatmap_plan(
         username = "alice",
@@ -6332,6 +6416,10 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "optimization_capability_registry" in modules["cognix-optimization-engine"]["capabilities"]
     assert "benchmark_gated_experiments" in modules["cognix-optimization-engine"]["capabilities"]
     assert "benchmark_evidence_contract" in modules["cognix-optimization-engine"]["capabilities"]
+    assert "semantic_cache_planning" in modules["cognix-optimization-engine"]["capabilities"]
+    assert "semantic_reuse_contract" in modules["cognix-optimization-engine"]["capabilities"]
+    assert "privacy_safe_cache_keys" in modules["cognix-optimization-engine"]["capabilities"]
+    assert "/api/cognix/semantic-cache/plan" in modules["cognix-optimization-engine"]["routes"]
     assert "/api/cognix/optimizations/capabilities" in modules["cognix-optimization-engine"]["routes"]
     assert "/api/cognix/optimizations/experiment-plan" in modules["cognix-optimization-engine"]["routes"]
     assert modules["cognix-performance-monitor"]["dependencyState"]["ready"] is True

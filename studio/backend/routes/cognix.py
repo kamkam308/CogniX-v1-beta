@@ -79,6 +79,7 @@ from core.cognix import response_reflection as cognix_response_reflection
 from core.cognix import runtime_adapter as cognix_runtime_adapter
 from core.cognix import sandbox as cognix_sandbox
 from core.cognix import scheduled as cognix_scheduled
+from core.cognix import semantic_cache as cognix_semantic_cache
 from core.cognix import skill_memory as cognix_skill_memory
 from core.cognix import simulation as cognix_simulation
 from core.cognix import thinking_status as cognix_thinking_status
@@ -433,6 +434,19 @@ class PromptCompressionRequest(BaseModel):
     project_id: str | None = Field(None, alias = "projectId", max_length = 160)
     target_tokens: int = Field(500, alias = "targetTokens", ge = 64, le = 8000)
     store_context: bool = Field(True, alias = "storeContext")
+
+
+class SemanticCachePlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    prompt: str = Field(..., min_length = 1, max_length = 240000)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    project_type: str | None = Field(None, alias = "projectType", max_length = 80)
+    task_type: str | None = Field(None, alias = "taskType", max_length = 80)
+    model_id: str | None = Field(None, alias = "modelId", max_length = 240)
+    sensitivity_level: str | None = Field(None, alias = "sensitivityLevel", max_length = 80)
+    requires_sources: bool = Field(False, alias = "requiresSources")
+    context_hashes: list[str] | None = Field(None, alias = "contextHashes")
 
 
 class ContextHeatmapPlanRequest(BaseModel):
@@ -7753,6 +7767,53 @@ async def prompt_compression_plan(
         "auditLogId": audit.get("id"),
         "sideEffects": side_effects,
         "plannerVersion": cognix_prompt_compression.COGNIX_PROMPT_COMPRESSION_VERSION,
+    }
+
+
+@router.post("/semantic-cache/plan")
+async def semantic_cache_plan(
+    payload: SemanticCachePlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_semantic_cache.build_semantic_cache_plan(
+        username = current_subject,
+        prompt = payload.prompt,
+        project_id = payload.project_id,
+        project_type = payload.project_type,
+        task_type = payload.task_type,
+        model_id = payload.model_id,
+        sensitivity_level = payload.sensitivity_level,
+        requires_sources = payload.requires_sources,
+        context_hashes = payload.context_hashes,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "semantic_cache_plan_built",
+        resource_type = "cognix_semantic_cache_plan",
+        resource_id = str(plan.get("cacheKeyPlan", {}).get("cacheKeyHash") or plan.get("requestSignature")),
+        severity = "warning" if plan.get("sensitivity", {}).get("level") == "restricted" else "notice",
+        metadata = {
+            "semanticCacheVersion": plan.get("semanticCacheVersion"),
+            "policyVersion": plan.get("policyVersion"),
+            "reuseContractVersion": plan.get("reuseContractVersion"),
+            "requestSignature": plan.get("requestSignature"),
+            "scopeType": plan.get("scope", {}).get("scopeType"),
+            "sensitivityLevel": plan.get("sensitivity", {}).get("level"),
+            "cacheabilityStatus": plan.get("cacheability", {}).get("status"),
+            "readyForLookup": plan.get("lookupPlan", {}).get("readyForLookup"),
+            "writeEligibleAfterValidation": plan.get("writePlan", {}).get("writeEligibleAfterValidation"),
+            "sideEffects": plan.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "semanticCachePlan": plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": plan.get("sideEffects", {}),
+        "plannerVersion": cognix_semantic_cache.COGNIX_SEMANTIC_CACHE_VERSION,
     }
 
 
