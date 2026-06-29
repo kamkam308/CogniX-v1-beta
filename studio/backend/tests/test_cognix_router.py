@@ -32,6 +32,7 @@ from core.cognix import context_graph as cognix_context_graph
 from core.cognix import context_heatmap as cognix_context_heatmap
 from core.cognix import context_manager as cognix_context_manager
 from core.cognix import cost_optimizer as cognix_cost_optimizer
+from core.cognix import database_blueprint as cognix_database_blueprint
 from core.cognix import dataset_builder as cognix_dataset_builder
 from core.cognix import debate_orchestrator as cognix_debate_orchestrator
 from core.cognix import deployment_manager as cognix_deployment_manager
@@ -8458,6 +8459,70 @@ def test_audit_governance_contract_endpoint_is_admin_only_and_read_only():
     assert "secret_value" not in str(contract)
 
 
+def test_database_blueprint_maps_roadmap_tables_without_schema_mutation():
+    blueprint = cognix_database_blueprint.build_database_blueprint(
+        auth_tables = {"auth_user", "refresh_tokens"},
+        studio_tables = {
+            "chat_projects",
+            "chat_threads",
+            "chat_messages",
+            "cognix_audit_logs",
+            "cognix_router_logs",
+            "cognix_token_usage_events",
+            "cognix_model_performance_logs",
+            "cognix_context_memory",
+            "cognix_generated_datasets",
+        },
+        rag_tables = {"documents", "chunks"},
+    )
+
+    assert blueprint["databaseBlueprintVersion"] == "cognix_database_blueprint_v1"
+    assert blueprint["mode"] == "database_blueprint_read_only"
+    assert blueprint["summary"]["roadmapTableCount"] == 25
+    assert blueprint["summary"]["migrationExecutionAllowed"] is False
+    assert blueprint["summary"]["destructiveChangeAllowed"] is False
+    assert blueprint["coverage"]["readyForMvpSchema"] is True
+    assert {"users", "projects", "chats", "messages", "documents", "document_chunks", "audit_logs"}.issubset(
+        set(blueprint["coverage"]["availableLogicalTables"])
+    )
+    assert "datasets" in blueprint["coverage"]["partialLogicalTables"]
+    assert "workspaces" in blueprint["coverage"]["plannedLogicalTables"]
+    tables = {item["logicalName"]: item for item in blueprint["logicalTables"]}
+    assert tables["users"]["presentCanonicalTables"] == ["auth_user"]
+    assert tables["documents"]["presentCanonicalTables"] == ["documents"]
+    assert tables["document_chunks"]["presentCanonicalTables"] == ["chunks"]
+    assert tables["billing_events"]["runtimeMigrationAllowed"] is False
+    assert blueprint["dataIsolationPolicy"]["authDatabaseSeparated"] is True
+    assert blueprint["dataIsolationPolicy"]["ragDatabaseSeparated"] is True
+    assert blueprint["migrationPolicy"]["destructiveMigrationAllowed"] is False
+    assert blueprint["sideEffects"]["schemaRead"] is True
+    assert blueprint["sideEffects"]["databaseWrite"] is False
+    assert blueprint["sideEffects"]["migrationRun"] is False
+    assert blueprint["sideEffects"]["tableCreate"] is False
+    assert blueprint["sideEffects"]["auditWrite"] is False
+
+
+def test_database_blueprint_endpoint_is_admin_only_and_read_only():
+    seed_accounts()
+
+    with pytest.raises(HTTPException) as user_read:
+        run_async(cognix_routes.admin_database_blueprint(current_subject = "alice"))
+    assert user_read.value.status_code == 403
+
+    body = run_async(cognix_routes.admin_database_blueprint(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+
+    blueprint = body["databaseBlueprint"]
+    assert body["plannerVersion"] == "cognix_database_blueprint_v1"
+    assert blueprint["sourceOfTruth"] == "roadmap_section_27"
+    assert "users" in blueprint["coverage"]["requiredLogicalTables"]
+    assert "audit_logs" in blueprint["coverage"]["requiredLogicalTables"]
+    assert blueprint["schemaSources"]["rawCreateSqlReturned"] is False
+    assert body["sideEffects"]["databaseWrite"] is False
+    assert body["sideEffects"]["migrationRun"] is False
+    assert body["sideEffects"]["tableDrop"] is False
+    assert body["sideEffects"]["auditWrite"] is False
+
+
 def test_audit_log_redacts_sensitive_metadata_before_storage():
     seed_accounts()
 
@@ -8972,6 +9037,9 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "approval_queue" in modules["cognix-admin-operations"]["capabilities"]
     assert "approval_policy_engine" in modules["cognix-admin-operations"]["capabilities"]
     assert "audit_governance_contract" in modules["cognix-admin-operations"]["capabilities"]
+    assert "database_blueprint_contract" in modules["cognix-admin-operations"]["capabilities"]
+    assert "roadmap_schema_mapping" in modules["cognix-admin-operations"]["capabilities"]
+    assert "read_only_schema_inspection" in modules["cognix-admin-operations"]["capabilities"]
     assert "ban_service" in modules["cognix-admin-operations"]["capabilities"]
     assert "ban_report_generator" in modules["cognix-admin-operations"]["capabilities"]
     assert "user_reactivation" in modules["cognix-admin-operations"]["capabilities"]
@@ -8983,6 +9051,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/admin/approvals" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/approvals/blueprint" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/audit-governance-contract" in modules["cognix-admin-operations"]["routes"]
+    assert "/api/cognix/admin/database-blueprint" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/banned" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/usage/blueprint" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/usage/aggregate" in modules["cognix-admin-operations"]["routes"]

@@ -38,6 +38,7 @@ from core.cognix import context_graph as cognix_context_graph
 from core.cognix import context_heatmap as cognix_context_heatmap
 from core.cognix import context_manager as cognix_context_manager
 from core.cognix import cost_optimizer as cognix_cost_optimizer
+from core.cognix import database_blueprint as cognix_database_blueprint
 from core.cognix import dataset_builder as cognix_dataset_builder
 from core.cognix import debate_orchestrator as cognix_debate_orchestrator
 from core.cognix import deployment_manager as cognix_deployment_manager
@@ -14216,6 +14217,17 @@ async def admin_audit_governance_contract(current_subject: str = Depends(get_cur
         "auditGovernanceContract": contract,
         "plannerVersion": cognix_db.AUDIT_GOVERNANCE_CONTRACT_VERSION,
         "sideEffects": contract.get("sideEffects", {}),
+    }
+
+
+@router.get("/admin/database-blueprint")
+async def admin_database_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    blueprint = cognix_database_blueprint.build_database_blueprint()
+    return {
+        "databaseBlueprint": blueprint,
+        "plannerVersion": cognix_database_blueprint.COGNIX_DATABASE_BLUEPRINT_VERSION,
+        "sideEffects": blueprint.get("sideEffects", {}),
     }
 
 
