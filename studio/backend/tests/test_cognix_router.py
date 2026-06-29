@@ -28,6 +28,7 @@ from core.cognix import draft_generation as cognix_draft_generation
 from core.cognix import decision_engine as cognix_decision_engine
 from core.cognix import decision_explainer as cognix_decision_explainer
 from core.cognix import dynamic_ui as cognix_dynamic_ui
+from core.cognix import evolution_engine as cognix_evolution_engine
 from core.cognix import governance_manager as cognix_governance_manager
 from core.cognix import integration_manager as cognix_integration_manager
 from core.cognix import intent_prediction as cognix_intent_prediction
@@ -5214,6 +5215,95 @@ def test_research_integration_endpoint_logs_audited_dry_run(monkeypatch):
     assert log["metadata"]["sideEffects"]["networkResearch"] is False
 
 
+def test_evolution_engine_blueprint_and_experiment_require_human_approval():
+    blueprint = cognix_evolution_engine.build_evolution_blueprint()
+    item_plan = cognix_evolution_engine.build_evolution_item_plan(
+        technique_name = "Speculative decoding KV cache",
+        source_name = "DeepSeek research",
+        claimed_benefit = "+31% vitesse sur prompts longs",
+        evidence = ["benchmark public", "reference repo"],
+        risk_tolerance = "balanced",
+    )
+    experiment_plan = cognix_evolution_engine.build_evolution_experiment_plan(
+        item_plan = item_plan,
+        expected_gain_percent = 31,
+        benchmark_metric = "tokens_per_second",
+        sandbox_target = "runtime_adapter",
+    )
+
+    assert blueprint["evolutionEngineVersion"] == "cognix_evolution_engine_v1"
+    assert blueprint["rules"]["automaticProductionIntegrationAllowed"] is False
+    assert blueprint["rules"]["automaticUxModificationAllowed"] is False
+    assert blueprint["rules"]["sandboxRequired"] is True
+    assert blueprint["rules"]["humanApprovalRequired"] is True
+    assert "EvolutionEngine" in blueprint["services"]
+    assert item_plan["technique"]["category"] == "inference_optimization"
+    assert item_plan["gates"]["sandboxRequired"] is True
+    assert item_plan["sideEffects"]["productionIntegration"] is False
+    assert experiment_plan["prototypePlan"]["willModifyCodeNow"] is False
+    assert experiment_plan["sandboxPlan"]["willRunNow"] is False
+    assert experiment_plan["benchmarkPlan"]["willRunNow"] is False
+    assert experiment_plan["integrationProposal"]["status"] == "requires_human_approval"
+    assert experiment_plan["integrationProposal"]["automaticProductionIntegrationAllowed"] is False
+    assert experiment_plan["sideEffects"]["codeModification"] is False
+    assert experiment_plan["sideEffects"]["productionIntegration"] is False
+
+
+def test_evolution_endpoints_store_item_experiment_proposal_without_integration():
+    seed_accounts()
+
+    item_body = run_async(
+        cognix_routes.evolution_item_plan(
+            cognix_routes.EvolutionItemPlanRequest(
+                techniqueName = "Speculative decoding KV cache",
+                sourceName = "DeepSeek research",
+                claimedBenefit = "+31% vitesse sur prompts longs",
+                evidence = ["benchmark public", "reference repo"],
+                riskTolerance = "balanced",
+                storeItem = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    item_id = item_body["item"]["id"]
+    experiment_body = run_async(
+        cognix_routes.evolution_experiment_plan(
+            cognix_routes.EvolutionExperimentPlanRequest(
+                itemId = item_id,
+                expectedGainPercent = 31,
+                benchmarkMetric = "tokens_per_second",
+                sandboxTarget = "runtime_adapter",
+                storeExperiment = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    listed = run_async(cognix_routes.evolution_items(current_subject = "alice"))
+    proposals = run_async(cognix_routes.evolution_proposals(current_subject = "alice"))
+    bob_items = run_async(cognix_routes.evolution_items(current_subject = "bob"))
+
+    assert item_id.startswith("evo_")
+    assert item_body["sideEffects"]["evolutionItemWrite"] is True
+    assert item_body["sideEffects"]["productionIntegration"] is False
+    assert item_body["sideEffects"]["codeModification"] is False
+    assert experiment_body["experiment"]["id"].startswith("evexp_")
+    assert len(experiment_body["benchmarkResults"]) == 1
+    assert len(experiment_body["proposals"]) == 1
+    assert experiment_body["proposals"][0]["status"] == "requires_human_approval"
+    assert experiment_body["sideEffects"]["experimentWrite"] is True
+    assert experiment_body["sideEffects"]["benchmarkResultWrite"] is True
+    assert experiment_body["sideEffects"]["proposalWrite"] is True
+    assert experiment_body["sideEffects"]["productionIntegration"] is False
+    assert experiment_body["sideEffects"]["uxModification"] is False
+    assert listed["items"][0]["id"] == item_id
+    assert proposals["proposals"][0]["itemId"] == item_id
+    assert bob_items["items"] == []
+
+    logs = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))["logs"]
+    actions = {item["action"] for item in logs}
+    assert {"evolution_item_planned", "evolution_experiment_planned"}.issubset(actions)
+
+
 def test_context_manager_builds_bounded_context_packet():
     packet = cognix_context_manager.build_context_packet(
         current_subject = "alice",
@@ -5385,6 +5475,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-fine-tuning",
         "cognix-worker-queue",
         "cognix-research-watch",
+        "cognix-ai-evolution-engine",
         "cognix-integrations",
         "cognix-plugin-marketplace",
         "cognix-codex-secure-agent",
@@ -5605,6 +5696,15 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/research/integration-plan" in modules["cognix-research-watch"]["routes"]
     assert "/api/cognix/research/assistant/topics" in modules["cognix-research-watch"]["routes"]
     assert "/api/cognix/research/assistant/reports/plan" in modules["cognix-research-watch"]["routes"]
+    assert modules["cognix-ai-evolution-engine"]["dependencyState"]["ready"] is True
+    assert "evolution_lab" in modules["cognix-ai-evolution-engine"]["capabilities"]
+    assert "technique_classifier" in modules["cognix-ai-evolution-engine"]["capabilities"]
+    assert "sandbox_experiment_planning" in modules["cognix-ai-evolution-engine"]["capabilities"]
+    assert "benchmark_review" in modules["cognix-ai-evolution-engine"]["capabilities"]
+    assert "human_approval_gate" in modules["cognix-ai-evolution-engine"]["capabilities"]
+    assert "/api/cognix/evolution/items/plan" in modules["cognix-ai-evolution-engine"]["routes"]
+    assert "/api/cognix/evolution/experiments/plan" in modules["cognix-ai-evolution-engine"]["routes"]
+    assert "/api/cognix/evolution/proposals" in modules["cognix-ai-evolution-engine"]["routes"]
     assert "tool_permission_matrix" in modules["cognix-integrations"]["capabilities"]
     assert "/api/cognix/tools/permission-matrix" in modules["cognix-integrations"]["routes"]
     assert modules["cognix-plugin-marketplace"]["dependencyState"]["ready"] is True

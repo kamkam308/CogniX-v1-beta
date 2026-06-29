@@ -1675,6 +1675,68 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_research_username_created
             ON cognix_research_reports(username, created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_evolution_items (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            project_id TEXT,
+            technique_name TEXT NOT NULL,
+            source_name TEXT NOT NULL DEFAULT '',
+            category TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'ready_for_sandbox_plan',
+            risk_level TEXT NOT NULL DEFAULT 'medium',
+            item_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_evolution_items_username_created
+            ON cognix_evolution_items(username, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_evolution_items_project
+            ON cognix_evolution_items(username, project_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_evolution_experiments (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            item_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'planned',
+            sandbox_id TEXT,
+            experiment_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_evolution_experiments_item
+            ON cognix_evolution_experiments(username, item_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_evolution_benchmark_results (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            item_id TEXT NOT NULL,
+            experiment_id TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            gain_percent REAL NOT NULL DEFAULT 0,
+            result_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_evolution_benchmark_results_experiment
+            ON cognix_evolution_benchmark_results(username, experiment_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_integration_proposals (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            item_id TEXT NOT NULL,
+            experiment_id TEXT NOT NULL,
+            recommendation TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'requires_human_approval',
+            proposal_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_integration_proposals_username
+            ON cognix_integration_proposals(username, status, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_agent_runs (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -8559,6 +8621,271 @@ def create_research_report(
             if report.get("id") == report_id:
                 return report
         return {}
+    finally:
+        conn.close()
+
+
+def _hydrate_evolution_item(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["item"] = _json_or_default(item.get("item_json"), {})
+    return item
+
+
+def _hydrate_evolution_experiment(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["experiment"] = _json_or_default(item.get("experiment_json"), {})
+    return item
+
+
+def _hydrate_evolution_benchmark_result(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["result"] = _json_or_default(item.get("result_json"), {})
+    return item
+
+
+def _hydrate_integration_proposal(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["proposal"] = _json_or_default(item.get("proposal_json"), {})
+    return item
+
+
+def create_evolution_item(
+    username: str,
+    *,
+    item_plan: dict[str, Any],
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    now = _now()
+    item_id = _new_id("evo")
+    technique = item_plan.get("technique") if isinstance(item_plan.get("technique"), dict) else {}
+    risk = item_plan.get("risk") if isinstance(item_plan.get("risk"), dict) else {}
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_evolution_items
+                (
+                    id, username, project_id, technique_name, source_name,
+                    category, status, risk_level, item_json, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                item_id,
+                username,
+                project_id or item_plan.get("projectId"),
+                str(technique.get("name") or "")[:240],
+                str(technique.get("sourceName") or "")[:240],
+                str(technique.get("category") or "evaluation_method")[:120],
+                str(item_plan.get("status") or "ready_for_sandbox_plan")[:120],
+                str(risk.get("level") or "medium")[:80],
+                json.dumps(item_plan, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM cognix_evolution_items WHERE id = ?", (item_id,)).fetchone()
+        return _hydrate_evolution_item(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_evolution_items(username: str, *, project_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 100), 1), 300)
+    conn = get_connection()
+    try:
+        if project_id:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_evolution_items
+                WHERE username = ? AND project_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, project_id, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_evolution_items
+                WHERE username = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, safe_limit),
+            ).fetchall()
+        return [_hydrate_evolution_item(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def get_evolution_item(username: str, item_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM cognix_evolution_items WHERE username = ? AND id = ?",
+            (username, item_id),
+        ).fetchone()
+        return _hydrate_evolution_item(row_to_dict(row) or {}) if row else None
+    finally:
+        conn.close()
+
+
+def create_evolution_experiment(
+    username: str,
+    *,
+    item_id: str,
+    experiment_plan: dict[str, Any],
+) -> dict[str, Any]:
+    now = _now()
+    experiment_id = _new_id("evexp")
+    benchmark = experiment_plan.get("benchmarkPlan") if isinstance(experiment_plan.get("benchmarkPlan"), dict) else {}
+    proposal = experiment_plan.get("integrationProposal") if isinstance(experiment_plan.get("integrationProposal"), dict) else {}
+    report = experiment_plan.get("report") if isinstance(experiment_plan.get("report"), dict) else {}
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_evolution_experiments
+                (id, username, item_id, status, sandbox_id, experiment_json, created_at, updated_at)
+            VALUES (?, ?, ?, 'planned', NULL, ?, ?, ?)
+            """,
+            (
+                experiment_id,
+                username,
+                item_id,
+                json.dumps(experiment_plan, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO cognix_evolution_benchmark_results
+                (id, username, item_id, experiment_id, metric, gain_percent, result_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _new_id("evbench"),
+                username,
+                item_id,
+                experiment_id,
+                str(benchmark.get("metric") or "quality_speed_cost")[:160],
+                float(benchmark.get("expectedGainPercent") or 0.0),
+                json.dumps({"benchmarkPlan": benchmark, "report": report}, ensure_ascii = False),
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO cognix_integration_proposals
+                (
+                    id, username, item_id, experiment_id, recommendation,
+                    status, proposal_json, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, 'requires_human_approval', ?, ?, ?)
+            """,
+            (
+                _new_id("evprop"),
+                username,
+                item_id,
+                experiment_id,
+                str(proposal.get("recommendation") or report.get("recommendation") or "watch_and_retest")[:160],
+                json.dumps({"proposal": proposal, "report": report}, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        experiment = get_evolution_experiment(username, experiment_id)
+        benchmarks = list_evolution_benchmark_results(username, experiment_id = experiment_id)
+        proposals = list_integration_proposals(username, item_id = item_id)
+        return {
+            "experiment": experiment,
+            "benchmarkResults": benchmarks,
+            "proposals": proposals,
+        }
+    finally:
+        conn.close()
+
+
+def get_evolution_experiment(username: str, experiment_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM cognix_evolution_experiments WHERE username = ? AND id = ?",
+            (username, experiment_id),
+        ).fetchone()
+        return _hydrate_evolution_experiment(row_to_dict(row) or {}) if row else None
+    finally:
+        conn.close()
+
+
+def list_evolution_benchmark_results(
+    username: str,
+    *,
+    experiment_id: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 100), 1), 300)
+    conn = get_connection()
+    try:
+        if experiment_id:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_evolution_benchmark_results
+                WHERE username = ? AND experiment_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, experiment_id, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_evolution_benchmark_results
+                WHERE username = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, safe_limit),
+            ).fetchall()
+        return [_hydrate_evolution_benchmark_result(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def list_integration_proposals(
+    username: str,
+    *,
+    item_id: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 100), 1), 300)
+    conn = get_connection()
+    try:
+        if item_id:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_integration_proposals
+                WHERE username = ? AND item_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, item_id, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_integration_proposals
+                WHERE username = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, safe_limit),
+            ).fetchall()
+        return [_hydrate_integration_proposal(row) for row in _rows_to_dicts(rows)]
     finally:
         conn.close()
 

@@ -33,6 +33,7 @@ from core.cognix import draft_generation as cognix_draft_generation
 from core.cognix import decision_engine as cognix_decision_engine
 from core.cognix import decision_explainer as cognix_decision_explainer
 from core.cognix import dynamic_ui as cognix_dynamic_ui
+from core.cognix import evolution_engine as cognix_evolution_engine
 from core.cognix import fine_tuning_planner as cognix_fine_tuning_planner
 from core.cognix import governance_manager as cognix_governance_manager
 from core.cognix import hardware as cognix_hardware
@@ -368,6 +369,30 @@ class ResearchIntegrationPlanRequest(BaseModel):
     claimed_benefit: str | None = Field(None, alias = "claimedBenefit", max_length = 1000)
     target_module: str | None = Field(None, alias = "targetModule", max_length = 160)
     risk_tolerance: str | None = Field(None, alias = "riskTolerance", max_length = 80)
+
+
+class EvolutionItemPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    technique_name: str = Field(..., alias = "techniqueName", min_length = 1, max_length = 240)
+    source_name: str | None = Field(None, alias = "sourceName", max_length = 240)
+    category: str | None = Field(None, max_length = 120)
+    claimed_benefit: str | None = Field(None, alias = "claimedBenefit", max_length = 1000)
+    evidence: list[Any] = Field(default_factory = list, max_length = 20)
+    risk_tolerance: str | None = Field(None, alias = "riskTolerance", max_length = 80)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    store_item: bool = Field(True, alias = "storeItem")
+
+
+class EvolutionExperimentPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    item_id: str | None = Field(None, alias = "itemId", max_length = 180)
+    item_plan: dict[str, Any] | None = Field(None, alias = "itemPlan")
+    expected_gain_percent: float | None = Field(None, alias = "expectedGainPercent", ge = -100, le = 500)
+    benchmark_metric: str | None = Field(None, alias = "benchmarkMetric", max_length = 160)
+    sandbox_target: str | None = Field(None, alias = "sandboxTarget", max_length = 120)
+    store_experiment: bool = Field(True, alias = "storeExperiment")
 
 
 class LibraryItemRequest(BaseModel):
@@ -1143,6 +1168,17 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "preload_plan_json": "preloadPlanJson",
         "prediction_id": "predictionId",
         "target_model_id": "targetModelId",
+        "technique_name": "techniqueName",
+        "source_name": "sourceName",
+        "item_json": "itemJson",
+        "risk_level": "riskLevel",
+        "item_id": "itemId",
+        "sandbox_id": "sandboxId",
+        "experiment_json": "experimentJson",
+        "experiment_id": "experimentId",
+        "gain_percent": "gainPercent",
+        "result_json": "resultJson",
+        "proposal_json": "proposalJson",
         "profile_key": "profileKey",
         "profile_json": "profileJson",
         "value_json": "valueJson",
@@ -1209,6 +1245,10 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         out["personalizationRules"] = [_row(item) if isinstance(item, dict) else item for item in out["personalizationRules"]]
     if isinstance(out.get("outputs"), list):
         out["outputs"] = [_row(item) if isinstance(item, dict) else item for item in out["outputs"]]
+    if isinstance(out.get("benchmarkResults"), list):
+        out["benchmarkResults"] = [_row(item) if isinstance(item, dict) else item for item in out["benchmarkResults"]]
+    if isinstance(out.get("proposals"), list):
+        out["proposals"] = [_row(item) if isinstance(item, dict) else item for item in out["proposals"]]
     return out
 
 
@@ -7459,6 +7499,189 @@ async def research_integration_plan(
         "auditLogId": audit.get("id"),
         "sideEffects": plan.get("sideEffects", {}),
         "plannerVersion": cognix_research_watch.COGNIX_RESEARCH_WATCH_VERSION,
+    }
+
+
+@router.get("/evolution/blueprint")
+async def evolution_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_evolution_engine.build_evolution_blueprint()
+    return {
+        "username": current_subject,
+        "evolutionBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_evolution_engine.COGNIX_EVOLUTION_ENGINE_VERSION,
+    }
+
+
+@router.post("/evolution/items/plan")
+async def evolution_item_plan(
+    payload: EvolutionItemPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_evolution_engine.build_evolution_item_plan(
+        technique_name = payload.technique_name,
+        source_name = payload.source_name,
+        category = payload.category,
+        claimed_benefit = payload.claimed_benefit,
+        evidence = payload.evidence,
+        risk_tolerance = payload.risk_tolerance,
+        project_id = payload.project_id,
+    )
+    item_record = (
+        cognix_db.create_evolution_item(current_subject, item_plan = plan, project_id = payload.project_id)
+        if payload.store_item
+        else None
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "evolutionItemWrite": item_record is not None,
+        "experimentWrite": False,
+        "benchmarkResultWrite": False,
+        "proposalWrite": False,
+        "productionIntegration": False,
+        "codeModification": False,
+        "uxModification": False,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "evolution_item_planned",
+        resource_type = "cognix_evolution_item",
+        resource_id = str((item_record or {}).get("id") or plan.get("technique", {}).get("name") or "evolution-item"),
+        severity = "warning" if plan.get("risk", {}).get("level") == "high" else "notice",
+        metadata = {
+            "evolutionEngineVersion": plan.get("evolutionEngineVersion"),
+            "techniqueName": plan.get("technique", {}).get("name"),
+            "category": plan.get("technique", {}).get("category"),
+            "riskLevel": plan.get("risk", {}).get("level"),
+            "status": plan.get("status"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "evolutionItemPlan": plan,
+        "item": _row(item_record) if item_record else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_evolution_engine.COGNIX_EVOLUTION_ENGINE_VERSION,
+    }
+
+
+@router.get("/evolution/items")
+async def evolution_items(
+    project_id: str | None = None,
+    limit: int = 100,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if project_id:
+        _require_owned_project(project_id, current_subject)
+    items = cognix_db.list_evolution_items(current_subject, project_id = project_id, limit = limit)
+    return {
+        "username": current_subject,
+        "items": _rows(items),
+        "count": len(items),
+        "sideEffects": {
+            "evolutionItemWrite": False,
+            "experimentWrite": False,
+            "benchmarkResultWrite": False,
+            "proposalWrite": False,
+            "productionIntegration": False,
+            "codeModification": False,
+            "uxModification": False,
+            "modelLoad": False,
+            "generation": False,
+        },
+    }
+
+
+@router.post("/evolution/experiments/plan")
+async def evolution_experiment_plan(
+    payload: EvolutionExperimentPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    stored_item = cognix_db.get_evolution_item(current_subject, payload.item_id) if payload.item_id else None
+    if payload.item_id and stored_item is None:
+        raise HTTPException(status_code = status.HTTP_404_NOT_FOUND, detail = "Evolution item not found")
+    item_plan = payload.item_plan or (stored_item or {}).get("item")
+    if not isinstance(item_plan, dict) or not item_plan:
+        raise HTTPException(status_code = status.HTTP_400_BAD_REQUEST, detail = "Evolution item plan is required")
+    plan = cognix_evolution_engine.build_evolution_experiment_plan(
+        item_plan = item_plan,
+        expected_gain_percent = payload.expected_gain_percent,
+        benchmark_metric = payload.benchmark_metric,
+        sandbox_target = payload.sandbox_target,
+    )
+    stored = (
+        cognix_db.create_evolution_experiment(
+            current_subject,
+            item_id = payload.item_id or "dry-run-item",
+            experiment_plan = plan,
+        )
+        if payload.store_experiment and payload.item_id
+        else {"experiment": None, "benchmarkResults": [], "proposals": []}
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "evolutionItemWrite": False,
+        "experimentWrite": bool(stored.get("experiment")),
+        "benchmarkResultWrite": bool(stored.get("benchmarkResults")),
+        "proposalWrite": bool(stored.get("proposals")),
+        "productionIntegration": False,
+        "codeModification": False,
+        "uxModification": False,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "evolution_experiment_planned",
+        resource_type = "cognix_evolution_experiment",
+        resource_id = str((stored.get("experiment") or {}).get("id") or payload.item_id or "evolution-experiment"),
+        severity = "warning" if plan.get("securityReview", {}).get("riskLevel") in {"medium", "high"} else "notice",
+        metadata = {
+            "evolutionEngineVersion": plan.get("evolutionEngineVersion"),
+            "recommendation": plan.get("integrationProposal", {}).get("recommendation"),
+            "riskLevel": plan.get("securityReview", {}).get("riskLevel"),
+            "expectedGainPercent": plan.get("benchmarkPlan", {}).get("expectedGainPercent"),
+            "humanApprovalRequired": True,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "evolutionExperimentPlan": plan,
+        "experiment": _row(stored.get("experiment") or {}) if stored.get("experiment") else None,
+        "benchmarkResults": _rows(stored.get("benchmarkResults") or []),
+        "proposals": _rows(stored.get("proposals") or []),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_evolution_engine.COGNIX_EVOLUTION_ENGINE_VERSION,
+    }
+
+
+@router.get("/evolution/proposals")
+async def evolution_proposals(
+    item_id: str | None = None,
+    limit: int = 100,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    proposals = cognix_db.list_integration_proposals(current_subject, item_id = item_id, limit = limit)
+    return {
+        "username": current_subject,
+        "proposals": _rows(proposals),
+        "count": len(proposals),
+        "sideEffects": {
+            "proposalWrite": False,
+            "productionIntegration": False,
+            "codeModification": False,
+            "uxModification": False,
+            "modelLoad": False,
+            "generation": False,
+        },
     }
 
 
