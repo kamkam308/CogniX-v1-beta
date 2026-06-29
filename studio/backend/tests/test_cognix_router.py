@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import secrets
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -15,6 +16,7 @@ if str(_BACKEND_ROOT) not in sys.path:
 from auth import storage
 from auth.authentication import get_current_jwt_subject
 from core.cognix import admin_activity as cognix_admin_activity
+from core.cognix import admin_approvals as cognix_admin_approvals
 from core.cognix import admin_chat as cognix_admin_chat
 from core.cognix import admin_limits as cognix_admin_limits
 from core.cognix import admin_permissions as cognix_admin_permissions
@@ -80,6 +82,7 @@ from routes import auth as auth_routes
 from routes import cognix as cognix_routes
 from storage import cognix_db
 from storage import studio_db as studio_db_storage
+from utils.paths import studio_db_path
 
 
 @pytest.fixture(autouse = True)
@@ -5970,11 +5973,16 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "user_permission_overrides" in modules["cognix-admin-operations"]["capabilities"]
     assert "project_permission_scopes" in modules["cognix-admin-operations"]["capabilities"]
     assert "ceo_cloud_training_permissions" in modules["cognix-admin-operations"]["capabilities"]
+    assert "approval_service" in modules["cognix-admin-operations"]["capabilities"]
+    assert "approval_queue" in modules["cognix-admin-operations"]["capabilities"]
+    assert "approval_policy_engine" in modules["cognix-admin-operations"]["capabilities"]
     assert "/api/cognix/admin/users" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/limits" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/limits/enforcement-plan" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/permissions/matrix" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/permissions/decision" in modules["cognix-admin-operations"]["routes"]
+    assert "/api/cognix/admin/approvals" in modules["cognix-admin-operations"]["routes"]
+    assert "/api/cognix/admin/approvals/blueprint" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/activity/aggregate" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/usage" in modules["cognix-admin-operations"]["routes"]
     assert modules["cognix-admin-chat-access"]["status"] == "enabled"
@@ -6887,6 +6895,186 @@ def test_admin_permission_grant_and_revoke_affect_tool_planning():
     actions = [log["action"] for log in admin_read["logs"]]
     assert "permission_granted" in actions
     assert "permission_revoked" in actions
+
+
+def test_admin_approvals_core_builds_queue_policy_and_blueprint():
+    blueprint = cognix_admin_approvals.build_approvals_blueprint()
+    assert blueprint["services"] == ["ApprovalService", "ApprovalQueue", "ApprovalPolicyEngine"]
+    assert "cognix_approval_decisions" in blueprint["tables"]
+    assert blueprint["sideEffects"]["toolExecution"] is False
+
+    policy = cognix_admin_approvals.build_policy_decision(
+        request_type = "codex:run",
+        requester_role = "user",
+        risk_level = "critical",
+        has_permission = False,
+    )
+    assert policy["requiresApproval"] is True
+    assert policy["recommendedQueue"] == "admin"
+
+    admin_policy = cognix_admin_approvals.build_policy_decision(
+        request_type = "codex:run",
+        requester_role = "admin",
+        risk_level = "critical",
+        has_permission = True,
+    )
+    assert admin_policy["requiresApproval"] is False
+    assert admin_policy["recommendedAction"] == "execute_with_audit"
+
+    queue = cognix_admin_approvals.build_approval_queue(
+        requests = [
+            {
+                "id": "apr_low",
+                "username": "alice",
+                "request_type": "apps:connect",
+                "reason": "connect app",
+                "risk_level": "medium",
+                "status": "pending",
+                "created_at": "2026-06-29T00:00:00+00:00",
+            },
+            {
+                "id": "apr_high",
+                "username": "bob",
+                "request_type": "codex:run",
+                "reason": "run codex",
+                "risk_level": "critical",
+                "status": "pending",
+                "created_at": "2026-06-29T00:01:00+00:00",
+            },
+        ],
+        decisions = [{"request_id": "apr_low", "status": "approved", "decided_by": "admin"}],
+        comments = [{"request_id": "apr_high", "comment": "Needs review", "username": "admin"}],
+    )
+    assert queue["summary"]["pending"] == 2
+    assert queue["summary"]["critical"] == 1
+    assert queue["requests"][0]["id"] == "apr_high"
+    assert queue["requests"][0]["commentCount"] == 1
+
+
+def test_admin_approvals_schema_migrates_legacy_request_table():
+    db_path = studio_db_path()
+    db_path.parent.mkdir(parents = True, exist_ok = True)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE cognix_approval_requests (
+                id TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                request_type TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                admin_note TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                decided_at TEXT,
+                decided_by TEXT
+            );
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    cognix_db._schema_ready = False
+    conn = cognix_db.get_connection()
+    try:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(cognix_approval_requests)")}
+        indexes = {row["name"] for row in conn.execute("PRAGMA index_list(cognix_approval_requests)")}
+    finally:
+        conn.close()
+
+    assert {"title", "risk_level", "resource_type", "resource_id", "metadata_json"}.issubset(columns)
+    assert "idx_cognix_approval_risk" in indexes
+
+
+def test_admin_approvals_routes_manage_queue_comments_decisions_and_developer_sync():
+    seed_accounts()
+
+    with pytest.raises(HTTPException) as user_read:
+        run_async(cognix_routes.admin_approvals(current_subject = "alice"))
+    assert user_read.value.status_code == 403
+
+    blueprint = run_async(
+        cognix_routes.admin_approvals_blueprint(current_subject = storage.DEFAULT_ADMIN_USERNAME)
+    )
+    assert blueprint["approvalsBlueprint"]["approvalQueueVersion"] == "cognix_approval_queue_v1"
+
+    created = run_async(
+        cognix_routes.create_approval_request(
+            cognix_routes.ApprovalCreateRequest(
+                requestType = "codex:run",
+                reason = "Need Codex for a protected repo change",
+                riskLevel = "critical",
+                resourceType = "tool",
+                resourceId = "codex",
+            ),
+            current_subject = "alice",
+        )
+    )
+    request_id = created["request"]["id"]
+    assert created["request"]["requestType"] == "codex:run"
+    assert created["request"]["riskLevel"] == "critical"
+    assert created["policy"]["requiresApproval"] is True
+
+    admin_queue = run_async(cognix_routes.admin_approvals(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    assert admin_queue["approvalQueue"]["summary"]["pending"] == 1
+    assert admin_queue["approvalQueue"]["requests"][0]["id"] == request_id
+    assert admin_queue["sideEffects"]["decisionWrite"] is False
+
+    comment = run_async(
+        cognix_routes.admin_add_approval_comment(
+            request_id,
+            cognix_routes.ApprovalCommentRequest(comment = "Reviewing scope", visibility = "admin"),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert comment["comment"]["requestId"] == request_id
+    assert comment["sideEffects"]["commentWrite"] is True
+
+    denied = run_async(
+        cognix_routes.admin_decide_approval(
+            request_id,
+            cognix_routes.ApprovalDecisionRequest(status = "denied", admin_note = "Too risky"),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert denied["request"]["status"] == "denied"
+    assert denied["decisions"][0]["status"] == "denied"
+    assert denied["sideEffects"]["decisionWrite"] is True
+
+    detail = run_async(
+        cognix_routes.admin_approval_detail(request_id, current_subject = storage.DEFAULT_ADMIN_USERNAME)
+    )
+    assert detail["comments"][0]["comment"] == "Reviewing scope"
+    assert detail["approvalQueueItem"]["status"] == "denied"
+
+    dev_request = run_async(
+        cognix_routes.request_developer_mode(
+            cognix_routes.ApprovalCreateRequest(reason = "Need developer mode"),
+            current_subject = "alice",
+        )
+    )
+    dev_request_id = dev_request["request"]["id"]
+    approved = run_async(
+        cognix_routes.admin_decide_approval(
+            dev_request_id,
+            cognix_routes.ApprovalDecisionRequest(status = "approved", admin_note = "Approved"),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert approved["request"]["status"] == "approved"
+    assert cognix_db.user_has_permission("alice", cognix_db.DEVELOPER_MODE_PERMISSION) is True
+    overrides = cognix_db.list_user_permission_overrides("alice")
+    assert any(
+        item["permission_key"] == cognix_db.DEVELOPER_MODE_PERMISSION and item["effect"] == "allow"
+        for item in overrides
+    )
+
+    actions = [log["action"] for log in cognix_db.list_audit_logs(limit = 20)]
+    assert "approval_requested" in actions
+    assert "approval_comment_added" in actions
+    assert "approval_decided" in actions
 
 
 def test_admin_users_service_aggregates_permissions_limits_activity_and_usage():

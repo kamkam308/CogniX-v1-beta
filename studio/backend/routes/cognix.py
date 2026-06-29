@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from auth import storage as auth_storage
 from auth.authentication import get_current_jwt_subject
 from core.cognix import admin_activity as cognix_admin_activity
+from core.cognix import admin_approvals as cognix_admin_approvals
 from core.cognix import admin_chat as cognix_admin_chat
 from core.cognix import admin_limits as cognix_admin_limits
 from core.cognix import admin_permissions as cognix_admin_permissions
@@ -94,12 +95,37 @@ router = APIRouter()
 
 
 class ApprovalCreateRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
     reason: str = Field(..., min_length = 3, max_length = 2000)
+    request_type: str | None = Field(None, alias = "requestType", max_length = 160)
+    title: str | None = Field(None, max_length = 180)
+    risk_level: Literal["low", "medium", "high", "critical"] = Field("medium", alias = "riskLevel")
+    resource_type: str | None = Field("", alias = "resourceType", max_length = 120)
+    resource_id: str | None = Field("", alias = "resourceId", max_length = 240)
+    metadata: dict[str, Any] = Field(default_factory = dict)
 
 
 class ApprovalDecisionRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
     status: Literal["pending", "approved", "denied"]
     admin_note: str | None = Field(None, max_length = 2000)
+    policy_snapshot: dict[str, Any] | None = Field(None, alias = "policySnapshot")
+
+
+class ApprovalCommentRequest(BaseModel):
+    comment: str = Field(..., min_length = 1, max_length = 2000)
+    visibility: Literal["admin", "requester", "internal"] = "admin"
+
+
+class ApprovalPolicyRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    request_type: str = Field(..., alias = "requestType", min_length = 1, max_length = 160)
+    requester_role: str = Field("user", alias = "requesterRole", max_length = 80)
+    risk_level: Literal["low", "medium", "high", "critical"] | None = Field(None, alias = "riskLevel")
+    has_permission: bool = Field(False, alias = "hasPermission")
 
 
 class AdminPermissionGrantRequest(BaseModel):
@@ -1264,6 +1290,23 @@ def _build_admin_permissions_bundle() -> dict[str, Any]:
     }
 
 
+def _build_admin_approvals_bundle() -> dict[str, Any]:
+    requests = cognix_db.list_approval_requests()
+    decisions = cognix_db.list_approval_decisions()
+    comments = cognix_db.list_approval_comments()
+    queue = cognix_admin_approvals.build_approval_queue(
+        requests = requests,
+        decisions = decisions,
+        comments = comments,
+    )
+    return {
+        "requests": requests,
+        "decisions": decisions,
+        "comments": comments,
+        "queue": queue,
+    }
+
+
 def _refresh_conversation_audit_metadata(
     threads: list[dict[str, Any]],
     messages: list[dict[str, Any]],
@@ -1392,8 +1435,10 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
     out = dict(row)
     alias_map = {
         "request_type": "requestType",
+        "request_id": "requestId",
         "permission_key": "permissionKey",
         "admin_note": "adminNote",
+        "policy_snapshot_json": "policySnapshotJson",
         "granted_at": "grantedAt",
         "granted_by": "grantedBy",
         "expires_at": "expiresAt",
@@ -5830,13 +5875,91 @@ async def request_developer_mode(
         current_subject,
         cognix_db.DEVELOPER_MODE_PERMISSION,
         payload.reason,
+        title = payload.title or "Developer mode",
+        risk_level = "critical",
+        resource_type = "permission",
+        resource_id = cognix_db.DEVELOPER_MODE_PERMISSION,
+        metadata = {"approvalPolicy": "developer_mode_requires_admin"},
     )
     return {"request": _row(request)}
 
 
+@router.post("/approvals")
+async def create_approval_request(
+    payload: ApprovalCreateRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    request_type = payload.request_type or cognix_db.DEVELOPER_MODE_PERMISSION
+    policy = cognix_admin_approvals.build_policy_decision(
+        request_type = request_type,
+        requester_role = (auth_storage.get_user_profile(current_subject) or {}).get("role") or "user",
+        risk_level = payload.risk_level,
+        has_permission = False,
+    )
+    request = cognix_db.create_approval_request(
+        current_subject,
+        request_type,
+        payload.reason,
+        title = payload.title or policy.get("requestType") or request_type,
+        risk_level = str(policy.get("riskLevel") or payload.risk_level),
+        resource_type = payload.resource_type or "",
+        resource_id = payload.resource_id or "",
+        metadata = {
+            **(payload.metadata or {}),
+            "policyDecision": policy,
+        },
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "approval_requested",
+        resource_type = "cognix_approval_request",
+        resource_id = request.get("id"),
+        severity = "warning" if policy.get("riskLevel") in {"high", "critical"} else "notice",
+        metadata = {
+            "requestType": request_type,
+            "riskLevel": policy.get("riskLevel"),
+            "requiresApproval": policy.get("requiresApproval"),
+        },
+    )
+    return {
+        "request": _row(request),
+        "policy": policy,
+        "auditLogId": audit.get("id"),
+        "sideEffects": {"requestWrite": True, "auditWrite": True},
+    }
+
+
 @router.get("/approvals/me")
 async def my_approval_requests(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
-    return {"requests": _rows(cognix_db.list_approval_requests(username = current_subject))}
+    requests = cognix_db.list_approval_requests(username = current_subject)
+    request_ids = {str(item.get("id") or "") for item in requests}
+    decisions = [
+        decision
+        for decision in cognix_db.list_approval_decisions()
+        if str(decision.get("request_id") or "") in request_ids
+    ]
+    comments = [
+        comment
+        for comment in cognix_db.list_approval_comments()
+        if str(comment.get("request_id") or "") in request_ids
+    ]
+    return {
+        "requests": _rows(requests),
+        "queue": cognix_admin_approvals.build_approval_queue(
+            requests = requests,
+            decisions = decisions,
+            comments = comments,
+        ),
+    }
+
+
+@router.get("/approvals/blueprint")
+async def approvals_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    return {
+        "username": current_subject,
+        "approvalsBlueprint": cognix_admin_approvals.build_approvals_blueprint(),
+    }
 
 
 @router.post("/reports")
@@ -11031,7 +11154,99 @@ async def admin_chat_export_plan(
 @router.get("/admin/approvals")
 async def admin_approvals(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
     _require_admin(current_subject)
-    return {"requests": _rows(cognix_db.list_approval_requests())}
+    bundle = _build_admin_approvals_bundle()
+    return {
+        "requests": _rows(bundle["requests"]),
+        "decisions": _rows(bundle["decisions"]),
+        "comments": _rows(bundle["comments"]),
+        "approvalQueue": bundle["queue"],
+        "sideEffects": bundle["queue"].get("sideEffects", {}),
+        "approvalServiceVersion": cognix_admin_approvals.COGNIX_APPROVAL_SERVICE_VERSION,
+    }
+
+
+@router.get("/admin/approvals/blueprint")
+async def admin_approvals_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    return {
+        "approvalsBlueprint": cognix_admin_approvals.build_approvals_blueprint(),
+    }
+
+
+@router.post("/admin/approvals/policy")
+async def admin_approval_policy(
+    payload: ApprovalPolicyRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    return {
+        "policy": cognix_admin_approvals.build_policy_decision(
+            request_type = payload.request_type,
+            requester_role = payload.requester_role,
+            risk_level = payload.risk_level,
+            has_permission = payload.has_permission,
+        )
+    }
+
+
+@router.get("/admin/approvals/{request_id}")
+async def admin_approval_detail(
+    request_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    request = cognix_db.get_approval_request(request_id)
+    if request is None:
+        raise HTTPException(status_code = 404, detail = "Approval request not found")
+    decisions = cognix_db.list_approval_decisions(request_id)
+    comments = cognix_db.list_approval_comments(request_id)
+    queue = cognix_admin_approvals.build_approval_queue(
+        requests = [request],
+        decisions = decisions,
+        comments = comments,
+    )
+    return {
+        "request": _row(request),
+        "decisions": _rows(decisions),
+        "comments": _rows(comments),
+        "approvalQueueItem": queue["requests"][0] if queue["requests"] else None,
+    }
+
+
+@router.post("/admin/approvals/{request_id}/comments")
+async def admin_add_approval_comment(
+    request_id: str,
+    payload: ApprovalCommentRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    if cognix_db.get_approval_request(request_id) is None:
+        raise HTTPException(status_code = 404, detail = "Approval request not found")
+    try:
+        comment = cognix_db.add_approval_comment(
+            request_id,
+            username = current_subject,
+            comment = payload.comment,
+            visibility = payload.visibility,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from exc
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "approval_comment_added",
+        resource_type = "cognix_approval_request",
+        resource_id = request_id,
+        severity = "notice",
+        metadata = {
+            "visibility": payload.visibility,
+        },
+    )
+    return {
+        "comment": _row(comment),
+        "auditLogId": audit.get("id"),
+        "sideEffects": {"commentWrite": True, "auditWrite": True},
+    }
 
 
 @router.patch("/admin/approvals/{request_id}")
@@ -11041,18 +11256,51 @@ async def admin_decide_approval(
     current_subject: str = Depends(get_current_jwt_subject),
 ) -> dict[str, Any]:
     _require_admin(current_subject)
+    current_request = cognix_db.get_approval_request(request_id)
+    if current_request is None:
+        raise HTTPException(status_code = 404, detail = "Approval request not found")
+    policy_snapshot = payload.policy_snapshot or cognix_admin_approvals.build_policy_decision(
+        request_type = str(current_request.get("request_type") or ""),
+        requester_role = "user",
+        risk_level = str(current_request.get("risk_level") or "medium"),
+        has_permission = False,
+    )
     try:
         request = cognix_db.set_approval_status(
             request_id,
             payload.status,
             decided_by = current_subject,
             admin_note = payload.admin_note,
+            policy_snapshot = policy_snapshot,
         )
     except ValueError as exc:
         raise HTTPException(status_code = 400, detail = str(exc)) from exc
     if request is None:
         raise HTTPException(status_code = 404, detail = "Approval request not found")
-    return {"request": _row(request)}
+    audit = cognix_db.create_audit_log(
+        username = str(request.get("username") or ""),
+        actor_username = current_subject,
+        action = "approval_decided",
+        resource_type = "cognix_approval_request",
+        resource_id = request_id,
+        severity = "notice" if payload.status == "approved" else "warning",
+        metadata = {
+            "status": payload.status,
+            "requestType": request.get("request_type"),
+            "riskLevel": request.get("risk_level"),
+            "policySnapshot": policy_snapshot,
+        },
+    )
+    return {
+        "request": _row(request),
+        "decisions": _rows(cognix_db.list_approval_decisions(request_id)),
+        "auditLogId": audit.get("id"),
+        "sideEffects": {
+            "decisionWrite": True,
+            "legacyPermissionWrite": request.get("request_type") == cognix_db.DEVELOPER_MODE_PERMISSION,
+            "auditWrite": True,
+        },
+    }
 
 
 @router.get("/admin/permissions/blueprint")

@@ -99,7 +99,12 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
             request_type TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
             reason TEXT NOT NULL,
+            risk_level TEXT NOT NULL DEFAULT 'medium',
+            resource_type TEXT NOT NULL DEFAULT '',
+            resource_id TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
             status TEXT NOT NULL DEFAULT 'pending',
             admin_note TEXT,
             created_at TEXT NOT NULL,
@@ -112,6 +117,31 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
             ON cognix_approval_requests(status, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_cognix_approval_username
             ON cognix_approval_requests(username, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_approval_decisions (
+            id TEXT PRIMARY KEY,
+            request_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            decided_by TEXT NOT NULL,
+            admin_note TEXT NOT NULL DEFAULT '',
+            policy_snapshot_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_approval_decisions_request
+            ON cognix_approval_decisions(request_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_approval_comments (
+            id TEXT PRIMARY KEY,
+            request_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            comment TEXT NOT NULL,
+            visibility TEXT NOT NULL DEFAULT 'admin',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_approval_comments_request
+            ON cognix_approval_comments(request_id, created_at ASC);
 
         CREATE TABLE IF NOT EXISTS cognix_user_permissions (
             username TEXT NOT NULL,
@@ -2172,6 +2202,27 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
             ON cognix_game_sessions(username, created_at DESC);
         """
     )
+    _ensure_approval_request_columns(conn)
+
+
+def _ensure_approval_request_columns(conn: sqlite3.Connection) -> None:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(cognix_approval_requests)").fetchall()}
+    additions = {
+        "title": "ALTER TABLE cognix_approval_requests ADD COLUMN title TEXT NOT NULL DEFAULT ''",
+        "risk_level": "ALTER TABLE cognix_approval_requests ADD COLUMN risk_level TEXT NOT NULL DEFAULT 'medium'",
+        "resource_type": "ALTER TABLE cognix_approval_requests ADD COLUMN resource_type TEXT NOT NULL DEFAULT ''",
+        "resource_id": "ALTER TABLE cognix_approval_requests ADD COLUMN resource_id TEXT NOT NULL DEFAULT ''",
+        "metadata_json": "ALTER TABLE cognix_approval_requests ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'",
+    }
+    for column, sql in additions.items():
+        if column not in columns:
+            conn.execute(sql)
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_cognix_approval_risk
+            ON cognix_approval_requests(risk_level, status, created_at DESC)
+        """
+    )
 
 
 def ensure_schema() -> None:
@@ -2199,9 +2250,20 @@ def _rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def create_approval_request(username: str, request_type: str, reason: str) -> dict[str, Any]:
+def create_approval_request(
+    username: str,
+    request_type: str,
+    reason: str,
+    *,
+    title: str = "",
+    risk_level: str = "medium",
+    resource_type: str = "",
+    resource_id: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     created_at = _now()
     request_id = _new_id("apr")
+    normalized_risk = _normalize_approval_risk(risk_level)
     conn = get_connection()
     try:
         existing = conn.execute(
@@ -2219,10 +2281,25 @@ def create_approval_request(username: str, request_type: str, reason: str) -> di
         conn.execute(
             """
             INSERT INTO cognix_approval_requests
-                (id, username, request_type, reason, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, 'pending', ?, ?)
+                (
+                    id, username, request_type, title, reason, risk_level,
+                    resource_type, resource_id, metadata_json, status, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
             """,
-            (request_id, username, request_type, reason.strip(), created_at, created_at),
+            (
+                request_id,
+                username,
+                request_type.strip().lower(),
+                str(title or "")[:180],
+                reason.strip(),
+                normalized_risk,
+                str(resource_type or "")[:120],
+                str(resource_id or "")[:240],
+                json.dumps(metadata or {}, ensure_ascii = False),
+                created_at,
+                created_at,
+            ),
         )
         conn.commit()
         return get_approval_request(request_id) or {}
@@ -2233,12 +2310,15 @@ def create_approval_request(username: str, request_type: str, reason: str) -> di
 def get_approval_request(request_id: str) -> dict[str, Any] | None:
     conn = get_connection()
     try:
-        return row_to_dict(
+        item = row_to_dict(
             conn.execute(
                 "SELECT * FROM cognix_approval_requests WHERE id = ?",
                 (request_id,),
             ).fetchone()
         )
+        if item:
+            item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+        return item
     finally:
         conn.close()
 
@@ -2259,9 +2339,26 @@ def list_approval_requests(username: str | None = None) -> list[dict[str, Any]]:
             rows = conn.execute(
                 "SELECT * FROM cognix_approval_requests ORDER BY created_at DESC"
             ).fetchall()
-        return _rows_to_dicts(rows)
+        items = _rows_to_dicts(rows)
+        for item in items:
+            item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+        return items
     finally:
         conn.close()
+
+
+def _normalize_approval_status(status: str) -> str:
+    normalized = (status or "").strip().lower()
+    if normalized not in {"pending", "approved", "denied"}:
+        raise ValueError("Unsupported approval status")
+    return normalized
+
+
+def _normalize_approval_risk(risk_level: str | None) -> str:
+    normalized = (risk_level or "medium").strip().lower()
+    if normalized not in {"low", "medium", "high", "critical"}:
+        raise ValueError("Unsupported approval risk level")
+    return normalized
 
 
 def set_approval_status(
@@ -2270,10 +2367,9 @@ def set_approval_status(
     *,
     decided_by: str,
     admin_note: str | None = None,
+    policy_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    status = status.strip().lower()
-    if status not in {"pending", "approved", "denied"}:
-        raise ValueError("Unsupported approval status")
+    status = _normalize_approval_status(status)
     updated_at = _now()
     conn = get_connection()
     try:
@@ -2291,6 +2387,22 @@ def set_approval_status(
             """,
             (status, admin_note, updated_at, updated_at, decided_by, request_id),
         )
+        conn.execute(
+            """
+            INSERT INTO cognix_approval_decisions
+                (id, request_id, status, decided_by, admin_note, policy_snapshot_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _new_id("apd"),
+                request_id,
+                status,
+                decided_by,
+                str(admin_note or "")[:2000],
+                json.dumps(policy_snapshot or {}, ensure_ascii = False),
+                updated_at,
+            ),
+        )
         if row["request_type"] == DEVELOPER_MODE_PERMISSION:
             if status == "approved":
                 conn.execute(
@@ -2305,7 +2417,29 @@ def set_approval_status(
                     """,
                     (row["username"], DEVELOPER_MODE_PERMISSION, decided_by, updated_at),
                 )
-            else:
+                conn.execute(
+                    """
+                    INSERT INTO cognix_user_permission_overrides
+                        (id, username, permission_key, effect, reason, expires_at, updated_by, created_at, updated_at)
+                    VALUES (?, ?, ?, 'allow', ?, NULL, ?, ?, ?)
+                    ON CONFLICT(username, permission_key) DO UPDATE SET
+                        effect = excluded.effect,
+                        reason = excluded.reason,
+                        expires_at = excluded.expires_at,
+                        updated_by = excluded.updated_by,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        _new_id("uper"),
+                        row["username"],
+                        DEVELOPER_MODE_PERMISSION,
+                        "Approval accepted by admin.",
+                        decided_by,
+                        updated_at,
+                        updated_at,
+                    ),
+                )
+            elif status == "denied":
                 remaining_approval = conn.execute(
                     """
                     SELECT 1 FROM cognix_approval_requests
@@ -2324,13 +2458,123 @@ def set_approval_status(
                         """,
                         (row["username"], DEVELOPER_MODE_PERMISSION),
                     )
+                    conn.execute(
+                        """
+                        INSERT INTO cognix_user_permission_overrides
+                            (id, username, permission_key, effect, reason, expires_at, updated_by, created_at, updated_at)
+                        VALUES (?, ?, ?, 'deny', ?, NULL, ?, ?, ?)
+                        ON CONFLICT(username, permission_key) DO UPDATE SET
+                            effect = excluded.effect,
+                            reason = excluded.reason,
+                            expires_at = excluded.expires_at,
+                            updated_by = excluded.updated_by,
+                            updated_at = excluded.updated_at
+                        """,
+                        (
+                            _new_id("uper"),
+                            row["username"],
+                            DEVELOPER_MODE_PERMISSION,
+                            "Approval denied by admin.",
+                            decided_by,
+                            updated_at,
+                            updated_at,
+                        ),
+                    )
         conn.commit()
-        return row_to_dict(
+        updated = row_to_dict(
             conn.execute(
                 "SELECT * FROM cognix_approval_requests WHERE id = ?",
                 (request_id,),
             ).fetchone()
         )
+        if updated:
+            updated["metadata"] = _json_or_default(updated.get("metadata_json"), {})
+        return updated
+    finally:
+        conn.close()
+
+
+def list_approval_decisions(request_id: str | None = None) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        if request_id:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_approval_decisions
+                WHERE request_id = ?
+                ORDER BY created_at DESC
+                """,
+                (request_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM cognix_approval_decisions ORDER BY created_at DESC"
+            ).fetchall()
+        items = _rows_to_dicts(rows)
+        for item in items:
+            item["policySnapshot"] = _json_or_default(item.get("policy_snapshot_json"), {})
+        return items
+    finally:
+        conn.close()
+
+
+def add_approval_comment(
+    request_id: str,
+    *,
+    username: str,
+    comment: str,
+    visibility: str = "admin",
+) -> dict[str, Any]:
+    normalized_visibility = (visibility or "admin").strip().lower()
+    if normalized_visibility not in {"admin", "requester", "internal"}:
+        raise ValueError("Unsupported approval comment visibility")
+    created_at = _now()
+    comment_id = _new_id("apc")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_approval_comments
+                (id, request_id, username, comment, visibility, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                comment_id,
+                request_id,
+                username,
+                comment.strip()[:2000],
+                normalized_visibility,
+                created_at,
+            ),
+        )
+        conn.commit()
+        return row_to_dict(
+            conn.execute(
+                "SELECT * FROM cognix_approval_comments WHERE id = ?",
+                (comment_id,),
+            ).fetchone()
+        ) or {}
+    finally:
+        conn.close()
+
+
+def list_approval_comments(request_id: str | None = None) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        if request_id:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_approval_comments
+                WHERE request_id = ?
+                ORDER BY created_at ASC
+                """,
+                (request_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM cognix_approval_comments ORDER BY created_at ASC"
+            ).fetchall()
+        return _rows_to_dicts(rows)
     finally:
         conn.close()
 
