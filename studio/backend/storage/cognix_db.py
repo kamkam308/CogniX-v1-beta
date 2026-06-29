@@ -5401,6 +5401,11 @@ def create_orchestrator_log(
         if isinstance(plan.get("executionStrategy"), dict)
         else {}
     )
+    architecture_decision = (
+        plan.get("architectureDecision")
+        if isinstance(plan.get("architectureDecision"), dict)
+        else {}
+    )
     recommendation = (
         plan.get("recommendation")
         if isinstance(plan.get("recommendation"), dict)
@@ -5416,6 +5421,8 @@ def create_orchestrator_log(
         "requiresHumanConfirmation": task_strategy.get("requiresHumanConfirmation"),
         "uses": task_strategy.get("uses"),
         "status": execution_strategy.get("status"),
+        "architectureDecisionVersion": architecture_decision.get("architectureDecisionVersion"),
+        "architectureDecision": architecture_decision,
         "sideEffects": plan.get("sideEffects"),
         "warnings": plan.get("warnings") or [],
     }

@@ -273,6 +273,16 @@ def test_orchestrator_builds_dry_run_plan_without_loading(monkeypatch):
 
     assert plan["mode"] == "dry_run"
     assert plan["classification"]["selectedDomain"] == "code"
+    assert plan["architectureDecision"]["architectureDecisionVersion"] == "cognix_architecture_decision_v1"
+    assert plan["architectureDecision"]["primaryPath"] == "codex_guarded_pipeline"
+    assert plan["architectureDecision"]["primaryCapability"] == "codex_secure_agent"
+    assert plan["architectureDecision"]["selectedModel"]["modelLabel"] == "Qwen 4B local via Ollama"
+    assert plan["architectureDecision"]["runtime"]["adapterId"] == "ollama"
+    assert plan["architectureDecision"]["context"]["rawHistoryAllowed"] is False
+    assert plan["architectureDecision"]["cache"]["cacheMutationAllowed"] is False
+    assert plan["architectureDecision"]["security"]["frontendDirectModelCallAllowed"] is False
+    assert plan["architectureDecision"]["sideEffects"]["modelLoad"] is False
+    assert plan["architectureDecision"]["sideEffects"]["generation"] is False
     assert plan["executionStrategy"]["selectedModelLabel"] == "Qwen 4B local via Ollama"
     assert plan["executionStrategy"]["domainModelLabel"] == "CogniX Code 4B"
     assert plan["taskStrategy"]["decisionEngineVersion"] == "cognix_decision_engine_v1"
@@ -5783,6 +5793,10 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/command-palette/plan" in modules["cognix-command-palette"]["routes"]
     assert modules["cognix-local-core"]["activationState"] == "ready"
     assert "module_manifest_registry" in modules["cognix-local-core"]["capabilities"]
+    assert "architecture_decision_contract" in modules["cognix-local-core"]["capabilities"]
+    assert "orchestrator_runtime_plan" in modules["cognix-local-core"]["capabilities"]
+    assert "/api/cognix/orchestrator/plan" in modules["cognix-local-core"]["routes"]
+    assert "/api/cognix/runtime/plan" in modules["cognix-local-core"]["routes"]
     assert "/api/cognix/modules/manifests" in modules["cognix-local-core"]["routes"]
     assert "project_dna" in modules["cognix-projects"]["capabilities"]
     assert "project_dna_context_injection" in modules["cognix-projects"]["capabilities"]
@@ -8507,6 +8521,10 @@ def test_orchestrator_plan_endpoint_logs_dry_run_decision(monkeypatch):
     assert body["logId"].startswith("rtl_")
     assert body["orchestratorLogId"].startswith("orl_")
     assert body["mode"] == "dry_run"
+    assert body["architectureDecision"]["architectureDecisionVersion"] == "cognix_architecture_decision_v1"
+    assert body["architectureDecision"]["runtime"]["adapterId"] == "ollama"
+    assert body["architectureDecision"]["security"]["automaticExecutionAllowed"] is False
+    assert body["architectureDecision"]["sideEffects"]["codeModification"] is False
     assert body["classification"]["selectedDomain"] == "code"
     assert body["taskStrategy"]["path"] == "codex_guarded_pipeline"
     assert body["taskStrategy"]["sideEffects"]["codeModification"] is False
@@ -8536,6 +8554,9 @@ def test_orchestrator_plan_endpoint_logs_dry_run_decision(monkeypatch):
     assert decision_log["recommendedPath"] == "codex_guarded_pipeline"
     assert decision_log["primaryCapability"] == "codex_secure_agent"
     assert decision_log["decision"]["sideEffects"]["generation"] is False
+    assert decision_log["decision"]["architectureDecisionVersion"] == "cognix_architecture_decision_v1"
+    assert decision_log["decision"]["architectureDecision"]["runtime"]["adapterId"] == "ollama"
+    assert decision_log["decision"]["architectureDecision"]["security"]["frontendDirectModelCallAllowed"] is False
 
 
 def test_router_decisions_are_logged_for_admin_review():

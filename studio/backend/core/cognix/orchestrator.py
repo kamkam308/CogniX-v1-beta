@@ -30,8 +30,15 @@ from core.cognix import worker_queue as cognix_worker_queue
 from core.cognix.router import classify_objective
 
 
+COGNIX_ARCHITECTURE_DECISION_VERSION = "cognix_architecture_decision_v1"
+
+
 def _objective_excerpt(objective: str) -> str:
     return re.sub(r"\s+", " ", objective or "").strip()[:500]
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
 
 
 def _runtime_snapshot_value(
@@ -79,6 +86,142 @@ def _execution_reason(
         recommendation.get("reason")
         or "CogniX ne peut pas executer cette demande localement avec l'etat actuel."
     )
+
+
+def _architecture_decision(
+    *,
+    status: str,
+    classification: dict[str, Any],
+    recommendation: dict[str, Any],
+    cache: dict[str, Any],
+    task_strategy: dict[str, Any],
+    codex_pipeline_plan: dict[str, Any],
+    rag_plan: dict[str, Any],
+    context_plan: dict[str, Any],
+    optimization_plan: dict[str, Any],
+    runtime_adapter_plan: dict[str, Any],
+    preload_plan: dict[str, Any],
+    project_expert_plan: dict[str, Any],
+    fine_tuning_plan: dict[str, Any],
+    worker_queue_plan: dict[str, Any],
+    execution_policy: dict[str, Any],
+) -> dict[str, Any]:
+    selected_adapter = _as_dict(runtime_adapter_plan.get("selectedAdapter"))
+    selected_expert = _as_dict(project_expert_plan.get("primaryExpert"))
+    selected_expert_model = _as_dict(selected_expert.get("selectedModel"))
+    cache_next_action = _as_dict(cache.get("nextAction"))
+    context_budget = _as_dict(context_plan.get("tokenBudget"))
+    fine_tuning_method = _as_dict(fine_tuning_plan.get("method"))
+    worker_summary = _as_dict(worker_queue_plan.get("summary"))
+    side_effects = {
+        "modelLoad": False,
+        "generation": False,
+        "networkModelCall": False,
+        "toolExecution": False,
+        "ragIndexing": False,
+        "ragRetrieval": False,
+        "memoryWrite": False,
+        "contextMutation": False,
+        "runtimeMutation": False,
+        "serverStart": False,
+        "fineTuningJob": False,
+        "jobEnqueue": False,
+        "codeModification": False,
+    }
+    return {
+        "architectureDecisionVersion": COGNIX_ARCHITECTURE_DECISION_VERSION,
+        "mode": "native_orchestrator_dry_run",
+        "status": status,
+        "selectedDomain": classification.get("selectedDomain") or "general",
+        "confidence": task_strategy.get("confidence"),
+        "primaryPath": task_strategy.get("path"),
+        "primaryCapability": task_strategy.get("primaryCapability"),
+        "selectedModel": {
+            "modelId": recommendation.get("modelId"),
+            "modelLabel": recommendation.get("modelLabel"),
+            "domainModelLabel": classification.get("recommendedModelLabel"),
+            "providerId": recommendation.get("providerId"),
+            "providerType": recommendation.get("providerType"),
+            "providerName": recommendation.get("providerName"),
+            "executionMode": recommendation.get("executionMode"),
+        },
+        "runtime": {
+            "adapterId": selected_adapter.get("adapterId"),
+            "runtimeType": selected_adapter.get("runtimeType"),
+            "deploymentTarget": selected_adapter.get("deploymentTarget"),
+            "requiredCapabilities": runtime_adapter_plan.get("requiredCapabilities", []),
+            "missingCapabilities": selected_adapter.get("missingCapabilities", []),
+            "runtimeMutationAllowed": False,
+            "frontendDirectModelCallAllowed": False,
+        },
+        "routing": {
+            "routerVersion": classification.get("routerVersion"),
+            "routingMode": classification.get("routingMode"),
+            "needsClarification": bool(classification.get("needsClarification")),
+            "scores": classification.get("scores", {}),
+        },
+        "context": {
+            "assemblyStrategy": context_plan.get("assemblyStrategy"),
+            "maxContextTokens": context_budget.get("maxContextTokens"),
+            "rawHistoryAllowed": bool(context_budget.get("rawHistoryAllowed")),
+            "includedChannelIds": context_plan.get("includedChannelIds", []),
+        },
+        "rag": {
+            "recommendedPath": rag_plan.get("recommendedPath"),
+            "readyForRetrieval": bool(rag_plan.get("readyForRetrieval")),
+            "strategy": _as_dict(rag_plan.get("retrieval")).get("strategy"),
+            "sourceStatus": _as_dict(rag_plan.get("sourceReadiness")).get("status"),
+        },
+        "cache": {
+            "managerVersion": cache.get("managerVersion"),
+            "mode": cache.get("mode"),
+            "nextAction": cache_next_action.get("type"),
+            "idleTimeoutSeconds": _as_dict(cache.get("policy")).get("idleTimeoutSeconds"),
+            "cacheMutationAllowed": False,
+        },
+        "preload": {
+            "action": _as_dict((preload_plan.get("actions") or [{}])[0]).get("type"),
+            "targetModelId": _as_dict(preload_plan.get("target")).get("modelId"),
+            "automatic": bool(_as_dict((preload_plan.get("actions") or [{}])[0]).get("automatic")),
+        },
+        "projectExpert": {
+            "expertId": selected_expert.get("expertId"),
+            "domain": selected_expert.get("domain"),
+            "modelId": selected_expert_model.get("modelId"),
+            "generalistVerifierEnabled": bool(_as_dict(project_expert_plan.get("generalistVerifier")).get("enabled")),
+        },
+        "fineTuning": {
+            "recommendedPath": fine_tuning_plan.get("recommendedPath"),
+            "method": fine_tuning_method.get("type"),
+            "readyToRequestApproval": bool(_as_dict(fine_tuning_plan.get("approval")).get("readyToRequest")),
+            "jobAllowedNow": False,
+        },
+        "optimization": {
+            "profile": optimization_plan.get("optimizationProfile"),
+            "hardwareTier": optimization_plan.get("hardwareTier"),
+            "recommendedOptimizationIds": optimization_plan.get("recommendedOptimizationIds", []),
+        },
+        "workers": {
+            "recommended": bool(worker_queue_plan.get("jobs")),
+            "queueId": _as_dict(worker_queue_plan.get("recommendedQueue")).get("id"),
+            "plannedJobCount": worker_summary.get("plannedJobCount"),
+            "jobEnqueueAllowed": False,
+        },
+        "codex": {
+            "applicable": bool(codex_pipeline_plan.get("applicable")),
+            "branchName": _as_dict(codex_pipeline_plan.get("branch")).get("recommendedName"),
+            "codeModificationAllowed": False,
+        },
+        "security": {
+            "policyVersion": execution_policy.get("policyVersion"),
+            "riskLevel": execution_policy.get("riskLevel"),
+            "automaticExecutionAllowed": bool(execution_policy.get("automaticExecutionAllowed")),
+            "requiresHumanConfirmation": bool(execution_policy.get("requiresHumanConfirmation")),
+            "frontendDirectModelCallAllowed": False,
+        },
+        "sideEffects": side_effects,
+        "reason": "Decision d'architecture native CogniX: router, modele, contexte, RAG, runtime, cache et securite alignes avant execution.",
+    }
 
 
 def _warnings(
@@ -492,11 +635,29 @@ def build_execution_plan(
             recommendation = recommendation,
         ),
     }
+    architecture_decision = _architecture_decision(
+        status = status,
+        classification = classification,
+        recommendation = recommendation,
+        cache = cache,
+        task_strategy = task_strategy,
+        codex_pipeline_plan = codex_pipeline_plan,
+        rag_plan = rag_plan,
+        context_plan = context_plan,
+        optimization_plan = optimization_plan,
+        runtime_adapter_plan = runtime_adapter_plan,
+        preload_plan = preload_plan,
+        project_expert_plan = project_expert_plan,
+        fine_tuning_plan = fine_tuning_plan,
+        worker_queue_plan = worker_queue_plan,
+        execution_policy = execution_policy,
+    )
 
     return {
         "username": current_subject,
         "orchestratorVersion": "cognix_orchestrator_v1",
         "mode": "dry_run",
+        "architectureDecision": architecture_decision,
         "objectiveExcerpt": _objective_excerpt(objective),
         "classification": classification,
         "hardware": hardware,
