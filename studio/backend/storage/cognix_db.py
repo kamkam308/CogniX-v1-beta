@@ -122,6 +122,64 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
             PRIMARY KEY(username, permission_key)
         );
 
+        CREATE TABLE IF NOT EXISTS cognix_user_limits (
+            username TEXT NOT NULL,
+            limit_key TEXT NOT NULL,
+            limit_value REAL NOT NULL,
+            unit TEXT NOT NULL DEFAULT '',
+            scope TEXT NOT NULL DEFAULT 'user',
+            updated_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(username, limit_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_user_limits_username
+            ON cognix_user_limits(username, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_user_activity_events (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            resource_type TEXT,
+            resource_id TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_user_activity_events_username_created
+            ON cognix_user_activity_events(username, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_token_usage_events (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            project_id TEXT,
+            model_id TEXT NOT NULL DEFAULT 'unknown',
+            provider TEXT NOT NULL DEFAULT 'local',
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0,
+            latency_ms REAL NOT NULL DEFAULT 0,
+            estimated_cost_usd REAL NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_token_usage_events_username_created
+            ON cognix_token_usage_events(username, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_token_usage_events_model_created
+            ON cognix_token_usage_events(model_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_admin_user_views (
+            id TEXT PRIMARY KEY,
+            target_username TEXT NOT NULL,
+            viewed_by TEXT NOT NULL,
+            view_reason TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_admin_user_views_target_created
+            ON cognix_admin_user_views(target_username, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_bans (
             id TEXT PRIMARY KEY,
             username TEXT,
@@ -2122,6 +2180,277 @@ def list_user_permissions(username: str) -> list[dict[str, Any]]:
             """,
             (username, now),
         ).fetchall()
+        return _rows_to_dicts(rows)
+    finally:
+        conn.close()
+
+
+def _normalize_admin_key(value: str, *, label: str) -> str:
+    normalized = (value or "").strip().lower()
+    if not RATE_LIMIT_KEY_PATTERN.fullmatch(normalized):
+        raise ValueError(f"Invalid {label}")
+    return normalized
+
+
+def upsert_user_limit(
+    username: str,
+    *,
+    limit_key: str,
+    limit_value: float,
+    unit: str = "",
+    scope: str = "user",
+    updated_by: str,
+) -> dict[str, Any]:
+    normalized_key = _normalize_admin_key(limit_key, label = "limit key")
+    normalized_scope = _normalize_admin_key(scope or "user", label = "limit scope")
+    now = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_user_limits
+                (username, limit_key, limit_value, unit, scope, updated_by, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(username, limit_key) DO UPDATE SET
+                limit_value = excluded.limit_value,
+                unit = excluded.unit,
+                scope = excluded.scope,
+                updated_by = excluded.updated_by,
+                updated_at = excluded.updated_at
+            """,
+            (
+                username,
+                normalized_key,
+                float(limit_value),
+                str(unit or "")[:80],
+                normalized_scope,
+                updated_by,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        return row_to_dict(
+            conn.execute(
+                "SELECT * FROM cognix_user_limits WHERE username = ? AND limit_key = ?",
+                (username, normalized_key),
+            ).fetchone()
+        ) or {}
+    finally:
+        conn.close()
+
+
+def list_user_limits(username: str | None = None) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        if username:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_user_limits
+                WHERE username = ?
+                ORDER BY limit_key ASC
+                """,
+                (username,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM cognix_user_limits ORDER BY username ASC, limit_key ASC"
+            ).fetchall()
+        return _rows_to_dicts(rows)
+    finally:
+        conn.close()
+
+
+def create_user_activity_event(
+    username: str,
+    *,
+    event_type: str,
+    resource_type: str | None = None,
+    resource_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    event_id = _new_id("act")
+    created_at = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_user_activity_events
+                (id, username, event_type, resource_type, resource_id, metadata_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                username,
+                _normalize_admin_key(event_type, label = "activity event type"),
+                str(resource_type or "")[:120] or None,
+                str(resource_id or "")[:160] or None,
+                json.dumps(metadata or {}, ensure_ascii = False),
+                created_at,
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM cognix_user_activity_events WHERE id = ?", (event_id,)).fetchone()
+        item = row_to_dict(row) or {}
+        item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+        return item
+    finally:
+        conn.close()
+
+
+def list_user_activity_events(username: str | None = None, *, limit: int = 200) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        safe_limit = max(1, min(int(limit or 200), 1000))
+        if username:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_user_activity_events
+                WHERE username = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_user_activity_events
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+        items = _rows_to_dicts(rows)
+        for item in items:
+            item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+        return items
+    finally:
+        conn.close()
+
+
+def create_token_usage_event(
+    username: str,
+    *,
+    project_id: str | None = None,
+    model_id: str = "unknown",
+    provider: str = "local",
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    latency_ms: float = 0,
+    estimated_cost_usd: float = 0,
+) -> dict[str, Any]:
+    event_id = _new_id("tok")
+    created_at = _now()
+    safe_input = max(0, int(input_tokens or 0))
+    safe_output = max(0, int(output_tokens or 0))
+    total_tokens = safe_input + safe_output
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_token_usage_events
+                (
+                    id, username, project_id, model_id, provider, input_tokens,
+                    output_tokens, total_tokens, latency_ms, estimated_cost_usd, created_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                username,
+                str(project_id)[:160] if project_id else None,
+                str(model_id or "unknown")[:240],
+                str(provider or "local")[:120],
+                safe_input,
+                safe_output,
+                total_tokens,
+                max(0.0, float(latency_ms or 0)),
+                max(0.0, float(estimated_cost_usd or 0)),
+                created_at,
+            ),
+        )
+        conn.commit()
+        return row_to_dict(conn.execute("SELECT * FROM cognix_token_usage_events WHERE id = ?", (event_id,)).fetchone()) or {}
+    finally:
+        conn.close()
+
+
+def list_token_usage_events(username: str | None = None, *, limit: int = 1000) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        safe_limit = max(1, min(int(limit or 1000), 5000))
+        if username:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_token_usage_events
+                WHERE username = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_token_usage_events
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+        return _rows_to_dicts(rows)
+    finally:
+        conn.close()
+
+
+def record_admin_user_view(
+    *,
+    target_username: str,
+    viewed_by: str,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    view_id = _new_id("uview")
+    created_at = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_admin_user_views
+                (id, target_username, viewed_by, view_reason, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (view_id, target_username, viewed_by, str(reason or "")[:500], created_at),
+        )
+        conn.commit()
+        return row_to_dict(conn.execute("SELECT * FROM cognix_admin_user_views WHERE id = ?", (view_id,)).fetchone()) or {}
+    finally:
+        conn.close()
+
+
+def list_admin_user_views(target_username: str | None = None, *, limit: int = 200) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        safe_limit = max(1, min(int(limit or 200), 1000))
+        if target_username:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_admin_user_views
+                WHERE target_username = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (target_username, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_admin_user_views
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
         return _rows_to_dicts(rows)
     finally:
         conn.close()

@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from auth import storage as auth_storage
 from auth.authentication import get_current_jwt_subject
 from core.cognix import admin_security as cognix_admin_security
+from core.cognix import admin_users as cognix_admin_users
 from core.cognix import apps as cognix_apps
 from core.cognix import benchmark as cognix_benchmark
 from core.cognix import background_agents as cognix_background_agents
@@ -100,6 +101,15 @@ class ApprovalDecisionRequest(BaseModel):
 class AdminPermissionGrantRequest(BaseModel):
     permission_key: str = Field(..., min_length = 1, max_length = 160)
     expires_at: str | None = Field(None, max_length = 80)
+
+
+class AdminUserLimitRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    limit_value: float = Field(..., alias = "limitValue", ge = 0)
+    unit: str = Field("", max_length = 80)
+    scope: str = Field("user", max_length = 80)
+    reason: str | None = Field(None, max_length = 500)
 
 
 class ReportCreateRequest(BaseModel):
@@ -1037,6 +1047,58 @@ def _build_admin_security_bundle() -> dict[str, Any]:
     }
 
 
+def _build_admin_user_bundle() -> dict[str, Any]:
+    users = auth_storage.list_user_profiles()
+    permissions = [
+        permission
+        for user in users
+        for permission in cognix_db.list_user_permissions(str(user.get("username") or ""))
+    ]
+    threads = list_chat_threads(
+        include_archived = True,
+        owner_username = "",
+        include_all = True,
+    )
+    projects = list_chat_projects(
+        include_archived = True,
+        owner_username = "",
+        include_all = True,
+    )
+    audit_logs = cognix_db.list_audit_logs(limit = 500)
+    activity_events = cognix_db.list_user_activity_events(limit = 1000)
+    token_events = cognix_db.list_token_usage_events(limit = 5000)
+    limits = cognix_db.list_user_limits()
+    bans = cognix_db.list_bans()
+    reports = cognix_db.list_reports()
+    directory = cognix_admin_users.build_admin_user_directory(
+        users = users,
+        permissions = permissions,
+        limits = limits,
+        audit_logs = audit_logs,
+        activity_events = activity_events,
+        token_events = token_events,
+        projects = projects,
+        threads = threads,
+        bans = bans,
+        reports = reports,
+    )
+    usage = cognix_admin_users.build_usage_dashboard(token_events = token_events)
+    return {
+        "users": users,
+        "permissions": permissions,
+        "threads": threads,
+        "projects": projects,
+        "auditLogs": audit_logs,
+        "activityEvents": activity_events,
+        "tokenEvents": token_events,
+        "limits": limits,
+        "bans": bans,
+        "reports": reports,
+        "directory": directory,
+        "usage": usage,
+    }
+
+
 def _row(row: dict[str, Any]) -> dict[str, Any]:
     """Return a frontend-friendly copy while keeping raw fields available."""
 
@@ -1207,6 +1269,16 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "command_id": "commandId",
         "command_label": "commandLabel",
         "result_status": "resultStatus",
+        "limit_key": "limitKey",
+        "limit_value": "limitValue",
+        "updated_by": "updatedBy",
+        "event_type": "eventType",
+        "input_tokens": "inputTokens",
+        "output_tokens": "outputTokens",
+        "total_tokens": "totalTokens",
+        "target_username": "targetUsername",
+        "viewed_by": "viewedBy",
+        "view_reason": "viewReason",
         "gpt_id": "gptId",
         "runtime_plan_json": "runtimePlanJson",
         "privacy_level": "privacyLevel",
@@ -9688,6 +9760,223 @@ async def create_image(
         "imagePlan": plan,
         "auditLogId": audit.get("id"),
         "sideEffects": side_effects,
+    }
+
+
+@router.get("/admin/users/blueprint")
+async def admin_users_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    blueprint = cognix_admin_users.build_admin_users_blueprint()
+    return {
+        "username": current_subject,
+        "adminUsersBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_admin_users.COGNIX_ADMIN_USER_SERVICE_VERSION,
+    }
+
+
+@router.get("/admin/users")
+async def admin_users(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_user_bundle()
+    audit = cognix_db.create_audit_log(
+        username = None,
+        actor_username = current_subject,
+        action = "admin_users_directory_viewed",
+        resource_type = "cognix_admin_users",
+        resource_id = "directory",
+        severity = "notice",
+        metadata = {
+            "adminUserServiceVersion": bundle["directory"].get("adminUserServiceVersion"),
+            "userCount": bundle["directory"].get("summary", {}).get("userCount"),
+            "sideEffects": {**bundle["directory"].get("sideEffects", {}), "auditWrite": True},
+        },
+    )
+    return {
+        "username": current_subject,
+        "directory": bundle["directory"],
+        "auditLogId": audit.get("id"),
+        "sideEffects": {**bundle["directory"].get("sideEffects", {}), "auditWrite": True},
+        "plannerVersion": cognix_admin_users.COGNIX_ADMIN_USER_SERVICE_VERSION,
+    }
+
+
+@router.get("/admin/users/{username}")
+async def admin_user_detail(
+    username: str,
+    reason: str | None = None,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_user_bundle()
+    detail_preview = cognix_admin_users.build_admin_user_detail(
+        username,
+        bundle["directory"],
+        cognix_db.list_admin_user_views(username, limit = 50),
+    )
+    if not detail_preview.get("found"):
+        raise HTTPException(status_code = 404, detail = "User not found")
+    view = cognix_db.record_admin_user_view(
+        target_username = username,
+        viewed_by = current_subject,
+        reason = reason or "admin_user_detail",
+    )
+    cognix_db.create_user_activity_event(
+        username,
+        event_type = "admin_user_profile_viewed",
+        resource_type = "cognix_admin_user",
+        resource_id = username,
+        metadata = {"viewedBy": current_subject, "viewId": view.get("id")},
+    )
+    detail = cognix_admin_users.build_admin_user_detail(
+        username,
+        _build_admin_user_bundle()["directory"],
+        cognix_db.list_admin_user_views(username, limit = 50),
+    )
+    side_effects = {
+        **detail.get("sideEffects", {}),
+        "adminViewLogWrite": True,
+        "activityEventWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = username,
+        actor_username = current_subject,
+        action = "admin_user_detail_viewed",
+        resource_type = "cognix_admin_user",
+        resource_id = username,
+        severity = "notice",
+        metadata = {
+            "adminUserServiceVersion": detail.get("adminUserServiceVersion"),
+            "viewId": view.get("id"),
+            "reason": reason or "admin_user_detail",
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "targetUsername": username,
+        "userDetail": detail,
+        "adminView": _row(view),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_admin_users.COGNIX_ADMIN_USER_SERVICE_VERSION,
+    }
+
+
+@router.get("/admin/users/{username}/limits")
+async def admin_user_limits(
+    username: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    if auth_storage.get_user_profile(username) is None:
+        raise HTTPException(status_code = 404, detail = "User not found")
+    bundle = _build_admin_user_bundle()
+    detail = cognix_admin_users.build_admin_user_detail(
+        username,
+        bundle["directory"],
+        cognix_db.list_admin_user_views(username, limit = 50),
+    )
+    return {
+        "username": current_subject,
+        "targetUsername": username,
+        "limits": detail.get("user", {}).get("limits", {}),
+        "sideEffects": cognix_admin_users.build_admin_users_blueprint()["sideEffects"],
+        "plannerVersion": cognix_admin_users.COGNIX_LIMIT_SERVICE_VERSION,
+    }
+
+
+@router.put("/admin/users/{username}/limits/{limit_key}")
+async def admin_update_user_limit(
+    username: str,
+    limit_key: str,
+    payload: AdminUserLimitRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    if auth_storage.get_user_profile(username) is None:
+        raise HTTPException(status_code = 404, detail = "User not found")
+    try:
+        limit = cognix_db.upsert_user_limit(
+            username,
+            limit_key = limit_key,
+            limit_value = payload.limit_value,
+            unit = payload.unit,
+            scope = payload.scope,
+            updated_by = current_subject,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from exc
+    activity = cognix_db.create_user_activity_event(
+        username,
+        event_type = "admin_user_limit_updated",
+        resource_type = "cognix_user_limit",
+        resource_id = str(limit.get("limit_key") or limit_key),
+        metadata = {
+            "updatedBy": current_subject,
+            "limitValue": limit.get("limit_value"),
+            "unit": limit.get("unit"),
+            "reason": payload.reason,
+        },
+    )
+    side_effects = {
+        **cognix_admin_users.build_admin_users_blueprint()["sideEffects"],
+        "limitWrite": True,
+        "activityEventWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = username,
+        actor_username = current_subject,
+        action = "admin_user_limit_updated",
+        resource_type = "cognix_user_limit",
+        resource_id = str(limit.get("limit_key") or limit_key),
+        severity = "notice",
+        metadata = {
+            "limitServiceVersion": cognix_admin_users.COGNIX_LIMIT_SERVICE_VERSION,
+            "limitKey": limit.get("limit_key"),
+            "limitValue": limit.get("limit_value"),
+            "unit": limit.get("unit"),
+            "scope": limit.get("scope"),
+            "reason": payload.reason,
+            "activityEventId": activity.get("id"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "targetUsername": username,
+        "limit": _row(limit),
+        "activityEvent": _row(activity),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_admin_users.COGNIX_LIMIT_SERVICE_VERSION,
+    }
+
+
+@router.get("/admin/activity")
+async def admin_activity(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_user_bundle()
+    return {
+        "username": current_subject,
+        "activityEvents": _rows(bundle["activityEvents"]),
+        "directorySummary": bundle["directory"].get("summary", {}),
+        "sideEffects": cognix_admin_users.build_admin_users_blueprint()["sideEffects"],
+        "plannerVersion": cognix_admin_users.COGNIX_ACTIVITY_MONITORING_VERSION,
+    }
+
+
+@router.get("/admin/usage")
+async def admin_usage(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_user_bundle()
+    return {
+        "username": current_subject,
+        "usageDashboard": bundle["usage"],
+        "sideEffects": bundle["usage"].get("sideEffects", {}),
+        "plannerVersion": cognix_admin_users.COGNIX_USAGE_DASHBOARD_VERSION,
     }
 
 

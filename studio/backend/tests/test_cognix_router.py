@@ -14,6 +14,7 @@ if str(_BACKEND_ROOT) not in sys.path:
 
 from auth import storage
 from auth.authentication import get_current_jwt_subject
+from core.cognix import admin_users as cognix_admin_users
 from core.cognix import apps as cognix_apps
 from core.cognix import background_agents as cognix_background_agents
 from core.cognix import cache_manager as cognix_cache_manager
@@ -5678,6 +5679,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-plugin-marketplace",
         "cognix-codex-secure-agent",
         "cognix-enterprise-foundation",
+        "cognix-admin-operations",
         "cognix-admin-security-center",
         "cognix-deployment-manager",
     }.issubset(modules)
@@ -5948,6 +5950,12 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/plugins/install-plan" in modules["cognix-plugin-marketplace"]["routes"]
     assert "sso_planning" in modules["cognix-enterprise-foundation"]["capabilities"]
     assert "/api/cognix/governance/plan" in modules["cognix-enterprise-foundation"]["routes"]
+    assert modules["cognix-admin-operations"]["status"] == "enabled"
+    assert modules["cognix-admin-operations"]["dependencyState"]["ready"] is True
+    assert "admin_user_service" in modules["cognix-admin-operations"]["capabilities"]
+    assert "token_usage_dashboard" in modules["cognix-admin-operations"]["capabilities"]
+    assert "/api/cognix/admin/users" in modules["cognix-admin-operations"]["routes"]
+    assert "/api/cognix/admin/usage" in modules["cognix-admin-operations"]["routes"]
     assert "ai_risk_scoring" in modules["cognix-admin-security-center"]["capabilities"]
     assert "live_system_health" in modules["cognix-admin-security-center"]["capabilities"]
     assert "/api/cognix/admin/risk-scores" in modules["cognix-admin-security-center"]["routes"]
@@ -6852,6 +6860,138 @@ def test_admin_permission_grant_and_revoke_affect_tool_planning():
     actions = [log["action"] for log in admin_read["logs"]]
     assert "permission_granted" in actions
     assert "permission_revoked" in actions
+
+
+def test_admin_users_service_aggregates_permissions_limits_activity_and_usage():
+    seed_accounts()
+    cognix_db.grant_user_permission(
+        "alice",
+        "codex:run",
+        granted_by = storage.DEFAULT_ADMIN_USERNAME,
+    )
+    cognix_db.upsert_user_limit(
+        "alice",
+        limit_key = "tokens_daily",
+        limit_value = 42000,
+        unit = "tokens",
+        updated_by = storage.DEFAULT_ADMIN_USERNAME,
+    )
+    cognix_db.create_user_activity_event(
+        "alice",
+        event_type = "message_sent",
+        resource_type = "chat",
+        resource_id = "thread-1",
+    )
+    cognix_db.create_token_usage_event(
+        "alice",
+        model_id = "qwen-local",
+        provider = "ollama",
+        input_tokens = 120,
+        output_tokens = 80,
+        estimated_cost_usd = 0,
+    )
+    cognix_db.create_audit_log(
+        username = "alice",
+        actor_username = "alice",
+        action = "chat_message_created",
+        resource_type = "chat",
+        severity = "notice",
+    )
+
+    directory = cognix_admin_users.build_admin_user_directory(
+        users = storage.list_user_profiles(),
+        permissions = cognix_db.list_user_permissions("alice"),
+        limits = cognix_db.list_user_limits(),
+        audit_logs = cognix_db.list_audit_logs(limit = 50),
+        activity_events = cognix_db.list_user_activity_events(limit = 50),
+        token_events = cognix_db.list_token_usage_events(limit = 50),
+        projects = [],
+        threads = [],
+        bans = [],
+        reports = [],
+    )
+    alice = next(item for item in directory["users"] if item["username"] == "alice")
+
+    assert directory["adminUserServiceVersion"] == "cognix_admin_user_service_v1"
+    assert alice["permissions"]["permissionKeys"] == ["codex:run"]
+    assert alice["permissions"]["sensitivePermissionCount"] == 1
+    assert alice["limits"]["tokens_daily"]["value"] == 42000
+    assert alice["limits"]["tokens_daily"]["overridden"] is True
+    assert alice["usage"]["totalTokens"] == 200
+    assert alice["usage"]["topModels"] == [{"modelId": "qwen-local", "count": 1}]
+    assert alice["activity"]["auditEvents"] == 1
+    assert alice["activity"]["activityEvents"] == 1
+    assert directory["sideEffects"]["permissionGrant"] is False
+    assert directory["sideEffects"]["generation"] is False
+
+
+def test_admin_users_endpoints_are_admin_only_audited_and_persist_limits():
+    seed_accounts()
+    cognix_db.create_token_usage_event(
+        "alice",
+        model_id = "qwen-local",
+        provider = "ollama",
+        input_tokens = 10,
+        output_tokens = 15,
+    )
+
+    with pytest.raises(HTTPException) as user_read:
+        run_async(cognix_routes.admin_users(current_subject = "alice"))
+    assert user_read.value.status_code == 403
+
+    blueprint = run_async(cognix_routes.admin_users_blueprint(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    assert blueprint["adminUsersBlueprint"]["services"] == [
+        "AdminUserService",
+        "UserActivityService",
+        "UserLimitService",
+        "UserPermissionService",
+        "ActivityMonitoringService",
+        "TokenUsageService",
+        "ModelUsageAggregator",
+    ]
+
+    directory = run_async(cognix_routes.admin_users(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    assert directory["auditLogId"].startswith("aud_")
+    assert directory["directory"]["summary"]["userCount"] == 2
+    alice = next(item for item in directory["directory"]["users"] if item["username"] == "alice")
+    assert alice["usage"]["totalTokens"] == 25
+
+    detail = run_async(
+        cognix_routes.admin_user_detail(
+            "alice",
+            reason = "support",
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert detail["adminView"]["targetUsername"] == "alice"
+    assert detail["adminView"]["viewedBy"] == storage.DEFAULT_ADMIN_USERNAME
+    assert detail["sideEffects"]["adminViewLogWrite"] is True
+    assert detail["sideEffects"]["activityEventWrite"] is True
+
+    updated = run_async(
+        cognix_routes.admin_update_user_limit(
+            "alice",
+            "tokens_daily",
+            cognix_routes.AdminUserLimitRequest(limitValue = 25000, unit = "tokens", reason = "reduce daily spend"),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert updated["limit"]["limitKey"] == "tokens_daily"
+    assert updated["limit"]["limitValue"] == 25000
+    assert updated["sideEffects"]["limitWrite"] is True
+
+    limits = run_async(cognix_routes.admin_user_limits("alice", current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    assert limits["limits"]["tokens_daily"]["value"] == 25000
+    activity = run_async(cognix_routes.admin_activity(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    assert any(item["eventType"] == "admin_user_limit_updated" for item in activity["activityEvents"])
+    usage = run_async(cognix_routes.admin_usage(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    assert usage["usageDashboard"]["summary"]["totalTokens"] == 25
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    actions = [log["action"] for log in admin_read["logs"]]
+    assert "admin_users_directory_viewed" in actions
+    assert "admin_user_detail_viewed" in actions
+    assert "admin_user_limit_updated" in actions
 
 
 def test_admin_security_center_builds_threat_risk_and_health(monkeypatch):
