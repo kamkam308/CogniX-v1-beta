@@ -8158,10 +8158,23 @@ def test_audit_log_redacts_sensitive_metadata_before_storage():
         metadata = {
             "access_token": "tok_live_secret_value",
             "apiKey": "sk-testabcdefghijklmnop",
+            "s3": {
+                "accessKeyId": "AKIA1234567890ABCDEF",
+                "secretAccessKey": "aws-secret-access-key",
+            },
             "safeLabel": "kept",
             "nested": {
                 "password": "plain-password",
-                "note": "Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456",
+                "note": (
+                    "Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456 "
+                    "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=="
+                ),
+                "signedUrl": "https://example.test/callback?access_token=tok_query_secret&safe=1",
+                "credentialUrl": "https://user:plainpass@example.test/private",
+                "assignment": (
+                    "OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz "
+                    "AWS_SECRET_ACCESS_KEY=awssecretfromstring"
+                ),
             },
         },
     )
@@ -8171,9 +8184,17 @@ def test_audit_log_redacts_sensitive_metadata_before_storage():
     assert stored["id"] == log["id"]
     assert stored["metadata"]["safeLabel"] == "kept"
     assert stored["metadata"]["redactedSensitiveFieldCount"] == 2
+    assert stored["metadata"]["s3"]["redactedSensitiveFieldCount"] == 2
     assert stored["metadata"]["nested"]["redactedSensitiveFieldCount"] == 1
     assert "tok_live_secret_value" not in metadata_json
+    assert "tok_query_secret" not in metadata_json
     assert "sk-test" not in metadata_json
+    assert "sk-proj" not in metadata_json
+    assert "akia1234567890abcdef" not in metadata_json
+    assert "aws-secret-access-key" not in metadata_json
+    assert "awssecretfromstring" not in metadata_json
+    assert "qwxszzrpbgjpbgvcgvuihnlc2ftzq" not in metadata_json
+    assert "plainpass" not in metadata_json
     assert "plain-password" not in metadata_json
     assert "access_token" not in metadata_json
     assert "apikey" not in metadata_json

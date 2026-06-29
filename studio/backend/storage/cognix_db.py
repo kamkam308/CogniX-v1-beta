@@ -27,31 +27,58 @@ AUDIT_REDACTED_VALUE = "<redacted>"
 AUDIT_REDACTED_TOKEN = "<redacted token>"
 AUDIT_SENSITIVE_KEYS = {
     "access_token",
+    "access_key",
+    "access_key_id",
     "api_key",
     "apikey",
     "authorization",
+    "authorization_header",
     "bearer_token",
     "client_secret",
+    "cookie",
     "credential",
     "credentials",
     "current_password",
+    "github_pat",
+    "github_token",
+    "gitlab_token",
     "hf_token",
     "id_token",
+    "kaggle_api_key",
     "kaggle_key",
+    "kaggle_token",
     "new_password",
+    "openai_api_key",
     "password",
+    "personal_access_token",
     "private_key",
     "refresh_token",
     "secret",
+    "secret_access_key",
+    "secret_key",
     "secret_value",
     "server_secret",
+    "session_cookie",
+    "set_cookie",
     "token",
+    "wandb_api_key",
     "wandb_token",
 }
-AUDIT_TOKEN_VALUE_RE = re.compile(r"(?i)\b(Bearer)\s+[A-Za-z0-9._~+/=-]{16,}")
-AUDIT_API_KEY_VALUE_RE = re.compile(r"\b(sk-[A-Za-z0-9_-]{12,}|hf_[A-Za-z0-9]{12,})\b")
+AUDIT_TOKEN_VALUE_RE = re.compile(r"(?i)\b(Bearer)\s+[A-Za-z0-9._~+/=-]{8,}")
+AUDIT_BASIC_AUTH_VALUE_RE = re.compile(r"(?i)\b(Basic)\s+[A-Za-z0-9+/=]{8,}")
+AUDIT_API_KEY_VALUE_RE = re.compile(
+    r"\b((?:sk|sk-proj|sk-ant|sk-or)-[A-Za-z0-9._-]{8,}|hf_[A-Za-z0-9]{8,}|AKIA[0-9A-Z]{16})\b"
+)
+AUDIT_SECRET_QUERY_VALUE_RE = re.compile(
+    r"(?i)([?&])(?:api[_-]?key|access[_-]?token|refresh[_-]?token|hf[_-]?token|token|password|secret|client_secret|code)=[^&#\s]+"
+)
 AUDIT_ASSIGNMENT_VALUE_RE = re.compile(
-    r"(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|hf[_-]?token|password|secret)\s*[:=]\s*[^,\s;]+"
+    r"(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|hf[_-]?token|openai[_-]?api[_-]?key|"
+    r"anthropic[_-]?api[_-]?key|gemini[_-]?api[_-]?key|kaggle[_-]?key|wandb[_-]?token|"
+    r"aws[_-]?secret[_-]?access[_-]?key|secret[_-]?access[_-]?key|password|secret)\s*[:=]\s*[^,\s;&]+"
+)
+AUDIT_URL_CREDENTIAL_VALUE_RE = re.compile(
+    r"(?i)\b([a-z][a-z0-9+.-]*://)([^/\s:@]+):([^@\s/]+)@"
 )
 
 KNOWN_ATTACK_SIGNATURES: list[dict[str, str]] = [
@@ -127,13 +154,21 @@ def _audit_key_is_sensitive(key: str) -> bool:
         return True
     if normalized.endswith("_api_key") or normalized.endswith("_secret"):
         return True
+    if normalized.endswith("_access_key") or normalized.endswith("_credential"):
+        return True
     return "password" in normalized or "private_key" in normalized
 
 
 def _redact_audit_string(value: str) -> str:
     redacted = AUDIT_TOKEN_VALUE_RE.sub(r"\1 " + AUDIT_REDACTED_TOKEN, value)
+    redacted = AUDIT_BASIC_AUTH_VALUE_RE.sub(r"\1 " + AUDIT_REDACTED_TOKEN, redacted)
+    redacted = AUDIT_URL_CREDENTIAL_VALUE_RE.sub(r"\1" + AUDIT_REDACTED_VALUE + "@", redacted)
+    redacted = AUDIT_SECRET_QUERY_VALUE_RE.sub(
+        lambda match: f"{match.group(1)}redacted={AUDIT_REDACTED_VALUE}",
+        redacted,
+    )
     redacted = AUDIT_API_KEY_VALUE_RE.sub(AUDIT_REDACTED_VALUE, redacted)
-    return AUDIT_ASSIGNMENT_VALUE_RE.sub(lambda match: f"{match.group(1)}={AUDIT_REDACTED_VALUE}", redacted)
+    return AUDIT_ASSIGNMENT_VALUE_RE.sub(AUDIT_REDACTED_VALUE, redacted)
 
 
 def redact_audit_metadata(value: Any) -> Any:

@@ -845,6 +845,10 @@ const checks: Check[] = [
     includes: [
       "CREATE TABLE IF NOT EXISTS cognix_audit_logs",
       "AUDIT_LOG_RETENTION_LIMIT",
+      "AUDIT_SECRET_QUERY_VALUE_RE",
+      "AUDIT_URL_CREDENTIAL_VALUE_RE",
+      "AUDIT_BASIC_AUTH_VALUE_RE",
+      "def redact_audit_metadata",
       "def create_audit_log",
       "def list_audit_logs",
       "def prune_audit_logs",
