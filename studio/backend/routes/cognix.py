@@ -14223,6 +14223,19 @@ async def admin_security_threats_blueprint(current_subject: str = Depends(get_cu
     return cognix_admin_security.build_security_threats_blueprint()
 
 
+@router.get("/admin/vulnerability-scanner-contract")
+async def admin_vulnerability_scanner_contract(
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    contract = cognix_admin_security.build_vulnerability_scanner_adapter_contract()
+    return {
+        "vulnerabilityScannerContract": contract,
+        "plannerVersion": cognix_admin_security.COGNIX_VULNERABILITY_SCANNER_ADAPTER_VERSION,
+        "sideEffects": contract.get("sideEffects", {}),
+    }
+
+
 @router.get("/admin/security-threats")
 async def admin_security_threats(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
     _require_admin(current_subject)

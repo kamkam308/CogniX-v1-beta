@@ -1545,6 +1545,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
             "security_threat_reports",
             "security_threat_service",
             "vulnerability_scanner_adapter",
+            "vulnerability_scanner_contract",
             "codex_security_summarizer",
             "threat_report_service",
             "permission_error_detection",
@@ -1559,6 +1560,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "routes": [
             "/api/cognix/admin/security-threats",
             "/api/cognix/admin/security-threats/blueprint",
+            "/api/cognix/admin/vulnerability-scanner-contract",
             "/api/cognix/admin/risk-scores",
             "/api/cognix/admin/system-health",
             "/api/cognix/admin/audit-logs",

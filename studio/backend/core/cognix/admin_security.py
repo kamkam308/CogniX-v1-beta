@@ -102,6 +102,33 @@ SECURITY_THREAT_CATEGORIES = [
     },
 ]
 
+VULNERABILITY_SCANNER_SOURCES = [
+    {
+        "id": "python_dependencies",
+        "label": "Python dependencies",
+        "manifestPatterns": ["requirements*.txt", "pyproject.toml", "uv.lock"],
+        "findingSource": "pip",
+    },
+    {
+        "id": "node_dependencies",
+        "label": "Node dependencies",
+        "manifestPatterns": ["package.json", "package-lock.json", "pnpm-lock.yaml"],
+        "findingSource": "npm",
+    },
+    {
+        "id": "model_runtime_dependencies",
+        "label": "Model runtime dependencies",
+        "manifestPatterns": ["llama.cpp", "ollama", "vllm", "transformers"],
+        "findingSource": "runtime",
+    },
+    {
+        "id": "cloud_training_dependencies",
+        "label": "Cloud training dependencies",
+        "manifestPatterns": ["colab", "kaggle", "cloud_gpu"],
+        "findingSource": "cloud_training",
+    },
+]
+
 
 def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
@@ -358,6 +385,48 @@ def build_security_threats_blueprint() -> dict[str, Any]:
             "networkCall": False,
             "modelLoad": False,
             "generation": False,
+        },
+    }
+
+
+def build_vulnerability_scanner_adapter_contract() -> dict[str, Any]:
+    return {
+        "contractVersion": COGNIX_VULNERABILITY_SCANNER_ADAPTER_VERSION,
+        "mode": "vulnerability_scanner_adapter_read_only",
+        "sourceOfTruth": "security_center_adapter_contract",
+        "supportedSources": [dict(item) for item in VULNERABILITY_SCANNER_SOURCES],
+        "findingTables": [
+            "cognix_vulnerability_findings",
+            "cognix_security_reports",
+            "cognix_security_remediation_tasks",
+            "cognix_audit_logs",
+        ],
+        "scanPolicy": {
+            "externalScannerExecutionAllowedHere": False,
+            "networkVulnerabilityLookupAllowedHere": False,
+            "manifestReadAllowed": True,
+            "rawManifestContentReturned": False,
+            "secretValueReturned": False,
+            "findingWriteAllowedHere": False,
+            "remediationTaskWriteAllowedHere": False,
+            "adminReviewRequired": True,
+        },
+        "redactionPolicy": {
+            "rawSecretsReturned": False,
+            "tokensRedacted": True,
+            "envFileContentReturned": False,
+            "evidenceIsSummaryOnly": True,
+        },
+        "sideEffects": {
+            "manifestRead": False,
+            "databaseWrite": False,
+            "externalScan": False,
+            "networkCall": False,
+            "subprocess": False,
+            "secretRead": False,
+            "findingWrite": False,
+            "remediationWrite": False,
+            "auditWrite": False,
         },
     }
 

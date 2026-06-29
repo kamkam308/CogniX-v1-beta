@@ -9398,6 +9398,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/admin/chats/{thread_id}/export-plan" in modules["cognix-admin-chat-access"]["routes"]
     assert "security_threat_service" in modules["cognix-admin-security-center"]["capabilities"]
     assert "vulnerability_scanner_adapter" in modules["cognix-admin-security-center"]["capabilities"]
+    assert "vulnerability_scanner_contract" in modules["cognix-admin-security-center"]["capabilities"]
     assert "codex_security_summarizer" in modules["cognix-admin-security-center"]["capabilities"]
     assert "permission_error_detection" in modules["cognix-admin-security-center"]["capabilities"]
     assert "secret_exposure_detection" in modules["cognix-admin-security-center"]["capabilities"]
@@ -9405,6 +9406,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "ai_risk_scoring" in modules["cognix-admin-security-center"]["capabilities"]
     assert "live_system_health" in modules["cognix-admin-security-center"]["capabilities"]
     assert "/api/cognix/admin/security-threats/blueprint" in modules["cognix-admin-security-center"]["routes"]
+    assert "/api/cognix/admin/vulnerability-scanner-contract" in modules["cognix-admin-security-center"]["routes"]
     assert "/api/cognix/admin/risk-scores" in modules["cognix-admin-security-center"]["routes"]
     assert "/api/cognix/admin/system-health" in modules["cognix-admin-security-center"]["routes"]
     assert "codex_run_contract" in modules["cognix-codex-secure-agent"]["capabilities"]
@@ -12549,6 +12551,27 @@ def test_admin_security_center_builds_threat_risk_and_health(monkeypatch):
     assert "cognix_vulnerability_findings" in blueprint["tables"]
     assert "filesAffected" in blueprint["codexSummaryFields"]
     assert blueprint["sideEffects"]["externalScan"] is False
+
+    with pytest.raises(HTTPException) as user_scanner_contract:
+        run_async(cognix_routes.admin_vulnerability_scanner_contract(current_subject = "alice"))
+    assert user_scanner_contract.value.status_code == 403
+
+    scanner_contract_body = run_async(
+        cognix_routes.admin_vulnerability_scanner_contract(current_subject = storage.DEFAULT_ADMIN_USERNAME)
+    )
+    scanner_contract = scanner_contract_body["vulnerabilityScannerContract"]
+    assert scanner_contract_body["plannerVersion"] == "cognix_vulnerability_scanner_adapter_v1"
+    assert scanner_contract["contractVersion"] == "cognix_vulnerability_scanner_adapter_v1"
+    assert scanner_contract["mode"] == "vulnerability_scanner_adapter_read_only"
+    assert any(item["id"] == "python_dependencies" for item in scanner_contract["supportedSources"])
+    assert any(item["id"] == "cloud_training_dependencies" for item in scanner_contract["supportedSources"])
+    assert scanner_contract["scanPolicy"]["externalScannerExecutionAllowedHere"] is False
+    assert scanner_contract["scanPolicy"]["networkVulnerabilityLookupAllowedHere"] is False
+    assert scanner_contract["scanPolicy"]["rawManifestContentReturned"] is False
+    assert scanner_contract["redactionPolicy"]["rawSecretsReturned"] is False
+    assert scanner_contract_body["sideEffects"]["externalScan"] is False
+    assert scanner_contract_body["sideEffects"]["databaseWrite"] is False
+    assert scanner_contract_body["sideEffects"]["subprocess"] is False
 
     security = run_async(
         cognix_routes.admin_security_threats(current_subject = storage.DEFAULT_ADMIN_USERNAME)
