@@ -17,6 +17,7 @@ from auth import storage
 from auth.authentication import get_current_jwt_subject
 from core.cognix import admin_activity as cognix_admin_activity
 from core.cognix import admin_approvals as cognix_admin_approvals
+from core.cognix import admin_banned as cognix_admin_banned
 from core.cognix import admin_chat as cognix_admin_chat
 from core.cognix import admin_limits as cognix_admin_limits
 from core.cognix import admin_permissions as cognix_admin_permissions
@@ -5976,6 +5977,9 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "approval_service" in modules["cognix-admin-operations"]["capabilities"]
     assert "approval_queue" in modules["cognix-admin-operations"]["capabilities"]
     assert "approval_policy_engine" in modules["cognix-admin-operations"]["capabilities"]
+    assert "ban_service" in modules["cognix-admin-operations"]["capabilities"]
+    assert "ban_report_generator" in modules["cognix-admin-operations"]["capabilities"]
+    assert "user_reactivation" in modules["cognix-admin-operations"]["capabilities"]
     assert "/api/cognix/admin/users" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/limits" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/limits/enforcement-plan" in modules["cognix-admin-operations"]["routes"]
@@ -5983,6 +5987,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/admin/permissions/decision" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/approvals" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/approvals/blueprint" in modules["cognix-admin-operations"]["routes"]
+    assert "/api/cognix/admin/banned" in modules["cognix-admin-operations"]["routes"]
+    assert "/api/cognix/admin/banned/blueprint" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/activity/aggregate" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/usage" in modules["cognix-admin-operations"]["routes"]
     assert modules["cognix-admin-chat-access"]["status"] == "enabled"
@@ -8007,6 +8013,133 @@ def test_admin_chat_access_routes_are_policy_gated_audited_and_persistent():
     assert "admin_chat_policy_updated" in actions
     assert "admin_chat_detail_viewed" in actions
     assert "admin_chat_export_planned" in actions
+
+
+def test_admin_banned_core_builds_reports_evidence_and_reactivation_plan():
+    blueprint = cognix_admin_banned.build_banned_blueprint()
+    assert blueprint["services"] == ["BanService", "BanReportGenerator", "UserRiskService"]
+    assert "cognix_ban_reports" in blueprint["tables"]
+    assert blueprint["sideEffects"]["generation"] is False
+
+    dashboard = cognix_admin_banned.build_banned_dashboard(
+        bans = [
+            {
+                "id": "ban_1",
+                "username": "alice",
+                "client_key": "client-a",
+                "reason": "SQL injection detected",
+                "status": "pending_admin_review",
+                "created_at": "2026-06-29T00:00:00+00:00",
+                "temporary_until": "2026-06-30T00:00:00+00:00",
+            }
+        ],
+        reports = [
+            {
+                "id": "rep_1",
+                "username": "alice",
+                "category": "security",
+                "title": "Suspicious behavior",
+                "message": "Repeated malicious prompts.",
+                "status": "open",
+            }
+        ],
+        security_events = [
+            {
+                "id": "sec_1",
+                "username": "alice",
+                "client_key": "client-a",
+                "category": "sql_injection",
+                "severity": "critical",
+                "pattern_label": "SQL injection",
+                "ban_id": "ban_1",
+            }
+        ],
+        audit_logs = [],
+        ban_reports = [],
+        evidence_logs = [{"ban_id": "ban_1", "source_type": "admin_note", "excerpt": "manual evidence"}],
+    )
+
+    row = dashboard["bannedUsers"][0]
+    assert dashboard["summary"]["pending"] == 1
+    assert row["aiReport"]["riskLevel"] == "critical"
+    assert row["aiReport"]["recommendation"] == "maintain_ban_and_require_admin_review"
+    assert row["evidence"]["securityEvents"][0]["id"] == "sec_1"
+    assert row["evidence"]["manualLogs"][0]["excerpt"] == "manual evidence"
+    assert row["reactivation"]["possible"] is False
+
+
+def test_admin_banned_routes_manage_reports_evidence_reactivation_and_audit():
+    seed_accounts()
+    event = cognix_db.record_security_event(
+        username = "alice",
+        client_key = "client-a",
+        category = "sql_injection",
+        severity = "critical",
+        pattern_label = "SQL injection",
+        method = "POST",
+        path = "/api/auth/login",
+        excerpt = "admin' OR 1=1 --",
+        create_temporary_ban = True,
+    )
+    ban_id = event["ban_id"]
+    cognix_db.create_report(
+        "alice",
+        "security",
+        "Suspicious behavior",
+        "Repeated malicious prompts.",
+    )
+
+    with pytest.raises(HTTPException) as user_read:
+        run_async(cognix_routes.admin_banned(current_subject = "alice"))
+    assert user_read.value.status_code == 403
+
+    blueprint = run_async(cognix_routes.admin_banned_blueprint(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    assert blueprint["bannedBlueprint"]["banServiceVersion"] == "cognix_ban_service_v1"
+
+    dashboard = run_async(cognix_routes.admin_banned(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    assert dashboard["bannedDashboard"]["summary"]["pending"] == 1
+    assert dashboard["bannedDashboard"]["bannedUsers"][0]["banId"] == ban_id
+    assert dashboard["bannedDashboard"]["bannedUsers"][0]["aiReport"]["riskLevel"] == "critical"
+
+    evidence = run_async(
+        cognix_routes.admin_add_ban_evidence(
+            ban_id,
+            cognix_routes.BanEvidenceRequest(
+                sourceType = "admin_note",
+                excerpt = "Manual admin evidence",
+                metadata = {"ticket": "INC-1"},
+            ),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert evidence["evidence"]["banId"] == ban_id
+    assert evidence["sideEffects"]["evidenceWrite"] is True
+
+    report = run_async(
+        cognix_routes.admin_generate_ban_report(
+            ban_id,
+            cognix_routes.BanReportRequest(store = True),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert report["report"]["riskLevel"] == "critical"
+    assert report["storedReport"]["banId"] == ban_id
+    assert report["sideEffects"]["reportWrite"] is True
+
+    cleared = run_async(
+        cognix_routes.admin_update_banned(
+            ban_id,
+            cognix_routes.BanStatusRequest(status = "cleared", admin_decision = "Reviewed and cleared"),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert cleared["ban"]["status"] == "cleared"
+    assert cleared["sideEffects"]["banWrite"] is True
+
+    actions = [log["action"] for log in cognix_db.list_audit_logs(limit = 20)]
+    assert "ban_evidence_added" in actions
+    assert "ban_report_generated" in actions
+    assert "ban_status_updated" in actions
 
 
 def test_admin_security_center_builds_threat_risk_and_health(monkeypatch):

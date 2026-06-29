@@ -20,6 +20,7 @@ from auth import storage as auth_storage
 from auth.authentication import get_current_jwt_subject
 from core.cognix import admin_activity as cognix_admin_activity
 from core.cognix import admin_approvals as cognix_admin_approvals
+from core.cognix import admin_banned as cognix_admin_banned
 from core.cognix import admin_chat as cognix_admin_chat
 from core.cognix import admin_limits as cognix_admin_limits
 from core.cognix import admin_permissions as cognix_admin_permissions
@@ -256,6 +257,19 @@ class ReportStatusRequest(BaseModel):
 class BanStatusRequest(BaseModel):
     status: Literal["pending_admin_review", "active", "cleared", "permanent"]
     admin_decision: str | None = Field(None, max_length = 2000)
+
+
+class BanEvidenceRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    source_type: str = Field("admin_note", alias = "sourceType", min_length = 1, max_length = 80)
+    source_id: str | None = Field(None, alias = "sourceId", max_length = 240)
+    excerpt: str = Field(..., min_length = 1, max_length = 2000)
+    metadata: dict[str, Any] = Field(default_factory = dict)
+
+
+class BanReportRequest(BaseModel):
+    store: bool = True
 
 
 class ContextMemoryRequest(BaseModel):
@@ -1178,6 +1192,32 @@ def _build_admin_security_bundle() -> dict[str, Any]:
     }
 
 
+def _build_admin_banned_bundle() -> dict[str, Any]:
+    bans = cognix_db.list_bans()
+    reports = cognix_db.list_reports()
+    security_events = cognix_db.list_security_events(limit = 1000)
+    audit_logs = cognix_db.list_audit_logs(limit = 1000)
+    ban_reports = cognix_db.list_ban_reports()
+    evidence_logs = cognix_db.list_ban_evidence_logs()
+    dashboard = cognix_admin_banned.build_banned_dashboard(
+        bans = bans,
+        reports = reports,
+        security_events = security_events,
+        audit_logs = audit_logs,
+        ban_reports = ban_reports,
+        evidence_logs = evidence_logs,
+    )
+    return {
+        "bans": bans,
+        "reports": reports,
+        "securityEvents": security_events,
+        "auditLogs": audit_logs,
+        "banReports": ban_reports,
+        "evidenceLogs": evidence_logs,
+        "dashboard": dashboard,
+    }
+
+
 def _build_admin_user_bundle() -> dict[str, Any]:
     users = auth_storage.list_user_profiles()
     permissions = [
@@ -1452,6 +1492,8 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "client_key": "clientKey",
         "pattern_label": "patternLabel",
         "ban_id": "banId",
+        "violated_rules_json": "violatedRulesJson",
+        "detected_behavior": "detectedBehavior",
         "role_key": "roleKey",
         "module_key": "moduleKey",
         "effect": "effect",
@@ -11684,10 +11726,126 @@ async def admin_revoke_permission(
     }
 
 
+@router.get("/admin/banned/blueprint")
+async def admin_banned_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    return {
+        "bannedBlueprint": cognix_admin_banned.build_banned_blueprint(),
+    }
+
+
+@router.get("/admin/banned")
+async def admin_banned(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_banned_bundle()
+    return {
+        "bannedDashboard": bundle["dashboard"],
+        "bans": _rows(bundle["bans"]),
+        "reports": _rows(bundle["reports"]),
+        "banReports": _rows(bundle["banReports"]),
+        "evidenceLogs": _rows(bundle["evidenceLogs"]),
+        "sideEffects": bundle["dashboard"].get("sideEffects", {}),
+    }
+
+
+@router.post("/admin/banned/{ban_id}/evidence")
+async def admin_add_ban_evidence(
+    ban_id: str,
+    payload: BanEvidenceRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    if not any(str(item.get("id") or "") == ban_id for item in cognix_db.list_bans()):
+        raise HTTPException(status_code = 404, detail = "Ban not found")
+    evidence = cognix_db.create_ban_evidence_log(
+        ban_id,
+        source_type = payload.source_type,
+        source_id = payload.source_id,
+        excerpt = payload.excerpt,
+        metadata = payload.metadata,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "ban_evidence_added",
+        resource_type = "cognix_ban",
+        resource_id = ban_id,
+        severity = "notice",
+        metadata = {
+            "sourceType": payload.source_type,
+            "sourceId": payload.source_id,
+        },
+    )
+    return {
+        "evidence": _row(evidence),
+        "auditLogId": audit.get("id"),
+        "sideEffects": {"evidenceWrite": True, "auditWrite": True},
+    }
+
+
+@router.post("/admin/banned/{ban_id}/report")
+async def admin_generate_ban_report(
+    ban_id: str,
+    payload: BanReportRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_banned_bundle()
+    row = next((item for item in bundle["dashboard"]["bannedUsers"] if item["banId"] == ban_id), None)
+    if row is None:
+        raise HTTPException(status_code = 404, detail = "Ban not found")
+    report = row["aiReport"]
+    stored = None
+    if payload.store:
+        stored = cognix_db.upsert_ban_report(
+            ban_id,
+            username = row.get("user"),
+            risk_level = report.get("riskLevel") or "medium",
+            summary = report.get("summary") or "",
+            detected_behavior = report.get("detectedBehavior") or "",
+            violated_rules = report.get("violatedRules") if isinstance(report.get("violatedRules"), list) else [],
+            recommendation = report.get("recommendation") or "",
+            report = report,
+        )
+    audit = cognix_db.create_audit_log(
+        username = row.get("user") or current_subject,
+        actor_username = current_subject,
+        action = "ban_report_generated",
+        resource_type = "cognix_ban",
+        resource_id = ban_id,
+        severity = "warning" if report.get("riskLevel") in {"high", "critical"} else "notice",
+        metadata = {
+            "riskLevel": report.get("riskLevel"),
+            "stored": bool(stored),
+            "recommendation": report.get("recommendation"),
+        },
+    )
+    return {
+        "banId": ban_id,
+        "report": report,
+        "storedReport": _row(stored) if stored else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": {"reportWrite": bool(stored), "auditWrite": True},
+    }
+
+
+@router.patch("/admin/banned/{ban_id}")
+async def admin_update_banned(
+    ban_id: str,
+    payload: BanStatusRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    return await admin_update_ban(ban_id, payload, current_subject)
+
+
 @router.get("/admin/bans")
 async def admin_bans(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
     _require_admin(current_subject)
-    return {"bans": _rows(cognix_db.list_bans())}
+    bundle = _build_admin_banned_bundle()
+    return {
+        "bans": _rows(bundle["bans"]),
+        "bannedDashboard": bundle["dashboard"],
+    }
 
 
 @router.patch("/admin/bans/{ban_id}")
@@ -11708,7 +11866,24 @@ async def admin_update_ban(
         raise HTTPException(status_code = 400, detail = str(exc)) from exc
     if ban is None:
         raise HTTPException(status_code = 404, detail = "Ban not found")
-    return {"ban": _row(ban)}
+    audit = cognix_db.create_audit_log(
+        username = str(ban.get("username") or current_subject),
+        actor_username = current_subject,
+        action = "ban_status_updated",
+        resource_type = "cognix_ban",
+        resource_id = ban_id,
+        severity = "warning" if payload.status in {"active", "permanent"} else "notice",
+        metadata = {
+            "status": payload.status,
+            "adminDecision": payload.admin_decision,
+            "reactivation": payload.status == "cleared",
+        },
+    )
+    return {
+        "ban": _row(ban),
+        "auditLogId": audit.get("id"),
+        "sideEffects": {"banWrite": True, "auditWrite": True},
+    }
 
 
 @router.get("/admin/security-threats")

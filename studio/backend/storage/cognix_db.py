@@ -500,6 +500,37 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_security_username
             ON cognix_security_events(username, created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_ban_reports (
+            id TEXT PRIMARY KEY,
+            ban_id TEXT NOT NULL,
+            username TEXT,
+            risk_level TEXT NOT NULL DEFAULT 'medium',
+            summary TEXT NOT NULL DEFAULT '',
+            detected_behavior TEXT NOT NULL DEFAULT '',
+            violated_rules_json TEXT NOT NULL DEFAULT '[]',
+            recommendation TEXT NOT NULL DEFAULT '',
+            report_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(ban_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_ban_reports_ban
+            ON cognix_ban_reports(ban_id, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_ban_evidence_logs (
+            id TEXT PRIMARY KEY,
+            ban_id TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            source_id TEXT,
+            excerpt TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_ban_evidence_ban
+            ON cognix_ban_evidence_logs(ban_id, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_audit_logs (
             id TEXT PRIMARY KEY,
             username TEXT,
@@ -5786,6 +5817,137 @@ def update_ban_status(
         if cur.rowcount == 0:
             return None
         return row_to_dict(conn.execute("SELECT * FROM cognix_bans WHERE id = ?", (ban_id,)).fetchone())
+    finally:
+        conn.close()
+
+
+def _hydrate_ban_report(row: dict[str, Any]) -> dict[str, Any]:
+    row["violatedRules"] = _json_or_default(row.get("violated_rules_json"), [])
+    row["report"] = _json_or_default(row.get("report_json"), {})
+    return row
+
+
+def upsert_ban_report(
+    ban_id: str,
+    *,
+    username: str | None = None,
+    risk_level: str = "medium",
+    summary: str = "",
+    detected_behavior: str = "",
+    violated_rules: list[str] | None = None,
+    recommendation: str = "",
+    report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    normalized_risk = _normalize_approval_risk(risk_level)
+    now = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_ban_reports
+                (
+                    id, ban_id, username, risk_level, summary, detected_behavior,
+                    violated_rules_json, recommendation, report_json, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(ban_id) DO UPDATE SET
+                username = excluded.username,
+                risk_level = excluded.risk_level,
+                summary = excluded.summary,
+                detected_behavior = excluded.detected_behavior,
+                violated_rules_json = excluded.violated_rules_json,
+                recommendation = excluded.recommendation,
+                report_json = excluded.report_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                _new_id("brp"),
+                ban_id,
+                username,
+                normalized_risk,
+                summary[:2000],
+                detected_behavior[:2000],
+                json.dumps(violated_rules or [], ensure_ascii = False),
+                recommendation[:1000],
+                json.dumps(report or {}, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        row = row_to_dict(conn.execute("SELECT * FROM cognix_ban_reports WHERE ban_id = ?", (ban_id,)).fetchone())
+        return _hydrate_ban_report(row or {})
+    finally:
+        conn.close()
+
+
+def list_ban_reports(ban_id: str | None = None) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        if ban_id:
+            rows = conn.execute(
+                "SELECT * FROM cognix_ban_reports WHERE ban_id = ? ORDER BY updated_at DESC",
+                (ban_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM cognix_ban_reports ORDER BY updated_at DESC").fetchall()
+        return [_hydrate_ban_report(dict(row)) for row in rows]
+    finally:
+        conn.close()
+
+
+def create_ban_evidence_log(
+    ban_id: str,
+    *,
+    source_type: str,
+    source_id: str | None = None,
+    excerpt: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    created_at = _now()
+    evidence_id = _new_id("bev")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_ban_evidence_logs
+                (id, ban_id, source_type, source_id, excerpt, metadata_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                evidence_id,
+                ban_id,
+                source_type.strip().lower()[:80],
+                (source_id or "")[:240],
+                excerpt[:2000],
+                json.dumps(metadata or {}, ensure_ascii = False),
+                created_at,
+            ),
+        )
+        conn.commit()
+        item = row_to_dict(
+            conn.execute("SELECT * FROM cognix_ban_evidence_logs WHERE id = ?", (evidence_id,)).fetchone()
+        ) or {}
+        item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+        return item
+    finally:
+        conn.close()
+
+
+def list_ban_evidence_logs(ban_id: str | None = None) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        if ban_id:
+            rows = conn.execute(
+                "SELECT * FROM cognix_ban_evidence_logs WHERE ban_id = ? ORDER BY created_at DESC",
+                (ban_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM cognix_ban_evidence_logs ORDER BY created_at DESC").fetchall()
+        items = _rows_to_dicts(rows)
+        for item in items:
+            item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+        return items
     finally:
         conn.close()
 
