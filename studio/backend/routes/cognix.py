@@ -40,6 +40,7 @@ from core.cognix import cost_optimizer as cognix_cost_optimizer
 from core.cognix import dataset_builder as cognix_dataset_builder
 from core.cognix import debate_orchestrator as cognix_debate_orchestrator
 from core.cognix import deployment_manager as cognix_deployment_manager
+from core.cognix import distillation_planner as cognix_distillation_planner
 from core.cognix import draft_generation as cognix_draft_generation
 from core.cognix import decision_engine as cognix_decision_engine
 from core.cognix import decision_explainer as cognix_decision_explainer
@@ -929,6 +930,18 @@ class FineTuningCloudHandoffPlanRequest(BaseModel):
     project_id: str | None = Field(None, max_length = 160)
     target_id: str | None = Field(None, alias = "targetId", max_length = 120)
     dataset: dict[str, Any] | None = None
+
+
+class FineTuningDistillationPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    project_type: str | None = Field(None, alias = "projectType", max_length = 80)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    teacher_model: dict[str, Any] | None = Field(None, alias = "teacherModel")
+    student_model: dict[str, Any] | None = Field(None, alias = "studentModel")
+    dataset: dict[str, Any] | None = None
+    target_id: str | None = Field(None, alias = "targetId", max_length = 120)
 
 
 class DatasetBuilderPlanRequest(BaseModel):
@@ -5040,6 +5053,62 @@ async def fine_tuning_dataset_validation(
         "datasetValidationPlan": validation,
         "auditLogId": audit.get("id"),
         "sideEffects": validation.get("sideEffects", {}),
+    }
+
+
+@router.post("/fine-tuning/distillation-plan")
+async def fine_tuning_distillation_plan(
+    payload: FineTuningDistillationPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    user_profile = auth_storage.get_user_profile(current_subject) or {}
+    user_plan = _effective_training_plan(current_subject, user_profile)
+    plan = cognix_distillation_planner.build_distillation_plan(
+        username = current_subject,
+        objective = payload.objective,
+        project_id = payload.project_id,
+        teacher_model = payload.teacher_model,
+        student_model = payload.student_model,
+        dataset = payload.dataset,
+        hardware = cognix_hardware.get_hardware_profile(),
+        user_plan = user_plan,
+        target_id = payload.target_id,
+    )
+    audit_side_effects = {
+        **plan.get("sideEffects", {}),
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "fine_tuning_distillation_plan_built",
+        resource_type = "cognix_distillation_plan",
+        resource_id = str(plan.get("planId") or payload.project_id or current_subject),
+        severity = "notice" if plan.get("readyForApproval") else "warning",
+        metadata = {
+            "plannerVersion": plan.get("plannerVersion"),
+            "teacherStudentContractVersion": plan.get("teacherStudentContractVersion"),
+            "evaluationContractVersion": plan.get("evaluationContractVersion"),
+            "status": plan.get("status"),
+            "readyForApproval": plan.get("readyForApproval"),
+            "teacherModelId": plan.get("teacher", {}).get("modelId"),
+            "studentModelId": plan.get("student", {}).get("modelId"),
+            "datasetStatus": plan.get("dataset", {}).get("status"),
+            "recommendedMethod": plan.get("summary", {}).get("recommendedMethod"),
+            "recommendedTargetId": plan.get("summary", {}).get("recommendedTargetId"),
+            "blockedGateIds": plan.get("summary", {}).get("blockedGateIds", []),
+            "warningGateIds": plan.get("summary", {}).get("warningGateIds", []),
+            "sideEffects": audit_side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "distillationPlan": plan,
+        "auditLogId": audit.get("id"),
+        "plannerVersion": cognix_distillation_planner.COGNIX_DISTILLATION_PLANNER_VERSION,
+        "sideEffects": audit_side_effects,
     }
 
 

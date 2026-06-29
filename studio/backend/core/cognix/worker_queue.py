@@ -45,7 +45,7 @@ QUEUE_DEFINITIONS: list[dict[str, Any]] = [
     {
         "id": "gpu_long_running",
         "label": "GPU long running",
-        "acceptedJobTypes": ["fine_tuning_job"],
+        "acceptedJobTypes": ["fine_tuning_job", "distillation_job"],
         "maxConcurrentJobs": 1,
         "requiresAudit": True,
         "requiresHumanConfirmation": True,
@@ -53,7 +53,7 @@ QUEUE_DEFINITIONS: list[dict[str, Any]] = [
     {
         "id": "cloud_training",
         "label": "Cloud training",
-        "acceptedJobTypes": ["cloud_training_job"],
+        "acceptedJobTypes": ["cloud_training_job", "cloud_distillation_job"],
         "maxConcurrentJobs": 1,
         "requiresAudit": True,
         "requiresHumanConfirmation": True,

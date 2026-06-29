@@ -34,6 +34,7 @@ from core.cognix import cost_optimizer as cognix_cost_optimizer
 from core.cognix import dataset_builder as cognix_dataset_builder
 from core.cognix import debate_orchestrator as cognix_debate_orchestrator
 from core.cognix import deployment_manager as cognix_deployment_manager
+from core.cognix import distillation_planner as cognix_distillation_planner
 from core.cognix import draft_generation as cognix_draft_generation
 from core.cognix import decision_engine as cognix_decision_engine
 from core.cognix import decision_explainer as cognix_decision_explainer
@@ -837,6 +838,166 @@ def test_fine_tuning_cloud_handoff_prepares_kaggle_package_without_launch(monkey
     assert log["metadata"]["readyToExport"] is True
     assert log["metadata"]["sideEffects"]["cloudTrainingJob"] is False
     assert "secret_value" not in log["metadataJson"].lower()
+
+
+def test_distillation_plan_allows_ceo_cloud_training_without_local_gpu():
+    plan = cognix_distillation_planner.build_distillation_plan(
+        username = storage.DEFAULT_ADMIN_USERNAME,
+        objective = "Distiller CogniX Code 7B vers petit expert code 1B",
+        teacher_model = {
+            "modelId": "teacher-code-7b",
+            "parameterCountB": 7,
+            "family": "qwen",
+            "tokenizerHash": "tok-qwen",
+        },
+        student_model = {
+            "modelId": "student-code-1b",
+            "parameterCountB": 1.5,
+            "family": "qwen",
+            "tokenizerHash": "tok-qwen",
+        },
+        dataset = {
+            "format": "jsonl",
+            "sampleCount": 1200,
+            "estimatedTokens": 400000,
+            "duplicateRatio": 0.01,
+            "invalidRows": 0,
+            "license": "mit",
+            "containsSensitiveData": False,
+            "sourceRef": "code-distill-v1",
+            "rawPreview": "this raw row must not appear in the plan",
+        },
+        hardware = stub_hardware_profile(),
+        user_plan = "CEO",
+        target_id = "kaggle",
+    )
+
+    assert plan["plannerVersion"] == "cognix_distillation_planner_v1"
+    assert plan["teacherStudentContractVersion"] == "cognix_teacher_student_contract_v1"
+    assert plan["evaluationContractVersion"] == "cognix_distillation_eval_contract_v1"
+    assert plan["status"] == "ready_for_approval"
+    assert plan["readyForApproval"] is True
+    assert plan["readyForJob"] is False
+    assert plan["teacherStudentContract"]["method"] == "logit_distillation"
+    assert plan["teacherStudentContract"]["studentSmallerThanTeacher"] is True
+    assert plan["dataset"]["status"] == "ready"
+    assert plan["dataset"]["rawPreviewIncluded"] is False
+    assert "this raw row" not in str(plan)
+    assert plan["resourceTargetPlan"]["status"] == "cloud_ready"
+    assert plan["resourceTargetPlan"]["recommendedTargetId"] == "kaggle"
+    assert plan["resourceTargetPlan"]["localGpuBypassAllowed"] is True
+    assert plan["queuePlan"]["queueId"] == "cloud_training"
+    assert plan["queuePlan"]["jobType"] == "cloud_distillation_job"
+    assert plan["queuePlan"]["willEnqueueNow"] is False
+    assert plan["sideEffects"]["teacherModelCall"] is False
+    assert plan["sideEffects"]["distillationJob"] is False
+    assert plan["sideEffects"]["cloudDistillationJob"] is False
+    assert plan["sideEffects"]["jobEnqueue"] is False
+    assert plan["sideEffects"]["cloudCredentialRead"] is False
+
+
+def test_distillation_plan_blocks_unsafe_student_and_dataset_without_training():
+    plan = cognix_distillation_planner.build_distillation_plan(
+        username = "alice",
+        objective = "Distiller un modele trop petit avec donnees insuffisantes",
+        teacher_model = {
+            "modelId": "teacher-code-1b",
+            "parameterCountB": 1,
+            "family": "qwen",
+        },
+        student_model = {
+            "modelId": "student-code-2b",
+            "parameterCountB": 2,
+            "family": "qwen",
+        },
+        dataset = {
+            "format": "txt",
+            "sampleCount": 50,
+            "invalidRows": 3,
+            "duplicateRatio": 0.2,
+            "license": "restricted",
+            "containsSensitiveData": True,
+            "rawPreview": "secret distillation row",
+        },
+        hardware = stub_hardware_profile(),
+        user_plan = "free",
+    )
+
+    blocked = set(plan["summary"]["blockedGateIds"])
+    warnings = set(plan["summary"]["warningGateIds"])
+    assert plan["status"] == "blocked_by_gates"
+    assert plan["readyForApproval"] is False
+    assert "student_smaller_than_teacher" in blocked
+    assert "dataset_ready" in blocked
+    assert "resource_target_ready" in blocked
+    assert {"duplicate_ratio", "license_review", "sensitive_data_review"}.issubset(warnings)
+    assert plan["resourceTargetPlan"]["status"] == "blocked_no_training_target"
+    assert "secret distillation row" not in str(plan)
+    assert plan["sideEffects"]["teacherModelCall"] is False
+    assert plan["sideEffects"]["datasetRead"] is False
+    assert plan["sideEffects"]["distillationJob"] is False
+    assert plan["sideEffects"]["jobEnqueue"] is False
+
+
+def test_distillation_plan_endpoint_audits_without_raw_dataset_leak(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_routes.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+
+    body = run_async(
+        cognix_routes.fine_tuning_distillation_plan(
+            cognix_routes.FineTuningDistillationPlanRequest(
+                objective = "Distiller CogniX Code 7B vers expert 1B",
+                target_id = "kaggle",
+                teacher_model = {
+                    "modelId": "teacher-code-7b",
+                    "parameterCountB": 7,
+                    "family": "qwen",
+                    "tokenizerHash": "tok-qwen",
+                },
+                student_model = {
+                    "modelId": "student-code-1b",
+                    "parameterCountB": 1,
+                    "family": "qwen",
+                    "tokenizerHash": "tok-qwen",
+                },
+                dataset = {
+                    "format": "jsonl",
+                    "sampleCount": 1200,
+                    "estimatedTokens": 400000,
+                    "duplicateRatio": 0.01,
+                    "invalidRows": 0,
+                    "license": "mit",
+                    "containsSensitiveData": False,
+                    "sourceRef": "code-distill-v1",
+                    "rawPreview": "private teacher output should not be logged",
+                },
+            ),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+
+    plan = body["distillationPlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_distillation_planner_v1"
+    assert body["sideEffects"]["auditWrite"] is True
+    assert body["sideEffects"]["jobEnqueue"] is False
+    assert plan["status"] == "ready_for_approval"
+    assert plan["resourceTargetPlan"]["recommendedTargetId"] == "kaggle"
+    assert plan["sideEffects"]["cloudDistillationJob"] is False
+    assert "private teacher output" not in str(plan)
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "fine_tuning_distillation_plan_built"
+    assert log["metadata"]["plannerVersion"] == "cognix_distillation_planner_v1"
+    assert log["metadata"]["recommendedTargetId"] == "kaggle"
+    assert log["metadata"]["sideEffects"]["cloudDistillationJob"] is False
+    assert "private teacher output" not in log["metadataJson"]
 
 
 def test_fine_tuning_cloud_handoff_blocks_non_ceo_cpu_without_launch(monkeypatch):
@@ -5667,8 +5828,10 @@ def test_worker_queue_registry_declares_cloud_training_without_execution():
     queues = {item["id"]: item for item in registry["queues"]}
     assert "simulation_run" in queues["local_probe"]["acceptedJobTypes"]
     assert "sandbox_experiment" in queues["local_probe"]["acceptedJobTypes"]
+    assert "distillation_job" in queues["gpu_long_running"]["acceptedJobTypes"]
     assert "cloud_training" in queues
     assert "cloud_training_job" in queues["cloud_training"]["acceptedJobTypes"]
+    assert "cloud_distillation_job" in queues["cloud_training"]["acceptedJobTypes"]
     assert queues["cloud_training"]["requiresHumanConfirmation"] is True
 
 
@@ -6819,8 +6982,11 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "cloud_training_targets" in modules["cognix-fine-tuning"]["capabilities"]
     assert "cloud_training_handoff" in modules["cognix-fine-tuning"]["capabilities"]
     assert "dataset_validation_plan" in modules["cognix-fine-tuning"]["capabilities"]
+    assert "distillation_planning" in modules["cognix-fine-tuning"]["capabilities"]
+    assert "teacher_student_contract" in modules["cognix-fine-tuning"]["capabilities"]
     assert "/api/cognix/fine-tuning/dataset/validate" in modules["cognix-fine-tuning"]["routes"]
     assert "/api/cognix/fine-tuning/cloud-handoff-plan" in modules["cognix-fine-tuning"]["routes"]
+    assert "/api/cognix/fine-tuning/distillation-plan" in modules["cognix-fine-tuning"]["routes"]
     assert modules["cognix-dataset-builder"]["dependencyState"]["ready"] is True
     assert "dataset_builder" in modules["cognix-dataset-builder"]["capabilities"]
     assert "synthetic_example_generation" in modules["cognix-dataset-builder"]["capabilities"]
