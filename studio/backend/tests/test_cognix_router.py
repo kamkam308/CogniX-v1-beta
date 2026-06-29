@@ -75,6 +75,7 @@ from core.cognix import response_reflection as cognix_response_reflection
 from core.cognix import runtime_adapter as cognix_runtime_adapter
 from core.cognix import sandbox as cognix_sandbox
 from core.cognix import scheduled as cognix_scheduled
+from core.cognix import security_policy as cognix_security_policy
 from core.cognix import semantic_cache as cognix_semantic_cache
 from core.cognix import skill_memory as cognix_skill_memory
 from core.cognix import simulation as cognix_simulation
@@ -535,6 +536,72 @@ def test_orchestrator_policy_blocks_tool_execution(monkeypatch):
     assert "tool_execution" in blocked_ids
     assert plan["executionStrategy"]["requiresModelLoad"] is False
     assert plan["executionStrategy"]["willGenerate"] is False
+
+
+def test_frontend_boundary_contract_blocks_direct_model_runtime_urls():
+    contract = cognix_security_policy.build_frontend_boundary_contract(
+        endpoint = "http://localhost:11434/api/chat",
+        provider_type = "ollama",
+        model_id = "qwen-secret-model",
+        request_intent = "chat_generation",
+    )
+
+    assert contract["contractVersion"] == "cognix_frontend_boundary_contract_v1"
+    assert contract["status"] == "blocked_frontend_direct_model_call"
+    assert contract["allowedForFrontend"] is False
+    assert contract["frontendDirectModelCallAllowed"] is False
+    assert contract["backendProxyRequired"] is True
+    assert contract["orchestratorPlanRequired"] is True
+    assert contract["endpoint"]["hostIsDirectModelRuntime"] is True
+    assert contract["sideEffects"]["networkModelCall"] is False
+    assert contract["sideEffects"]["generation"] is False
+
+
+def test_frontend_boundary_contract_allows_backend_generation_proxy_without_generation():
+    contract = cognix_security_policy.build_frontend_boundary_contract(
+        endpoint = "/api/inference/chat/completions",
+        provider_type = "ollama",
+        model_id = "qwen-local",
+        request_intent = "chat_generation",
+    )
+
+    assert contract["status"] == "allowed_backend_boundary"
+    assert contract["allowedForFrontend"] is True
+    assert contract["endpoint"]["category"] == "backend_inference_proxy"
+    assert contract["frontendDirectModelCallAllowed"] is False
+    assert contract["secretPolicy"]["rawProviderSecretsInBrowserStorageAllowed"] is False
+    assert contract["sideEffects"]["modelLoad"] is False
+    assert contract["sideEffects"]["generation"] is False
+
+
+def test_frontend_boundary_endpoint_logs_sanitized_dry_run():
+    seed_accounts()
+    body = run_async(
+        cognix_routes.frontend_boundary_contract(
+            cognix_routes.FrontendBoundaryContractRequest(
+                endpoint = "/v1/chat/completions",
+                provider_type = "openai",
+                model_id = "secret-model-id-should-not-be-logged",
+                request_intent = "chat_generation",
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    contract = body["frontendBoundaryContract"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_frontend_boundary_contract_v1"
+    assert contract["allowedForFrontend"] is True
+    assert contract["sideEffects"]["auditWrite"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "frontend_boundary_contract_built"
+    assert log["metadata"]["frontendBoundaryVersion"] == "cognix_frontend_boundary_contract_v1"
+    assert log["metadata"]["allowedForFrontend"] is True
+    assert log["metadata"]["frontendDirectModelCallAllowed"] is False
+    assert "secret-model-id-should-not-be-logged" not in log["metadataJson"]
 
 
 def test_fine_tuning_plan_endpoint_prepares_qlora_without_training(monkeypatch):
@@ -8197,9 +8264,12 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "runtime_fallback_chain" in modules["cognix-local-core"]["capabilities"]
     assert "runtime_failover_contract" in modules["cognix-local-core"]["capabilities"]
     assert "tensorrt_llm_adapter" in modules["cognix-local-core"]["capabilities"]
+    assert "frontend_inference_boundary_contract" in modules["cognix-local-core"]["capabilities"]
+    assert "orchestrator_required_generation_boundary" in modules["cognix-local-core"]["capabilities"]
     assert "/api/cognix/orchestrator/plan" in modules["cognix-local-core"]["routes"]
     assert "/api/cognix/runtime/plan" in modules["cognix-local-core"]["routes"]
     assert "/api/cognix/runtime/fallback-plan" in modules["cognix-local-core"]["routes"]
+    assert "/api/cognix/runtime/frontend-boundary-contract" in modules["cognix-local-core"]["routes"]
     assert "/api/cognix/modules/manifests" in modules["cognix-local-core"]["routes"]
     assert "project_dna" in modules["cognix-projects"]["capabilities"]
     assert "project_dna_context_injection" in modules["cognix-projects"]["capabilities"]

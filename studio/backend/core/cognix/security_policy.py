@@ -11,9 +11,11 @@ contract for what remains blocked until a dedicated guarded executor exists.
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlparse
 
 
 COGNIX_SECURITY_POLICY_VERSION = "cognix_security_policy_v1"
+COGNIX_FRONTEND_BOUNDARY_CONTRACT_VERSION = "cognix_frontend_boundary_contract_v1"
 
 
 PATH_RISK_LEVELS = {
@@ -28,6 +30,26 @@ SENSITIVE_PATHS = {
     "tool_plan",
     "guided_fine_tuning",
     "codex_guarded_pipeline",
+}
+
+BACKEND_GENERATION_ENDPOINTS = {
+    "/v1/chat/completions": "backend_openai_compatible_proxy",
+    "/api/inference/chat/completions": "backend_inference_proxy",
+    "/api/inference/cancel": "backend_cancel_proxy",
+}
+
+DIRECT_MODEL_HOSTS = {
+    "api.openai.com",
+    "api.anthropic.com",
+    "generativelanguage.googleapis.com",
+    "localhost:11434",
+    "127.0.0.1:11434",
+}
+
+DIRECT_MODEL_PATHS = {
+    "/api/generate",
+    "/api/chat",
+    "/v1/completions",
 }
 
 
@@ -56,6 +78,72 @@ def _allowed_actions(path: str) -> list[str]:
     elif path == "codex_guarded_pipeline":
         actions.append("plan_codex_pipeline")
     return actions
+
+
+def _endpoint_parts(endpoint: str) -> tuple[str, str, str]:
+    parsed = urlparse(endpoint.strip())
+    if parsed.scheme or parsed.netloc:
+        return parsed.scheme, parsed.netloc.lower(), parsed.path or "/"
+    return "", "", parsed.path or endpoint.strip().split("?", 1)[0] or "/"
+
+
+def build_frontend_boundary_contract(
+    *,
+    endpoint: str,
+    provider_type: str | None = None,
+    model_id: str | None = None,
+    request_intent: str | None = None,
+) -> dict[str, Any]:
+    scheme, host, path = _endpoint_parts(endpoint)
+    endpoint_category = BACKEND_GENERATION_ENDPOINTS.get(path)
+    direct_host = host in DIRECT_MODEL_HOSTS or host.endswith(".openai.com") or host.endswith(".anthropic.com")
+    direct_path = path in DIRECT_MODEL_PATHS and endpoint_category is None
+    browser_external_url = bool(scheme and host and not endpoint_category)
+    allowed_backend_boundary = bool(endpoint_category and not direct_host and not direct_path)
+    blocked = direct_host or direct_path or browser_external_url or not allowed_backend_boundary
+
+    return {
+        "contractVersion": COGNIX_FRONTEND_BOUNDARY_CONTRACT_VERSION,
+        "mode": "frontend_backend_boundary_dry_run",
+        "status": "blocked_frontend_direct_model_call" if blocked else "allowed_backend_boundary",
+        "endpoint": {
+            "path": path,
+            "category": endpoint_category or "unknown",
+            "schemePresent": bool(scheme),
+            "hostPresent": bool(host),
+            "hostIsDirectModelRuntime": direct_host,
+            "pathIsDirectModelRuntime": direct_path,
+        },
+        "requestIntent": request_intent or "chat_generation",
+        "providerType": provider_type or "unknown",
+        "modelIdDeclared": bool(model_id),
+        "allowedForFrontend": not blocked,
+        "backendProxyRequired": True,
+        "orchestratorPlanRequired": True,
+        "frontendDirectModelCallAllowed": False,
+        "frontendDirectToolExecutionAllowed": False,
+        "secretPolicy": {
+            "apiKeysMustStayServerSide": True,
+            "encryptedProviderKeyOnly": True,
+            "rawProviderSecretsInBrowserStorageAllowed": False,
+        },
+        "blockedActions": [
+            "browser_to_model_runtime",
+            "browser_to_external_model_api",
+            "browser_to_ollama",
+            "browser_secret_forwarding",
+        ],
+        "sideEffects": {
+            "modelLoad": False,
+            "generation": False,
+            "networkModelCall": False,
+            "toolExecution": False,
+            "secretRead": False,
+            "secretWrite": False,
+            "runtimeMutation": False,
+            "auditWrite": False,
+        },
+    }
 
 
 def _blocked_actions(path: str, readiness: str) -> list[dict[str, str]]:

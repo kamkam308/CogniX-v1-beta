@@ -63,6 +63,8 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
             "runtime_fallback_chain",
             "runtime_failover_contract",
             "tensorrt_llm_adapter",
+            "frontend_inference_boundary_contract",
+            "orchestrator_required_generation_boundary",
         ],
         "routes": [
             "/api/cognix/models/registry",
@@ -71,6 +73,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
             "/api/cognix/orchestrator/plan",
             "/api/cognix/runtime/plan",
             "/api/cognix/runtime/fallback-plan",
+            "/api/cognix/runtime/frontend-boundary-contract",
             "/api/cognix/modules/registry",
             "/api/cognix/modules/manifests",
             "/api/cognix/modules/plan",

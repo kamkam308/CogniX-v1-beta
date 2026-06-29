@@ -83,6 +83,7 @@ from core.cognix import response_reflection as cognix_response_reflection
 from core.cognix import runtime_adapter as cognix_runtime_adapter
 from core.cognix import sandbox as cognix_sandbox
 from core.cognix import scheduled as cognix_scheduled
+from core.cognix import security_policy as cognix_security_policy
 from core.cognix import semantic_cache as cognix_semantic_cache
 from core.cognix import skill_memory as cognix_skill_memory
 from core.cognix import simulation as cognix_simulation
@@ -1191,6 +1192,15 @@ class RuntimeFallbackPlanRequest(BaseModel):
     requested_optimization_ids: list[str] | None = Field(None, alias = "requestedOptimizationIds")
     allow_cloud_fallback: bool = Field(False, alias = "allowCloudFallback")
     data_sensitivity: str | None = Field(None, alias = "dataSensitivity", max_length = 80)
+
+
+class FrontendBoundaryContractRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    endpoint: str = Field(..., min_length = 1, max_length = 500)
+    provider_type: str | None = Field(None, alias = "providerType", max_length = 80)
+    model_id: str | None = Field(None, alias = "modelId", max_length = 240)
+    request_intent: str | None = Field(None, alias = "requestIntent", max_length = 120)
 
 
 class CodexPipelinePlanRequest(BaseModel):
@@ -4462,6 +4472,47 @@ async def runtime_fallback_plan(
         "auditLogId": audit.get("id"),
         "sideEffects": fallback_plan.get("sideEffects", {}),
         "plannerVersion": cognix_runtime_adapter.COGNIX_RUNTIME_FALLBACK_CONTRACT_VERSION,
+    }
+
+
+@router.post("/runtime/frontend-boundary-contract")
+async def frontend_boundary_contract(
+    payload: FrontendBoundaryContractRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    contract = cognix_security_policy.build_frontend_boundary_contract(
+        endpoint = payload.endpoint,
+        provider_type = payload.provider_type,
+        model_id = payload.model_id,
+        request_intent = payload.request_intent,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "frontend_boundary_contract_built",
+        resource_type = "cognix_frontend_boundary_contract",
+        resource_id = str(contract.get("endpoint", {}).get("category") or "unknown"),
+        severity = "notice" if contract.get("allowedForFrontend") else "warning",
+        metadata = {
+            "frontendBoundaryVersion": contract.get("contractVersion"),
+            "status": contract.get("status"),
+            "endpoint": contract.get("endpoint", {}),
+            "requestIntent": contract.get("requestIntent"),
+            "providerType": contract.get("providerType"),
+            "modelIdDeclared": contract.get("modelIdDeclared"),
+            "allowedForFrontend": contract.get("allowedForFrontend"),
+            "backendProxyRequired": contract.get("backendProxyRequired"),
+            "orchestratorPlanRequired": contract.get("orchestratorPlanRequired"),
+            "frontendDirectModelCallAllowed": contract.get("frontendDirectModelCallAllowed"),
+            "sideEffects": contract.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "frontendBoundaryContract": contract,
+        "auditLogId": audit.get("id"),
+        "sideEffects": contract.get("sideEffects", {}),
+        "plannerVersion": cognix_security_policy.COGNIX_FRONTEND_BOUNDARY_CONTRACT_VERSION,
     }
 
 
