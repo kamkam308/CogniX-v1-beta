@@ -180,6 +180,63 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_admin_user_views_target_created
             ON cognix_admin_user_views(target_username, created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_chat_access_policies (
+            id TEXT PRIMARY KEY,
+            policy_scope TEXT NOT NULL DEFAULT 'organization',
+            scope_id TEXT NOT NULL DEFAULT 'default',
+            mode TEXT NOT NULL DEFAULT 'e2ee_strict',
+            admin_chat_access INTEGER NOT NULL DEFAULT 0,
+            require_reason INTEGER NOT NULL DEFAULT 1,
+            retention_days INTEGER NOT NULL DEFAULT 90,
+            updated_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(policy_scope, scope_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_chat_access_policies_scope
+            ON cognix_chat_access_policies(policy_scope, scope_id);
+
+        CREATE TABLE IF NOT EXISTS cognix_admin_chat_access_logs (
+            id TEXT PRIMARY KEY,
+            admin_username TEXT NOT NULL,
+            target_username TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            access_mode TEXT NOT NULL DEFAULT 'metadata_only',
+            content_visible INTEGER NOT NULL DEFAULT 0,
+            reason TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_admin_chat_access_logs_target
+            ON cognix_admin_chat_access_logs(target_username, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_admin_chat_access_logs_admin
+            ON cognix_admin_chat_access_logs(admin_username, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_admin_chat_access_logs_thread
+            ON cognix_admin_chat_access_logs(thread_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_conversation_audit_metadata (
+            id TEXT PRIMARY KEY,
+            thread_id TEXT NOT NULL UNIQUE,
+            username TEXT NOT NULL,
+            project_id TEXT,
+            model_id TEXT NOT NULL DEFAULT 'unknown',
+            risk_level TEXT NOT NULL DEFAULT 'low',
+            message_count INTEGER NOT NULL DEFAULT 0,
+            token_total INTEGER NOT NULL DEFAULT 0,
+            tool_call_count INTEGER NOT NULL DEFAULT 0,
+            document_access_count INTEGER NOT NULL DEFAULT 0,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_conversation_audit_username
+            ON cognix_conversation_audit_metadata(username, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_conversation_audit_project
+            ON cognix_conversation_audit_metadata(project_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_conversation_audit_risk
+            ON cognix_conversation_audit_metadata(risk_level, updated_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_bans (
             id TEXT PRIMARY KEY,
             username TEXT,
@@ -2400,6 +2457,360 @@ def list_token_usage_events(username: str | None = None, *, limit: int = 1000) -
                 (safe_limit,),
             ).fetchall()
         return _rows_to_dicts(rows)
+    finally:
+        conn.close()
+
+
+CHAT_ACCESS_POLICY_MODES = {"e2ee_strict", "enterprise_compliance"}
+CHAT_RISK_LEVELS = {"low", "medium", "high", "critical"}
+
+
+def _normalize_chat_policy_mode(mode: str) -> str:
+    normalized = (mode or "e2ee_strict").strip().lower()
+    if normalized not in CHAT_ACCESS_POLICY_MODES:
+        raise ValueError("Unsupported chat access policy mode")
+    return normalized
+
+
+def _normalize_chat_risk_level(risk_level: str) -> str:
+    normalized = (risk_level or "low").strip().lower()
+    return normalized if normalized in CHAT_RISK_LEVELS else "low"
+
+
+def _hydrate_chat_access_policy(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    item = dict(row)
+    item["admin_chat_access"] = bool(item.get("admin_chat_access"))
+    item["require_reason"] = bool(item.get("require_reason"))
+    return item
+
+
+def upsert_chat_access_policy(
+    *,
+    policy_scope: str = "organization",
+    scope_id: str = "default",
+    mode: str = "e2ee_strict",
+    admin_chat_access: bool = False,
+    require_reason: bool = True,
+    retention_days: int = 90,
+    updated_by: str,
+) -> dict[str, Any]:
+    normalized_scope = _normalize_admin_key(policy_scope or "organization", label = "chat policy scope")
+    normalized_scope_id = str(scope_id or "default").strip()[:160] or "default"
+    normalized_mode = _normalize_chat_policy_mode(mode)
+    safe_retention = max(1, min(int(retention_days or 90), 3650))
+    now = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_chat_access_policies
+                (
+                    id,
+                    policy_scope,
+                    scope_id,
+                    mode,
+                    admin_chat_access,
+                    require_reason,
+                    retention_days,
+                    updated_by,
+                    created_at,
+                    updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(policy_scope, scope_id) DO UPDATE SET
+                mode = excluded.mode,
+                admin_chat_access = excluded.admin_chat_access,
+                require_reason = excluded.require_reason,
+                retention_days = excluded.retention_days,
+                updated_by = excluded.updated_by,
+                updated_at = excluded.updated_at
+            """,
+            (
+                _new_id("capol"),
+                normalized_scope,
+                normalized_scope_id,
+                normalized_mode,
+                1 if admin_chat_access else 0,
+                1 if require_reason else 0,
+                safe_retention,
+                str(updated_by or "")[:160],
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        return _hydrate_chat_access_policy(
+            conn.execute(
+                """
+                SELECT * FROM cognix_chat_access_policies
+                WHERE policy_scope = ? AND scope_id = ?
+                """,
+                (normalized_scope, normalized_scope_id),
+            ).fetchone()
+        ) or {}
+    finally:
+        conn.close()
+
+
+def get_chat_access_policy(
+    policy_scope: str = "organization",
+    scope_id: str = "default",
+) -> dict[str, Any] | None:
+    normalized_scope = _normalize_admin_key(policy_scope or "organization", label = "chat policy scope")
+    normalized_scope_id = str(scope_id or "default").strip()[:160] or "default"
+    conn = get_connection()
+    try:
+        return _hydrate_chat_access_policy(
+            conn.execute(
+                """
+                SELECT * FROM cognix_chat_access_policies
+                WHERE policy_scope = ? AND scope_id = ?
+                """,
+                (normalized_scope, normalized_scope_id),
+            ).fetchone()
+        )
+    finally:
+        conn.close()
+
+
+def list_chat_access_policies() -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM cognix_chat_access_policies
+            ORDER BY updated_at DESC
+            """
+        ).fetchall()
+        return [item for item in (_hydrate_chat_access_policy(row) for row in rows) if item is not None]
+    finally:
+        conn.close()
+
+
+def record_admin_chat_access(
+    *,
+    admin_username: str,
+    target_username: str,
+    thread_id: str,
+    access_mode: str,
+    content_visible: bool,
+    reason: str,
+) -> dict[str, Any]:
+    clean_reason = (reason or "").strip()
+    if len(clean_reason) < 3:
+        raise ValueError("Admin chat access reason is required")
+    access_id = _new_id("chatacc")
+    created_at = _now()
+    normalized_access_mode = _normalize_admin_key(access_mode or "metadata_only", label = "chat access mode")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_admin_chat_access_logs
+                (
+                    id,
+                    admin_username,
+                    target_username,
+                    thread_id,
+                    access_mode,
+                    content_visible,
+                    reason,
+                    created_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                access_id,
+                str(admin_username or "")[:160],
+                str(target_username or "")[:160],
+                str(thread_id or "")[:180],
+                normalized_access_mode,
+                1 if content_visible else 0,
+                clean_reason[:500],
+                created_at,
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM cognix_admin_chat_access_logs WHERE id = ?",
+            (access_id,),
+        ).fetchone()
+        item = row_to_dict(row) or {}
+        item["content_visible"] = bool(item.get("content_visible"))
+        return item
+    finally:
+        conn.close()
+
+
+def list_admin_chat_access_logs(
+    *,
+    target_username: str | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        safe_limit = max(1, min(int(limit or 200), 500))
+        if target_username:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_admin_chat_access_logs
+                WHERE target_username = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (target_username, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_admin_chat_access_logs
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+        items = _rows_to_dicts(rows)
+        for item in items:
+            item["content_visible"] = bool(item.get("content_visible"))
+        return items
+    finally:
+        conn.close()
+
+
+def _hydrate_conversation_audit_metadata(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    item = dict(row)
+    item["message_count"] = int(item.get("message_count") or 0)
+    item["token_total"] = int(item.get("token_total") or 0)
+    item["tool_call_count"] = int(item.get("tool_call_count") or 0)
+    item["document_access_count"] = int(item.get("document_access_count") or 0)
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def upsert_conversation_audit_metadata(
+    *,
+    thread_id: str,
+    username: str,
+    project_id: str | None = None,
+    model_id: str = "unknown",
+    risk_level: str = "low",
+    message_count: int = 0,
+    token_total: int = 0,
+    tool_call_count: int = 0,
+    document_access_count: int = 0,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    clean_thread_id = str(thread_id or "").strip()
+    if not clean_thread_id:
+        raise ValueError("Conversation audit metadata requires a thread id")
+    now = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_conversation_audit_metadata
+                (
+                    id,
+                    thread_id,
+                    username,
+                    project_id,
+                    model_id,
+                    risk_level,
+                    message_count,
+                    token_total,
+                    tool_call_count,
+                    document_access_count,
+                    metadata_json,
+                    updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(thread_id) DO UPDATE SET
+                username = excluded.username,
+                project_id = excluded.project_id,
+                model_id = excluded.model_id,
+                risk_level = excluded.risk_level,
+                message_count = excluded.message_count,
+                token_total = excluded.token_total,
+                tool_call_count = excluded.tool_call_count,
+                document_access_count = excluded.document_access_count,
+                metadata_json = excluded.metadata_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                _new_id("caud"),
+                clean_thread_id[:180],
+                str(username or "")[:160],
+                str(project_id)[:160] if project_id else None,
+                str(model_id or "unknown")[:240],
+                _normalize_chat_risk_level(risk_level),
+                max(0, int(message_count or 0)),
+                max(0, int(token_total or 0)),
+                max(0, int(tool_call_count or 0)),
+                max(0, int(document_access_count or 0)),
+                json.dumps(metadata or {}, ensure_ascii = False),
+                now,
+            ),
+        )
+        conn.commit()
+        return _hydrate_conversation_audit_metadata(
+            conn.execute(
+                "SELECT * FROM cognix_conversation_audit_metadata WHERE thread_id = ?",
+                (clean_thread_id[:180],),
+            ).fetchone()
+        ) or {}
+    finally:
+        conn.close()
+
+
+def get_conversation_audit_metadata(thread_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        return _hydrate_conversation_audit_metadata(
+            conn.execute(
+                "SELECT * FROM cognix_conversation_audit_metadata WHERE thread_id = ?",
+                (str(thread_id or "").strip()[:180],),
+            ).fetchone()
+        )
+    finally:
+        conn.close()
+
+
+def list_conversation_audit_metadata(
+    *,
+    username: str | None = None,
+    limit: int = 5000,
+) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        safe_limit = max(1, min(int(limit or 5000), 5000))
+        if username:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_conversation_audit_metadata
+                WHERE username = ?
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (username, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_conversation_audit_metadata
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+        return [
+            item
+            for item in (_hydrate_conversation_audit_metadata(row) for row in rows)
+            if item is not None
+        ]
     finally:
         conn.close()
 

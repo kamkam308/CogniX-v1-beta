@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from auth import storage as auth_storage
 from auth.authentication import get_current_jwt_subject
+from core.cognix import admin_chat as cognix_admin_chat
 from core.cognix import admin_security as cognix_admin_security
 from core.cognix import admin_users as cognix_admin_users
 from core.cognix import apps as cognix_apps
@@ -110,6 +111,24 @@ class AdminUserLimitRequest(BaseModel):
     unit: str = Field("", max_length = 80)
     scope: str = Field("user", max_length = 80)
     reason: str | None = Field(None, max_length = 500)
+
+
+class AdminChatPolicyRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    mode: Literal["e2ee_strict", "enterprise_compliance"] = "e2ee_strict"
+    admin_chat_access: bool = Field(False, alias = "adminChatAccess")
+    require_reason: bool = Field(True, alias = "requireReason")
+    retention_days: int = Field(90, alias = "retentionDays", ge = 1, le = 3650)
+    policy_scope: str = Field("organization", alias = "policyScope", max_length = 80)
+    scope_id: str = Field("default", alias = "scopeId", max_length = 160)
+
+
+class AdminChatExportPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    reason: str = Field(..., min_length = 3, max_length = 500)
+    output_format: Literal["json", "jsonl", "markdown"] = Field("json", alias = "outputFormat")
 
 
 class ReportCreateRequest(BaseModel):
@@ -1099,6 +1118,65 @@ def _build_admin_user_bundle() -> dict[str, Any]:
     }
 
 
+def _refresh_conversation_audit_metadata(
+    threads: list[dict[str, Any]],
+    messages: list[dict[str, Any]],
+    token_events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    stored: list[dict[str, Any]] = []
+    for record in cognix_admin_chat.build_conversation_audit_metadata_records(
+        threads = threads,
+        messages = messages,
+        token_events = token_events,
+    ):
+        stored.append(
+            cognix_db.upsert_conversation_audit_metadata(
+                thread_id = str(record.get("threadId") or ""),
+                username = str(record.get("username") or ""),
+                project_id = record.get("projectId"),
+                model_id = str(record.get("modelId") or "unknown"),
+                risk_level = str(record.get("riskLevel") or "low"),
+                message_count = int(record.get("messageCount") or 0),
+                token_total = int(record.get("tokenTotal") or 0),
+                tool_call_count = int(record.get("toolCallCount") or 0),
+                document_access_count = int(record.get("documentAccessCount") or 0),
+                metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {},
+            )
+        )
+    return stored
+
+
+def _build_admin_chat_bundle(
+    *,
+    refresh_metadata: bool = False,
+) -> dict[str, Any]:
+    threads = list_chat_threads(
+        include_archived = True,
+        owner_username = "",
+        include_all = True,
+    )
+    projects = list_chat_projects(
+        include_archived = True,
+        owner_username = "",
+        include_all = True,
+    )
+    messages = list_chat_messages_for_threads([str(thread.get("id")) for thread in threads if thread.get("id")])
+    token_events = cognix_db.list_token_usage_events(limit = 5000)
+    audit_metadata = (
+        _refresh_conversation_audit_metadata(threads, messages, token_events)
+        if refresh_metadata
+        else cognix_db.list_conversation_audit_metadata()
+    )
+    return {
+        "threads": threads,
+        "projects": projects,
+        "messages": messages,
+        "tokenEvents": token_events,
+        "auditMetadata": audit_metadata,
+        "policy": cognix_db.get_chat_access_policy(),
+    }
+
+
 def _row(row: dict[str, Any]) -> dict[str, Any]:
     """Return a frontend-friendly copy while keeping raw fields available."""
 
@@ -1279,6 +1357,18 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "target_username": "targetUsername",
         "viewed_by": "viewedBy",
         "view_reason": "viewReason",
+        "policy_scope": "policyScope",
+        "scope_id": "scopeId",
+        "admin_chat_access": "adminChatAccess",
+        "require_reason": "requireReason",
+        "retention_days": "retentionDays",
+        "admin_username": "adminUsername",
+        "access_mode": "accessMode",
+        "content_visible": "contentVisible",
+        "message_count": "messageCount",
+        "token_total": "tokenTotal",
+        "tool_call_count": "toolCallCount",
+        "document_access_count": "documentAccessCount",
         "gpt_id": "gptId",
         "runtime_plan_json": "runtimePlanJson",
         "privacy_level": "privacyLevel",
@@ -1408,6 +1498,9 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         out["ignored"] = bool(out["ignored"])
     if "gpuAvailable" in out:
         out["gpuAvailable"] = bool(out["gpuAvailable"])
+    for bool_key in ("adminChatAccess", "requireReason", "contentVisible"):
+        if bool_key in out:
+            out[bool_key] = bool(out[bool_key])
     if isinstance(out.get("steps"), list):
         out["steps"] = [_row(item) if isinstance(item, dict) else item for item in out["steps"]]
     if isinstance(out.get("runs"), list):
@@ -10068,6 +10161,241 @@ async def admin_dashboard(current_subject: str = Depends(get_current_jwt_subject
             }
             for item in cognix_db.KNOWN_ATTACK_SIGNATURES
         ],
+    }
+
+
+@router.get("/admin/chats/blueprint")
+async def admin_chats_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    blueprint = cognix_admin_chat.build_admin_chat_blueprint()
+    return {
+        "username": current_subject,
+        "adminChatBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+    }
+
+
+@router.get("/admin/chats/policy")
+async def admin_chat_policy(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    stored_policy = cognix_db.get_chat_access_policy()
+    policy = cognix_admin_chat.normalize_chat_access_policy(stored_policy)
+    return {
+        "username": current_subject,
+        "policy": policy,
+        "storedPolicy": _row(stored_policy) if stored_policy else None,
+        "sideEffects": cognix_admin_chat.build_admin_chat_blueprint()["sideEffects"],
+        "plannerVersion": cognix_admin_chat.COGNIX_CHAT_ACCESS_POLICY_VERSION,
+    }
+
+
+@router.put("/admin/chats/policy")
+async def admin_update_chat_policy(
+    payload: AdminChatPolicyRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    try:
+        policy = cognix_db.upsert_chat_access_policy(
+            policy_scope = payload.policy_scope,
+            scope_id = payload.scope_id,
+            mode = payload.mode,
+            admin_chat_access = payload.admin_chat_access,
+            require_reason = payload.require_reason,
+            retention_days = payload.retention_days,
+            updated_by = current_subject,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from exc
+    normalized_policy = cognix_admin_chat.normalize_chat_access_policy(policy)
+    side_effects = {
+        **cognix_admin_chat.build_admin_chat_blueprint()["sideEffects"],
+        "policyWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = None,
+        actor_username = current_subject,
+        action = "admin_chat_policy_updated",
+        resource_type = "cognix_chat_access_policy",
+        resource_id = str(policy.get("id") or ""),
+        severity = "notice",
+        metadata = {
+            "policyVersion": cognix_admin_chat.COGNIX_CHAT_ACCESS_POLICY_VERSION,
+            "mode": normalized_policy["mode"],
+            "contentVisible": normalized_policy["contentVisible"],
+            "adminChatAccess": normalized_policy["adminChatAccess"],
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "policy": normalized_policy,
+        "storedPolicy": _row(policy),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_admin_chat.COGNIX_CHAT_ACCESS_POLICY_VERSION,
+    }
+
+
+@router.get("/admin/chats")
+async def admin_chats(
+    username: str | None = None,
+    project_id: str | None = None,
+    model_id: str | None = None,
+    risk_level: str | None = None,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_chat_bundle(refresh_metadata = True)
+    directory = cognix_admin_chat.build_admin_chat_directory(
+        threads = bundle["threads"],
+        messages = bundle["messages"],
+        projects = bundle["projects"],
+        token_events = bundle["tokenEvents"],
+        audit_metadata = bundle["auditMetadata"],
+        policy = bundle["policy"],
+        filters = {
+            "username": username,
+            "projectId": project_id,
+            "modelId": model_id,
+            "riskLevel": risk_level,
+        },
+    )
+    side_effects = {
+        **directory.get("sideEffects", {}),
+        "auditMetadataWrite": True,
+    }
+    return {
+        "username": current_subject,
+        "directory": directory,
+        "conversationAuditMetadata": _rows(bundle["auditMetadata"]),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_admin_chat.COGNIX_ADMIN_CHAT_SERVICE_VERSION,
+    }
+
+
+@router.get("/admin/chats/{thread_id}")
+async def admin_chat_detail(
+    thread_id: str,
+    reason: str | None = None,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_chat_bundle(refresh_metadata = True)
+    thread = next((item for item in bundle["threads"] if str(item.get("id") or "") == thread_id), None)
+    if thread is None:
+        raise HTTPException(status_code = 404, detail = "Conversation not found")
+    audit_metadata = cognix_db.get_conversation_audit_metadata(thread_id) or {}
+    try:
+        detail = cognix_admin_chat.build_admin_chat_detail(
+            thread = thread,
+            messages = bundle["messages"],
+            policy = bundle["policy"],
+            reason = reason,
+            audit_metadata = audit_metadata,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from exc
+
+    content_visible = bool(detail.get("policy", {}).get("contentVisible"))
+    access_mode = "content_visible" if content_visible else "metadata_only"
+    target_username = str(detail.get("thread", {}).get("ownerUsername") or "")
+    try:
+        access_log = cognix_db.record_admin_chat_access(
+            admin_username = current_subject,
+            target_username = target_username,
+            thread_id = thread_id,
+            access_mode = access_mode,
+            content_visible = content_visible,
+            reason = str(detail.get("access", {}).get("reason") or reason or ""),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from exc
+    side_effects = {
+        **detail.get("sideEffects", {}),
+        "adminAccessLogWrite": True,
+        "auditMetadataWrite": True,
+        "auditWrite": True,
+        "contentRead": content_visible,
+    }
+    audit = cognix_db.create_audit_log(
+        username = target_username,
+        actor_username = current_subject,
+        action = "admin_chat_detail_viewed",
+        resource_type = "chat_thread",
+        resource_id = thread_id,
+        severity = "notice",
+        metadata = {
+            "adminChatServiceVersion": cognix_admin_chat.COGNIX_ADMIN_CHAT_SERVICE_VERSION,
+            "policyMode": detail.get("policy", {}).get("mode"),
+            "contentVisible": content_visible,
+            "accessMode": access_mode,
+            "accessLogId": access_log.get("id"),
+            "reason": detail.get("access", {}).get("reason"),
+            "messageCount": len(detail.get("messages") or []),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "detail": detail,
+        "accessLog": _row(access_log),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_admin_chat.COGNIX_CHAT_AUDIT_VIEWER_VERSION,
+    }
+
+
+@router.post("/admin/chats/{thread_id}/export-plan")
+async def admin_chat_export_plan(
+    thread_id: str,
+    payload: AdminChatExportPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_chat_bundle(refresh_metadata = True)
+    thread = next((item for item in bundle["threads"] if str(item.get("id") or "") == thread_id), None)
+    if thread is None:
+        raise HTTPException(status_code = 404, detail = "Conversation not found")
+    try:
+        plan = cognix_admin_chat.build_conversation_export_plan(
+            thread = thread,
+            messages = bundle["messages"],
+            policy = bundle["policy"],
+            reason = payload.reason,
+            output_format = payload.output_format,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from exc
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "auditMetadataWrite": True,
+        "auditWrite": True,
+        "exportWrite": False,
+    }
+    audit = cognix_db.create_audit_log(
+        username = str(plan.get("targetUsername") or ""),
+        actor_username = current_subject,
+        action = "admin_chat_export_planned",
+        resource_type = "chat_thread",
+        resource_id = thread_id,
+        severity = "notice",
+        metadata = {
+            "conversationExportVersion": cognix_admin_chat.COGNIX_CONVERSATION_EXPORT_VERSION,
+            "outputFormat": plan.get("outputFormat"),
+            "contentIncluded": plan.get("contentIncluded"),
+            "dryRun": plan.get("dryRun"),
+            "reason": plan.get("reason"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "exportPlan": plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_admin_chat.COGNIX_CONVERSATION_EXPORT_VERSION,
     }
 
 

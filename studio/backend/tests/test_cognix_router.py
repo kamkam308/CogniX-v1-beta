@@ -14,6 +14,7 @@ if str(_BACKEND_ROOT) not in sys.path:
 
 from auth import storage
 from auth.authentication import get_current_jwt_subject
+from core.cognix import admin_chat as cognix_admin_chat
 from core.cognix import admin_users as cognix_admin_users
 from core.cognix import apps as cognix_apps
 from core.cognix import background_agents as cognix_background_agents
@@ -5680,6 +5681,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-codex-secure-agent",
         "cognix-enterprise-foundation",
         "cognix-admin-operations",
+        "cognix-admin-chat-access",
         "cognix-admin-security-center",
         "cognix-deployment-manager",
     }.issubset(modules)
@@ -5956,6 +5958,12 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "token_usage_dashboard" in modules["cognix-admin-operations"]["capabilities"]
     assert "/api/cognix/admin/users" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/usage" in modules["cognix-admin-operations"]["routes"]
+    assert modules["cognix-admin-chat-access"]["status"] == "enabled"
+    assert modules["cognix-admin-chat-access"]["dependencyState"]["ready"] is True
+    assert "e2ee_metadata_only_mode" in modules["cognix-admin-chat-access"]["capabilities"]
+    assert "admin_chat_access_audit" in modules["cognix-admin-chat-access"]["capabilities"]
+    assert "/api/cognix/admin/chats" in modules["cognix-admin-chat-access"]["routes"]
+    assert "/api/cognix/admin/chats/{thread_id}/export-plan" in modules["cognix-admin-chat-access"]["routes"]
     assert "ai_risk_scoring" in modules["cognix-admin-security-center"]["capabilities"]
     assert "live_system_health" in modules["cognix-admin-security-center"]["capabilities"]
     assert "/api/cognix/admin/risk-scores" in modules["cognix-admin-security-center"]["routes"]
@@ -6992,6 +7000,186 @@ def test_admin_users_endpoints_are_admin_only_audited_and_persist_limits():
     assert "admin_users_directory_viewed" in actions
     assert "admin_user_detail_viewed" in actions
     assert "admin_user_limit_updated" in actions
+
+
+def test_admin_chat_core_redacts_e2ee_and_allows_compliance_content():
+    thread = {
+        "id": "thread-admin-chat-core",
+        "title": "Support",
+        "modelType": "ollama",
+        "modelId": "qwen-local",
+        "createdAt": 100,
+        "ownerUsername": "alice",
+    }
+    messages = [
+        {
+            "id": "msg-secret",
+            "threadId": "thread-admin-chat-core",
+            "role": "user",
+            "content": [{"type": "text", "text": "secret physics note"}],
+            "createdAt": 101,
+        }
+    ]
+
+    strict_detail = cognix_admin_chat.build_admin_chat_detail(
+        thread = thread,
+        messages = messages,
+        policy = None,
+        reason = "security review",
+    )
+    assert strict_detail["policy"]["mode"] == "e2ee_strict"
+    assert strict_detail["policy"]["contentVisible"] is False
+    assert strict_detail["messages"][0]["content"] is None
+    assert strict_detail["messages"][0]["contentRedacted"] is True
+    assert strict_detail["sideEffects"]["generation"] is False
+    assert strict_detail["sideEffects"]["toolExecution"] is False
+
+    compliance_detail = cognix_admin_chat.build_admin_chat_detail(
+        thread = thread,
+        messages = messages,
+        policy = {
+            "mode": "enterprise_compliance",
+            "admin_chat_access": 1,
+            "require_reason": 1,
+        },
+        reason = "legal review",
+    )
+    assert compliance_detail["policy"]["contentVisible"] is True
+    assert compliance_detail["messages"][0]["content"][0]["text"] == "secret physics note"
+    assert compliance_detail["sideEffects"]["contentRead"] is True
+
+    with pytest.raises(ValueError):
+        cognix_admin_chat.build_admin_chat_detail(
+            thread = thread,
+            messages = messages,
+            policy = None,
+            reason = "",
+        )
+
+
+def test_admin_chat_access_routes_are_policy_gated_audited_and_persistent():
+    seed_accounts()
+    now = int(time.time())
+    studio_db_storage.upsert_chat_thread(
+        {
+            "id": "thread-admin-chat-1",
+            "title": "Private research",
+            "modelType": "ollama",
+            "modelId": "qwen-local",
+            "createdAt": now,
+        },
+        owner_username = "alice",
+    )
+    studio_db_storage.upsert_chat_message(
+        {
+            "id": "msg-admin-chat-1",
+            "threadId": "thread-admin-chat-1",
+            "role": "user",
+            "content": [{"type": "text", "text": "secret physics note"}],
+            "metadata": {"toolCalls": [{"name": "library_search"}], "documents": ["doc-1"]},
+            "createdAt": now + 1,
+        }
+    )
+    cognix_db.create_token_usage_event(
+        "alice",
+        model_id = "qwen-local",
+        provider = "ollama",
+        input_tokens = 12,
+        output_tokens = 8,
+    )
+
+    with pytest.raises(HTTPException) as user_read:
+        run_async(cognix_routes.admin_chats(current_subject = "alice"))
+    assert user_read.value.status_code == 403
+
+    blueprint = run_async(cognix_routes.admin_chats_blueprint(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    assert "AdminChatService" in blueprint["adminChatBlueprint"]["services"]
+    assert blueprint["adminChatBlueprint"]["policies"]["strictE2eeDefault"] is True
+
+    directory = run_async(cognix_routes.admin_chats(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    row = next(item for item in directory["directory"]["threads"] if item["threadId"] == "thread-admin-chat-1")
+    assert row["ownerUsername"] == "alice"
+    assert row["messageCount"] == 1
+    assert row["contentAvailable"] is False
+    assert row["metadataOnly"] is True
+    assert row["toolCallCount"] == 1
+    assert row["documentAccessCount"] == 1
+    assert directory["sideEffects"]["auditMetadataWrite"] is True
+    assert cognix_db.get_conversation_audit_metadata("thread-admin-chat-1") is not None
+
+    with pytest.raises(HTTPException) as missing_reason:
+        run_async(
+            cognix_routes.admin_chat_detail(
+                "thread-admin-chat-1",
+                current_subject = storage.DEFAULT_ADMIN_USERNAME,
+            )
+        )
+    assert missing_reason.value.status_code == 400
+
+    strict_detail = run_async(
+        cognix_routes.admin_chat_detail(
+            "thread-admin-chat-1",
+            reason = "support review",
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert strict_detail["detail"]["policy"]["contentVisible"] is False
+    assert strict_detail["detail"]["messages"][0]["content"] is None
+    assert "secret physics note" not in str(strict_detail["detail"]["messages"])
+    assert strict_detail["accessLog"]["targetUsername"] == "alice"
+    assert strict_detail["accessLog"]["contentVisible"] is False
+    assert strict_detail["sideEffects"]["adminAccessLogWrite"] is True
+    assert strict_detail["sideEffects"]["contentRead"] is False
+
+    updated_policy = run_async(
+        cognix_routes.admin_update_chat_policy(
+            cognix_routes.AdminChatPolicyRequest(
+                mode = "enterprise_compliance",
+                admin_chat_access = True,
+                require_reason = True,
+                retention_days = 365,
+            ),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert updated_policy["policy"]["mode"] == "enterprise_compliance"
+    assert updated_policy["policy"]["contentVisible"] is True
+    assert updated_policy["storedPolicy"]["adminChatAccess"] is True
+    assert cognix_db.get_chat_access_policy()["mode"] == "enterprise_compliance"
+
+    compliance_detail = run_async(
+        cognix_routes.admin_chat_detail(
+            "thread-admin-chat-1",
+            reason = "compliance review",
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert compliance_detail["detail"]["policy"]["contentVisible"] is True
+    assert compliance_detail["detail"]["messages"][0]["content"][0]["text"] == "secret physics note"
+    assert compliance_detail["accessLog"]["contentVisible"] is True
+    assert compliance_detail["sideEffects"]["contentRead"] is True
+
+    export = run_async(
+        cognix_routes.admin_chat_export_plan(
+            "thread-admin-chat-1",
+            cognix_routes.AdminChatExportPlanRequest(
+                reason = "legal export",
+                output_format = "json",
+            ),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert export["exportPlan"]["dryRun"] is True
+    assert export["exportPlan"]["contentIncluded"] is True
+    assert export["sideEffects"]["exportWrite"] is False
+
+    logs = cognix_db.list_admin_chat_access_logs(target_username = "alice")
+    assert len(logs) == 2
+    assert [item["content_visible"] for item in logs] == [True, False]
+    actions = [log["action"] for log in cognix_db.list_audit_logs(limit = 20)]
+    assert "admin_chat_policy_updated" in actions
+    assert "admin_chat_detail_viewed" in actions
+    assert "admin_chat_export_planned" in actions
 
 
 def test_admin_security_center_builds_threat_risk_and_health(monkeypatch):
