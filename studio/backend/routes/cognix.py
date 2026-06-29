@@ -1163,6 +1163,10 @@ def _build_admin_security_bundle() -> dict[str, Any]:
     audit_logs = cognix_db.list_audit_logs(limit = 500)
     bans = cognix_db.list_bans()
     reports = cognix_db.list_reports()
+    security_threats = cognix_db.list_security_threats(limit = 500)
+    security_reports = cognix_db.list_security_reports(limit = 500)
+    vulnerability_findings = cognix_db.list_vulnerability_findings(limit = 500)
+    remediation_tasks = cognix_db.list_security_remediation_tasks(limit = 500)
     threat_report = cognix_admin_security.build_security_threat_report(
         security_events = security_events,
         audit_logs = audit_logs,
@@ -1181,12 +1185,27 @@ def _build_admin_security_bundle() -> dict[str, Any]:
         risk_scoring = risk_scoring,
         audit_logs = audit_logs,
     )
+    security_threat_center = cognix_admin_security.build_security_threat_center(
+        security_events = security_events,
+        audit_logs = audit_logs,
+        bans = bans,
+        reports = reports,
+        security_threats = security_threats,
+        security_reports = security_reports,
+        vulnerability_findings = vulnerability_findings,
+        remediation_tasks = remediation_tasks,
+    )
     return {
         "securityEvents": security_events,
         "auditLogs": audit_logs,
         "bans": bans,
         "reports": reports,
+        "securityThreats": security_threats,
+        "securityReports": security_reports,
+        "vulnerabilityFindings": vulnerability_findings,
+        "remediationTasks": remediation_tasks,
         "threatReport": threat_report,
+        "securityThreatCenter": security_threat_center,
         "riskScoring": risk_scoring,
         "systemHealth": system_health,
     }
@@ -1503,6 +1522,13 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "updated_by": "updatedBy",
         "size_bytes": "sizeBytes",
         "metadata_json": "metadataJson",
+        "evidence_json": "evidenceJson",
+        "files_json": "filesJson",
+        "recommended_solution": "recommendedSolution",
+        "installed_version": "installedVersion",
+        "fixed_version": "fixedVersion",
+        "package_name": "packageName",
+        "source_name": "sourceName",
         "schedule_text": "scheduleText",
         "display_name": "displayName",
         "app_id": "appId",
@@ -11886,13 +11912,26 @@ async def admin_update_ban(
     }
 
 
+@router.get("/admin/security-threats/blueprint")
+async def admin_security_threats_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    return cognix_admin_security.build_security_threats_blueprint()
+
+
 @router.get("/admin/security-threats")
 async def admin_security_threats(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
     _require_admin(current_subject)
     bundle = _build_admin_security_bundle()
     return {
         "threats": _rows(bundle["securityEvents"]),
+        "securityThreats": _rows(bundle["securityThreats"]),
+        "securityReports": _rows(bundle["securityReports"]),
+        "vulnerabilityFindings": _rows(bundle["vulnerabilityFindings"]),
+        "remediationTasks": _rows(bundle["remediationTasks"]),
         "threatReport": bundle["threatReport"],
+        "securityThreatCenter": bundle["securityThreatCenter"],
+        "incidentCategories": bundle["securityThreatCenter"]["incidentCategories"],
+        "codexSummaries": bundle["securityThreatCenter"]["codexSummaries"],
         "riskScoring": bundle["riskScoring"],
         "knownAttacks": [
             {
@@ -11902,7 +11941,8 @@ async def admin_security_threats(current_subject: str = Depends(get_current_jwt_
             }
             for item in cognix_db.KNOWN_ATTACK_SIGNATURES
         ],
-        "sideEffects": bundle["threatReport"]["sideEffects"],
+        "blueprint": cognix_admin_security.build_security_threats_blueprint(),
+        "sideEffects": bundle["securityThreatCenter"]["sideEffects"],
     }
 
 

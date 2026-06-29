@@ -1304,6 +1304,14 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "status": "planned",
         "capabilities": [
             "security_threat_reports",
+            "security_threat_service",
+            "vulnerability_scanner_adapter",
+            "codex_security_summarizer",
+            "threat_report_service",
+            "permission_error_detection",
+            "codex_incident_detection",
+            "secret_exposure_detection",
+            "cloud_risk_detection",
             "ai_risk_scoring",
             "live_system_health",
             "sensitive_action_audit",
@@ -1311,6 +1319,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         ],
         "routes": [
             "/api/cognix/admin/security-threats",
+            "/api/cognix/admin/security-threats/blueprint",
             "/api/cognix/admin/risk-scores",
             "/api/cognix/admin/system-health",
             "/api/cognix/admin/audit-logs",

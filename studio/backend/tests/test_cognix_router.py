@@ -5997,8 +5997,15 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "admin_chat_access_audit" in modules["cognix-admin-chat-access"]["capabilities"]
     assert "/api/cognix/admin/chats" in modules["cognix-admin-chat-access"]["routes"]
     assert "/api/cognix/admin/chats/{thread_id}/export-plan" in modules["cognix-admin-chat-access"]["routes"]
+    assert "security_threat_service" in modules["cognix-admin-security-center"]["capabilities"]
+    assert "vulnerability_scanner_adapter" in modules["cognix-admin-security-center"]["capabilities"]
+    assert "codex_security_summarizer" in modules["cognix-admin-security-center"]["capabilities"]
+    assert "permission_error_detection" in modules["cognix-admin-security-center"]["capabilities"]
+    assert "secret_exposure_detection" in modules["cognix-admin-security-center"]["capabilities"]
+    assert "cloud_risk_detection" in modules["cognix-admin-security-center"]["capabilities"]
     assert "ai_risk_scoring" in modules["cognix-admin-security-center"]["capabilities"]
     assert "live_system_health" in modules["cognix-admin-security-center"]["capabilities"]
+    assert "/api/cognix/admin/security-threats/blueprint" in modules["cognix-admin-security-center"]["routes"]
     assert "/api/cognix/admin/risk-scores" in modules["cognix-admin-security-center"]["routes"]
     assert "/api/cognix/admin/system-health" in modules["cognix-admin-security-center"]["routes"]
     assert modules["cognix-deployment-manager"]["dependencyState"]["ready"] is True
@@ -8172,19 +8179,106 @@ def test_admin_security_center_builds_threat_risk_and_health(monkeypatch):
         severity = "warning",
         metadata = {"permissionKey": "developer_mode"},
     )
+    cognix_db.create_audit_log(
+        username = "alice",
+        actor_username = storage.DEFAULT_ADMIN_USERNAME,
+        action = "permission_denied",
+        resource_type = "permission",
+        resource_id = "codex:run",
+        severity = "warning",
+        metadata = {"missingPermission": "codex:run"},
+    )
+    cognix_db.create_audit_log(
+        username = "alice",
+        actor_username = "codex",
+        action = "codex_run_denied",
+        resource_type = "codex",
+        resource_id = "cloud-training",
+        severity = "warning",
+        metadata = {"target": "google_colab", "reason": "permission denied"},
+    )
+    cognix_db.create_audit_log(
+        username = "alice",
+        actor_username = "system",
+        action = "secret_exposure_detected",
+        resource_type = "configuration",
+        resource_id = ".env",
+        severity = "critical",
+        metadata = {"file": ".env", "token": "redacted"},
+    )
+    cognix_db.create_security_threat(
+        title = "HTTPS configuration drift",
+        category = "configuration_issues",
+        severity = "medium",
+        summary = "cognix.local HTTPS configuration needs review.",
+        evidence = {"host": "cognix.local"},
+        files = ["studio/backend/run.py"],
+        recommended_solution = "Verify HTTPS proxy and certificate configuration.",
+    )
+    finding = cognix_db.create_vulnerability_finding(
+        package_name = "llama-cpp-python",
+        source_name = "pip",
+        installed_version = "0.0.1",
+        fixed_version = "0.0.2",
+        severity = "high",
+        description = "Runtime dependency needs upgrade.",
+        evidence = {"file": "requirements.txt"},
+    )
+    cognix_db.create_security_report(
+        title = "Dependency risk summary",
+        summary = "Risky dependency queued for review.",
+        impact = "Runtime surface could be exposed.",
+        severity = "high",
+        report = {"findingId": finding["id"]},
+    )
+    cognix_db.create_security_remediation_task(
+        title = "Upgrade llama-cpp-python",
+        priority = "high",
+        recommended_solution = "Upgrade dependency before enabling remote training workers.",
+        finding_id = finding["id"],
+        assignee = storage.DEFAULT_ADMIN_USERNAME,
+    )
 
     with pytest.raises(HTTPException) as user_read:
         run_async(cognix_routes.admin_security_threats(current_subject = "alice"))
     assert user_read.value.status_code == 403
+
+    with pytest.raises(HTTPException) as user_blueprint:
+        run_async(cognix_routes.admin_security_threats_blueprint(current_subject = "alice"))
+    assert user_blueprint.value.status_code == 403
+
+    blueprint = run_async(
+        cognix_routes.admin_security_threats_blueprint(current_subject = storage.DEFAULT_ADMIN_USERNAME)
+    )
+    assert blueprint["blueprintVersion"] == "cognix_security_threat_center_v1"
+    assert "SecurityThreatService" in blueprint["services"]
+    assert "VulnerabilityScannerAdapter" in blueprint["services"]
+    assert "cognix_vulnerability_findings" in blueprint["tables"]
+    assert "filesAffected" in blueprint["codexSummaryFields"]
+    assert blueprint["sideEffects"]["externalScan"] is False
 
     security = run_async(
         cognix_routes.admin_security_threats(current_subject = storage.DEFAULT_ADMIN_USERNAME)
     )
 
     assert security["threatReport"]["reportVersion"] == "cognix_admin_security_v1"
+    assert security["securityThreatCenter"]["centerVersion"] == "cognix_security_threat_center_v1"
+    assert security["securityThreatCenter"]["scannerAdapterVersion"] == "cognix_vulnerability_scanner_adapter_v1"
+    assert security["securityThreatCenter"]["summary"]["cloudRisks"] >= 1
+    assert security["securityThreatCenter"]["summary"]["codexIncidents"] >= 1
+    assert security["securityThreatCenter"]["summary"]["permissionErrors"] >= 1
+    assert security["securityThreatCenter"]["summary"]["exposedSecrets"] >= 1
+    categories = {item["id"]: item for item in security["incidentCategories"]}
+    assert categories["risky_dependencies"]["count"] >= 1
+    assert categories["configuration_issues"]["count"] >= 1
+    assert any(item["title"] == "llama-cpp-python" for item in categories["risky_dependencies"]["items"])
+    assert any(item["recommendedSolution"] for item in security["codexSummaries"])
     assert security["threatReport"]["summary"]["critical"] >= 1
     assert security["threatReport"]["summary"]["activeBans"] == 1
     assert security["sideEffects"]["databaseWrite"] is False
+    assert security["sideEffects"]["generation"] is False
+    assert security["vulnerabilityFindings"][0]["packageName"] == "llama-cpp-python"
+    assert security["remediationTasks"][0]["recommendedSolution"]
     threat = next(item for item in security["threatReport"]["threats"] if item["sourceEventId"] == event["id"])
     assert threat["title"] == "SQL injection"
     assert threat["severity"] == "critical"

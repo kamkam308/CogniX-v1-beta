@@ -19,6 +19,7 @@ import { Route as projectsRoute } from "./routes/projects";
 import { Route as changePasswordRoute } from "./routes/change-password";
 import { Route as settingsRoute } from "./routes/settings";
 import { Route as studioRoute } from "./routes/studio";
+import { Route as adminSecurityThreatsRoute } from "./routes/admin-security-threats";
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
@@ -35,6 +36,7 @@ const routeTree = rootRoute.addChildren([
   exportRoute,
   dataRecipesRoute,
   dataRecipeRoute,
+  adminSecurityThreatsRoute,
 ]);
 
 const COGNIX_LOGO_SRC = `${import.meta.env.BASE_URL}cognix-logo-512.png`;

@@ -15,11 +15,92 @@ from typing import Any
 COGNIX_ADMIN_SECURITY_VERSION = "cognix_admin_security_v1"
 COGNIX_RISK_SCORING_VERSION = "cognix_risk_scoring_v1"
 COGNIX_SYSTEM_HEALTH_VERSION = "cognix_system_health_v1"
+COGNIX_SECURITY_THREAT_CENTER_VERSION = "cognix_security_threat_center_v1"
+COGNIX_VULNERABILITY_SCANNER_ADAPTER_VERSION = "cognix_vulnerability_scanner_adapter_v1"
 
 SEVERITY_ORDER = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 SEVERITY_POINTS = {"low": 8, "medium": 18, "high": 34, "critical": 55}
 ACTIVE_BAN_STATUSES = {"pending_admin_review", "active", "permanent"}
 OPEN_REPORT_STATUSES = {"open", "in_review"}
+RESOLVED_STATUSES = {"resolved", "closed", "cleared"}
+IGNORED_STATUSES = {"ignored", "false_positive"}
+SECURITY_THREAT_STATUSES = ["open", "active", "in_review", "resolved", "ignored"]
+SECRET_EXPOSURE_TERMS = (
+    "secret",
+    "api_key",
+    "api key",
+    "access_token",
+    "refresh_token",
+    "hf_token",
+    "bearer ",
+    ".env",
+    "credential",
+    "password",
+)
+
+SECURITY_THREAT_SERVICES = [
+    "SecurityThreatService",
+    "VulnerabilityScannerAdapter",
+    "CodexSecuritySummarizer",
+    "ThreatReportService",
+]
+
+SECURITY_THREAT_TABLES = [
+    "cognix_security_threats",
+    "cognix_security_reports",
+    "cognix_vulnerability_findings",
+    "cognix_security_remediation_tasks",
+    "cognix_security_events",
+    "cognix_audit_logs",
+]
+
+SECURITY_THREAT_CATEGORIES = [
+    {
+        "id": "vulnerabilities_detected",
+        "label": "Vulnerabilities detected",
+        "description": "Security signatures, risky routes, and vulnerability findings.",
+    },
+    {
+        "id": "risky_dependencies",
+        "label": "Risky dependencies",
+        "description": "Packages, runtimes, or model dependencies that need review.",
+    },
+    {
+        "id": "permission_errors",
+        "label": "Permission errors",
+        "description": "Missing, denied, revoked, or conflicting permission decisions.",
+    },
+    {
+        "id": "access_denied",
+        "label": "Access denied attempts",
+        "description": "Forbidden or blocked access attempts across CogniX.",
+    },
+    {
+        "id": "user_anomalies",
+        "label": "User anomalies",
+        "description": "Bans, reports, and unusual user behavior that needs admin review.",
+    },
+    {
+        "id": "codex_incidents",
+        "label": "Codex incidents",
+        "description": "Codex tool, agent, sandbox, or automation incidents.",
+    },
+    {
+        "id": "configuration_issues",
+        "label": "Configuration issues",
+        "description": "Misconfiguration signals from runtime, auth, HTTPS, and providers.",
+    },
+    {
+        "id": "exposed_secrets",
+        "label": "Exposed secrets",
+        "description": "Tokens, keys, env files, and credential exposure signals.",
+    },
+    {
+        "id": "cloud_risks",
+        "label": "Cloud risks",
+        "description": "Colab, Kaggle, provider, and remote execution security risks.",
+    },
+]
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -76,6 +157,209 @@ def _event_subject(event: dict[str, Any]) -> str:
         return username
     client_key = _norm(event.get("client_key") or event.get("clientKey"))
     return client_key or "anonymous"
+
+
+def _text_blob(*values: Any) -> str:
+    parts: list[str] = []
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, dict):
+            parts.extend(_text_blob(key, item) for key, item in value.items())
+            continue
+        if isinstance(value, list):
+            parts.extend(_text_blob(item) for item in value)
+            continue
+        parts.append(str(value))
+    return " ".join(item for item in parts if item).lower()
+
+
+def _category_definitions() -> dict[str, dict[str, Any]]:
+    return {item["id"]: dict(item) for item in SECURITY_THREAT_CATEGORIES}
+
+
+def _new_category_state(category: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": category["id"],
+        "label": category["label"],
+        "description": category["description"],
+        "count": 0,
+        "severity": "low",
+        "status": "clear",
+        "items": [],
+    }
+
+
+def _normalize_status(value: Any, fallback: str = "open") -> str:
+    normalized = _norm(value, fallback).lower()
+    if normalized in IGNORED_STATUSES:
+        return "ignored"
+    if normalized in RESOLVED_STATUSES:
+        return "resolved"
+    if normalized in {"pending_admin_review", "pending", "active", "permanent"}:
+        return "active"
+    if normalized in {"in_review", "review"}:
+        return "in_review"
+    return normalized if normalized else fallback
+
+
+def _category_status(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return "clear"
+    statuses = {_normalize_status(item.get("status")) for item in items}
+    if statuses <= {"ignored"}:
+        return "ignored"
+    if statuses <= {"resolved"}:
+        return "resolved"
+    if "active" in statuses:
+        return "active"
+    if "in_review" in statuses:
+        return "in_review"
+    return "open"
+
+
+def _files_from_item(item: dict[str, Any]) -> list[str]:
+    files = item.get("filesAffected") or item.get("files") or item.get("files_json") or item.get("filesJson") or []
+    if isinstance(files, list):
+        return [str(file) for file in files if str(file).strip()]
+    if isinstance(files, str) and files.strip() and files.strip() != "[]":
+        return [files.strip()]
+    return []
+
+
+def _solution_for_category(category_id: str, severity: str) -> str:
+    if category_id == "risky_dependencies":
+        return "Pin or upgrade the dependency, verify compatibility, then mark the finding resolved."
+    if category_id == "permission_errors":
+        return "Review the permission decision, align role overrides, and keep an audit trail."
+    if category_id == "access_denied":
+        return "Correlate denied attempts with auth logs, rate limits, and active bans."
+    if category_id == "user_anomalies":
+        return "Review user history, reports, and bans before reactivation or escalation."
+    if category_id == "codex_incidents":
+        return "Inspect the Codex action, sandbox context, and requested tool permissions."
+    if category_id == "configuration_issues":
+        return "Fix the configuration drift and verify HTTPS, auth, and provider settings."
+    if category_id == "exposed_secrets":
+        return "Rotate exposed credentials, remove them from storage, and audit recent access."
+    if category_id == "cloud_risks":
+        return "Confirm the cloud target, data sensitivity, and provider permissions before execution."
+    if severity in {"critical", "high"}:
+        return "Review immediately, preserve evidence, and apply the recommended remediation."
+    return "Track the finding and close it once evidence confirms the risk is gone."
+
+
+def _impact_for_category(category_id: str, severity: str) -> str:
+    if category_id == "risky_dependencies":
+        return "A vulnerable dependency can expose the runtime or training workflow."
+    if category_id == "permission_errors":
+        return "A permission mismatch can grant or block sensitive CogniX actions incorrectly."
+    if category_id == "access_denied":
+        return "Repeated denied attempts can indicate credential abuse or route probing."
+    if category_id == "user_anomalies":
+        return "Unusual user behavior can put projects, chats, or admin workflows at risk."
+    if category_id == "codex_incidents":
+        return "A Codex incident can affect code execution, tools, or automation safety."
+    if category_id == "configuration_issues":
+        return "Configuration drift can break authentication, HTTPS, providers, or local safety gates."
+    if category_id == "exposed_secrets":
+        return "Exposed credentials can allow unauthorized access to local or cloud resources."
+    if category_id == "cloud_risks":
+        return "Cloud execution can leak data or consume remote resources if policy is wrong."
+    if severity == "critical":
+        return "Critical security risk that can affect account, data, or runtime integrity."
+    return "Security risk that needs admin review and remediation tracking."
+
+
+def _summarize_signal(signal: dict[str, Any], category: dict[str, Any]) -> dict[str, Any]:
+    severity = _severity(signal.get("severity"))
+    category_id = _norm(category.get("id"), "vulnerabilities_detected")
+    evidence = _norm(signal.get("evidence")) or _norm(signal.get("description")) or "No direct evidence captured."
+    return {
+        "id": _norm(signal.get("id"), f"{category_id}:summary"),
+        "category": category_id,
+        "title": _norm(signal.get("title"), category.get("label", "Security threat")),
+        "description": _norm(signal.get("description"))
+        or f"{category.get('label', 'Security threat')} detected by CogniX security services.",
+        "impact": _norm(signal.get("impact")) or _impact_for_category(category_id, severity),
+        "severity": severity,
+        "filesAffected": _files_from_item(signal),
+        "evidence": evidence[:300],
+        "recommendedSolution": _norm(signal.get("recommendedSolution"))
+        or _norm(signal.get("solution"))
+        or _solution_for_category(category_id, severity),
+        "status": _normalize_status(signal.get("status")),
+        "sourceType": _norm(signal.get("sourceType") or signal.get("source_type"), "security_signal"),
+        "sourceId": _norm(signal.get("sourceId") or signal.get("source_id") or signal.get("id")),
+        "createdAt": _norm(signal.get("createdAt") or signal.get("created_at")),
+    }
+
+
+def _append_signal(
+    categories: dict[str, dict[str, Any]],
+    category_id: str,
+    signal: dict[str, Any],
+) -> None:
+    if category_id not in categories:
+        category_id = "vulnerabilities_detected"
+    category = categories[category_id]
+    summary = _summarize_signal(signal, category)
+    category["items"].append(summary)
+    category["count"] = len(category["items"])
+    category["severity"] = _max_severity(category["items"])
+    category["status"] = _category_status(category["items"])
+
+
+def _category_from_security_text(text: str, fallback: str = "vulnerabilities_detected") -> str:
+    if any(term in text for term in ("dependency", "package", "pip", "npm", "llama", "runtime")):
+        return "risky_dependencies"
+    if "permission" in text or "role" in text or "override" in text:
+        return "permission_errors"
+    if any(term in text for term in ("denied", "forbidden", "unauthorized", "401", "403")):
+        return "access_denied"
+    if any(term in text for term in ("codex", "sandbox", "agent", "tool")):
+        return "codex_incidents"
+    if any(term in text for term in ("config", "configuration", "https", "cognix.local", "provider")):
+        return "configuration_issues"
+    if any(term in text for term in SECRET_EXPOSURE_TERMS):
+        return "exposed_secrets"
+    if any(term in text for term in ("cloud", "kaggle", "colab", "google colab", "gpu", "provider")):
+        return "cloud_risks"
+    if any(term in text for term in ("ban", "report", "anomal", "abuse")):
+        return "user_anomalies"
+    return fallback
+
+
+def build_security_threats_blueprint() -> dict[str, Any]:
+    return {
+        "blueprintVersion": COGNIX_SECURITY_THREAT_CENTER_VERSION,
+        "mode": "native_read_only",
+        "route": "/admin/security-threats",
+        "services": SECURITY_THREAT_SERVICES,
+        "tables": SECURITY_THREAT_TABLES,
+        "categories": SECURITY_THREAT_CATEGORIES,
+        "filters": {
+            "severity": ["critical", "high", "medium", "low"],
+            "status": SECURITY_THREAT_STATUSES,
+        },
+        "codexSummaryFields": [
+            "title",
+            "description",
+            "impact",
+            "severity",
+            "filesAffected",
+            "evidence",
+            "recommendedSolution",
+            "status",
+        ],
+        "sideEffects": {
+            "databaseWrite": False,
+            "externalScan": False,
+            "networkCall": False,
+            "modelLoad": False,
+            "generation": False,
+        },
+    }
 
 
 def _threat_from_event(event: dict[str, Any]) -> dict[str, Any]:
@@ -186,6 +470,235 @@ def build_security_threat_report(
             "externalScan": False,
             "networkCall": False,
             "banMutation": False,
+        },
+    }
+
+
+def build_security_threat_center(
+    *,
+    security_events: list[dict[str, Any]],
+    audit_logs: list[dict[str, Any]],
+    bans: list[dict[str, Any]],
+    reports: list[dict[str, Any]],
+    security_threats: list[dict[str, Any]] | None = None,
+    security_reports: list[dict[str, Any]] | None = None,
+    vulnerability_findings: list[dict[str, Any]] | None = None,
+    remediation_tasks: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    definitions = _category_definitions()
+    categories = {
+        category_id: _new_category_state(category)
+        for category_id, category in definitions.items()
+    }
+
+    for event in security_events:
+        event_category = _norm(event.get("category"), "security_event").lower()
+        text = _text_blob(event)
+        category_id = "vulnerabilities_detected"
+        if event_category == "ssrf" or "cloud" in text:
+            category_id = "cloud_risks"
+        if any(term in text for term in SECRET_EXPOSURE_TERMS):
+            _append_signal(
+                categories,
+                "exposed_secrets",
+                {
+                    **_threat_from_event(event),
+                    "title": "Possible secret exposure",
+                    "sourceType": "security_event",
+                },
+            )
+        _append_signal(categories, category_id, _threat_from_event(event))
+
+    for audit in audit_logs:
+        action = _norm(audit.get("action")).lower()
+        resource_type = _norm(audit.get("resource_type") or audit.get("resourceType")).lower()
+        metadata = audit.get("metadata") or audit.get("metadata_json") or audit.get("metadataJson")
+        text = _text_blob(action, resource_type, audit.get("resource_id"), audit.get("severity"), metadata)
+        category_id = ""
+        if "codex" in action or resource_type in {"codex", "agent", "tool"}:
+            category_id = "codex_incidents"
+        elif "permission" in text and any(term in text for term in ("denied", "missing", "revoked", "failed", "error")):
+            category_id = "permission_errors"
+        elif any(term in text for term in ("access_denied", "denied", "forbidden", "unauthorized", "401", "403")):
+            category_id = "access_denied"
+        elif any(term in text for term in SECRET_EXPOSURE_TERMS):
+            category_id = "exposed_secrets"
+        elif any(term in text for term in ("config", "https", "cognix.local", "provider")):
+            category_id = "configuration_issues"
+        elif any(term in text for term in ("cloud", "kaggle", "colab", "remote_gpu")):
+            category_id = "cloud_risks"
+
+        if category_id:
+            severity = "high" if _norm(audit.get("severity")) == "critical" else "medium"
+            if category_id in {"exposed_secrets", "codex_incidents"} and _norm(audit.get("severity")) == "warning":
+                severity = "high"
+            _append_signal(
+                categories,
+                category_id,
+                {
+                    "id": _norm(audit.get("id"), "audit"),
+                    "title": _norm(audit.get("action"), "Audit security signal").replace("_", " ").title(),
+                    "description": f"Audit log signal for {_norm(audit.get('username') or audit.get('actor_username'), 'system')}.",
+                    "severity": severity,
+                    "evidence": _text_blob(audit.get("action"), audit.get("resource_type"), audit.get("resource_id"))[:300],
+                    "status": "open",
+                    "sourceType": "audit_log",
+                    "sourceId": _norm(audit.get("id")),
+                    "createdAt": _norm(audit.get("created_at") or audit.get("createdAt")),
+                },
+            )
+
+    for ban in bans:
+        if _norm(ban.get("status")).lower() in ACTIVE_BAN_STATUSES:
+            _append_signal(
+                categories,
+                "user_anomalies",
+                {
+                    "id": f"ban:{_norm(ban.get('id'), 'unknown')}",
+                    "title": "Active user ban",
+                    "description": f"User anomaly under admin review for {_norm(ban.get('username') or ban.get('client_key'), 'unknown')}.",
+                    "severity": "critical" if _norm(ban.get("status")) == "permanent" else "high",
+                    "evidence": _norm(ban.get("reason"), "ban record"),
+                    "status": _normalize_status(ban.get("status")),
+                    "sourceType": "ban",
+                    "sourceId": _norm(ban.get("id")),
+                    "createdAt": _norm(ban.get("created_at") or ban.get("createdAt")),
+                },
+            )
+
+    for report in reports:
+        text = _text_blob(report.get("category"), report.get("title"), report.get("message"), report.get("status"))
+        if not any(term in text for term in ("security", "cloud", "secret", "permission", "codex", "config", "abuse", "anomal")):
+            continue
+        category_id = _category_from_security_text(text, fallback = "user_anomalies")
+        _append_signal(
+            categories,
+            category_id,
+            {
+                "id": _norm(report.get("id"), "report"),
+                "title": _norm(report.get("title"), "Security report"),
+                "description": _norm(report.get("message"), "User report requires review."),
+                "severity": "high" if category_id in {"exposed_secrets", "cloud_risks"} else "medium",
+                "evidence": _norm(report.get("message") or report.get("title"), "report"),
+                "status": _normalize_status(report.get("status")),
+                "sourceType": "report",
+                "sourceId": _norm(report.get("id")),
+                "createdAt": _norm(report.get("created_at") or report.get("createdAt")),
+            },
+        )
+
+    for threat in security_threats or []:
+        text = _text_blob(threat)
+        category_id = _norm(threat.get("category"))
+        if category_id not in definitions:
+            category_id = _category_from_security_text(text)
+        _append_signal(
+            categories,
+            category_id,
+            {
+                "id": _norm(threat.get("id"), "threat"),
+                "title": _norm(threat.get("title"), "Security threat"),
+                "description": _norm(threat.get("summary") or threat.get("description"), "Persisted security threat."),
+                "severity": _severity(threat.get("severity")),
+                "filesAffected": _files_from_item(threat),
+                "evidence": _norm(threat.get("evidence") or threat.get("evidence_json") or text, "persisted threat"),
+                "recommendedSolution": _norm(threat.get("recommended_solution") or threat.get("recommendedSolution")),
+                "status": _normalize_status(threat.get("status")),
+                "sourceType": _norm(threat.get("source_type") or threat.get("sourceType"), "security_threat"),
+                "sourceId": _norm(threat.get("source_id") or threat.get("sourceId") or threat.get("id")),
+                "createdAt": _norm(threat.get("created_at") or threat.get("createdAt")),
+            },
+        )
+
+    for finding in vulnerability_findings or []:
+        package_name = _norm(finding.get("package_name") or finding.get("packageName") or finding.get("source_name"))
+        version = _norm(finding.get("installed_version") or finding.get("installedVersion"))
+        fixed = _norm(finding.get("fixed_version") or finding.get("fixedVersion"))
+        evidence = f"{package_name} {version}".strip()
+        if fixed:
+            evidence = f"{evidence} -> fixed in {fixed}".strip()
+        _append_signal(
+            categories,
+            "risky_dependencies",
+            {
+                "id": _norm(finding.get("id"), "finding"),
+                "title": _norm(finding.get("title"), package_name or "Risky dependency"),
+                "description": _norm(finding.get("description"), "Dependency finding from the native scanner adapter."),
+                "severity": _severity(finding.get("severity")),
+                "evidence": evidence or _norm(finding.get("evidence") or finding.get("evidence_json"), "dependency finding"),
+                "status": _normalize_status(finding.get("status")),
+                "sourceType": "vulnerability_finding",
+                "sourceId": _norm(finding.get("id")),
+                "createdAt": _norm(finding.get("created_at") or finding.get("createdAt")),
+            },
+        )
+
+    incident_categories = list(categories.values())
+    codex_summaries = [
+        item
+        for category in incident_categories
+        for item in category["items"]
+    ]
+    codex_summaries.sort(
+        key = lambda item: (
+            _severity_rank(item.get("severity")),
+            _norm(item.get("createdAt")),
+            _norm(item.get("title")),
+        ),
+        reverse = True,
+    )
+
+    severity_counts = {key: 0 for key in ("critical", "high", "medium", "low")}
+    status_counts = {key: 0 for key in (*SECURITY_THREAT_STATUSES, "clear")}
+    for item in codex_summaries:
+        severity_counts[_severity(item.get("severity"))] += 1
+        status = _normalize_status(item.get("status"))
+        status_counts[status] = status_counts.get(status, 0) + 1
+    for category in incident_categories:
+        if not category["items"]:
+            status_counts["clear"] = status_counts.get("clear", 0) + 1
+
+    overall_status = "green"
+    if severity_counts["critical"]:
+        overall_status = "red"
+    elif severity_counts["high"]:
+        overall_status = "yellow"
+
+    return {
+        "centerVersion": COGNIX_SECURITY_THREAT_CENTER_VERSION,
+        "scannerAdapterVersion": COGNIX_VULNERABILITY_SCANNER_ADAPTER_VERSION,
+        "mode": "native_read_only",
+        "services": SECURITY_THREAT_SERVICES,
+        "tables": SECURITY_THREAT_TABLES,
+        "summary": {
+            "status": overall_status,
+            "totalSignals": len(codex_summaries),
+            "categories": len(incident_categories),
+            "critical": severity_counts["critical"],
+            "high": severity_counts["high"],
+            "medium": severity_counts["medium"],
+            "low": severity_counts["low"],
+            "resolved": status_counts.get("resolved", 0),
+            "ignored": status_counts.get("ignored", 0),
+            "open": status_counts.get("open", 0) + status_counts.get("active", 0) + status_counts.get("in_review", 0),
+            "cloudRisks": categories["cloud_risks"]["count"],
+            "codexIncidents": categories["codex_incidents"]["count"],
+            "permissionErrors": categories["permission_errors"]["count"],
+            "exposedSecrets": categories["exposed_secrets"]["count"],
+            "statusCounts": status_counts,
+        },
+        "incidentCategories": incident_categories,
+        "codexSummaries": codex_summaries,
+        "securityThreats": security_threats or [],
+        "securityReports": security_reports or [],
+        "vulnerabilityFindings": vulnerability_findings or [],
+        "remediationTasks": remediation_tasks or [],
+        "sideEffects": {
+            "databaseWrite": False,
+            "externalScan": False,
+            "networkCall": False,
+            "modelLoad": False,
+            "generation": False,
         },
     }
 

@@ -500,6 +500,84 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_security_username
             ON cognix_security_events(username, created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_security_threats (
+            id TEXT PRIMARY KEY,
+            source_type TEXT NOT NULL DEFAULT 'manual',
+            source_id TEXT,
+            category TEXT NOT NULL DEFAULT 'vulnerabilities_detected',
+            title TEXT NOT NULL,
+            severity TEXT NOT NULL DEFAULT 'medium',
+            status TEXT NOT NULL DEFAULT 'open',
+            summary TEXT NOT NULL DEFAULT '',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            files_json TEXT NOT NULL DEFAULT '[]',
+            recommended_solution TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_security_threats_status
+            ON cognix_security_threats(status, severity, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_security_threats_source
+            ON cognix_security_threats(source_type, source_id);
+
+        CREATE TABLE IF NOT EXISTS cognix_security_reports (
+            id TEXT PRIMARY KEY,
+            threat_id TEXT,
+            title TEXT NOT NULL,
+            summary TEXT NOT NULL DEFAULT '',
+            impact TEXT NOT NULL DEFAULT '',
+            severity TEXT NOT NULL DEFAULT 'medium',
+            status TEXT NOT NULL DEFAULT 'open',
+            report_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_security_reports_status
+            ON cognix_security_reports(status, severity, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_security_reports_threat
+            ON cognix_security_reports(threat_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_vulnerability_findings (
+            id TEXT PRIMARY KEY,
+            source_name TEXT NOT NULL DEFAULT '',
+            package_name TEXT NOT NULL DEFAULT '',
+            installed_version TEXT NOT NULL DEFAULT '',
+            fixed_version TEXT NOT NULL DEFAULT '',
+            severity TEXT NOT NULL DEFAULT 'medium',
+            status TEXT NOT NULL DEFAULT 'open',
+            description TEXT NOT NULL DEFAULT '',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_vulnerability_findings_status
+            ON cognix_vulnerability_findings(status, severity, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_vulnerability_findings_package
+            ON cognix_vulnerability_findings(package_name, source_name);
+
+        CREATE TABLE IF NOT EXISTS cognix_security_remediation_tasks (
+            id TEXT PRIMARY KEY,
+            threat_id TEXT,
+            finding_id TEXT,
+            title TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open',
+            priority TEXT NOT NULL DEFAULT 'medium',
+            recommended_solution TEXT NOT NULL DEFAULT '',
+            assignee TEXT NOT NULL DEFAULT '',
+            due_at TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_security_remediation_status
+            ON cognix_security_remediation_tasks(status, priority, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_security_remediation_refs
+            ON cognix_security_remediation_tasks(threat_id, finding_id);
+
         CREATE TABLE IF NOT EXISTS cognix_ban_reports (
             id TEXT PRIMARY KEY,
             ban_id TEXT NOT NULL,
@@ -4306,6 +4384,287 @@ def list_security_events(limit: int = 200) -> list[dict[str, Any]]:
             (max(1, min(int(limit), 500)),),
         ).fetchall()
         return _rows_to_dicts(rows)
+    finally:
+        conn.close()
+
+
+def _normalize_security_severity(severity: str) -> str:
+    normalized = (severity or "medium").strip().lower()
+    return normalized if normalized in {"critical", "high", "medium", "low"} else "medium"
+
+
+def _normalize_security_status(status: str) -> str:
+    normalized = (status or "open").strip().lower()
+    return normalized if normalized in {"open", "active", "in_review", "resolved", "ignored"} else "open"
+
+
+def _inflate_security_threat(row: dict[str, Any]) -> dict[str, Any]:
+    row["evidence"] = _json_or_default(row.get("evidence_json"), {})
+    row["files"] = _json_or_default(row.get("files_json"), [])
+    return row
+
+
+def create_security_threat(
+    *,
+    title: str,
+    category: str = "vulnerabilities_detected",
+    severity: str = "medium",
+    status: str = "open",
+    summary: str = "",
+    evidence: dict[str, Any] | None = None,
+    files: list[str] | None = None,
+    recommended_solution: str = "",
+    source_type: str = "manual",
+    source_id: str | None = None,
+) -> dict[str, Any]:
+    created_at = _now()
+    threat_id = _new_id("sth")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_security_threats
+                (
+                    id, source_type, source_id, category, title, severity, status,
+                    summary, evidence_json, files_json, recommended_solution, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                threat_id,
+                source_type.strip()[:120] or "manual",
+                source_id,
+                category.strip()[:120] or "vulnerabilities_detected",
+                title.strip()[:240],
+                _normalize_security_severity(severity),
+                _normalize_security_status(status),
+                summary.strip(),
+                json.dumps(evidence or {}, ensure_ascii = False),
+                json.dumps(files or [], ensure_ascii = False),
+                recommended_solution.strip(),
+                created_at,
+                created_at,
+            ),
+        )
+        conn.commit()
+        row = row_to_dict(conn.execute("SELECT * FROM cognix_security_threats WHERE id = ?", (threat_id,)).fetchone()) or {}
+        return _inflate_security_threat(row)
+    finally:
+        conn.close()
+
+
+def list_security_threats(limit: int = 500) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM cognix_security_threats
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (max(1, min(int(limit), 1000)),),
+        ).fetchall()
+        return [_inflate_security_threat(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _inflate_security_report(row: dict[str, Any]) -> dict[str, Any]:
+    row["report"] = _json_or_default(row.get("report_json"), {})
+    return row
+
+
+def create_security_report(
+    *,
+    title: str,
+    summary: str = "",
+    impact: str = "",
+    severity: str = "medium",
+    status: str = "open",
+    report: dict[str, Any] | None = None,
+    threat_id: str | None = None,
+) -> dict[str, Any]:
+    created_at = _now()
+    report_id = _new_id("srep")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_security_reports
+                (id, threat_id, title, summary, impact, severity, status, report_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                report_id,
+                threat_id,
+                title.strip()[:240],
+                summary.strip(),
+                impact.strip(),
+                _normalize_security_severity(severity),
+                _normalize_security_status(status),
+                json.dumps(report or {}, ensure_ascii = False),
+                created_at,
+                created_at,
+            ),
+        )
+        conn.commit()
+        row = row_to_dict(conn.execute("SELECT * FROM cognix_security_reports WHERE id = ?", (report_id,)).fetchone()) or {}
+        return _inflate_security_report(row)
+    finally:
+        conn.close()
+
+
+def list_security_reports(limit: int = 500) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM cognix_security_reports
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (max(1, min(int(limit), 1000)),),
+        ).fetchall()
+        return [_inflate_security_report(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _inflate_vulnerability_finding(row: dict[str, Any]) -> dict[str, Any]:
+    row["evidence"] = _json_or_default(row.get("evidence_json"), {})
+    return row
+
+
+def create_vulnerability_finding(
+    *,
+    package_name: str,
+    source_name: str = "",
+    installed_version: str = "",
+    fixed_version: str = "",
+    severity: str = "medium",
+    status: str = "open",
+    description: str = "",
+    evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    created_at = _now()
+    finding_id = _new_id("vuln")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_vulnerability_findings
+                (
+                    id, source_name, package_name, installed_version, fixed_version,
+                    severity, status, description, evidence_json, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                finding_id,
+                source_name.strip()[:160],
+                package_name.strip()[:160],
+                installed_version.strip()[:80],
+                fixed_version.strip()[:80],
+                _normalize_security_severity(severity),
+                _normalize_security_status(status),
+                description.strip(),
+                json.dumps(evidence or {}, ensure_ascii = False),
+                created_at,
+                created_at,
+            ),
+        )
+        conn.commit()
+        row = row_to_dict(
+            conn.execute("SELECT * FROM cognix_vulnerability_findings WHERE id = ?", (finding_id,)).fetchone()
+        ) or {}
+        return _inflate_vulnerability_finding(row)
+    finally:
+        conn.close()
+
+
+def list_vulnerability_findings(limit: int = 500) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM cognix_vulnerability_findings
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (max(1, min(int(limit), 1000)),),
+        ).fetchall()
+        return [_inflate_vulnerability_finding(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _inflate_security_remediation_task(row: dict[str, Any]) -> dict[str, Any]:
+    row["metadata"] = _json_or_default(row.get("metadata_json"), {})
+    return row
+
+
+def create_security_remediation_task(
+    *,
+    title: str,
+    priority: str = "medium",
+    status: str = "open",
+    recommended_solution: str = "",
+    threat_id: str | None = None,
+    finding_id: str | None = None,
+    assignee: str = "",
+    due_at: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    created_at = _now()
+    task_id = _new_id("srt")
+    normalized_priority = _normalize_security_severity(priority)
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_security_remediation_tasks
+                (
+                    id, threat_id, finding_id, title, status, priority,
+                    recommended_solution, assignee, due_at, metadata_json, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_id,
+                threat_id,
+                finding_id,
+                title.strip()[:240],
+                _normalize_security_status(status),
+                normalized_priority,
+                recommended_solution.strip(),
+                assignee.strip()[:160],
+                due_at,
+                json.dumps(metadata or {}, ensure_ascii = False),
+                created_at,
+                created_at,
+            ),
+        )
+        conn.commit()
+        row = row_to_dict(
+            conn.execute("SELECT * FROM cognix_security_remediation_tasks WHERE id = ?", (task_id,)).fetchone()
+        ) or {}
+        return _inflate_security_remediation_task(row)
+    finally:
+        conn.close()
+
+
+def list_security_remediation_tasks(limit: int = 500) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM cognix_security_remediation_tasks
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (max(1, min(int(limit), 1000)),),
+        ).fetchall()
+        return [_inflate_security_remediation_task(row) for row in _rows_to_dicts(rows)]
     finally:
         conn.close()
 

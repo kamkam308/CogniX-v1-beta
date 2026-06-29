@@ -82,6 +82,7 @@ const CHAT_ONLY_ALLOWED = new Set([
 
 function isChatOnlyAllowed(pathname: string, trainingAccessible = false): boolean {
   if (CHAT_ONLY_ALLOWED.has(pathname)) return true;
+  if (pathname === "/admin" || pathname.startsWith("/admin/")) return true;
   if (trainingAccessible && (pathname === "/studio" || pathname.startsWith("/studio/"))) return true;
   if (pathname === "/data-recipes" || pathname.startsWith("/data-recipes/")) return true;
   return false;
