@@ -18,6 +18,7 @@ from core.cognix import apps as cognix_apps
 from core.cognix import background_agents as cognix_background_agents
 from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import codex_pipeline as cognix_codex_pipeline
+from core.cognix import command_palette as cognix_command_palette
 from core.cognix import context_graph as cognix_context_graph
 from core.cognix import context_heatmap as cognix_context_heatmap
 from core.cognix import context_manager as cognix_context_manager
@@ -895,6 +896,94 @@ def test_gpts_endpoint_stores_lists_runtime_plan_and_audits():
     actions = [item["action"] for item in admin_read["logs"][:2]]
     assert "gpt_runtime_plan_built" in actions
     assert "gpt_plan_built" in actions
+
+
+def test_command_palette_filters_commands_by_permissions_and_admin_role():
+    blueprint = cognix_command_palette.build_command_palette_blueprint()
+    search = cognix_command_palette.list_commands(
+        query = "codex",
+        granted_permissions = set(),
+        include_disabled = True,
+    )
+    commands = {item["id"]: item for item in search["commands"]}
+    admin_search = cognix_command_palette.list_commands(
+        query = "approval",
+        granted_permissions = set(),
+        is_admin = True,
+        include_disabled = True,
+    )
+    admin_commands = {item["id"]: item for item in admin_search["commands"]}
+    plan = cognix_command_palette.build_command_plan(
+        command_id = "launch_codex",
+        granted_permissions = set(),
+    )
+
+    assert blueprint["commandPaletteVersion"] == "cognix_command_palette_v1"
+    assert blueprint["policies"]["commandPlansAreDryRun"] is True
+    assert blueprint["sideEffects"]["toolExecution"] is False
+    assert commands["launch_codex"]["status"] == "missing_permissions"
+    assert commands["launch_codex"]["missingPermissions"] == ["developer_mode"]
+    assert admin_commands["view_approvals"]["available"] is True
+    assert plan["status"] == "missing_permissions"
+    assert plan["allowedToRun"] is False
+    assert plan["executionPlan"]["runsToolNow"] is False
+    assert plan["executionPlan"]["loadsModelNow"] is False
+
+
+def test_command_palette_endpoint_searches_plans_logs_and_audits():
+    seed_accounts()
+    cognix_db.grant_user_permission(
+        "alice",
+        "library:read",
+        granted_by = storage.DEFAULT_ADMIN_USERNAME,
+    )
+
+    search = run_async(
+        cognix_routes.command_palette_search(
+            cognix_routes.CommandPaletteSearchRequest(
+                query = "document",
+                includeDisabled = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    commands = {item["id"]: item for item in search["commandPalette"]["commands"]}
+    assert commands["search_documents"]["available"] is True
+
+    body = run_async(
+        cognix_routes.command_palette_plan(
+            cognix_routes.CommandPalettePlanRequest(
+                commandId = "search_documents",
+                query = "document",
+                parameters = {"q": "cours physique"},
+                logUsage = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    assert body["auditLogId"].startswith("aud_")
+    assert body["commandPlan"]["status"] == "ready"
+    assert body["commandPlan"]["executionPlan"]["route"] == "/library?focus=search"
+    assert body["commandPlan"]["executionPlan"]["runsToolNow"] is False
+    assert body["sideEffects"]["commandUsageLogWrite"] is True
+    assert body["sideEffects"]["toolExecution"] is False
+    assert body["usageLog"]["id"].startswith("cmdlog_")
+    assert body["usageLog"]["commandId"] == "search_documents"
+    assert body["usageLog"]["metadata"]["allowedToRun"] is True
+
+    blocked = run_async(
+        cognix_routes.command_palette_plan(
+            cognix_routes.CommandPalettePlanRequest(commandId = "launch_codex"),
+            current_subject = "alice",
+        )
+    )
+    assert blocked["commandPlan"]["status"] == "missing_permissions"
+    assert blocked["commandPlan"]["command"]["missingPermissions"] == ["developer_mode"]
+
+    usage = run_async(cognix_routes.command_palette_usage(current_subject = "alice"))
+    assert [item["commandId"] for item in usage["usageLogs"][:2]] == ["launch_codex", "search_documents"]
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    assert admin_read["logs"][0]["action"] == "command_palette_plan_built"
 
 
 def test_rag_plan_endpoint_prepares_hybrid_retrieval_without_indexing(monkeypatch):
@@ -5554,6 +5643,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-scheduled",
         "cognix-images",
         "cognix-apps",
+        "cognix-command-palette",
         "cognix-model-lifecycle",
         "cognix-live-model-comparison",
         "cognix-model-translator",
@@ -5613,6 +5703,12 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "app_permission_scanning" in modules["cognix-apps"]["capabilities"]
     assert "token_safe_registry" in modules["cognix-apps"]["capabilities"]
     assert "/api/cognix/apps/plan" in modules["cognix-apps"]["routes"]
+    assert modules["cognix-command-palette"]["status"] == "enabled"
+    assert modules["cognix-command-palette"]["dependencyState"]["ready"] is True
+    assert "permission_aware_command_filter" in modules["cognix-command-palette"]["capabilities"]
+    assert "command_usage_logging" in modules["cognix-command-palette"]["capabilities"]
+    assert "/api/cognix/command-palette/search" in modules["cognix-command-palette"]["routes"]
+    assert "/api/cognix/command-palette/plan" in modules["cognix-command-palette"]["routes"]
     assert modules["cognix-local-core"]["activationState"] == "ready"
     assert "module_manifest_registry" in modules["cognix-local-core"]["capabilities"]
     assert "/api/cognix/modules/manifests" in modules["cognix-local-core"]["routes"]

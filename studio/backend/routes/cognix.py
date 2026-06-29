@@ -24,6 +24,7 @@ from core.cognix import benchmark as cognix_benchmark
 from core.cognix import background_agents as cognix_background_agents
 from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import codex_pipeline as cognix_codex_pipeline
+from core.cognix import command_palette as cognix_command_palette
 from core.cognix import context_graph as cognix_context_graph
 from core.cognix import context_heatmap as cognix_context_heatmap
 from core.cognix import context_manager as cognix_context_manager
@@ -713,6 +714,25 @@ class ModelCacheLoadPlanRequest(BaseModel):
     project_id: str | None = Field(None, alias = "projectId", max_length = 160)
 
 
+class CommandPaletteSearchRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    query: str | None = Field(None, max_length = 240)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    limit: int = Field(20, ge = 1, le = 80)
+    include_disabled: bool = Field(False, alias = "includeDisabled")
+
+
+class CommandPalettePlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    command_id: str = Field(..., alias = "commandId", min_length = 1, max_length = 160)
+    query: str | None = Field(None, max_length = 240)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    parameters: dict[str, Any] | None = None
+    log_usage: bool = Field(True, alias = "logUsage")
+
+
 class FineTuningPlanRequest(BaseModel):
     objective: str = Field(..., min_length = 1, max_length = 4000)
     project_type: str | None = Field(None, max_length = 80)
@@ -1184,6 +1204,9 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "tool_name": "toolName",
         "need_id": "needId",
         "recommendation_json": "recommendationJson",
+        "command_id": "commandId",
+        "command_label": "commandLabel",
+        "result_status": "resultStatus",
         "gpt_id": "gptId",
         "runtime_plan_json": "runtimePlanJson",
         "privacy_level": "privacyLevel",
@@ -3597,6 +3620,106 @@ async def plan_module_activation(
     )
     plan["auditLogId"] = audit.get("id")
     return plan
+
+
+@router.get("/command-palette/blueprint")
+async def command_palette_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_command_palette.build_command_palette_blueprint()
+    return {
+        "username": current_subject,
+        "commandPaletteBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_command_palette.COGNIX_COMMAND_PALETTE_VERSION,
+    }
+
+
+@router.post("/command-palette/search")
+async def command_palette_search(
+    payload: CommandPaletteSearchRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    result = cognix_command_palette.list_commands(
+        query = payload.query,
+        granted_permissions = _granted_permission_keys(current_subject),
+        is_admin = auth_storage.is_admin(current_subject),
+        project_id = payload.project_id,
+        limit = payload.limit,
+        include_disabled = payload.include_disabled,
+    )
+    return {
+        "username": current_subject,
+        "commandPalette": result,
+        "sideEffects": result.get("sideEffects", {}),
+        "plannerVersion": cognix_command_palette.COGNIX_COMMAND_PALETTE_VERSION,
+    }
+
+
+@router.post("/command-palette/plan")
+async def command_palette_plan(
+    payload: CommandPalettePlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_command_palette.build_command_plan(
+        command_id = payload.command_id,
+        query = payload.query,
+        project_id = payload.project_id,
+        parameters = payload.parameters,
+        granted_permissions = _granted_permission_keys(current_subject),
+        is_admin = auth_storage.is_admin(current_subject),
+    )
+    usage_log = (
+        cognix_db.create_command_usage_log(current_subject, command_plan = plan)
+        if payload.log_usage
+        else None
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "commandUsageLogWrite": usage_log is not None,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "command_palette_plan_built",
+        resource_type = "cognix_command_palette",
+        resource_id = str(plan.get("commandId") or payload.command_id),
+        severity = "warning" if plan.get("status") != "ready" else "notice",
+        metadata = {
+            "commandPaletteVersion": plan.get("commandPaletteVersion"),
+            "commandRegistryVersion": plan.get("commandRegistryVersion"),
+            "commandId": plan.get("commandId"),
+            "status": plan.get("status"),
+            "allowedToRun": plan.get("allowedToRun"),
+            "missingPermissions": plan.get("command", {}).get("missingPermissions", []),
+            "route": plan.get("executionPlan", {}).get("route"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "commandPlan": plan,
+        "usageLog": _row(usage_log) if usage_log else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_command_palette.COGNIX_COMMAND_PALETTE_VERSION,
+    }
+
+
+@router.get("/command-palette/usage")
+async def command_palette_usage(
+    limit: int = 100,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    return {
+        "username": current_subject,
+        "usageLogs": _rows(cognix_db.list_command_usage_logs(current_subject, limit = limit)),
+        "sideEffects": cognix_command_palette.build_command_palette_blueprint()["sideEffects"],
+        "plannerVersion": cognix_command_palette.COGNIX_COMMAND_PALETTE_VERSION,
+    }
 
 
 @router.get("/tools/registry")

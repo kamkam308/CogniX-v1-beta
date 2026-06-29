@@ -1013,6 +1013,21 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_gpt_usage_logs_gpt
             ON cognix_gpt_usage_logs(username, gpt_id, created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_command_usage_logs (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            command_id TEXT NOT NULL,
+            command_label TEXT NOT NULL DEFAULT '',
+            project_id TEXT,
+            query TEXT NOT NULL DEFAULT '',
+            result_status TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_command_usage_logs_username_created
+            ON cognix_command_usage_logs(username, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_intent_predictions (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -6203,6 +6218,75 @@ def create_gpt_usage_log(username: str, *, gpt_id: str, runtime_plan: dict[str, 
         conn.commit()
         row = conn.execute("SELECT * FROM cognix_gpt_usage_logs WHERE id = ?", (log_id,)).fetchone()
         return _hydrate_gpt_usage_log(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def _hydrate_command_usage_log(row: dict[str, Any]) -> dict[str, Any]:
+    row["metadata"] = _json_or_default(row.get("metadata_json"), {})
+    return row
+
+
+def create_command_usage_log(username: str, *, command_plan: dict[str, Any]) -> dict[str, Any]:
+    now = _now()
+    log_id = _new_id("cmdlog")
+    command = command_plan.get("command") if isinstance(command_plan.get("command"), dict) else {}
+    command_id = str(command_plan.get("commandId") or command.get("id") or "unknown_command")[:160]
+    command_label = str(command.get("label") or command_id)[:240]
+    project_id = command_plan.get("projectId")
+    query = str(command_plan.get("query") or "")[:240]
+    status = str(command_plan.get("status") or "unknown")[:80]
+    metadata = {
+        "commandPaletteVersion": command_plan.get("commandPaletteVersion"),
+        "commandRegistryVersion": command_plan.get("commandRegistryVersion"),
+        "permissionFilterVersion": command_plan.get("permissionFilterVersion"),
+        "allowedToRun": command_plan.get("allowedToRun"),
+        "missingPermissions": command.get("missingPermissions", []),
+        "route": command_plan.get("executionPlan", {}).get("route"),
+        "actionType": command_plan.get("executionPlan", {}).get("actionType"),
+        "sideEffects": command_plan.get("sideEffects", {}),
+    }
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_command_usage_logs
+                (id, username, command_id, command_label, project_id, query, result_status, metadata_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                log_id,
+                username,
+                command_id,
+                command_label,
+                str(project_id)[:160] if project_id else None,
+                query,
+                status,
+                json.dumps(metadata, ensure_ascii = False),
+                now,
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM cognix_command_usage_logs WHERE id = ?", (log_id,)).fetchone()
+        return _hydrate_command_usage_log(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_command_usage_logs(username: str, *, limit: int = 100) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        safe_limit = min(max(int(limit or 100), 1), 300)
+        rows = conn.execute(
+            """
+            SELECT * FROM cognix_command_usage_logs
+            WHERE username = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (username, safe_limit),
+        ).fetchall()
+        return [_hydrate_command_usage_log(row) for row in _rows_to_dicts(rows)]
     finally:
         conn.close()
 
