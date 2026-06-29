@@ -31,6 +31,7 @@ from core.cognix import decision_explainer as cognix_decision_explainer
 from core.cognix import dynamic_ui as cognix_dynamic_ui
 from core.cognix import evolution_engine as cognix_evolution_engine
 from core.cognix import governance_manager as cognix_governance_manager
+from core.cognix import gpts as cognix_gpts
 from core.cognix import images as cognix_images
 from core.cognix import integration_manager as cognix_integration_manager
 from core.cognix import intent_prediction as cognix_intent_prediction
@@ -797,6 +798,103 @@ def test_persona_endpoint_stores_versions_lists_detail_and_audits():
     assert log["id"] == body["auditLogId"]
     assert log["action"] == "persona_plan_built"
     assert log["metadata"]["blockedToolIds"] == ["github"]
+
+
+def test_gpts_native_manager_binds_tools_memory_documents_and_runtime():
+    plan = cognix_gpts.build_gpt_plan(
+        username = "alice",
+        name = "Prof physique",
+        description = "Assistant pedagogique pour la mecanique",
+        instructions = "Explique etape par etape.",
+        preferred_model = "qwen-local",
+        allowed_tools = ["memory_read", "github", "terminal", "rag_retrieval"],
+        document_ids = ["lib_course"],
+        memory_ids = ["mem_style"],
+        skills = ["pedagogie"],
+        directives = ["Ne jamais inventer une citation."],
+        privacy_level = "private",
+        share_scope = "organization",
+        granted_permissions = {"tools:github"},
+    )
+    tools = {item["toolId"]: item for item in plan["toolBinding"]["tools"]}
+
+    assert plan["gptManagerVersion"] == "cognix_gpt_manager_v1"
+    assert plan["customAssistantRuntimeVersion"] == "cognix_custom_assistant_runtime_v1"
+    assert plan["permissionBinderVersion"] == "cognix_gpt_permission_binder_v1"
+    assert tools["memory_read"]["status"] == "allowed"
+    assert tools["github"]["status"] == "allowed"
+    assert tools["terminal"]["status"] == "blocked_missing_creator_permission"
+    assert tools["rag_retrieval"]["status"] == "allowed"
+    assert plan["permissionBinding"]["shareScope"] == "private"
+    assert plan["permissionBinding"]["requestedShareScope"] == "organization"
+    assert plan["documentBinding"]["rawDocumentReadNow"] is False
+    assert plan["memoryBinding"]["rawMemoryReadNow"] is False
+    assert plan["runtimePolicy"]["routeThroughOrchestrator"] is True
+    assert plan["runtimePolicy"]["generationNow"] is False
+    assert plan["security"]["cannotExceedCreatorPermissions"] is True
+    assert plan["sideEffects"]["permissionGrant"] is False
+    assert plan["sideEffects"]["toolExecution"] is False
+    assert plan["sideEffects"]["generation"] is False
+
+
+def test_gpts_endpoint_stores_lists_runtime_plan_and_audits():
+    seed_accounts()
+    body = run_async(
+        cognix_routes.gpt_plan(
+            cognix_routes.GPTPlanRequest(
+                name = "Prof physique",
+                description = "Aide mecanique",
+                instructions = "Explique etape par etape.",
+                preferredModel = "qwen-local",
+                allowedTools = ["memory_read", "github", "terminal"],
+                documentIds = ["lib_course"],
+                memoryIds = ["mem_style"],
+                skills = ["pedagogie"],
+                directives = ["Pas de citations inventees."],
+                privacyLevel = "private",
+                shareScope = "organization",
+                storeGpt = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    gpt = body["gpt"]
+    assert body["auditLogId"].startswith("aud_")
+    assert gpt["id"].startswith("gpt_")
+    assert gpt["gptId"] == gpt["id"]
+    assert gpt["versions"][0]["id"].startswith("gver_")
+    assert gpt["versions"][0]["managerVersion"] == "cognix_gpt_manager_v1"
+    assert gpt["toolBinding"]["blockedToolIds"] == ["github", "terminal"]
+    assert gpt["documentBinding"]["documentIds"] == ["lib_course"]
+    assert gpt["memoryBinding"]["memoryIds"] == ["mem_style"]
+    assert gpt["permissionBinding"]["shareScope"] == "private"
+    assert body["sideEffects"]["gptWrite"] is True
+    assert body["sideEffects"]["gptVersionWrite"] is True
+    assert body["sideEffects"]["permissionGrant"] is False
+    assert body["sideEffects"]["toolExecution"] is False
+    assert body["sideEffects"]["generation"] is False
+
+    listed = run_async(cognix_routes.gpts(current_subject = "alice"))
+    detail = run_async(cognix_routes.gpt_detail(gpt["id"], current_subject = "alice"))
+    runtime = run_async(
+        cognix_routes.gpt_runtime_plan(
+            gpt["id"],
+            cognix_routes.GPTRuntimePlanRequest(objective = "Explique Newton"),
+            current_subject = "alice",
+        )
+    )
+    assert listed["gpts"][0]["id"] == gpt["id"]
+    assert detail["gpt"]["id"] == gpt["id"]
+    assert runtime["gptRuntimePlan"]["runtimeGuards"]["generationNow"] is False
+    assert runtime["gptRuntimePlan"]["runtimeGuards"]["toolExecutionNow"] is False
+    assert runtime["usageLog"]["id"].startswith("guse_")
+    assert runtime["usageLog"]["runtimePlan"]["gptId"] == gpt["id"]
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    actions = [item["action"] for item in admin_read["logs"][:2]]
+    assert "gpt_runtime_plan_built" in actions
+    assert "gpt_plan_built" in actions
 
 
 def test_rag_plan_endpoint_prepares_hybrid_retrieval_without_indexing(monkeypatch):
@@ -5708,6 +5806,12 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "persona_permission_binder" in modules["cognix-persona-builder"]["capabilities"]
     assert "/api/cognix/personas/plan" in modules["cognix-persona-builder"]["routes"]
     assert "/api/cognix/personas/{persona_id}" in modules["cognix-persona-builder"]["routes"]
+    assert modules["cognix-gpts"]["dependencyState"]["ready"] is True
+    assert "custom_gpt_manager" in modules["cognix-gpts"]["capabilities"]
+    assert "custom_assistant_runtime" in modules["cognix-gpts"]["capabilities"]
+    assert "creator_permission_ceiling" in modules["cognix-gpts"]["capabilities"]
+    assert "/api/cognix/gpts/plan" in modules["cognix-gpts"]["routes"]
+    assert "/api/cognix/gpts/{gpt_id}/runtime-plan" in modules["cognix-gpts"]["routes"]
     assert "worker_job_specs" in modules["cognix-worker-queue"]["capabilities"]
     assert "cloud_training_job_specs" in modules["cognix-worker-queue"]["capabilities"]
     assert "/api/cognix/workers/registry" in modules["cognix-worker-queue"]["routes"]

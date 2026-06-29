@@ -947,6 +947,72 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_persona_project_bindings_project
             ON cognix_persona_project_bindings(username, project_id, updated_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_gpts (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            preferred_model TEXT,
+            privacy_level TEXT NOT NULL DEFAULT 'private',
+            share_scope TEXT NOT NULL DEFAULT 'private',
+            icon TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            config_json TEXT NOT NULL DEFAULT '{}',
+            instructions TEXT NOT NULL DEFAULT '',
+            runtime_instructions TEXT NOT NULL DEFAULT '',
+            tool_binding_json TEXT NOT NULL DEFAULT '{}',
+            document_binding_json TEXT NOT NULL DEFAULT '{}',
+            memory_binding_json TEXT NOT NULL DEFAULT '{}',
+            permission_binding_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_gpts_username_created
+            ON cognix_gpts(username, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_gpt_versions (
+            id TEXT PRIMARY KEY,
+            gpt_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            version_number INTEGER NOT NULL DEFAULT 1,
+            manager_version TEXT NOT NULL,
+            config_json TEXT NOT NULL DEFAULT '{}',
+            runtime_instructions TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_gpt_versions_gpt
+            ON cognix_gpt_versions(username, gpt_id, version_number DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_gpt_project_bindings (
+            id TEXT PRIMARY KEY,
+            gpt_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            binding_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(username, gpt_id, project_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_gpt_project_bindings_project
+            ON cognix_gpt_project_bindings(username, project_id, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_gpt_usage_logs (
+            id TEXT PRIMARY KEY,
+            gpt_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            project_id TEXT,
+            objective_excerpt TEXT NOT NULL DEFAULT '',
+            runtime_plan_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_gpt_usage_logs_gpt
+            ON cognix_gpt_usage_logs(username, gpt_id, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_intent_predictions (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -5887,6 +5953,256 @@ def get_persona(username: str, persona_id: str) -> dict[str, Any] | None:
         persona["versions"] = [_hydrate_persona_version(item) for item in _rows_to_dicts(version_rows)]
         persona["projectBindings"] = [_hydrate_persona_project_binding(item) for item in _rows_to_dicts(binding_rows)]
         return persona
+    finally:
+        conn.close()
+
+
+def _hydrate_gpt(row: dict[str, Any]) -> dict[str, Any]:
+    row["gptId"] = row.get("id")
+    row["config"] = _json_or_default(row.get("config_json"), {})
+    row["toolBinding"] = _json_or_default(row.get("tool_binding_json"), {})
+    row["documentBinding"] = _json_or_default(row.get("document_binding_json"), {})
+    row["memoryBinding"] = _json_or_default(row.get("memory_binding_json"), {})
+    row["permissionBinding"] = _json_or_default(row.get("permission_binding_json"), {})
+    return row
+
+
+def _hydrate_gpt_version(row: dict[str, Any]) -> dict[str, Any]:
+    row["config"] = _json_or_default(row.get("config_json"), {})
+    return row
+
+
+def _hydrate_gpt_project_binding(row: dict[str, Any]) -> dict[str, Any]:
+    row["binding"] = _json_or_default(row.get("binding_json"), {})
+    return row
+
+
+def _hydrate_gpt_usage_log(row: dict[str, Any]) -> dict[str, Any]:
+    row["gptId"] = row.get("gpt_id")
+    row["runtimePlan"] = _json_or_default(row.get("runtime_plan_json"), {})
+    return row
+
+
+def create_gpt(
+    username: str,
+    *,
+    plan: dict[str, Any],
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    now = _now()
+    gpt_id = str(plan.get("gptId") or _new_id("gpt"))[:160]
+    config = plan.get("config") if isinstance(plan.get("config"), dict) else {}
+    runtime = plan.get("runtimeInstructions") if isinstance(plan.get("runtimeInstructions"), dict) else {}
+    tool_binding = plan.get("toolBinding") if isinstance(plan.get("toolBinding"), dict) else {}
+    document_binding = plan.get("documentBinding") if isinstance(plan.get("documentBinding"), dict) else {}
+    memory_binding = plan.get("memoryBinding") if isinstance(plan.get("memoryBinding"), dict) else {}
+    permission_binding = plan.get("permissionBinding") if isinstance(plan.get("permissionBinding"), dict) else {}
+    project_binding = plan.get("projectBinding") if isinstance(plan.get("projectBinding"), dict) else {}
+    binding_project_id = project_id or project_binding.get("projectId")
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT MAX(version_number) AS version_number FROM cognix_gpt_versions WHERE username = ? AND gpt_id = ?",
+            (username, gpt_id),
+        ).fetchone()
+        version_number = int((row["version_number"] if row else 0) or 0) + 1
+        conn.execute(
+            """
+            INSERT INTO cognix_gpts
+                (
+                    id, username, name, description, preferred_model, privacy_level,
+                    share_scope, icon, status, config_json, instructions,
+                    runtime_instructions, tool_binding_json, document_binding_json,
+                    memory_binding_json, permission_binding_json, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                description = excluded.description,
+                preferred_model = excluded.preferred_model,
+                privacy_level = excluded.privacy_level,
+                share_scope = excluded.share_scope,
+                icon = excluded.icon,
+                config_json = excluded.config_json,
+                instructions = excluded.instructions,
+                runtime_instructions = excluded.runtime_instructions,
+                tool_binding_json = excluded.tool_binding_json,
+                document_binding_json = excluded.document_binding_json,
+                memory_binding_json = excluded.memory_binding_json,
+                permission_binding_json = excluded.permission_binding_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                gpt_id,
+                username,
+                str(config.get("name") or "GPT CogniX")[:180],
+                str(config.get("description") or "")[:1000],
+                (str(config.get("preferredModel"))[:240] if config.get("preferredModel") else None),
+                str(config.get("privacyLevel") or "private")[:80],
+                str(config.get("shareScope") or "private")[:80],
+                str(config.get("icon") or "sparkles")[:80],
+                json.dumps(config, ensure_ascii = False),
+                str(config.get("instructions") or ""),
+                str(runtime.get("content") or ""),
+                json.dumps(tool_binding, ensure_ascii = False),
+                json.dumps(document_binding, ensure_ascii = False),
+                json.dumps(memory_binding, ensure_ascii = False),
+                json.dumps(permission_binding, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO cognix_gpt_versions
+                (
+                    id, gpt_id, username, version_number, manager_version,
+                    config_json, runtime_instructions, created_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _new_id("gver"),
+                gpt_id,
+                username,
+                version_number,
+                str(plan.get("gptManagerVersion") or "")[:120],
+                json.dumps(config, ensure_ascii = False),
+                str(runtime.get("content") or ""),
+                now,
+            ),
+        )
+        if binding_project_id:
+            conn.execute(
+                """
+                INSERT INTO cognix_gpt_project_bindings
+                    (
+                        id, gpt_id, username, project_id, status,
+                        binding_json, created_at, updated_at
+                    )
+                VALUES (?, ?, ?, ?, 'active', ?, ?, ?)
+                ON CONFLICT(username, gpt_id, project_id) DO UPDATE SET
+                    status = 'active',
+                    binding_json = excluded.binding_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    _new_id("gbind"),
+                    gpt_id,
+                    username,
+                    str(binding_project_id)[:160],
+                    json.dumps(project_binding, ensure_ascii = False),
+                    now,
+                    now,
+                ),
+            )
+        conn.commit()
+        return get_gpt(username, gpt_id) or {}
+    finally:
+        conn.close()
+
+
+def list_gpts(username: str, *, project_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        safe_limit = min(max(int(limit or 100), 1), 300)
+        if project_id:
+            rows = conn.execute(
+                """
+                SELECT g.*
+                FROM cognix_gpts g
+                INNER JOIN cognix_gpt_project_bindings b
+                    ON b.gpt_id = g.id AND b.username = g.username
+                WHERE g.username = ? AND b.project_id = ? AND g.status = 'active'
+                ORDER BY g.updated_at DESC
+                LIMIT ?
+                """,
+                (username, project_id, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_gpts
+                WHERE username = ? AND status = 'active'
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (username, safe_limit),
+            ).fetchall()
+        return [_hydrate_gpt(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def get_gpt(username: str, gpt_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM cognix_gpts WHERE id = ? AND username = ? AND status = 'active'",
+            (gpt_id, username),
+        ).fetchone()
+        if row is None:
+            return None
+        gpt = _hydrate_gpt(row_to_dict(row) or {})
+        version_rows = conn.execute(
+            """
+            SELECT * FROM cognix_gpt_versions
+            WHERE username = ? AND gpt_id = ?
+            ORDER BY version_number DESC
+            """,
+            (username, gpt_id),
+        ).fetchall()
+        binding_rows = conn.execute(
+            """
+            SELECT * FROM cognix_gpt_project_bindings
+            WHERE username = ? AND gpt_id = ? AND status = 'active'
+            ORDER BY updated_at DESC
+            """,
+            (username, gpt_id),
+        ).fetchall()
+        usage_rows = conn.execute(
+            """
+            SELECT * FROM cognix_gpt_usage_logs
+            WHERE username = ? AND gpt_id = ?
+            ORDER BY created_at DESC
+            LIMIT 40
+            """,
+            (username, gpt_id),
+        ).fetchall()
+        gpt["versions"] = [_hydrate_gpt_version(item) for item in _rows_to_dicts(version_rows)]
+        gpt["projectBindings"] = [_hydrate_gpt_project_binding(item) for item in _rows_to_dicts(binding_rows)]
+        gpt["usageLogs"] = [_hydrate_gpt_usage_log(item) for item in _rows_to_dicts(usage_rows)]
+        return gpt
+    finally:
+        conn.close()
+
+
+def create_gpt_usage_log(username: str, *, gpt_id: str, runtime_plan: dict[str, Any]) -> dict[str, Any]:
+    now = _now()
+    log_id = _new_id("guse")
+    project_id = runtime_plan.get("projectId")
+    objective = str(runtime_plan.get("objective") or "")[:500]
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_gpt_usage_logs
+                (id, gpt_id, username, project_id, objective_excerpt, runtime_plan_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                log_id,
+                gpt_id,
+                username,
+                str(project_id)[:160] if project_id else None,
+                objective,
+                json.dumps(runtime_plan, ensure_ascii = False),
+                now,
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM cognix_gpt_usage_logs WHERE id = ?", (log_id,)).fetchone()
+        return _hydrate_gpt_usage_log(row_to_dict(row) or {})
     finally:
         conn.close()
 

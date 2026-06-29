@@ -38,6 +38,7 @@ from core.cognix import dynamic_ui as cognix_dynamic_ui
 from core.cognix import evolution_engine as cognix_evolution_engine
 from core.cognix import fine_tuning_planner as cognix_fine_tuning_planner
 from core.cognix import governance_manager as cognix_governance_manager
+from core.cognix import gpts as cognix_gpts
 from core.cognix import hardware as cognix_hardware
 from core.cognix import images as cognix_images
 from core.cognix import integration_manager as cognix_integration_manager
@@ -755,6 +756,33 @@ class PersonaPlanRequest(BaseModel):
     store_persona: bool = Field(True, alias = "storePersona")
 
 
+class GPTPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    name: str = Field(..., min_length = 1, max_length = 180)
+    description: str | None = Field(None, max_length = 1000)
+    instructions: str | None = Field(None, max_length = 12000)
+    preferred_model: str | None = Field(None, alias = "preferredModel", max_length = 240)
+    allowed_tools: list[Any] | None = Field(None, alias = "allowedTools")
+    document_ids: list[Any] | None = Field(None, alias = "documentIds")
+    memory_ids: list[Any] | None = Field(None, alias = "memoryIds")
+    skills: list[Any] | None = None
+    directives: list[Any] | None = None
+    privacy_level: Literal["private", "project", "organization"] = Field("private", alias = "privacyLevel")
+    icon: str | None = Field(None, max_length = 80)
+    share_scope: Literal["private", "project", "organization", "public_readonly"] = Field("private", alias = "shareScope")
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    store_gpt: bool = Field(True, alias = "storeGpt")
+
+
+class GPTRuntimePlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    store_usage_log: bool = Field(True, alias = "storeUsageLog")
+
+
 class RagPlanRequest(BaseModel):
     objective: str = Field(..., min_length = 1, max_length = 4000)
     project_type: str | None = Field(None, max_length = 80)
@@ -1127,6 +1155,7 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "response_style": "responseStyle",
         "preferred_models_json": "preferredModelsJson",
         "allowed_tools_json": "allowedToolsJson",
+        "allowed_tools": "allowedTools",
         "dna_json": "dnaJson",
         "dna_hash": "dnaHash",
         "constraint_type": "constraintType",
@@ -1155,6 +1184,16 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "tool_name": "toolName",
         "need_id": "needId",
         "recommendation_json": "recommendationJson",
+        "gpt_id": "gptId",
+        "runtime_plan_json": "runtimePlanJson",
+        "privacy_level": "privacyLevel",
+        "share_scope": "shareScope",
+        "runtime_instructions": "runtimeInstructions",
+        "tool_binding_json": "toolBindingJson",
+        "document_binding_json": "documentBindingJson",
+        "memory_binding_json": "memoryBindingJson",
+        "permission_binding_json": "permissionBindingJson",
+        "manager_version": "managerVersion",
         "snapshot_id": "snapshotId",
         "graph_json": "graphJson",
         "node_count": "nodeCount",
@@ -1300,6 +1339,10 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         out["reportRecord"] = _row(out["reportRecord"])
     if isinstance(out.get("versions"), list):
         out["versions"] = [_row(item) if isinstance(item, dict) else item for item in out["versions"]]
+    if isinstance(out.get("projectBindings"), list):
+        out["projectBindings"] = [_row(item) if isinstance(item, dict) else item for item in out["projectBindings"]]
+    if isinstance(out.get("usageLogs"), list):
+        out["usageLogs"] = [_row(item) if isinstance(item, dict) else item for item in out["usageLogs"]]
     if isinstance(out.get("auditLogs"), list):
         out["auditLogs"] = [_row(item) if isinstance(item, dict) else item for item in out["auditLogs"]]
     if isinstance(out.get("styleProfiles"), list):
@@ -4529,6 +4572,173 @@ async def persona_detail(
             "networkCall": False,
         },
         "plannerVersion": cognix_persona_manager.COGNIX_PERSONA_MANAGER_VERSION,
+    }
+
+
+@router.get("/gpts/blueprint")
+async def gpts_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_gpts.build_gpts_blueprint()
+    return {
+        "username": current_subject,
+        "gptsBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_gpts.COGNIX_GPT_MANAGER_VERSION,
+    }
+
+
+@router.post("/gpts/plan")
+async def gpt_plan(
+    payload: GPTPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_gpts.build_gpt_plan(
+        username = current_subject,
+        name = payload.name,
+        description = payload.description,
+        instructions = payload.instructions,
+        preferred_model = payload.preferred_model,
+        allowed_tools = payload.allowed_tools,
+        document_ids = payload.document_ids,
+        memory_ids = payload.memory_ids,
+        skills = payload.skills,
+        directives = payload.directives,
+        privacy_level = payload.privacy_level,
+        icon = payload.icon,
+        share_scope = payload.share_scope,
+        project_id = payload.project_id,
+        granted_permissions = _granted_permission_keys(current_subject),
+    )
+    stored_gpt = (
+        cognix_db.create_gpt(
+            current_subject,
+            plan = plan,
+            project_id = payload.project_id,
+        )
+        if payload.store_gpt
+        else None
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "gptWrite": stored_gpt is not None,
+        "gptVersionWrite": stored_gpt is not None,
+        "projectBindingWrite": bool(stored_gpt and payload.project_id),
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "gpt_plan_built",
+        resource_type = "cognix_gpt",
+        resource_id = str((stored_gpt or {}).get("id") or plan.get("gptId") or current_subject),
+        severity = "warning" if plan.get("security", {}).get("blockedToolCount") else "notice",
+        metadata = {
+            "gptManagerVersion": plan.get("gptManagerVersion"),
+            "customAssistantRuntimeVersion": plan.get("customAssistantRuntimeVersion"),
+            "permissionBinderVersion": plan.get("permissionBinderVersion"),
+            "gptId": plan.get("gptId"),
+            "blockedToolCount": plan.get("security", {}).get("blockedToolCount"),
+            "allowedToolIds": plan.get("toolBinding", {}).get("allowedToolIds", []),
+            "blockedToolIds": plan.get("toolBinding", {}).get("blockedToolIds", []),
+            "privacyLevel": plan.get("security", {}).get("privacyLevel"),
+            "shareScope": plan.get("security", {}).get("shareScope"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "gptPlan": plan,
+        "gpt": _row(stored_gpt) if stored_gpt else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_gpts.COGNIX_GPT_MANAGER_VERSION,
+    }
+
+
+@router.get("/gpts")
+async def gpts(
+    project_id: str | None = None,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if project_id:
+        _require_owned_project(project_id, current_subject)
+    return {
+        "gpts": _rows(cognix_db.list_gpts(current_subject, project_id = project_id)),
+        "sideEffects": cognix_gpts.build_gpts_blueprint()["sideEffects"],
+        "plannerVersion": cognix_gpts.COGNIX_GPT_MANAGER_VERSION,
+    }
+
+
+@router.get("/gpts/{gpt_id}")
+async def gpt_detail(
+    gpt_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    gpt = cognix_db.get_gpt(current_subject, gpt_id)
+    if gpt is None:
+        raise HTTPException(status_code = 404, detail = "GPT not found")
+    return {
+        "gpt": _row(gpt),
+        "sideEffects": cognix_gpts.build_gpts_blueprint()["sideEffects"],
+        "plannerVersion": cognix_gpts.COGNIX_GPT_MANAGER_VERSION,
+    }
+
+
+@router.post("/gpts/{gpt_id}/runtime-plan")
+async def gpt_runtime_plan(
+    gpt_id: str,
+    payload: GPTRuntimePlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    gpt = cognix_db.get_gpt(current_subject, gpt_id)
+    if gpt is None:
+        raise HTTPException(status_code = 404, detail = "GPT not found")
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_gpts.build_gpt_runtime_plan(
+        username = current_subject,
+        gpt = gpt,
+        objective = payload.objective,
+        project_id = payload.project_id,
+    )
+    usage_log = (
+        cognix_db.create_gpt_usage_log(
+            current_subject,
+            gpt_id = gpt_id,
+            runtime_plan = plan,
+        )
+        if payload.store_usage_log
+        else None
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "usageLogWrite": usage_log is not None,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "gpt_runtime_plan_built",
+        resource_type = "cognix_gpt",
+        resource_id = gpt_id,
+        severity = "notice",
+        metadata = {
+            "gptManagerVersion": plan.get("gptManagerVersion"),
+            "customAssistantRuntimeVersion": plan.get("customAssistantRuntimeVersion"),
+            "allowedToolIds": plan.get("orchestratorRequest", {}).get("allowedToolIds", []),
+            "blockedToolIds": plan.get("orchestratorRequest", {}).get("blockedToolIds", []),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "gpt": _row(gpt),
+        "gptRuntimePlan": plan,
+        "usageLog": _row(usage_log) if usage_log else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_gpts.COGNIX_CUSTOM_ASSISTANT_RUNTIME_VERSION,
     }
 
 
