@@ -6388,6 +6388,9 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/evolution/proposals" in modules["cognix-ai-evolution-engine"]["routes"]
     assert "tool_permission_matrix" in modules["cognix-integrations"]["capabilities"]
     assert "tool_execution_contract" in modules["cognix-integrations"]["capabilities"]
+    assert "integration_activation_contract" in modules["cognix-integrations"]["capabilities"]
+    assert "/api/cognix/integrations/plan" in modules["cognix-integrations"]["routes"]
+    assert "/api/cognix/integrations/activation-contract" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/tools/permission-matrix" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/tools/plan" in modules["cognix-integrations"]["routes"]
     assert modules["cognix-plugin-marketplace"]["dependencyState"]["ready"] is True
@@ -7119,7 +7122,9 @@ def test_integration_manager_summarizes_connectors_without_secret_access():
     assert status["integrationManagerVersion"] == "cognix_integration_manager_v1"
     assert status["mode"] == "dry_run"
     assert status["summary"]["directFrontendExecutionAllowed"] is False
+    assert status["summary"]["activationContractRequired"] is True
     assert status["policies"]["secretsStayServerSide"] is True
+    assert status["policies"]["activationRequiresSeparateExecutor"] is True
     assert status["sideEffects"]["secretRead"] is False
     assert status["sideEffects"]["toolExecution"] is False
 
@@ -7144,6 +7149,14 @@ def test_integration_plan_endpoint_writes_sanitized_audit_log():
     assert body["integrationManagerVersion"] == "cognix_integration_manager_v1"
     assert body["status"] == "declared_disabled"
     assert body["allowedToActivate"] is False
+    assert body["activationContractVersion"] == "cognix_integration_activation_contract_v1"
+    assert body["activationContract"]["contractVersion"] == "cognix_integration_activation_contract_v1"
+    assert body["activationContract"]["readyForActivation"] is False
+    assert body["activationContract"]["automaticActivationAllowed"] is False
+    assert body["activationContract"]["frontendDirectActivationAllowed"] is False
+    assert body["activationContract"]["preconditions"]["serverSecretConfigured"] is False
+    assert "connector_disabled" in body["activationContract"]["blockedWhen"]
+    assert "server_secret_required" in body["activationContract"]["blockedWhen"]
     assert body["sideEffects"]["secretRead"] is False
     assert body["sideEffects"]["networkToolCall"] is False
     assert any(item["id"] == "enable_connector" for item in body["nextActions"])
@@ -7154,8 +7167,43 @@ def test_integration_plan_endpoint_writes_sanitized_audit_log():
     assert log["action"] == "integration_plan_built"
     assert log["resourceType"] == "cognix_integration"
     assert log["metadata"]["integrationManagerVersion"] == "cognix_integration_manager_v1"
+    assert log["metadata"]["activationContractVersion"] == "cognix_integration_activation_contract_v1"
+    assert log["metadata"]["activationContract"]["readyForActivation"] is False
     assert log["metadata"]["sideEffects"]["secretRead"] is False
     assert "access_token" not in log["metadataJson"].lower()
+    assert "secret_value" not in log["metadataJson"].lower()
+
+
+def test_integration_activation_contract_endpoint_blocks_activation_without_secret_read():
+    seed_accounts()
+
+    body = run_async(
+        cognix_routes.integration_activation_contract(
+            cognix_routes.IntegrationActivationContractRequest(tool_id = "github"),
+            current_subject = "alice",
+        )
+    )
+
+    contract = body["activationContract"]
+    assert body["auditLogId"].startswith("aud_")
+    assert contract["contractVersion"] == "cognix_integration_activation_contract_v1"
+    assert contract["allowedToPrepareActivation"] is True
+    assert contract["readyForActivation"] is False
+    assert contract["preconditions"]["manifestPresent"] is True
+    assert contract["preconditions"]["serverSecretConfigured"] is False
+    assert contract["dataBoundary"]["secretsStayServerSide"] is True
+    assert contract["dataBoundary"]["rawSecretLoggingAllowed"] is False
+    assert "secret_read" in contract["blockedActions"]
+    assert body["sideEffects"]["secretRead"] is False
+    assert body["sideEffects"]["integrationActivation"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "integration_activation_contract_built"
+    assert log["metadata"]["activationContractVersion"] == "cognix_integration_activation_contract_v1"
+    assert log["metadata"]["readyForActivation"] is False
+    assert "server_secret_required" in log["metadata"]["blockedWhen"]
     assert "secret_value" not in log["metadataJson"].lower()
 
 

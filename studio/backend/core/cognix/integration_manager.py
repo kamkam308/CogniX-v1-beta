@@ -16,6 +16,7 @@ from core.cognix import tool_registry as cognix_tool_registry
 
 
 COGNIX_INTEGRATION_MANAGER_VERSION = "cognix_integration_manager_v1"
+COGNIX_INTEGRATION_ACTIVATION_CONTRACT_VERSION = "cognix_integration_activation_contract_v1"
 
 
 def _normalize_permission(permission: str) -> str:
@@ -122,6 +123,112 @@ def _next_actions(
     return actions
 
 
+def _activation_contract(
+    *,
+    integration: dict[str, Any] | None,
+    username: str,
+    status_side_effects: dict[str, Any],
+) -> dict[str, Any]:
+    if integration is None:
+        return {
+            "contractVersion": COGNIX_INTEGRATION_ACTIVATION_CONTRACT_VERSION,
+            "mode": "activation_contract_dry_run",
+            "username": username,
+            "toolId": None,
+            "connector": None,
+            "allowedToPrepareActivation": False,
+            "readyForActivation": False,
+            "automaticActivationAllowed": False,
+            "frontendDirectActivationAllowed": False,
+            "nextRequiredGate": "unknown_integration",
+            "preconditions": {
+                "manifestPresent": False,
+                "connectorDeclared": False,
+                "permissionsResolved": False,
+                "serverSecretConfigured": False,
+                "riskReviewed": False,
+                "humanApprovalRequired": True,
+                "auditRequired": True,
+            },
+            "blockedWhen": ["unknown_integration"],
+            "blockedActions": [
+                "connector_activation",
+                "secret_read",
+                "network_tool_call",
+                "external_write",
+                "permission_write",
+                "frontend_direct_activation",
+            ],
+            "sideEffects": status_side_effects,
+        }
+
+    missing_permissions = list(integration.get("missingPermissions") or [])
+    secrets_required = bool(integration.get("secretsRequired"))
+    enabled = bool(integration.get("enabled"))
+    high_risk = _risk_rank(str(integration.get("maxRiskLevel") or "low")) >= _risk_rank("high")
+    blocked_when: list[str] = []
+    if not enabled:
+        blocked_when.append("connector_disabled")
+    if missing_permissions:
+        blocked_when.append("missing_permissions")
+    if secrets_required:
+        blocked_when.append("server_secret_required")
+    if high_risk:
+        blocked_when.append("risk_review_required")
+    if not blocked_when:
+        blocked_when.append("human_approval_required")
+    ready_for_activation = enabled and not missing_permissions and not secrets_required and not high_risk
+    return {
+        "contractVersion": COGNIX_INTEGRATION_ACTIVATION_CONTRACT_VERSION,
+        "mode": "activation_contract_dry_run",
+        "username": username,
+        "toolId": integration.get("id"),
+        "connector": integration.get("connector"),
+        "allowedToPrepareActivation": bool(integration.get("id")),
+        "readyForActivation": False,
+        "automaticActivationAllowed": False,
+        "frontendDirectActivationAllowed": False,
+        "nextRequiredGate": blocked_when[0],
+        "preconditions": {
+            "manifestPresent": True,
+            "connectorDeclared": bool(integration.get("connector")),
+            "connectorEnabled": enabled,
+            "permissionsResolved": not missing_permissions,
+            "missingPermissions": missing_permissions,
+            "serverSecretConfigured": not secrets_required,
+            "secretsRequired": secrets_required,
+            "riskReviewed": not high_risk,
+            "maxRiskLevel": integration.get("maxRiskLevel"),
+            "humanApprovalRequired": True,
+            "auditRequired": True,
+            "wouldBeActivationReadyAfterApproval": ready_for_activation,
+        },
+        "activationExecutor": "cognix_integration_executor:activate_connector",
+        "allowedActions": [
+            "record_activation_plan",
+            "request_missing_permissions",
+            "configure_server_secret_reference",
+            "request_human_approval",
+            "enable_connector_after_approval",
+        ],
+        "blockedWhen": blocked_when,
+        "blockedActions": [
+            "connector_activation",
+            "secret_read",
+            "network_tool_call",
+            "external_write",
+            "permission_write",
+            "frontend_direct_activation",
+        ],
+        "dataBoundary": {
+            "dataIsolation": integration.get("dataIsolation"),
+            "secretsStayServerSide": True,
+            "rawSecretLoggingAllowed": False,
+        },
+        "sideEffects": status_side_effects,
+    }
+
+
 def _integration_record(tool: dict[str, Any], permissions: set[str]) -> dict[str, Any]:
     actions = [action for action in tool.get("actions") or [] if isinstance(action, dict)]
     enabled = bool(tool.get("enabled"))
@@ -200,6 +307,7 @@ def build_integration_status(
                 1 for item in integrations if _risk_rank(str(item.get("maxRiskLevel"))) >= _risk_rank("high")
             ),
             "directFrontendExecutionAllowed": False,
+            "activationContractRequired": True,
         },
         "policies": {
             "secretsStayServerSide": True,
@@ -207,6 +315,7 @@ def build_integration_status(
             "auditRequired": True,
             "rateLimitsRequired": True,
             "toolExecutionRequiresSeparateExecutor": True,
+            "activationRequiresSeparateExecutor": True,
         },
         "sideEffects": {
             "integrationActivation": False,
@@ -245,6 +354,11 @@ def build_integration_plan(
             "status": "unknown_integration",
             "allowedToActivate": False,
             "humanApprovalRequired": True,
+            "activationContract": _activation_contract(
+                integration = None,
+                username = username,
+                status_side_effects = status["sideEffects"],
+            ),
             "steps": [
                 {
                     "id": "verify_manifest",
@@ -265,6 +379,7 @@ def build_integration_plan(
     return {
         "username": username,
         "integrationManagerVersion": COGNIX_INTEGRATION_MANAGER_VERSION,
+        "activationContractVersion": COGNIX_INTEGRATION_ACTIVATION_CONTRACT_VERSION,
         "mode": "dry_run",
         "toolId": integration.get("id"),
         "connector": integration.get("connector"),
@@ -272,6 +387,11 @@ def build_integration_plan(
         "allowedToActivate": allowed_to_activate,
         "humanApprovalRequired": True if next_actions else _risk_rank(max_risk) >= _risk_rank("medium"),
         "integration": integration,
+        "activationContract": _activation_contract(
+            integration = integration,
+            username = username,
+            status_side_effects = status["sideEffects"],
+        ),
         "steps": [
             {
                 "id": "verify_manifest",

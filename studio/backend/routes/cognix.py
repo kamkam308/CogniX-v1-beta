@@ -1100,6 +1100,10 @@ class IntegrationPlanRequest(BaseModel):
     tool_id: str = Field(..., min_length = 1, max_length = 120)
 
 
+class IntegrationActivationContractRequest(BaseModel):
+    tool_id: str = Field(..., min_length = 1, max_length = 120)
+
+
 class ModulePlanRequest(BaseModel):
     module_id: str = Field(..., min_length = 1, max_length = 160)
 
@@ -4502,11 +4506,17 @@ async def plan_integration(
         severity = "warning" if plan.get("humanApprovalRequired") else "notice",
         metadata = {
             "integrationManagerVersion": plan.get("integrationManagerVersion"),
+            "activationContractVersion": plan.get("activationContractVersion"),
             "toolId": plan.get("toolId"),
             "connector": plan.get("connector"),
             "status": plan.get("status"),
             "allowedToActivate": plan.get("allowedToActivate"),
             "humanApprovalRequired": plan.get("humanApprovalRequired"),
+            "activationContract": {
+                "readyForActivation": plan.get("activationContract", {}).get("readyForActivation"),
+                "nextRequiredGate": plan.get("activationContract", {}).get("nextRequiredGate"),
+                "blockedWhen": plan.get("activationContract", {}).get("blockedWhen", []),
+            },
             "missingPermissions": plan.get("integration", {}).get("missingPermissions", []),
             "nextActionIds": [
                 item.get("id") for item in plan.get("nextActions", []) if isinstance(item, dict)
@@ -4516,6 +4526,52 @@ async def plan_integration(
     )
     plan["auditLogId"] = audit.get("id")
     return plan
+
+
+@router.post("/integrations/activation-contract")
+async def integration_activation_contract(
+    payload: IntegrationActivationContractRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    is_admin = auth_storage.is_admin(current_subject)
+    has_developer_mode = cognix_db.user_has_permission(
+        current_subject,
+        cognix_db.DEVELOPER_MODE_PERMISSION,
+    )
+    plan = cognix_integration_manager.build_integration_plan(
+        tool_id = payload.tool_id,
+        username = current_subject,
+        is_admin = is_admin,
+        has_developer_mode = has_developer_mode,
+        granted_permissions = _granted_permission_keys(current_subject),
+    )
+    contract = plan.get("activationContract", {})
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "integration_activation_contract_built",
+        resource_type = "cognix_integration_activation_contract",
+        resource_id = str(payload.tool_id),
+        severity = "notice" if contract.get("allowedToPrepareActivation") else "warning",
+        metadata = {
+            "integrationManagerVersion": plan.get("integrationManagerVersion"),
+            "activationContractVersion": contract.get("contractVersion"),
+            "toolId": plan.get("toolId"),
+            "connector": plan.get("connector"),
+            "status": plan.get("status"),
+            "readyForActivation": contract.get("readyForActivation"),
+            "nextRequiredGate": contract.get("nextRequiredGate"),
+            "blockedWhen": contract.get("blockedWhen", []),
+            "sideEffects": contract.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "integrationPlan": plan,
+        "activationContract": contract,
+        "auditLogId": audit.get("id"),
+        "sideEffects": contract.get("sideEffects", {}),
+    }
 
 
 @router.get("/plugins/marketplace/blueprint")

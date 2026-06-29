@@ -1143,9 +1143,12 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
             "permissions_audit",
             "tool_permission_matrix",
             "tool_execution_contract",
+            "integration_activation_contract",
         ],
         "routes": [
             "/api/cognix/integrations/status",
+            "/api/cognix/integrations/plan",
+            "/api/cognix/integrations/activation-contract",
             "/api/cognix/tools/registry",
             "/api/cognix/tools/permission-matrix",
             "/api/cognix/tools/plan",
