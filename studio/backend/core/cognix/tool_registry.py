@@ -17,6 +17,7 @@ from typing import Any
 
 TOOL_REGISTRY_VERSION = "cognix_tool_registry_v1"
 TOOL_EXECUTION_CONTRACT_VERSION = "cognix_tool_execution_contract_v1"
+TOOL_EXECUTION_BOUNDARY_CONTRACT_VERSION = "cognix_tool_execution_boundary_contract_v1"
 TOOL_EXECUTION_HANDOFF_VERSION = "cognix_tool_execution_handoff_v1"
 TOOL_SECRET_POLICY_VERSION = "cognix_tool_secret_policy_v1"
 
@@ -1073,6 +1074,8 @@ def _action_decision(
             "secretsStayServerSide": bool(action.get("secretsRequired")),
             "secretPolicyRequired": True,
             "adminRequired": admin_required,
+            "executionBoundaryRequired": True,
+            "executorQueueGateRequired": allowed,
             "frontendDirectExecutionAllowed": False,
         },
         "blockers": blockers,
@@ -1103,6 +1106,248 @@ def _contract_blocked_when(decision: dict[str, Any]) -> list[str]:
     return sorted(set(blocked))
 
 
+def _execution_boundary_contract(
+    *,
+    tool: dict[str, Any],
+    action: dict[str, Any],
+    decision: dict[str, Any],
+    permission_context: dict[str, Any],
+    phase: str = "plan",
+) -> dict[str, Any]:
+    secret_policy = decision.get("secretPolicy")
+    if not isinstance(secret_policy, dict):
+        secret_policy = _secret_policy(tool, action)
+    rate_limit_policy = decision.get("rateLimitPolicy")
+    if not isinstance(rate_limit_policy, dict):
+        rate_limit_policy = rate_limit_policy_for_key(
+            str(decision.get("rateLimitKey") or "")
+            if decision.get("rateLimitKey")
+            else None
+        )
+    allowed_to_prepare = bool(decision.get("allowed"))
+    blocked_when = sorted(
+        set(_contract_blocked_when(decision))
+        | {"executor_boundary_required"}
+    )
+    connector = str(tool.get("connector") or "unknown")
+    return {
+        "contractVersion": TOOL_EXECUTION_BOUNDARY_CONTRACT_VERSION,
+        "mode": "pre_executor_boundary",
+        "phase": phase,
+        "toolId": tool.get("id"),
+        "connector": connector,
+        "actionId": action.get("id"),
+        "status": "closed_until_executor_review",
+        "manifest": {
+            "declared": True,
+            "toolEnabled": bool(tool.get("enabled")),
+            "actionMode": action.get("mode"),
+            "riskLevel": decision.get("riskLevel"),
+            "dataIsolation": tool.get("dataIsolation"),
+            "auditRequired": bool(decision.get("auditRequired")),
+            "rateLimitKey": decision.get("rateLimitKey"),
+        },
+        "rbac": {
+            "permissionsEvaluated": True,
+            "requiredPermissions": decision.get("requiredPermissions", []),
+            "missingPermissions": decision.get("missingPermissions", []),
+            "adminRequired": bool(decision.get("adminRequired")),
+            "allowedByRbac": bool(allowed_to_prepare and not decision.get("missingPermissions")),
+            "permissionContext": {
+                "username": permission_context.get("username"),
+                "isAdmin": bool(permission_context.get("isAdmin")),
+                "developerMode": bool(permission_context.get("developerMode")),
+                "effectivePermissionCount": len(permission_context.get("effectivePermissions") or []),
+            },
+        },
+        "requestBoundary": {
+            "toolExecutionAllowedHere": False,
+            "frontendDirectExecutionAllowed": False,
+            "clientPayloadStorageAllowed": False,
+            "rawPayloadAuditAllowed": False,
+            "clientSecretTransmitAllowed": False,
+        },
+        "executorBoundary": {
+            "executorRequired": allowed_to_prepare,
+            "executorQueueGateRequired": allowed_to_prepare,
+            "plannedExecutor": f"cognix_tool_executor:{connector}" if allowed_to_prepare else None,
+            "plannedExecutorQueue": "cognix_worker_queue:tool_execution" if allowed_to_prepare else None,
+            "jobEnqueueAllowedHere": False,
+            "automaticExecutionAllowed": False,
+            "executorMustRecheckBoundary": True,
+        },
+        "approvalBoundary": {
+            "humanConfirmationRequired": bool(decision.get("requiresConfirmation")),
+            "confirmationCollected": False,
+            "executionRequiresFreshApproval": bool(decision.get("requiresConfirmation")),
+        },
+        "sandboxBoundary": {
+            "sandboxRequired": bool(decision.get("sandboxRequired")),
+            "sandboxReady": False,
+            "isolatedRuntimeRequired": bool(decision.get("sandboxRequired")),
+        },
+        "secretBoundary": {
+            "secretPolicyVersion": secret_policy.get("policyVersion"),
+            "requiresSecret": bool(secret_policy.get("requiresSecret")),
+            "serverSideResolutionRequired": bool(secret_policy.get("serverSideResolutionRequired")),
+            "secretReadAllowedHere": False,
+            "rawSecretExposureAllowed": False,
+            "clientSecretTransmitAllowed": False,
+            "auditSecretValueAllowed": False,
+            "secretRefsAllowedOnlyInsideExecutor": bool(secret_policy.get("requiresSecret")),
+        },
+        "networkBoundary": {
+            "networkToolCallAllowedHere": False,
+            "externalWriteAllowedHere": False,
+            "connectorNetworkAllowedOnlyInsideExecutor": allowed_to_prepare,
+        },
+        "rateLimitBoundary": {
+            "rateLimitRequired": bool(decision.get("rateLimitKey")),
+            "rateLimitChecked": False,
+            "rateLimitAllowed": None,
+            "rateLimitPolicy": deepcopy(rate_limit_policy) if isinstance(rate_limit_policy, dict) else None,
+        },
+        "auditBoundary": {
+            "auditRequired": bool(decision.get("auditRequired")),
+            "auditLogMustRedactSecrets": True,
+            "auditLogRawPayloadAllowed": False,
+            "auditLogSecretValuesAllowed": False,
+        },
+        "blockedActions": [
+            "tool_execution",
+            "network_tool_call",
+            "external_write",
+            "secret_read",
+            "permission_write",
+            "job_enqueue",
+            "frontend_direct_execution",
+            "raw_payload_audit",
+        ],
+        "blockedWhen": blocked_when,
+        "sideEffects": {
+            "toolExecution": False,
+            "networkToolCall": False,
+            "externalWrite": False,
+            "secretRead": False,
+            "permissionWrite": False,
+            "jobEnqueue": False,
+            "rawPayloadAudit": False,
+        },
+    }
+
+
+def _unknown_execution_boundary_contract(
+    *,
+    tool_id: str,
+    action_id: str,
+    username: str,
+) -> dict[str, Any]:
+    return {
+        "contractVersion": TOOL_EXECUTION_BOUNDARY_CONTRACT_VERSION,
+        "mode": "pre_executor_boundary",
+        "phase": "plan",
+        "toolId": tool_id,
+        "connector": "unknown",
+        "actionId": action_id,
+        "status": "blocked_unknown_action",
+        "manifest": {
+            "declared": False,
+            "toolEnabled": False,
+            "actionMode": "unknown",
+            "riskLevel": "unknown",
+            "dataIsolation": "unknown",
+            "auditRequired": True,
+            "rateLimitKey": None,
+        },
+        "rbac": {
+            "permissionsEvaluated": False,
+            "requiredPermissions": [],
+            "missingPermissions": [],
+            "adminRequired": True,
+            "allowedByRbac": False,
+            "permissionContext": {
+                "username": username,
+                "isAdmin": False,
+                "developerMode": False,
+                "effectivePermissionCount": 0,
+            },
+        },
+        "requestBoundary": {
+            "toolExecutionAllowedHere": False,
+            "frontendDirectExecutionAllowed": False,
+            "clientPayloadStorageAllowed": False,
+            "rawPayloadAuditAllowed": False,
+            "clientSecretTransmitAllowed": False,
+        },
+        "executorBoundary": {
+            "executorRequired": False,
+            "executorQueueGateRequired": False,
+            "plannedExecutor": None,
+            "plannedExecutorQueue": None,
+            "jobEnqueueAllowedHere": False,
+            "automaticExecutionAllowed": False,
+            "executorMustRecheckBoundary": True,
+        },
+        "approvalBoundary": {
+            "humanConfirmationRequired": True,
+            "confirmationCollected": False,
+            "executionRequiresFreshApproval": True,
+        },
+        "sandboxBoundary": {
+            "sandboxRequired": True,
+            "sandboxReady": False,
+            "isolatedRuntimeRequired": True,
+        },
+        "secretBoundary": {
+            "secretPolicyVersion": TOOL_SECRET_POLICY_VERSION,
+            "requiresSecret": False,
+            "serverSideResolutionRequired": False,
+            "secretReadAllowedHere": False,
+            "rawSecretExposureAllowed": False,
+            "clientSecretTransmitAllowed": False,
+            "auditSecretValueAllowed": False,
+            "secretRefsAllowedOnlyInsideExecutor": False,
+        },
+        "networkBoundary": {
+            "networkToolCallAllowedHere": False,
+            "externalWriteAllowedHere": False,
+            "connectorNetworkAllowedOnlyInsideExecutor": False,
+        },
+        "rateLimitBoundary": {
+            "rateLimitRequired": False,
+            "rateLimitChecked": False,
+            "rateLimitAllowed": None,
+            "rateLimitPolicy": None,
+        },
+        "auditBoundary": {
+            "auditRequired": True,
+            "auditLogMustRedactSecrets": True,
+            "auditLogRawPayloadAllowed": False,
+            "auditLogSecretValuesAllowed": False,
+        },
+        "blockedActions": [
+            "tool_execution",
+            "network_tool_call",
+            "external_write",
+            "secret_read",
+            "permission_write",
+            "job_enqueue",
+            "frontend_direct_execution",
+            "raw_payload_audit",
+        ],
+        "blockedWhen": ["unknown_action", "executor_boundary_required"],
+        "sideEffects": {
+            "toolExecution": False,
+            "networkToolCall": False,
+            "externalWrite": False,
+            "secretRead": False,
+            "permissionWrite": False,
+            "jobEnqueue": False,
+            "rawPayloadAudit": False,
+        },
+    }
+
+
 def _execution_contract(
     *,
     tool: dict[str, Any],
@@ -1118,6 +1363,7 @@ def _execution_contract(
         secret_policy = _secret_policy(tool, action)
     return {
         "contractVersion": TOOL_EXECUTION_CONTRACT_VERSION,
+        "boundaryContractVersion": TOOL_EXECUTION_BOUNDARY_CONTRACT_VERSION,
         "mode": "guarded_plan_only",
         "toolId": tool.get("id"),
         "connector": connector,
@@ -1164,6 +1410,7 @@ def _execution_contract(
             "secretsRequired": bool(decision.get("secretsRequired")),
             "secretsStayServerSide": True,
             "secretPolicyVersion": secret_policy.get("policyVersion"),
+            "executionBoundaryContractVersion": TOOL_EXECUTION_BOUNDARY_CONTRACT_VERSION,
             "adminRequired": bool(decision.get("adminRequired")),
         },
         "permissionContext": {
@@ -1222,6 +1469,8 @@ def build_tool_registry() -> dict[str, Any]:
             "auditRequired": True,
             "rateLimitsEnabled": True,
             "executionContractRequired": True,
+            "executionBoundaryContractRequired": True,
+            "executionBoundaryContractVersion": TOOL_EXECUTION_BOUNDARY_CONTRACT_VERSION,
             "secretPolicyRequired": True,
             "secretPolicyVersion": TOOL_SECRET_POLICY_VERSION,
             "secretsMustStayServerSide": True,
@@ -1310,6 +1559,8 @@ def build_tool_permission_matrix(
             "adminOnlyForRiskAtLeast": "critical",
             "auditRequired": True,
             "rateLimitsEnabled": True,
+            "executionBoundaryContractRequired": True,
+            "executionBoundaryContractVersion": TOOL_EXECUTION_BOUNDARY_CONTRACT_VERSION,
             "secretPolicyRequired": True,
             "secretPolicyVersion": TOOL_SECRET_POLICY_VERSION,
             "secretsMustStayServerSide": True,
@@ -1355,9 +1606,15 @@ def plan_tool_action(
 ) -> dict[str, Any]:
     found = find_tool_action(tool_id, action_id)
     if found is None:
+        boundary_contract = _unknown_execution_boundary_contract(
+            tool_id = tool_id,
+            action_id = action_id,
+            username = username,
+        )
         return {
             "registryVersion": TOOL_REGISTRY_VERSION,
             "executionContractVersion": TOOL_EXECUTION_CONTRACT_VERSION,
+            "executionBoundaryContractVersion": TOOL_EXECUTION_BOUNDARY_CONTRACT_VERSION,
             "secretPolicyVersion": TOOL_SECRET_POLICY_VERSION,
             "username": username,
             "toolId": tool_id,
@@ -1381,6 +1638,7 @@ def plan_tool_action(
             ),
             "executionContract": {
                 "contractVersion": TOOL_EXECUTION_CONTRACT_VERSION,
+                "boundaryContractVersion": TOOL_EXECUTION_BOUNDARY_CONTRACT_VERSION,
                 "mode": "guarded_plan_only",
                 "toolId": tool_id,
                 "actionId": action_id,
@@ -1409,6 +1667,7 @@ def plan_tool_action(
                     "permissionWrite": False,
                 },
             },
+            "executionBoundaryContract": boundary_contract,
         }
 
     tool, action = found
@@ -1423,9 +1682,22 @@ def plan_tool_action(
         action = action,
         permission_set = _permission_set_from_context(permission_context),
     )
+    execution_contract = _execution_contract(
+        tool = tool,
+        action = action,
+        decision = decision,
+        permission_context = permission_context,
+    )
+    boundary_contract = _execution_boundary_contract(
+        tool = tool,
+        action = action,
+        decision = decision,
+        permission_context = permission_context,
+    )
     return {
         "registryVersion": TOOL_REGISTRY_VERSION,
         "executionContractVersion": TOOL_EXECUTION_CONTRACT_VERSION,
+        "executionBoundaryContractVersion": TOOL_EXECUTION_BOUNDARY_CONTRACT_VERSION,
         "username": username,
         "toolId": tool["id"],
         "toolName": tool["name"],
@@ -1433,12 +1705,8 @@ def plan_tool_action(
         "actionLabel": action["label"],
         "permissionContext": permission_context,
         **decision,
-        "executionContract": _execution_contract(
-            tool = tool,
-            action = action,
-            decision = decision,
-            permission_context = permission_context,
-        ),
+        "executionContract": execution_contract,
+        "executionBoundaryContract": boundary_contract,
     }
 
 
@@ -1464,6 +1732,17 @@ def apply_rate_limit_result(
         "remaining": rate_limit.get("remaining"),
         "resetAt": rate_limit.get("resetAt"),
     }
+    boundary = updated.get("executionBoundaryContract")
+    if isinstance(boundary, dict):
+        rate_limit_boundary = boundary.get("rateLimitBoundary")
+        if isinstance(rate_limit_boundary, dict):
+            rate_limit_boundary["rateLimitChecked"] = True
+            rate_limit_boundary["rateLimitAllowed"] = bool(rate_limit.get("allowed"))
+            rate_limit_boundary["rateLimit"] = {
+                "allowed": bool(rate_limit.get("allowed")),
+                "remaining": rate_limit.get("remaining"),
+                "resetAt": rate_limit.get("resetAt"),
+            }
     blocked_when = [
         str(item)
         for item in contract.get("blockedWhen", [])
@@ -1473,6 +1752,12 @@ def apply_rate_limit_result(
         contract["blockedWhen"] = blocked_when
         if contract.get("nextRequiredGate") == "rate_limit_check_required":
             contract["nextRequiredGate"] = blocked_when[0] if blocked_when else "executor_approval_gate"
+        if isinstance(boundary, dict):
+            boundary["blockedWhen"] = [
+                str(item)
+                for item in boundary.get("blockedWhen", [])
+                if str(item or "").strip() and item != "rate_limit_check_required"
+            ]
         return updated
 
     if "rate_limited" not in blocked_when:
@@ -1482,6 +1767,22 @@ def apply_rate_limit_result(
     contract["allowedToPrepare"] = False
     contract["executorRequired"] = False
     contract["plannedExecutor"] = None
+    if isinstance(boundary, dict):
+        boundary_blocked_when = [
+            str(item)
+            for item in boundary.get("blockedWhen", [])
+            if str(item or "").strip() and item != "rate_limit_check_required"
+        ]
+        if "rate_limited" not in boundary_blocked_when:
+            boundary_blocked_when.append("rate_limited")
+        boundary["blockedWhen"] = boundary_blocked_when
+        boundary["status"] = "blocked_rate_limited"
+        executor_boundary = boundary.get("executorBoundary")
+        if isinstance(executor_boundary, dict):
+            executor_boundary["executorRequired"] = False
+            executor_boundary["executorQueueGateRequired"] = False
+            executor_boundary["plannedExecutor"] = None
+            executor_boundary["plannedExecutorQueue"] = None
     updated["allowed"] = False
     updated["status"] = "rate_limited"
     updated["reason"] = "Tool action rate limit reached."
@@ -1526,6 +1827,9 @@ def build_tool_execution_handoff(
     contract = plan.get("executionContract")
     if not isinstance(contract, dict):
         contract = {}
+    boundary_contract = plan.get("executionBoundaryContract")
+    if not isinstance(boundary_contract, dict):
+        boundary_contract = {}
     secret_policy = plan.get("secretPolicy")
     if not isinstance(secret_policy, dict):
         secret_policy = {}
@@ -1603,9 +1907,14 @@ def build_tool_execution_handoff(
         action_id = action_id,
         request_id = request_id,
     )
+    boundary_contract_version = (
+        boundary_contract.get("contractVersion")
+        or TOOL_EXECUTION_BOUNDARY_CONTRACT_VERSION
+    )
     return {
         "handoffVersion": TOOL_EXECUTION_HANDOFF_VERSION,
         "executionContractVersion": contract.get("contractVersion") or TOOL_EXECUTION_CONTRACT_VERSION,
+        "executionBoundaryContractVersion": boundary_contract_version,
         "mode": "executor_handoff_dry_run",
         "handoffId": handoff_id,
         "idempotencyKey": handoff_id,
@@ -1616,6 +1925,17 @@ def build_tool_execution_handoff(
         "connector": contract.get("connector"),
         "plannedExecutor": contract.get("plannedExecutor"),
         "executorQueue": executor_queue,
+        "executionBoundary": {
+            "status": boundary_contract.get("status") or "closed_until_executor_review",
+            "contractVersion": boundary_contract_version,
+            "toolExecutionAllowedHere": False,
+            "jobEnqueueAllowedHere": False,
+            "frontendDirectExecutionAllowed": False,
+            "rawPayloadAuditAllowed": False,
+            "secretReadAllowedHere": False,
+            "executorMustRecheckBoundary": True,
+            "blockedWhen": boundary_contract.get("blockedWhen", []),
+        },
         "status": "ready_for_executor_review" if ready_for_executor_review else "blocked_missing_gate",
         "readyForExecutorReview": ready_for_executor_review,
         "readyForJobEnqueue": False,
@@ -1636,6 +1956,8 @@ def build_tool_execution_handoff(
         },
         "policies": {
             "jobEnqueueAllowedHere": False,
+            "executionBoundaryContractRequired": True,
+            "executorMustRecheckBoundary": True,
             "executorMustRecheckPermissions": True,
             "executorMustRecheckRateLimit": True,
             "executorMustResolveSecretsServerSide": True,

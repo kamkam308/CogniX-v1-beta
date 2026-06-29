@@ -8741,6 +8741,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/evolution/proposals" in modules["cognix-ai-evolution-engine"]["routes"]
     assert "tool_permission_matrix" in modules["cognix-integrations"]["capabilities"]
     assert "tool_execution_contract" in modules["cognix-integrations"]["capabilities"]
+    assert "tool_execution_boundary_contract" in modules["cognix-integrations"]["capabilities"]
     assert "tool_execution_handoff" in modules["cognix-integrations"]["capabilities"]
     assert "tool_executor_queue_gate" in modules["cognix-integrations"]["capabilities"]
     assert "tool_secret_policy" in modules["cognix-integrations"]["capabilities"]
@@ -9489,6 +9490,8 @@ def test_tool_registry_declares_permissions_and_guardrails():
     assert registry["globalPolicies"]["rateLimitsEnabled"] is True
     assert registry["globalPolicies"]["permissionMatrixAvailable"] is True
     assert registry["globalPolicies"]["executionContractRequired"] is True
+    assert registry["globalPolicies"]["executionBoundaryContractRequired"] is True
+    assert registry["globalPolicies"]["executionBoundaryContractVersion"] == "cognix_tool_execution_boundary_contract_v1"
     assert registry["globalPolicies"]["secretPolicyRequired"] is True
     assert registry["globalPolicies"]["secretPolicyVersion"] == "cognix_tool_secret_policy_v1"
     assert registry["sideEffects"]["toolExecution"] is False
@@ -9674,6 +9677,7 @@ def test_tool_action_plan_builds_execution_contract_without_execution():
     assert plan["secretPolicy"]["requiresSecret"] is False
     assert plan["allowed"] is True
     assert contract["contractVersion"] == "cognix_tool_execution_contract_v1"
+    assert contract["boundaryContractVersion"] == "cognix_tool_execution_boundary_contract_v1"
     assert contract["mode"] == "guarded_plan_only"
     assert contract["allowedToPrepare"] is True
     assert contract["readyForExecution"] is False
@@ -9692,6 +9696,39 @@ def test_tool_action_plan_builds_execution_contract_without_execution():
     assert "tool_execution" in contract["blockedActions"]
     assert contract["sideEffects"]["toolExecution"] is False
     assert plan["sideEffects"]["toolExecution"] is False
+
+
+def test_tool_action_plan_builds_execution_boundary_contract_without_execution():
+    plan = cognix_tool_registry.plan_tool_action(
+        tool_id = "codex-secure-agent",
+        action_id = "modify_code",
+        username = "alice",
+        has_developer_mode = True,
+        granted_permissions = set(),
+    )
+
+    boundary = plan["executionBoundaryContract"]
+    assert plan["executionBoundaryContractVersion"] == "cognix_tool_execution_boundary_contract_v1"
+    assert boundary["contractVersion"] == "cognix_tool_execution_boundary_contract_v1"
+    assert boundary["mode"] == "pre_executor_boundary"
+    assert boundary["status"] == "closed_until_executor_review"
+    assert boundary["manifest"]["declared"] is True
+    assert boundary["manifest"]["toolEnabled"] is True
+    assert boundary["manifest"]["riskLevel"] == "high"
+    assert boundary["rbac"]["allowedByRbac"] is True
+    assert boundary["requestBoundary"]["toolExecutionAllowedHere"] is False
+    assert boundary["requestBoundary"]["frontendDirectExecutionAllowed"] is False
+    assert boundary["requestBoundary"]["rawPayloadAuditAllowed"] is False
+    assert boundary["executorBoundary"]["executorRequired"] is True
+    assert boundary["executorBoundary"]["plannedExecutorQueue"] == "cognix_worker_queue:tool_execution"
+    assert boundary["executorBoundary"]["jobEnqueueAllowedHere"] is False
+    assert boundary["secretBoundary"]["secretReadAllowedHere"] is False
+    assert boundary["networkBoundary"]["networkToolCallAllowedHere"] is False
+    assert boundary["auditBoundary"]["auditLogRawPayloadAllowed"] is False
+    assert "job_enqueue" in boundary["blockedActions"]
+    assert "executor_boundary_required" in boundary["blockedWhen"]
+    assert boundary["sideEffects"]["toolExecution"] is False
+    assert boundary["sideEffects"]["jobEnqueue"] is False
 
 
 def test_tool_execution_handoff_prepares_executor_packet_without_enqueuing():
@@ -9720,6 +9757,10 @@ def test_tool_execution_handoff_prepares_executor_packet_without_enqueuing():
 
     assert handoff["handoffVersion"] == "cognix_tool_execution_handoff_v1"
     assert handoff["executionContractVersion"] == "cognix_tool_execution_contract_v1"
+    assert handoff["executionBoundaryContractVersion"] == "cognix_tool_execution_boundary_contract_v1"
+    assert handoff["executionBoundary"]["toolExecutionAllowedHere"] is False
+    assert handoff["executionBoundary"]["jobEnqueueAllowedHere"] is False
+    assert handoff["executionBoundary"]["executorMustRecheckBoundary"] is True
     assert handoff["status"] == "ready_for_executor_review"
     assert handoff["readyForExecutorReview"] is True
     assert handoff["readyForJobEnqueue"] is False
@@ -9748,6 +9789,8 @@ def test_tool_permission_matrix_summarizes_effective_permissions_without_executi
     assert matrix["mode"] == "permission_matrix_dry_run"
     assert matrix["summary"]["executionEnabled"] is False
     assert matrix["policies"]["permissionSource"] == "cognix_user_permissions_plus_role"
+    assert matrix["policies"]["executionBoundaryContractRequired"] is True
+    assert matrix["policies"]["executionBoundaryContractVersion"] == "cognix_tool_execution_boundary_contract_v1"
     assert matrix["sideEffects"]["permissionWrite"] is False
     assert matrix["sideEffects"]["secretRead"] is False
     assert matrix["sideEffects"]["toolExecution"] is False
@@ -9845,6 +9888,10 @@ def test_enterprise_tool_action_plan_blocks_critical_exports_without_execution()
     assert "connector_disabled" in plan["executionContract"]["blockedWhen"]
     assert "sandbox_required" in plan["executionContract"]["blockedWhen"]
     assert plan["executionContract"]["dataBoundary"]["clientSecretTransmitAllowed"] is False
+    assert plan["executionBoundaryContract"]["manifest"]["riskLevel"] == "critical"
+    assert plan["executionBoundaryContract"]["rbac"]["adminRequired"] is True
+    assert plan["executionBoundaryContract"]["requestBoundary"]["toolExecutionAllowedHere"] is False
+    assert plan["executionBoundaryContract"]["auditBoundary"]["auditLogRawPayloadAllowed"] is False
     assert plan["sideEffects"]["toolExecution"] is False
     assert plan["sideEffects"]["externalWrite"] is False
     assert plan["sideEffects"]["secretRead"] is False
@@ -10052,6 +10099,9 @@ def test_tool_execution_handoff_endpoint_logs_sanitized_packet_without_job_enque
     assert body["auditLogId"].startswith("aud_")
     assert body["plannerVersion"] == "cognix_tool_execution_handoff_v1"
     assert body["toolPlan"]["executionContract"]["preconditions"]["rateLimitChecked"] is True
+    assert body["toolPlan"]["executionBoundaryContract"]["rateLimitBoundary"]["rateLimitChecked"] is True
+    assert handoff["executionBoundaryContractVersion"] == "cognix_tool_execution_boundary_contract_v1"
+    assert handoff["executionBoundary"]["jobEnqueueAllowedHere"] is False
     assert handoff["status"] == "ready_for_executor_review"
     assert handoff["readyForExecutorReview"] is True
     assert handoff["readyForJobEnqueue"] is False
@@ -10066,6 +10116,9 @@ def test_tool_execution_handoff_endpoint_logs_sanitized_packet_without_job_enque
     assert log["action"] == "tool_execution_handoff_built"
     assert log["resourceType"] == "cognix_tool_execution_handoff"
     assert log["metadata"]["handoffVersion"] == "cognix_tool_execution_handoff_v1"
+    assert log["metadata"]["executionBoundaryContractVersion"] == "cognix_tool_execution_boundary_contract_v1"
+    assert log["metadata"]["executionBoundary"]["jobEnqueueAllowedHere"] is False
+    assert log["metadata"]["executionBoundary"]["rawPayloadAuditAllowed"] is False
     assert log["metadata"]["readyForJobEnqueue"] is False
     assert log["metadata"]["secretValuesIncluded"] is False
     assert log["metadata"]["rawPayloadIncluded"] is False
@@ -10257,6 +10310,8 @@ def test_tool_plan_applies_rate_limit_guard(monkeypatch):
     assert first["rateLimit"]["allowed"] is True
     assert first["executionContract"]["preconditions"]["rateLimitChecked"] is True
     assert first["executionContract"]["preconditions"]["rateLimitAllowed"] is True
+    assert first["executionBoundaryContract"]["rateLimitBoundary"]["rateLimitChecked"] is True
+    assert first["executionBoundaryContract"]["rateLimitBoundary"]["rateLimitAllowed"] is True
     assert first["executionContract"]["readyForExecution"] is False
     assert second["allowed"] is False
     assert second["status"] == "rate_limited"
@@ -10264,6 +10319,10 @@ def test_tool_plan_applies_rate_limit_guard(monkeypatch):
     assert second["executionContract"]["nextRequiredGate"] == "rate_limited"
     assert "rate_limited" in second["executionContract"]["blockedWhen"]
     assert second["executionContract"]["allowedToPrepare"] is False
+    assert second["executionBoundaryContract"]["status"] == "blocked_rate_limited"
+    assert "rate_limited" in second["executionBoundaryContract"]["blockedWhen"]
+    assert second["executionBoundaryContract"]["executorBoundary"]["executorRequired"] is False
+    assert second["executionBoundaryContract"]["executorBoundary"]["plannedExecutorQueue"] is None
     assert second["sideEffects"]["toolExecution"] is False
 
 
@@ -10322,6 +10381,9 @@ def test_tool_plan_uses_database_permissions_for_connector_actions():
     assert body["secretPolicy"]["secretReadAllowedHere"] is False
     assert body["secretPolicy"]["rawSecretExposureAllowed"] is False
     assert body["executionContract"]["contractVersion"] == "cognix_tool_execution_contract_v1"
+    assert body["executionBoundaryContract"]["contractVersion"] == "cognix_tool_execution_boundary_contract_v1"
+    assert body["executionBoundaryContract"]["requestBoundary"]["toolExecutionAllowedHere"] is False
+    assert body["executionBoundaryContract"]["secretBoundary"]["secretReadAllowedHere"] is False
     assert body["executionContract"]["preconditions"]["secretsRequired"] is True
     assert body["executionContract"]["preconditions"]["secretPolicyVersion"] == "cognix_tool_secret_policy_v1"
     assert body["executionContract"]["dataBoundary"]["secretsStayServerSide"] is True
@@ -10334,6 +10396,9 @@ def test_tool_plan_uses_database_permissions_for_connector_actions():
     assert log["action"] == "tool_action_planned"
     assert log["metadata"]["missingPermissions"] == []
     assert log["metadata"]["executionContractVersion"] == "cognix_tool_execution_contract_v1"
+    assert log["metadata"]["executionBoundaryContractVersion"] == "cognix_tool_execution_boundary_contract_v1"
+    assert log["metadata"]["executionBoundary"]["toolExecutionAllowedHere"] is False
+    assert log["metadata"]["executionBoundary"]["rawPayloadAuditAllowed"] is False
     assert log["metadata"]["secretPolicyVersion"] == "cognix_tool_secret_policy_v1"
     assert log["metadata"]["secretPolicy"]["rawSecretExposureAllowed"] is False
     assert log["metadata"]["contract"]["readyForExecution"] is False

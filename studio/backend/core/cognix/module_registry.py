@@ -1205,6 +1205,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
             "permissions_audit",
             "tool_permission_matrix",
             "tool_execution_contract",
+            "tool_execution_boundary_contract",
             "tool_execution_handoff",
             "tool_executor_queue_gate",
             "tool_secret_policy",

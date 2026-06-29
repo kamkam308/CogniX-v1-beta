@@ -5680,6 +5680,18 @@ async def plan_tool_action(
         if isinstance(rate_limit, dict) and plan.get("status") == tool_rate_limited_status:
             rate_limit["status"] = tool_rate_limited_status
 
+    execution_boundary_contract = plan.get("executionBoundaryContract")
+    if not isinstance(execution_boundary_contract, dict):
+        execution_boundary_contract = {}
+    request_boundary = execution_boundary_contract.get("requestBoundary")
+    if not isinstance(request_boundary, dict):
+        request_boundary = {}
+    executor_boundary = execution_boundary_contract.get("executorBoundary")
+    if not isinstance(executor_boundary, dict):
+        executor_boundary = {}
+    audit_boundary = execution_boundary_contract.get("auditBoundary")
+    if not isinstance(audit_boundary, dict):
+        audit_boundary = {}
     audit = cognix_db.create_audit_log(
         username = current_subject,
         actor_username = current_subject,
@@ -5690,6 +5702,7 @@ async def plan_tool_action(
         metadata = {
             "toolRegistryVersion": plan.get("registryVersion"),
             "executionContractVersion": plan.get("executionContractVersion"),
+            "executionBoundaryContractVersion": plan.get("executionBoundaryContractVersion"),
             "toolId": plan.get("toolId"),
             "actionId": plan.get("actionId"),
             "status": plan.get("status"),
@@ -5708,6 +5721,13 @@ async def plan_tool_action(
                 "readyForExecution": plan.get("executionContract", {}).get("readyForExecution"),
                 "nextRequiredGate": plan.get("executionContract", {}).get("nextRequiredGate"),
                 "blockedWhen": plan.get("executionContract", {}).get("blockedWhen", []),
+            },
+            "executionBoundary": {
+                "status": execution_boundary_contract.get("status"),
+                "contractVersion": execution_boundary_contract.get("contractVersion"),
+                "toolExecutionAllowedHere": request_boundary.get("toolExecutionAllowedHere"),
+                "jobEnqueueAllowedHere": executor_boundary.get("jobEnqueueAllowedHere"),
+                "rawPayloadAuditAllowed": audit_boundary.get("auditLogRawPayloadAllowed"),
             },
             "missingPermissions": plan.get("missingPermissions", []),
             "rateLimit": rate_limit,
@@ -6082,6 +6102,7 @@ async def tool_execution_handoff(
         metadata = {
             "toolRegistryVersion": plan.get("registryVersion"),
             "executionContractVersion": handoff.get("executionContractVersion"),
+            "executionBoundaryContractVersion": handoff.get("executionBoundaryContractVersion"),
             "handoffVersion": handoff.get("handoffVersion"),
             "handoffId": handoff.get("handoffId"),
             "toolId": handoff.get("toolId"),
@@ -6090,6 +6111,7 @@ async def tool_execution_handoff(
             "status": handoff.get("status"),
             "readyForExecutorReview": handoff.get("readyForExecutorReview"),
             "readyForJobEnqueue": handoff.get("readyForJobEnqueue"),
+            "executionBoundary": handoff.get("executionBoundary", {}),
             "blockedWhen": handoff.get("blockedWhen", []),
             "gateIds": [
                 item.get("id") for item in handoff.get("gates", []) if isinstance(item, dict)
