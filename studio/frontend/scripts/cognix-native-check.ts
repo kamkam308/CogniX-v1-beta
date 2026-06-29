@@ -54,6 +54,9 @@ const checks: Check[] = [
       "trainingLocalAvailable",
       "trainingCloudAvailable",
       "isTrainingAccessible",
+      "isCloudTrainingAccess",
+      'access === "cloud_ceo"',
+      'access === "local_plus_cloud_ceo"',
     ],
   },
   {
@@ -61,7 +64,9 @@ const checks: Check[] = [
     includes: [
       "cloudOnlyTraining",
       "fetchDeviceType({ force: true })",
-      "platform.trainingCloudAvailable && !platform.trainingLocalAvailable",
+      "!platform.trainingLocalAvailable",
+      "platform.cloudTrainingUnlocked",
+      "isCloudTrainingAccess(platform.trainingAccess)",
       "prepareCloudTrainingHandoff",
       "buildCloudTrainingObjective",
       "buildCloudTrainingDataset",
@@ -74,7 +79,9 @@ const checks: Check[] = [
     file: "src/features/studio/sections/training-section.tsx",
     includes: [
       "cloudOnlyTraining",
-      "trainingCloudAvailable && !s.trainingLocalAvailable",
+      "!s.trainingLocalAvailable",
+      "s.cloudTrainingUnlocked",
+      "isCloudTrainingAccess(s.trainingAccess)",
       "formatCloudProviderLabel",
       "studio.training.prepareCloudTraining",
       "studio.training.cloudTrainingReady",

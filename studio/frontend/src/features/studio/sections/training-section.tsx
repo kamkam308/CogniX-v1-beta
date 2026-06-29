@@ -17,7 +17,7 @@ import {
   useTrainingConfigStore,
   validateTrainingConfig,
 } from "@/features/training";
-import { usePlatformStore } from "@/config/env";
+import { isCloudTrainingAccess, usePlatformStore } from "@/config/env";
 import {
   Archive04Icon,
   ChartAverageIcon,
@@ -43,7 +43,13 @@ const placeholderData = [
 export function TrainingSection() {
   const t = useT();
   const cloudOnlyTraining = usePlatformStore(
-    (s) => s.trainingCloudAvailable && !s.trainingLocalAvailable,
+    (s) =>
+      !s.trainingLocalAvailable &&
+      (
+        s.trainingCloudAvailable ||
+        s.cloudTrainingUnlocked ||
+        isCloudTrainingAccess(s.trainingAccess)
+      ),
   );
   const cloudProviders = usePlatformStore((s) => s.cloudTrainingProviders);
   const cloudProviderLabel = cloudProviders.length > 0

@@ -14,6 +14,11 @@ export const env = {
 // Platform / device type
 
 export type DeviceType = "mac" | "windows" | "linux" | string;
+type TrainingAccess = "local" | "cloud_ceo" | "local_plus_cloud_ceo" | string;
+
+export function isCloudTrainingAccess(access: TrainingAccess | null | undefined): boolean {
+  return access === "cloud_ceo" || access === "local_plus_cloud_ceo";
+}
 
 interface PlatformState {
   deviceType: DeviceType;
@@ -29,7 +34,7 @@ interface PlatformState {
   secure: boolean;
   cloudTrainingUnlocked: boolean;
   cloudTrainingProviders: string[];
-  trainingAccess: "local" | "cloud_ceo" | string;
+  trainingAccess: TrainingAccess;
   trainingLocalAvailable: boolean;
   trainingCloudAvailable: boolean;
   fetched: boolean;
@@ -63,7 +68,15 @@ export const usePlatformStore = create<PlatformState>()((_, get) => ({
   trainingCloudAvailable: false,
   fetched: false,
   isChatOnly: () => get().chatOnly,
-  isTrainingAccessible: () => get().trainingLocalAvailable || get().trainingCloudAvailable || get().cloudTrainingUnlocked,
+  isTrainingAccessible: () => {
+    const state = get();
+    return (
+      state.trainingLocalAvailable ||
+      state.trainingCloudAvailable ||
+      state.cloudTrainingUnlocked ||
+      isCloudTrainingAccess(state.trainingAccess)
+    );
+  },
 }));
 
 // `force` re-reads /api/health even if cached, to pick up a late-arriving tunnel URL.
@@ -101,9 +114,13 @@ export async function fetchDeviceType(options?: {
       const deviceType = data.device_type ?? detectLocalPlatform();
       const chatOnly = data.chat_only ?? false;
       const chatOnlyReason = data.chat_only_reason ?? null;
+      const trainingAccess = data.training_access ?? "local";
       const cloudTrainingProviders = Array.isArray(data.cloud_training_providers)
         ? data.cloud_training_providers.filter((item): item is string => typeof item === "string")
         : [];
+      const cloudTrainingUnlocked =
+        data.cloud_training_unlocked === true ||
+        isCloudTrainingAccess(trainingAccess);
       // Cache only a server-reported platform. Unauthenticated responses fall
       // back to the browser platform, which can differ from the host (WSL,
       // SSH); keeping fetched=false retries once a token exists.
@@ -114,11 +131,11 @@ export async function fetchDeviceType(options?: {
         cloudflareUrl: data.cloudflare_url ?? null,
         serverUrl: data.server_url ?? null,
         secure: data.secure ?? false,
-        cloudTrainingUnlocked: data.cloud_training_unlocked === true,
+        cloudTrainingUnlocked,
         cloudTrainingProviders,
-        trainingAccess: data.training_access ?? "local",
+        trainingAccess,
         trainingLocalAvailable: data.training_local_available ?? !chatOnly,
-        trainingCloudAvailable: data.training_cloud_available ?? data.cloud_training_unlocked === true,
+        trainingCloudAvailable: data.training_cloud_available ?? cloudTrainingUnlocked,
         fetched: data.device_type !== undefined,
       });
       return deviceType;
