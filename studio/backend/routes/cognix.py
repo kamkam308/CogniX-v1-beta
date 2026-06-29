@@ -38,6 +38,7 @@ from core.cognix import evolution_engine as cognix_evolution_engine
 from core.cognix import fine_tuning_planner as cognix_fine_tuning_planner
 from core.cognix import governance_manager as cognix_governance_manager
 from core.cognix import hardware as cognix_hardware
+from core.cognix import images as cognix_images
 from core.cognix import integration_manager as cognix_integration_manager
 from core.cognix import intent_prediction as cognix_intent_prediction
 from core.cognix import library as cognix_library
@@ -632,8 +633,14 @@ class ProjectShareCreateRequest(BaseModel):
 
 
 class ImageRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
     prompt: str = Field(..., min_length = 1, max_length = 4000)
     model: str | None = Field(None, max_length = 160)
+    mode: Literal["generate", "edit", "analyze", "variants"] = "generate"
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    source_image_id: str | None = Field(None, alias = "sourceImageId", max_length = 180)
+    variant_count: int | None = Field(None, alias = "variantCount", ge = 1, le = 8)
 
 
 class ResearchRequest(BaseModel):
@@ -9127,7 +9134,45 @@ async def generate_pulse(
 
 @router.get("/images")
 async def my_images(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
-    return {"images": _rows(cognix_db.list_image_history(current_subject))}
+    images = _rows(cognix_db.list_image_history(current_subject))
+    return {
+        "images": images,
+        "summary": cognix_images.summarize_image_history(images),
+        "blueprint": cognix_images.build_images_blueprint(),
+    }
+
+
+@router.get("/images/blueprint")
+async def images_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_images.build_images_blueprint()
+    return {
+        "username": current_subject,
+        "blueprint": blueprint,
+        "sideEffects": blueprint["sideEffects"],
+    }
+
+
+@router.post("/images/plan")
+async def plan_image(
+    payload: ImageRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    plan = cognix_images.build_image_plan(
+        username = current_subject,
+        prompt = payload.prompt,
+        model = payload.model,
+        mode = payload.mode,
+        project_id = payload.project_id,
+        source_image_id = payload.source_image_id,
+        variant_count = payload.variant_count,
+        granted_permissions = _granted_permission_keys(current_subject),
+        admin = auth_storage.is_admin(current_subject),
+    )
+    return {
+        "username": current_subject,
+        "imagePlan": plan,
+        "sideEffects": plan["sideEffects"],
+    }
 
 
 @router.post("/images")
@@ -9135,15 +9180,70 @@ async def create_image(
     payload: ImageRequest,
     current_subject: str = Depends(get_current_jwt_subject),
 ) -> dict[str, Any]:
-    image = cognix_db.create_image_request(current_subject, payload.prompt, payload.model)
-    cognix_db.create_library_item(
-        current_subject,
-        kind = "image",
-        name = payload.prompt[:80] or "Image CogniX",
-        source = "image_generation",
-        metadata = {"imageRequestId": image.get("id"), "status": image.get("status")},
+    plan = cognix_images.build_image_plan(
+        username = current_subject,
+        prompt = payload.prompt,
+        model = payload.model,
+        mode = payload.mode,
+        project_id = payload.project_id,
+        source_image_id = payload.source_image_id,
+        variant_count = payload.variant_count,
+        granted_permissions = _granted_permission_keys(current_subject),
+        admin = auth_storage.is_admin(current_subject),
     )
-    return {"image": _row(image)}
+    if plan["permissionPlan"]["missingPermissions"]:
+        raise HTTPException(
+            status_code = 403,
+            detail = "Missing image permissions: " + ", ".join(plan["permissionPlan"]["missingPermissions"]),
+        )
+    image = cognix_db.create_image_request(
+        current_subject,
+        plan["prompt"],
+        plan["modelPlan"]["selectedModel"],
+    )
+    asset = plan["libraryAsset"]
+    metadata = {
+        **asset["metadata"],
+        "imageRequestId": image.get("id"),
+        "status": image.get("status"),
+    }
+    library_item = cognix_db.create_library_item(
+        current_subject,
+        kind = asset["kind"],
+        name = asset["name"],
+        source = asset["source"],
+        metadata = metadata,
+    )
+    side_effects = {
+        **plan["sideEffects"],
+        "imageRequestWrite": True,
+        "libraryWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "image_request_created",
+        resource_type = "cognix_image",
+        resource_id = str(image.get("id") or ""),
+        severity = "warning" if plan["safety"]["status"] == "needs_review" else "notice",
+        metadata = {
+            "imagesVersion": plan.get("imagesVersion"),
+            "actionType": plan["action"]["actionType"],
+            "selectedModel": plan["modelPlan"]["selectedModel"],
+            "variantCount": plan["variantPlan"]["count"],
+            "safetyStatus": plan["safety"]["status"],
+            "libraryItemId": library_item.get("id"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "image": _row(image),
+        "libraryItem": _row(library_item),
+        "imagePlan": plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+    }
 
 
 @router.get("/admin/dashboard")

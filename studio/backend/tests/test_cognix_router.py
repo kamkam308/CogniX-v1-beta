@@ -30,6 +30,7 @@ from core.cognix import decision_explainer as cognix_decision_explainer
 from core.cognix import dynamic_ui as cognix_dynamic_ui
 from core.cognix import evolution_engine as cognix_evolution_engine
 from core.cognix import governance_manager as cognix_governance_manager
+from core.cognix import images as cognix_images
 from core.cognix import integration_manager as cognix_integration_manager
 from core.cognix import intent_prediction as cognix_intent_prediction
 from core.cognix import library as cognix_library
@@ -5452,6 +5453,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-pulse",
         "cognix-library",
         "cognix-scheduled",
+        "cognix-images",
         "cognix-model-lifecycle",
         "cognix-live-model-comparison",
         "cognix-model-translator",
@@ -5503,6 +5505,10 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "creator_permission_ceiling" in modules["cognix-scheduled"]["capabilities"]
     assert "/api/cognix/scheduled-tasks/plan" in modules["cognix-scheduled"]["routes"]
     assert "/api/cognix/scheduled-tasks/{task_id}/run-plan" in modules["cognix-scheduled"]["routes"]
+    assert modules["cognix-images"]["status"] == "enabled"
+    assert "image_safety_check" in modules["cognix-images"]["capabilities"]
+    assert "image_asset_library_link" in modules["cognix-images"]["capabilities"]
+    assert "/api/cognix/images/plan" in modules["cognix-images"]["routes"]
     assert modules["cognix-local-core"]["activationState"] == "ready"
     assert "module_manifest_registry" in modules["cognix-local-core"]["capabilities"]
     assert "/api/cognix/modules/manifests" in modules["cognix-local-core"]["routes"]
@@ -6096,6 +6102,89 @@ def test_scheduled_native_plan_permission_ceiling_and_audited_runs():
     assert "scheduled_task_run_completed" in actions
     assert "scheduled_task_run_blocked" in actions
     assert any(log["metadata"].get("scheduledVersion") == "cognix_scheduled_v1" for log in admin_read["logs"])
+
+
+def test_images_native_plan_safety_library_link_and_permission_ceiling():
+    seed_accounts()
+    cognix_db.create_image_request("bob", "image privee bob", "private-model")
+
+    blueprint = run_async(cognix_routes.images_blueprint(current_subject = "alice"))
+    assert blueprint["blueprint"]["imagesVersion"] == cognix_images.COGNIX_IMAGES_VERSION
+    assert blueprint["blueprint"]["runtimePolicy"]["frontendDirectModelCallAllowed"] is False
+    assert blueprint["sideEffects"]["generation"] is False
+
+    plan = run_async(
+        cognix_routes.plan_image(
+            cognix_routes.ImageRequest(
+                prompt = "cree 3 variantes du logo CogniX blanc",
+                model = "local-image-test",
+                variantCount = 3,
+                projectId = "project-logo",
+            ),
+            current_subject = "alice",
+        )
+    )
+    image_plan = plan["imagePlan"]
+    assert image_plan["action"]["actionType"] == "variants"
+    assert image_plan["variantPlan"]["count"] == 3
+    assert image_plan["modelPlan"]["selectedModel"] == "local-image-test"
+    assert image_plan["safety"]["status"] == "clear"
+    assert image_plan["permissionPlan"]["missingPermissions"] == []
+    assert image_plan["sideEffects"]["modelLoad"] is False
+
+    created = run_async(
+        cognix_routes.create_image(
+            cognix_routes.ImageRequest(
+                prompt = "cree 3 variantes du logo CogniX blanc",
+                model = "local-image-test",
+                variantCount = 3,
+                projectId = "project-logo",
+            ),
+            current_subject = "alice",
+        )
+    )
+    assert created["image"]["id"].startswith("img_")
+    assert created["image"]["status"] == "queued"
+    assert created["imagePlan"]["variantPlan"]["count"] == 3
+    assert created["libraryItem"]["kind"] == "image"
+    assert created["libraryItem"]["metadata"]["imageRequestId"] == created["image"]["id"]
+    assert created["libraryItem"]["metadata"]["projectId"] == "project-logo"
+    assert created["sideEffects"]["imageRequestWrite"] is True
+    assert created["sideEffects"]["libraryWrite"] is True
+    assert created["sideEffects"]["generation"] is False
+    assert created["sideEffects"]["modelLoad"] is False
+
+    with pytest.raises(HTTPException) as blocked_edit:
+        run_async(
+            cognix_routes.create_image(
+                cognix_routes.ImageRequest(
+                    prompt = "modifie cette image",
+                    mode = "edit",
+                    sourceImageId = created["image"]["id"],
+                ),
+                current_subject = "alice",
+            )
+        )
+    assert blocked_edit.value.status_code == 403
+
+    sensitive = run_async(
+        cognix_routes.plan_image(
+            cognix_routes.ImageRequest(prompt = "illustration avec mot de passe visible"),
+            current_subject = "alice",
+        )
+    )
+    assert sensitive["imagePlan"]["safety"]["status"] == "needs_review"
+    assert sensitive["imagePlan"]["warnings"][0]["id"] == "image_safety_review"
+
+    listing = run_async(cognix_routes.my_images(current_subject = "alice"))
+    assert listing["blueprint"]["imagesVersion"] == "cognix_images_v1"
+    assert listing["summary"]["requestCount"] == 1
+    assert "image privee bob" not in {item["prompt"] for item in listing["images"]}
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    assert admin_read["logs"][0]["action"] == "image_request_created"
+    assert admin_read["logs"][0]["metadata"]["imagesVersion"] == "cognix_images_v1"
+    assert admin_read["logs"][0]["metadata"]["sideEffects"]["generation"] is False
 
 
 def test_tool_registry_declares_permissions_and_guardrails():
