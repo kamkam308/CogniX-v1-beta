@@ -573,6 +573,53 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_user_preferences_username_status
             ON cognix_user_preferences(username, status, updated_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_personal_ai_profiles (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL UNIQUE,
+            display_name TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'disabled',
+            profile_json TEXT NOT NULL DEFAULT '{}',
+            controls_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_personal_ai_profiles_status
+            ON cognix_personal_ai_profiles(username, status, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_style_profiles (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            profile_id TEXT NOT NULL,
+            style_key TEXT NOT NULL,
+            style_value TEXT NOT NULL,
+            confidence REAL NOT NULL DEFAULT 0,
+            evidence_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            UNIQUE(username, profile_id, style_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_style_profiles_profile
+            ON cognix_style_profiles(username, profile_id, style_key);
+
+        CREATE TABLE IF NOT EXISTS cognix_personalization_rules (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            profile_id TEXT NOT NULL,
+            rule_key TEXT NOT NULL,
+            rule_type TEXT NOT NULL,
+            rule_text TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            confidence REAL NOT NULL DEFAULT 0,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(username, profile_id, rule_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_personalization_rules_profile
+            ON cognix_personalization_rules(username, profile_id, status, updated_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_memories (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -3713,6 +3760,244 @@ def list_user_preferences(username: str, *, include_disabled: bool = False) -> l
         return [_hydrate_user_preference(row) for row in _rows_to_dicts(rows)]
     finally:
         conn.close()
+
+
+def _hydrate_personal_ai_profile(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["profile"] = _json_or_default(item.get("profile_json"), {})
+    item["controls"] = _json_or_default(item.get("controls_json"), {})
+    return item
+
+
+def _hydrate_style_profile(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["evidence"] = _json_or_default(item.get("evidence_json"), [])
+    return item
+
+
+def _hydrate_personalization_rule(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def _attach_personal_twin_children(conn: sqlite3.Connection, profile: dict[str, Any]) -> dict[str, Any]:
+    profile_id = str(profile.get("id") or "")
+    username = str(profile.get("username") or "")
+    style_rows = conn.execute(
+        """
+        SELECT * FROM cognix_style_profiles
+        WHERE username = ? AND profile_id = ?
+        ORDER BY style_key ASC
+        """,
+        (username, profile_id),
+    ).fetchall()
+    rule_rows = conn.execute(
+        """
+        SELECT * FROM cognix_personalization_rules
+        WHERE username = ? AND profile_id = ?
+        ORDER BY confidence DESC, updated_at DESC
+        """,
+        (username, profile_id),
+    ).fetchall()
+    profile["styleProfiles"] = [_hydrate_style_profile(row) for row in _rows_to_dicts(style_rows)]
+    profile["personalizationRules"] = [_hydrate_personalization_rule(row) for row in _rows_to_dicts(rule_rows)]
+    return profile
+
+
+def get_personal_ai_profile(username: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM cognix_personal_ai_profiles WHERE username = ?",
+            (username,),
+        ).fetchone()
+        if row is None:
+            return None
+        return _attach_personal_twin_children(conn, _hydrate_personal_ai_profile(row_to_dict(row) or {}))
+    finally:
+        conn.close()
+
+
+def upsert_personal_ai_profile(
+    username: str,
+    *,
+    plan: dict[str, Any],
+    activate: bool = False,
+) -> dict[str, Any]:
+    now = _now()
+    profile_payload = plan.get("profile") if isinstance(plan.get("profile"), dict) else {}
+    display_name = str(profile_payload.get("displayName") or f"{username} Personal AI Twin")[:240]
+    controls = plan.get("controls") if isinstance(plan.get("controls"), dict) else {}
+    styles = [item for item in profile_payload.get("styleProfiles", []) if isinstance(item, dict)]
+    rules = [item for item in profile_payload.get("preferenceRules", []) if isinstance(item, dict)]
+    conn = get_connection()
+    try:
+        existing = conn.execute(
+            "SELECT * FROM cognix_personal_ai_profiles WHERE username = ?",
+            (username,),
+        ).fetchone()
+        profile_id = str((row_to_dict(existing) or {}).get("id") or _new_id("ptwin"))
+        status = "active" if activate else str((row_to_dict(existing) or {}).get("status") or "disabled")
+        profile_payload = {**profile_payload, "status": status}
+        conn.execute(
+            """
+            INSERT INTO cognix_personal_ai_profiles
+                (id, username, display_name, status, profile_json, controls_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(username) DO UPDATE SET
+                display_name = excluded.display_name,
+                status = excluded.status,
+                profile_json = excluded.profile_json,
+                controls_json = excluded.controls_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                profile_id,
+                username,
+                display_name,
+                status,
+                json.dumps(profile_payload, ensure_ascii = False),
+                json.dumps(controls, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            "DELETE FROM cognix_style_profiles WHERE username = ? AND profile_id = ?",
+            (username, profile_id),
+        )
+        for style in styles:
+            conn.execute(
+                """
+                INSERT INTO cognix_style_profiles
+                    (id, username, profile_id, style_key, style_value, confidence, evidence_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _new_id("sty"),
+                    username,
+                    profile_id,
+                    str(style.get("styleKey") or "")[:160],
+                    str(style.get("styleValue") or "")[:240],
+                    float(style.get("confidence") or 0.0),
+                    json.dumps(style.get("evidence") or [], ensure_ascii = False),
+                    now,
+                ),
+            )
+        conn.execute(
+            "DELETE FROM cognix_personalization_rules WHERE username = ? AND profile_id = ?",
+            (username, profile_id),
+        )
+        rule_status = "active" if status == "active" else "disabled"
+        for rule in rules:
+            metadata = {
+                "editable": bool(rule.get("editable", True)),
+                "requiresUserActivation": bool(rule.get("requiresUserActivation", True)),
+                "evidence": rule.get("evidence") or [],
+            }
+            conn.execute(
+                """
+                INSERT INTO cognix_personalization_rules
+                    (
+                        id, username, profile_id, rule_key, rule_type,
+                        rule_text, status, confidence, metadata_json,
+                        created_at, updated_at
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _new_id("prule"),
+                    username,
+                    profile_id,
+                    str(rule.get("ruleKey") or "")[:160],
+                    str(rule.get("ruleType") or "preference")[:120],
+                    str(rule.get("ruleText") or "")[:3000],
+                    rule_status,
+                    float(rule.get("confidence") or 0.0),
+                    json.dumps(metadata, ensure_ascii = False),
+                    now,
+                    now,
+                ),
+            )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM cognix_personal_ai_profiles WHERE username = ?",
+            (username,),
+        ).fetchone()
+        return _attach_personal_twin_children(conn, _hydrate_personal_ai_profile(row_to_dict(row) or {}))
+    finally:
+        conn.close()
+
+
+def set_personal_ai_profile_status(username: str, status: str) -> dict[str, Any] | None:
+    normalized_status = status if status in {"active", "disabled", "reset"} else "disabled"
+    now = _now()
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM cognix_personal_ai_profiles WHERE username = ?",
+            (username,),
+        ).fetchone()
+        if row is None:
+            return None
+        profile = row_to_dict(row) or {}
+        profile_id = str(profile.get("id") or "")
+        if normalized_status == "reset":
+            conn.execute(
+                """
+                UPDATE cognix_personal_ai_profiles
+                SET status = 'reset', profile_json = '{}', controls_json = '{}', updated_at = ?
+                WHERE username = ?
+                """,
+                (now, username),
+            )
+            conn.execute("DELETE FROM cognix_style_profiles WHERE username = ? AND profile_id = ?", (username, profile_id))
+            conn.execute("DELETE FROM cognix_personalization_rules WHERE username = ? AND profile_id = ?", (username, profile_id))
+        else:
+            rule_status = "active" if normalized_status == "active" else "disabled"
+            conn.execute(
+                """
+                UPDATE cognix_personal_ai_profiles
+                SET status = ?, updated_at = ?
+                WHERE username = ?
+                """,
+                (normalized_status, now, username),
+            )
+            conn.execute(
+                """
+                UPDATE cognix_personalization_rules
+                SET status = ?, updated_at = ?
+                WHERE username = ? AND profile_id = ?
+                """,
+                (rule_status, now, username, profile_id),
+            )
+        conn.commit()
+        updated = conn.execute(
+            "SELECT * FROM cognix_personal_ai_profiles WHERE username = ?",
+            (username,),
+        ).fetchone()
+        return _attach_personal_twin_children(conn, _hydrate_personal_ai_profile(row_to_dict(updated) or {}))
+    finally:
+        conn.close()
+
+
+def export_personal_ai_profile(username: str) -> dict[str, Any] | None:
+    profile = get_personal_ai_profile(username)
+    if profile is None:
+        return None
+    return {
+        "schemaVersion": "cognix_personal_ai_profile_export_v1",
+        "username": username,
+        "exportedAt": _now(),
+        "profile": profile,
+        "userControls": {
+            "canModify": True,
+            "canDeactivate": True,
+            "canReset": True,
+            "canDeleteExport": True,
+        },
+    }
 
 
 def approve_memory_candidate(

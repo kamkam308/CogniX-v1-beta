@@ -47,6 +47,7 @@ from core.cognix import onboarding as cognix_onboarding
 from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import persona_manager as cognix_persona_manager
+from core.cognix import personal_twin as cognix_personal_twin
 from core.cognix import performance_monitor as cognix_performance_monitor
 from core.cognix import plugin_marketplace as cognix_plugin_marketplace
 from core.cognix import project_dna as cognix_project_dna
@@ -175,6 +176,22 @@ class SkillMemoryInjectionPlanRequest(BaseModel):
 
     objective: str | None = Field(None, max_length = 4000)
     max_memories: int = Field(5, alias = "maxMemories", ge = 1, le = 20)
+
+
+class PersonalTwinProfilePlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    interactions: list[Any] = Field(default_factory = list, max_length = 200)
+    activate: bool = False
+    store_profile: bool = Field(True, alias = "storeProfile")
+
+
+class PersonalTwinStatusRequest(BaseModel):
+    status: Literal["active", "disabled", "reset"]
+
+
+class PersonalTwinInjectionPlanRequest(BaseModel):
+    objective: str | None = Field(None, max_length = 4000)
 
 
 class LiveMemoryCreateRequest(BaseModel):
@@ -1100,6 +1117,15 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "profile_key": "profileKey",
         "profile_json": "profileJson",
         "value_json": "valueJson",
+        "profile_id": "profileId",
+        "profile_json": "profileJson",
+        "controls_json": "controlsJson",
+        "style_key": "styleKey",
+        "style_value": "styleValue",
+        "evidence_json": "evidenceJson",
+        "rule_key": "ruleKey",
+        "rule_type": "ruleType",
+        "rule_text": "ruleText",
         "job_type": "jobType",
         "progress_percent": "progressPercent",
         "job_plan_json": "jobPlanJson",
@@ -1148,6 +1174,10 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         out["versions"] = [_row(item) if isinstance(item, dict) else item for item in out["versions"]]
     if isinstance(out.get("auditLogs"), list):
         out["auditLogs"] = [_row(item) if isinstance(item, dict) else item for item in out["auditLogs"]]
+    if isinstance(out.get("styleProfiles"), list):
+        out["styleProfiles"] = [_row(item) if isinstance(item, dict) else item for item in out["styleProfiles"]]
+    if isinstance(out.get("personalizationRules"), list):
+        out["personalizationRules"] = [_row(item) if isinstance(item, dict) else item for item in out["personalizationRules"]]
     return out
 
 
@@ -5220,6 +5250,225 @@ async def skill_memory_injection_plan(
         "auditLogId": audit.get("id"),
         "sideEffects": side_effects,
         "plannerVersion": cognix_skill_memory.COGNIX_CONTEXT_INJECTOR_VERSION,
+    }
+
+
+@router.get("/personal-twin/blueprint")
+async def personal_twin_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_personal_twin.build_personal_twin_blueprint()
+    return {
+        "username": current_subject,
+        "personalTwinBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_personal_twin.COGNIX_PERSONAL_TWIN_SERVICE_VERSION,
+    }
+
+
+@router.post("/personal-twin/profile/plan")
+async def personal_twin_profile_plan(
+    payload: PersonalTwinProfilePlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    existing_profile = cognix_db.get_personal_ai_profile(current_subject)
+    plan = cognix_personal_twin.build_personal_twin_profile_plan(
+        username = current_subject,
+        interactions = payload.interactions,
+        existing_profile = existing_profile,
+        activate = payload.activate,
+    )
+    stored_profile = (
+        cognix_db.upsert_personal_ai_profile(
+            current_subject,
+            plan = plan,
+            activate = payload.activate,
+        )
+        if payload.store_profile
+        else None
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "profileWrite": stored_profile is not None,
+        "styleProfileWrite": bool((stored_profile or {}).get("styleProfiles")),
+        "ruleWrite": bool((stored_profile or {}).get("personalizationRules")),
+        "contextInjection": False,
+        "autonomousAction": False,
+        "toolExecution": False,
+        "modelLoad": False,
+        "generation": False,
+        "networkCall": False,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "personal_twin_profile_planned",
+        resource_type = "cognix_personal_ai_profile",
+        resource_id = str((stored_profile or {}).get("id") or current_subject),
+        severity = "notice",
+        metadata = {
+            "personalTwinServiceVersion": plan.get("personalTwinServiceVersion"),
+            "profileConfidence": plan.get("summary", {}).get("profileConfidence"),
+            "ruleCount": plan.get("summary", {}).get("ruleCount"),
+            "styleSignalCount": plan.get("summary", {}).get("styleSignalCount"),
+            "stored": stored_profile is not None,
+            "activated": payload.activate,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "personalTwinPlan": plan,
+        "profile": _row(stored_profile) if stored_profile else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_personal_twin.COGNIX_PERSONAL_TWIN_SERVICE_VERSION,
+    }
+
+
+@router.get("/personal-twin/profile")
+async def personal_twin_profile(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    profile = cognix_db.get_personal_ai_profile(current_subject)
+    return {
+        "username": current_subject,
+        "profile": _row(profile) if profile else None,
+        "sideEffects": {
+            "profileWrite": False,
+            "styleProfileWrite": False,
+            "ruleWrite": False,
+            "contextInjection": False,
+            "autonomousAction": False,
+            "toolExecution": False,
+            "modelLoad": False,
+            "generation": False,
+            "networkCall": False,
+        },
+        "plannerVersion": cognix_personal_twin.COGNIX_PERSONAL_TWIN_SERVICE_VERSION,
+    }
+
+
+@router.patch("/personal-twin/profile/status")
+async def personal_twin_profile_status(
+    payload: PersonalTwinStatusRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    profile = cognix_db.set_personal_ai_profile_status(current_subject, payload.status)
+    if profile is None:
+        raise HTTPException(status_code = status.HTTP_404_NOT_FOUND, detail = "Personal AI profile not found")
+    side_effects = {
+        "profileWrite": True,
+        "styleProfileWrite": payload.status == "reset",
+        "ruleWrite": True,
+        "contextInjection": False,
+        "autonomousAction": False,
+        "toolExecution": False,
+        "modelLoad": False,
+        "generation": False,
+        "networkCall": False,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "personal_twin_status_updated",
+        resource_type = "cognix_personal_ai_profile",
+        resource_id = str(profile.get("id") or current_subject),
+        severity = "warning" if payload.status == "reset" else "notice",
+        metadata = {
+            "status": payload.status,
+            "styleProfileCount": len(profile.get("styleProfiles") or []),
+            "ruleCount": len(profile.get("personalizationRules") or []),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "profile": _row(profile),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_personal_twin.COGNIX_PERSONAL_TWIN_SERVICE_VERSION,
+    }
+
+
+@router.get("/personal-twin/export")
+async def personal_twin_export(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    export = cognix_db.export_personal_ai_profile(current_subject)
+    if export is None:
+        raise HTTPException(status_code = status.HTTP_404_NOT_FOUND, detail = "Personal AI profile not found")
+    side_effects = {
+        "exportRead": True,
+        "profileWrite": False,
+        "styleProfileWrite": False,
+        "ruleWrite": False,
+        "contextInjection": False,
+        "autonomousAction": False,
+        "toolExecution": False,
+        "modelLoad": False,
+        "generation": False,
+        "networkCall": False,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "personal_twin_exported",
+        resource_type = "cognix_personal_ai_profile",
+        resource_id = str((export.get("profile") or {}).get("id") or current_subject),
+        severity = "notice",
+        metadata = {
+            "schemaVersion": export.get("schemaVersion"),
+            "styleProfileCount": len((export.get("profile") or {}).get("styleProfiles") or []),
+            "ruleCount": len((export.get("profile") or {}).get("personalizationRules") or []),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "profileExport": {
+            **export,
+            "profile": _row(export.get("profile") or {}),
+        },
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_personal_twin.COGNIX_PERSONAL_TWIN_SERVICE_VERSION,
+    }
+
+
+@router.post("/personal-twin/injection-plan")
+async def personal_twin_injection_plan(
+    payload: PersonalTwinInjectionPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    profile = cognix_db.get_personal_ai_profile(current_subject)
+    plan = cognix_personal_twin.build_personalization_injection_plan(
+        username = current_subject,
+        profile = profile,
+        objective = payload.objective,
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "personal_twin_injection_plan_built",
+        resource_type = "cognix_personal_ai_profile",
+        resource_id = str((profile or {}).get("id") or current_subject),
+        severity = "notice",
+        metadata = {
+            "personalizationEngineVersion": plan.get("personalizationEngineVersion"),
+            "profileStatus": plan.get("profileStatus"),
+            "selectedRuleCount": plan.get("profileSummary", {}).get("selectedRuleCount"),
+            "willInjectNow": plan.get("willInjectNow"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "injectionPlan": plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_personal_twin.COGNIX_PERSONALIZATION_ENGINE_VERSION,
     }
 
 

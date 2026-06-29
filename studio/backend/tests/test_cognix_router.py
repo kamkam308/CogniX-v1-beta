@@ -40,6 +40,7 @@ from core.cognix import onboarding as cognix_onboarding
 from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
 from core.cognix import persona_manager as cognix_persona_manager
+from core.cognix import personal_twin as cognix_personal_twin
 from core.cognix import performance_monitor as cognix_performance_monitor
 from core.cognix import plugin_marketplace as cognix_plugin_marketplace
 from core.cognix import project_dna as cognix_project_dna
@@ -3333,6 +3334,119 @@ def test_skill_memory_injection_plan_selects_active_relevant_memories_without_in
     assert logs[0]["action"] == "skill_memory_injection_plan_built"
 
 
+def test_personal_twin_builds_user_controlled_profile_without_autonomy():
+    plan = cognix_personal_twin.build_personal_twin_profile_plan(
+        username = "alice",
+        interactions = [
+            (
+                "Reponds en francais, continue de maniere autonome, et fais les changements "
+                "dans le code source natif. Je veux que CogniX garde la securite et Github."
+            ),
+            {"message": "Ne fais pas une surcouche, les modifications doivent etre permanentes."},
+        ],
+        activate = True,
+    )
+    blueprint = cognix_personal_twin.build_personal_twin_blueprint()
+    style_values = {item["styleKey"]: item["styleValue"] for item in plan["profile"]["styleProfiles"]}
+    rule_keys = {item["ruleKey"] for item in plan["profile"]["preferenceRules"]}
+
+    assert blueprint["services"] == [
+        "PersonalTwinService",
+        "StyleProfiler",
+        "PreferenceModel",
+        "PersonalizationEngine",
+    ]
+    assert blueprint["userControls"]["activate"] is True
+    assert blueprint["userControls"]["deactivate"] is True
+    assert blueprint["userControls"]["export"] is True
+    assert blueprint["userControls"]["reset"] is True
+    assert blueprint["safetyPolicy"]["autonomousCloneAllowed"] is False
+    assert style_values["language_preference"] == "fr"
+    assert style_values["work_method"] == "autonomous_native_execution"
+    assert style_values["coding_style"] in {"native_source_changes", "security_first_native_changes"}
+    assert {"reply_language_fr", "autonomous_native_work", "native_source_only", "security_first", "git_preservation"}.issubset(
+        rule_keys
+    )
+    assert plan["personalizationLayer"]["requiresUserActivation"] is True
+    assert plan["personalizationLayer"]["willInjectNow"] is False
+    assert plan["sideEffects"]["autonomousAction"] is False
+    assert plan["sideEffects"]["toolExecution"] is False
+    assert plan["sideEffects"]["modelLoad"] is False
+    assert plan["sideEffects"]["generation"] is False
+
+
+def test_personal_twin_endpoint_stores_activates_exports_and_resets():
+    seed_accounts()
+
+    body = run_async(
+        cognix_routes.personal_twin_profile_plan(
+            cognix_routes.PersonalTwinProfilePlanRequest(
+                interactions = [
+                    "Je veux CogniX en francais, autonome, natif dans le code source, avec securite.",
+                    {"content": "Github doit servir de checkpoint permanent."},
+                ],
+                activate = True,
+                storeProfile = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    profile = body["profile"]
+    listed = run_async(cognix_routes.personal_twin_profile(current_subject = "alice"))
+    injection = run_async(
+        cognix_routes.personal_twin_injection_plan(
+            cognix_routes.PersonalTwinInjectionPlanRequest(objective = "Modifier le code source CogniX"),
+            current_subject = "alice",
+        )
+    )
+    exported = run_async(cognix_routes.personal_twin_export(current_subject = "alice"))
+    disabled = run_async(
+        cognix_routes.personal_twin_profile_status(
+            cognix_routes.PersonalTwinStatusRequest(status = "disabled"),
+            current_subject = "alice",
+        )
+    )
+    reset = run_async(
+        cognix_routes.personal_twin_profile_status(
+            cognix_routes.PersonalTwinStatusRequest(status = "reset"),
+            current_subject = "alice",
+        )
+    )
+    bob_profile = run_async(cognix_routes.personal_twin_profile(current_subject = "bob"))
+
+    assert body["auditLogId"].startswith("aud_")
+    assert profile["id"].startswith("ptwin_")
+    assert profile["status"] == "active"
+    assert body["sideEffects"]["profileWrite"] is True
+    assert body["sideEffects"]["styleProfileWrite"] is True
+    assert body["sideEffects"]["ruleWrite"] is True
+    assert body["sideEffects"]["autonomousAction"] is False
+    assert body["sideEffects"]["generation"] is False
+    assert listed["profile"]["id"] == profile["id"]
+    assert listed["profile"]["status"] == "active"
+    assert injection["injectionPlan"]["safeToInject"] is True
+    assert injection["injectionPlan"]["willInjectNow"] is False
+    assert injection["sideEffects"]["contextInjection"] is False
+    assert injection["sideEffects"]["modelLoad"] is False
+    assert exported["profileExport"]["schemaVersion"] == "cognix_personal_ai_profile_export_v1"
+    assert exported["profileExport"]["profile"]["id"] == profile["id"]
+    assert disabled["profile"]["status"] == "disabled"
+    assert all(item["status"] == "disabled" for item in disabled["profile"]["personalizationRules"])
+    assert reset["profile"]["status"] == "reset"
+    assert reset["profile"]["styleProfiles"] == []
+    assert reset["profile"]["personalizationRules"] == []
+    assert bob_profile["profile"] is None
+
+    logs = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))["logs"]
+    actions = {item["action"] for item in logs}
+    assert {
+        "personal_twin_profile_planned",
+        "personal_twin_injection_plan_built",
+        "personal_twin_exported",
+        "personal_twin_status_updated",
+    }.issubset(actions)
+
+
 def test_live_memory_editor_blueprint_declares_versioned_user_controls():
     blueprint = cognix_memory_editor.build_memory_editor_blueprint()
 
@@ -5165,6 +5279,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-context-graph",
         "cognix-memory-manager",
         "cognix-long-term-skill-memory",
+        "cognix-personal-ai-twin",
         "cognix-ai-workflow-recorder",
         "cognix-onboarding",
         "cognix-rag",
@@ -5299,6 +5414,15 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/memory/skills/candidates" in modules["cognix-long-term-skill-memory"]["routes"]
     assert "/api/cognix/memory/skills/export" in modules["cognix-long-term-skill-memory"]["routes"]
     assert "/api/cognix/memory/skills/injection-plan" in modules["cognix-long-term-skill-memory"]["routes"]
+    assert modules["cognix-personal-ai-twin"]["dependencyState"]["ready"] is True
+    assert "personal_ai_profile" in modules["cognix-personal-ai-twin"]["capabilities"]
+    assert "style_profiler" in modules["cognix-personal-ai-twin"]["capabilities"]
+    assert "preference_model" in modules["cognix-personal-ai-twin"]["capabilities"]
+    assert "personalization_rules" in modules["cognix-personal-ai-twin"]["capabilities"]
+    assert "profile_export_reset" in modules["cognix-personal-ai-twin"]["capabilities"]
+    assert "/api/cognix/personal-twin/profile/plan" in modules["cognix-personal-ai-twin"]["routes"]
+    assert "/api/cognix/personal-twin/export" in modules["cognix-personal-ai-twin"]["routes"]
+    assert "/api/cognix/personal-twin/injection-plan" in modules["cognix-personal-ai-twin"]["routes"]
     assert modules["cognix-live-memory-editing"]["dependencyState"]["ready"] is True
     assert "live_memory_editor" in modules["cognix-live-memory-editing"]["capabilities"]
     assert "memory_versioning" in modules["cognix-live-memory-editing"]["capabilities"]
