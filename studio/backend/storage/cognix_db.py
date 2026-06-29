@@ -137,6 +137,75 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_user_limits_username
             ON cognix_user_limits(username, updated_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_user_quotas (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            quota_key TEXT NOT NULL,
+            quota_value REAL NOT NULL,
+            unit TEXT NOT NULL DEFAULT '',
+            period TEXT NOT NULL DEFAULT 'custom',
+            status TEXT NOT NULL DEFAULT 'active',
+            updated_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(username, quota_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_user_quotas_username
+            ON cognix_user_quotas(username, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_role_quotas (
+            id TEXT PRIMARY KEY,
+            role_key TEXT NOT NULL,
+            quota_key TEXT NOT NULL,
+            quota_value REAL NOT NULL,
+            unit TEXT NOT NULL DEFAULT '',
+            period TEXT NOT NULL DEFAULT 'custom',
+            status TEXT NOT NULL DEFAULT 'active',
+            updated_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(role_key, quota_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_role_quotas_role
+            ON cognix_role_quotas(role_key, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_quota_usage (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            quota_key TEXT NOT NULL,
+            period_key TEXT NOT NULL,
+            used_value REAL NOT NULL DEFAULT 0,
+            unit TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(username, quota_key, period_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_quota_usage_username
+            ON cognix_quota_usage(username, quota_key, period_key);
+
+        CREATE TABLE IF NOT EXISTS cognix_quota_overrides (
+            id TEXT PRIMARY KEY,
+            target_type TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            quota_key TEXT NOT NULL,
+            quota_value REAL NOT NULL,
+            unit TEXT NOT NULL DEFAULT '',
+            period TEXT NOT NULL DEFAULT 'custom',
+            reason TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'active',
+            expires_at TEXT,
+            updated_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_quota_overrides_target
+            ON cognix_quota_overrides(target_type, target_id, status, updated_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_user_activity_events (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -2363,6 +2432,363 @@ def list_user_limits(username: str | None = None) -> list[dict[str, Any]]:
             rows = conn.execute(
                 "SELECT * FROM cognix_user_limits ORDER BY username ASC, limit_key ASC"
             ).fetchall()
+        return _rows_to_dicts(rows)
+    finally:
+        conn.close()
+
+
+def delete_user_limit(username: str, limit_key: str) -> bool:
+    normalized_key = _normalize_admin_key(limit_key, label = "limit key")
+    conn = get_connection()
+    try:
+        cur = conn.execute(
+            "DELETE FROM cognix_user_limits WHERE username = ? AND limit_key = ?",
+            (username, normalized_key),
+        )
+        conn.commit()
+        return bool(cur.rowcount)
+    finally:
+        conn.close()
+
+
+def _normalize_quota_status(status: str | None) -> str:
+    normalized = (status or "active").strip().lower()
+    if normalized not in {"active", "disabled"}:
+        raise ValueError("Unsupported quota status")
+    return normalized
+
+
+def upsert_user_quota(
+    username: str,
+    *,
+    quota_key: str,
+    quota_value: float,
+    unit: str = "",
+    period: str = "custom",
+    status: str = "active",
+    updated_by: str,
+) -> dict[str, Any]:
+    normalized_key = _normalize_admin_key(quota_key, label = "quota key")
+    normalized_period = _normalize_admin_key(period or "custom", label = "quota period")
+    normalized_status = _normalize_quota_status(status)
+    now = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_user_quotas
+                (id, username, quota_key, quota_value, unit, period, status, updated_by, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(username, quota_key) DO UPDATE SET
+                quota_value = excluded.quota_value,
+                unit = excluded.unit,
+                period = excluded.period,
+                status = excluded.status,
+                updated_by = excluded.updated_by,
+                updated_at = excluded.updated_at
+            """,
+            (
+                _new_id("uquo"),
+                username,
+                normalized_key,
+                float(quota_value),
+                str(unit or "")[:80],
+                normalized_period,
+                normalized_status,
+                updated_by,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        return row_to_dict(
+            conn.execute(
+                "SELECT * FROM cognix_user_quotas WHERE username = ? AND quota_key = ?",
+                (username, normalized_key),
+            ).fetchone()
+        ) or {}
+    finally:
+        conn.close()
+
+
+def list_user_quotas(username: str | None = None) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        if username:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_user_quotas
+                WHERE username = ?
+                ORDER BY quota_key ASC
+                """,
+                (username,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM cognix_user_quotas ORDER BY username ASC, quota_key ASC"
+            ).fetchall()
+        return _rows_to_dicts(rows)
+    finally:
+        conn.close()
+
+
+def delete_user_quota(username: str, quota_key: str) -> bool:
+    normalized_key = _normalize_admin_key(quota_key, label = "quota key")
+    conn = get_connection()
+    try:
+        cur = conn.execute(
+            "DELETE FROM cognix_user_quotas WHERE username = ? AND quota_key = ?",
+            (username, normalized_key),
+        )
+        conn.commit()
+        return bool(cur.rowcount)
+    finally:
+        conn.close()
+
+
+def upsert_role_quota(
+    role_key: str,
+    *,
+    quota_key: str,
+    quota_value: float,
+    unit: str = "",
+    period: str = "custom",
+    status: str = "active",
+    updated_by: str,
+) -> dict[str, Any]:
+    normalized_role = _normalize_admin_key(role_key or "user", label = "role key")
+    normalized_key = _normalize_admin_key(quota_key, label = "quota key")
+    normalized_period = _normalize_admin_key(period or "custom", label = "quota period")
+    normalized_status = _normalize_quota_status(status)
+    now = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_role_quotas
+                (id, role_key, quota_key, quota_value, unit, period, status, updated_by, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(role_key, quota_key) DO UPDATE SET
+                quota_value = excluded.quota_value,
+                unit = excluded.unit,
+                period = excluded.period,
+                status = excluded.status,
+                updated_by = excluded.updated_by,
+                updated_at = excluded.updated_at
+            """,
+            (
+                _new_id("rquo"),
+                normalized_role,
+                normalized_key,
+                float(quota_value),
+                str(unit or "")[:80],
+                normalized_period,
+                normalized_status,
+                updated_by,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        return row_to_dict(
+            conn.execute(
+                "SELECT * FROM cognix_role_quotas WHERE role_key = ? AND quota_key = ?",
+                (normalized_role, normalized_key),
+            ).fetchone()
+        ) or {}
+    finally:
+        conn.close()
+
+
+def list_role_quotas(role_key: str | None = None) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        if role_key:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_role_quotas
+                WHERE role_key = ?
+                ORDER BY quota_key ASC
+                """,
+                (_normalize_admin_key(role_key, label = "role key"),),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM cognix_role_quotas ORDER BY role_key ASC, quota_key ASC"
+            ).fetchall()
+        return _rows_to_dicts(rows)
+    finally:
+        conn.close()
+
+
+def record_quota_usage(
+    username: str,
+    *,
+    quota_key: str,
+    used_value: float,
+    unit: str = "",
+    period_key: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    normalized_key = _normalize_admin_key(quota_key, label = "quota key")
+    normalized_period_key = str(period_key or datetime.now(timezone.utc).date().isoformat())[:80]
+    now = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_quota_usage
+                (id, username, quota_key, period_key, used_value, unit, metadata_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(username, quota_key, period_key) DO UPDATE SET
+                used_value = cognix_quota_usage.used_value + excluded.used_value,
+                unit = excluded.unit,
+                metadata_json = excluded.metadata_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                _new_id("qusage"),
+                username,
+                normalized_key,
+                normalized_period_key,
+                max(0.0, float(used_value or 0)),
+                str(unit or "")[:80],
+                json.dumps(metadata or {}, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        return row_to_dict(
+            conn.execute(
+                """
+                SELECT * FROM cognix_quota_usage
+                WHERE username = ? AND quota_key = ? AND period_key = ?
+                """,
+                (username, normalized_key, normalized_period_key),
+            ).fetchone()
+        ) or {}
+    finally:
+        conn.close()
+
+
+def list_quota_usage(username: str | None = None, *, limit: int = 1000) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        safe_limit = max(1, min(int(limit or 1000), 5000))
+        if username:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_quota_usage
+                WHERE username = ?
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (username, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_quota_usage
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+        items = _rows_to_dicts(rows)
+        for item in items:
+            item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+        return items
+    finally:
+        conn.close()
+
+
+def create_quota_override(
+    *,
+    target_type: str,
+    target_id: str,
+    quota_key: str,
+    quota_value: float,
+    unit: str = "",
+    period: str = "custom",
+    reason: str = "",
+    status: str = "active",
+    expires_at: str | None = None,
+    updated_by: str,
+) -> dict[str, Any]:
+    normalized_target_type = _normalize_admin_key(target_type, label = "quota override target type")
+    if normalized_target_type not in {"user", "role", "group"}:
+        raise ValueError("Unsupported quota override target type")
+    normalized_key = _normalize_admin_key(quota_key, label = "quota key")
+    normalized_period = _normalize_admin_key(period or "custom", label = "quota period")
+    normalized_status = _normalize_quota_status(status)
+    override_id = _new_id("qover")
+    now = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_quota_overrides
+                (
+                    id, target_type, target_id, quota_key, quota_value, unit, period,
+                    reason, status, expires_at, updated_by, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                override_id,
+                normalized_target_type,
+                str(target_id or "")[:160],
+                normalized_key,
+                float(quota_value),
+                str(unit or "")[:80],
+                normalized_period,
+                str(reason or "")[:500],
+                normalized_status,
+                expires_at,
+                updated_by,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        return row_to_dict(
+            conn.execute("SELECT * FROM cognix_quota_overrides WHERE id = ?", (override_id,)).fetchone()
+        ) or {}
+    finally:
+        conn.close()
+
+
+def list_quota_overrides(
+    *,
+    target_type: str | None = None,
+    target_id: str | None = None,
+    include_disabled: bool = False,
+    limit: int = 1000,
+) -> list[dict[str, Any]]:
+    clauses: list[str] = []
+    values: list[Any] = []
+    if target_type:
+        clauses.append("target_type = ?")
+        values.append(_normalize_admin_key(target_type, label = "quota override target type"))
+    if target_id:
+        clauses.append("target_id = ?")
+        values.append(str(target_id)[:160])
+    if not include_disabled:
+        clauses.append("status = 'active'")
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    safe_limit = max(1, min(int(limit or 1000), 5000))
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM cognix_quota_overrides
+            {where}
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (*values, safe_limit),
+        ).fetchall()
         return _rows_to_dicts(rows)
     finally:
         conn.close()

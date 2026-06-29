@@ -20,6 +20,7 @@ from auth import storage as auth_storage
 from auth.authentication import get_current_jwt_subject
 from core.cognix import admin_activity as cognix_admin_activity
 from core.cognix import admin_chat as cognix_admin_chat
+from core.cognix import admin_limits as cognix_admin_limits
 from core.cognix import admin_security as cognix_admin_security
 from core.cognix import admin_users as cognix_admin_users
 from core.cognix import apps as cognix_apps
@@ -111,7 +112,52 @@ class AdminUserLimitRequest(BaseModel):
     limit_value: float = Field(..., alias = "limitValue", ge = 0)
     unit: str = Field("", max_length = 80)
     scope: str = Field("user", max_length = 80)
+    period: str = Field("custom", max_length = 80)
+    status: Literal["active", "disabled"] = "active"
     reason: str | None = Field(None, max_length = 500)
+
+
+class AdminQuotaRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    quota_value: float = Field(..., alias = "quotaValue", ge = 0)
+    unit: str = Field("", max_length = 80)
+    period: str = Field("custom", max_length = 80)
+    status: Literal["active", "disabled"] = "active"
+    reason: str | None = Field(None, max_length = 500)
+
+
+class AdminQuotaUsageRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    username: str | None = Field(None, max_length = 160)
+    quota_key: str = Field(..., alias = "quotaKey", min_length = 1, max_length = 160)
+    used_value: float = Field(..., alias = "usedValue", ge = 0)
+    unit: str = Field("", max_length = 80)
+    period_key: str | None = Field(None, alias = "periodKey", max_length = 80)
+    metadata: dict[str, Any] | None = None
+
+
+class AdminQuotaOverrideRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    target_type: Literal["user", "role", "group"] = Field(..., alias = "targetType")
+    target_id: str = Field(..., alias = "targetId", min_length = 1, max_length = 160)
+    quota_key: str = Field(..., alias = "quotaKey", min_length = 1, max_length = 160)
+    quota_value: float = Field(..., alias = "quotaValue", ge = 0)
+    unit: str = Field("", max_length = 80)
+    period: str = Field("custom", max_length = 80)
+    reason: str = Field("", max_length = 500)
+    status: Literal["active", "disabled"] = "active"
+    expires_at: str | None = Field(None, alias = "expiresAt", max_length = 80)
+
+
+class AdminQuotaEnforcementRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    username: str = Field(..., min_length = 1, max_length = 160)
+    quota_key: str = Field(..., alias = "quotaKey", min_length = 1, max_length = 160)
+    requested_units: float = Field(1, alias = "requestedUnits", ge = 0)
 
 
 class AdminChatPolicyRequest(BaseModel):
@@ -1119,6 +1165,32 @@ def _build_admin_user_bundle() -> dict[str, Any]:
     }
 
 
+def _build_admin_limits_bundle() -> dict[str, Any]:
+    users = auth_storage.list_user_profiles()
+    user_quotas = cognix_db.list_user_quotas()
+    role_quotas = cognix_db.list_role_quotas()
+    quota_overrides = cognix_db.list_quota_overrides()
+    quota_usage = cognix_db.list_quota_usage(limit = 5000)
+    legacy_limits = cognix_db.list_user_limits()
+    matrix = cognix_admin_limits.build_quota_matrix(
+        users = users,
+        user_quotas = user_quotas,
+        role_quotas = role_quotas,
+        quota_overrides = quota_overrides,
+        quota_usage = quota_usage,
+        legacy_limits = legacy_limits,
+    )
+    return {
+        "users": users,
+        "userQuotas": user_quotas,
+        "roleQuotas": role_quotas,
+        "quotaOverrides": quota_overrides,
+        "quotaUsage": quota_usage,
+        "legacyLimits": legacy_limits,
+        "matrix": matrix,
+    }
+
+
 def _refresh_conversation_audit_metadata(
     threads: list[dict[str, Any]],
     messages: list[dict[str, Any]],
@@ -1413,6 +1485,13 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "result_status": "resultStatus",
         "limit_key": "limitKey",
         "limit_value": "limitValue",
+        "quota_key": "quotaKey",
+        "quota_value": "quotaValue",
+        "role_key": "roleKey",
+        "period_key": "periodKey",
+        "used_value": "usedValue",
+        "target_type": "targetType",
+        "target_id": "targetId",
         "updated_by": "updatedBy",
         "event_type": "eventType",
         "input_tokens": "inputTokens",
@@ -10055,6 +10134,332 @@ async def admin_user_limits(
     }
 
 
+@router.get("/admin/limits/blueprint")
+async def admin_limits_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    blueprint = cognix_admin_limits.build_limits_blueprint()
+    return {
+        "username": current_subject,
+        "limitsBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+    }
+
+
+@router.get("/admin/limits")
+async def admin_limits(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_limits_bundle()
+    return {
+        "username": current_subject,
+        "quotaMatrix": bundle["matrix"],
+        "userQuotas": _rows(bundle["userQuotas"]),
+        "roleQuotas": _rows(bundle["roleQuotas"]),
+        "quotaOverrides": _rows(bundle["quotaOverrides"]),
+        "quotaUsage": _rows(bundle["quotaUsage"]),
+        "legacyLimits": _rows(bundle["legacyLimits"]),
+        "sideEffects": bundle["matrix"].get("sideEffects", {}),
+        "plannerVersion": cognix_admin_limits.COGNIX_LIMIT_SERVICE_VERSION,
+    }
+
+
+@router.put("/admin/limits/users/{username}/{quota_key}")
+async def admin_update_user_quota(
+    username: str,
+    quota_key: str,
+    payload: AdminQuotaRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    if auth_storage.get_user_profile(username) is None:
+        raise HTTPException(status_code = 404, detail = "User not found")
+    try:
+        quota = cognix_db.upsert_user_quota(
+            username,
+            quota_key = quota_key,
+            quota_value = payload.quota_value,
+            unit = payload.unit,
+            period = payload.period,
+            status = payload.status,
+            updated_by = current_subject,
+        )
+        legacy_limit = cognix_db.upsert_user_limit(
+            username,
+            limit_key = quota_key,
+            limit_value = payload.quota_value,
+            unit = payload.unit,
+            scope = "user",
+            updated_by = current_subject,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from exc
+    side_effects = {
+        **cognix_admin_limits.build_limits_blueprint()["sideEffects"],
+        "userQuotaWrite": True,
+        "legacyLimitWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = username,
+        actor_username = current_subject,
+        action = "admin_user_quota_updated",
+        resource_type = "cognix_user_quota",
+        resource_id = str(quota.get("quota_key") or quota_key),
+        severity = "notice",
+        metadata = {
+            "limitServiceVersion": cognix_admin_limits.COGNIX_LIMIT_SERVICE_VERSION,
+            "quotaManagerVersion": cognix_admin_limits.COGNIX_QUOTA_MANAGER_VERSION,
+            "quotaKey": quota.get("quota_key"),
+            "quotaValue": quota.get("quota_value"),
+            "unit": quota.get("unit"),
+            "period": quota.get("period"),
+            "reason": payload.reason,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "targetUsername": username,
+        "quota": _row(quota),
+        "legacyLimit": _row(legacy_limit),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_admin_limits.COGNIX_QUOTA_MANAGER_VERSION,
+    }
+
+
+@router.delete("/admin/limits/users/{username}/{quota_key}")
+async def admin_reset_user_quota(
+    username: str,
+    quota_key: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    if auth_storage.get_user_profile(username) is None:
+        raise HTTPException(status_code = 404, detail = "User not found")
+    try:
+        quota_deleted = cognix_db.delete_user_quota(username, quota_key)
+        legacy_deleted = cognix_db.delete_user_limit(username, quota_key)
+    except ValueError as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from exc
+    side_effects = {
+        **cognix_admin_limits.build_limits_blueprint()["sideEffects"],
+        "userQuotaWrite": quota_deleted,
+        "legacyLimitWrite": legacy_deleted,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = username,
+        actor_username = current_subject,
+        action = "admin_user_quota_reset",
+        resource_type = "cognix_user_quota",
+        resource_id = quota_key,
+        severity = "notice",
+        metadata = {
+            "quotaDeleted": quota_deleted,
+            "legacyDeleted": legacy_deleted,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "targetUsername": username,
+        "quotaKey": quota_key,
+        "quotaDeleted": quota_deleted,
+        "legacyDeleted": legacy_deleted,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_admin_limits.COGNIX_QUOTA_MANAGER_VERSION,
+    }
+
+
+@router.put("/admin/limits/roles/{role_key}/{quota_key}")
+async def admin_update_role_quota(
+    role_key: str,
+    quota_key: str,
+    payload: AdminQuotaRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    try:
+        quota = cognix_db.upsert_role_quota(
+            role_key,
+            quota_key = quota_key,
+            quota_value = payload.quota_value,
+            unit = payload.unit,
+            period = payload.period,
+            status = payload.status,
+            updated_by = current_subject,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from exc
+    side_effects = {
+        **cognix_admin_limits.build_limits_blueprint()["sideEffects"],
+        "roleQuotaWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = None,
+        actor_username = current_subject,
+        action = "admin_role_quota_updated",
+        resource_type = "cognix_role_quota",
+        resource_id = str(quota.get("quota_key") or quota_key),
+        severity = "notice",
+        metadata = {
+            "roleKey": quota.get("role_key"),
+            "quotaKey": quota.get("quota_key"),
+            "quotaValue": quota.get("quota_value"),
+            "reason": payload.reason,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "roleKey": role_key,
+        "quota": _row(quota),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_admin_limits.COGNIX_QUOTA_MANAGER_VERSION,
+    }
+
+
+@router.post("/admin/limits/usage")
+async def admin_record_quota_usage(
+    payload: AdminQuotaUsageRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    if not payload.username:
+        raise HTTPException(status_code = 400, detail = "Username is required")
+    return await admin_record_user_quota_usage(
+        payload.username,
+        payload,
+        current_subject = current_subject,
+    )
+
+
+@router.post("/admin/limits/users/{username}/usage")
+async def admin_record_user_quota_usage(
+    username: str,
+    payload: AdminQuotaUsageRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    if auth_storage.get_user_profile(username) is None:
+        raise HTTPException(status_code = 404, detail = "User not found")
+    try:
+        usage = cognix_db.record_quota_usage(
+            username,
+            quota_key = payload.quota_key,
+            used_value = payload.used_value,
+            unit = payload.unit,
+            period_key = payload.period_key,
+            metadata = payload.metadata,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from exc
+    side_effects = {
+        **cognix_admin_limits.build_limits_blueprint()["sideEffects"],
+        "quotaUsageWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = username,
+        actor_username = current_subject,
+        action = "admin_quota_usage_recorded",
+        resource_type = "cognix_quota_usage",
+        resource_id = str(usage.get("quota_key") or payload.quota_key),
+        severity = "notice",
+        metadata = {
+            "quotaKey": usage.get("quota_key"),
+            "usedValue": usage.get("used_value"),
+            "periodKey": usage.get("period_key"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "targetUsername": username,
+        "usage": _row(usage),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_admin_limits.COGNIX_QUOTA_MANAGER_VERSION,
+    }
+
+
+@router.post("/admin/limits/overrides")
+async def admin_create_quota_override(
+    payload: AdminQuotaOverrideRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    try:
+        override = cognix_db.create_quota_override(
+            target_type = payload.target_type,
+            target_id = payload.target_id,
+            quota_key = payload.quota_key,
+            quota_value = payload.quota_value,
+            unit = payload.unit,
+            period = payload.period,
+            reason = payload.reason,
+            status = payload.status,
+            expires_at = payload.expires_at,
+            updated_by = current_subject,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from exc
+    side_effects = {
+        **cognix_admin_limits.build_limits_blueprint()["sideEffects"],
+        "quotaOverrideWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = payload.target_id if payload.target_type == "user" else None,
+        actor_username = current_subject,
+        action = "admin_quota_override_created",
+        resource_type = "cognix_quota_override",
+        resource_id = str(override.get("id") or ""),
+        severity = "notice",
+        metadata = {
+            "targetType": override.get("target_type"),
+            "targetId": override.get("target_id"),
+            "quotaKey": override.get("quota_key"),
+            "quotaValue": override.get("quota_value"),
+            "reason": override.get("reason"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "override": _row(override),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_admin_limits.COGNIX_QUOTA_MANAGER_VERSION,
+    }
+
+
+@router.post("/admin/limits/enforcement-plan")
+async def admin_quota_enforcement_plan(
+    payload: AdminQuotaEnforcementRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    if auth_storage.get_user_profile(payload.username) is None:
+        raise HTTPException(status_code = 404, detail = "User not found")
+    bundle = _build_admin_limits_bundle()
+    plan = cognix_admin_limits.build_usage_enforcement_plan(
+        username = payload.username,
+        quota_key = payload.quota_key,
+        requested_units = payload.requested_units,
+        quota_matrix = bundle["matrix"],
+    )
+    return {
+        "username": current_subject,
+        "enforcementPlan": plan,
+        "sideEffects": plan.get("sideEffects", {}),
+        "plannerVersion": cognix_admin_limits.COGNIX_USAGE_ENFORCER_VERSION,
+    }
+
+
 @router.put("/admin/users/{username}/limits/{limit_key}")
 async def admin_update_user_limit(
     username: str,
@@ -10074,6 +10479,15 @@ async def admin_update_user_limit(
             scope = payload.scope,
             updated_by = current_subject,
         )
+        quota = cognix_db.upsert_user_quota(
+            username,
+            quota_key = limit_key,
+            quota_value = payload.limit_value,
+            unit = payload.unit,
+            period = payload.period,
+            status = payload.status,
+            updated_by = current_subject,
+        )
     except ValueError as exc:
         raise HTTPException(status_code = 400, detail = str(exc)) from exc
     activity = cognix_db.create_user_activity_event(
@@ -10091,6 +10505,7 @@ async def admin_update_user_limit(
     side_effects = {
         **cognix_admin_users.build_admin_users_blueprint()["sideEffects"],
         "limitWrite": True,
+        "userQuotaWrite": True,
         "activityEventWrite": True,
         "auditWrite": True,
     }
@@ -10107,6 +10522,8 @@ async def admin_update_user_limit(
             "limitValue": limit.get("limit_value"),
             "unit": limit.get("unit"),
             "scope": limit.get("scope"),
+            "quotaId": quota.get("id"),
+            "quotaPeriod": quota.get("period"),
             "reason": payload.reason,
             "activityEventId": activity.get("id"),
             "sideEffects": side_effects,
@@ -10116,6 +10533,7 @@ async def admin_update_user_limit(
         "username": current_subject,
         "targetUsername": username,
         "limit": _row(limit),
+        "quota": _row(quota),
         "activityEvent": _row(activity),
         "auditLogId": audit.get("id"),
         "sideEffects": side_effects,

@@ -16,6 +16,7 @@ from auth import storage
 from auth.authentication import get_current_jwt_subject
 from core.cognix import admin_activity as cognix_admin_activity
 from core.cognix import admin_chat as cognix_admin_chat
+from core.cognix import admin_limits as cognix_admin_limits
 from core.cognix import admin_users as cognix_admin_users
 from core.cognix import apps as cognix_apps
 from core.cognix import background_agents as cognix_background_agents
@@ -5958,8 +5959,13 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "admin_user_service" in modules["cognix-admin-operations"]["capabilities"]
     assert "activity_daily_rollups" in modules["cognix-admin-operations"]["capabilities"]
     assert "organization_activity_daily" in modules["cognix-admin-operations"]["capabilities"]
+    assert "quota_manager" in modules["cognix-admin-operations"]["capabilities"]
+    assert "usage_enforcer" in modules["cognix-admin-operations"]["capabilities"]
+    assert "role_quota_management" in modules["cognix-admin-operations"]["capabilities"]
     assert "token_usage_dashboard" in modules["cognix-admin-operations"]["capabilities"]
     assert "/api/cognix/admin/users" in modules["cognix-admin-operations"]["routes"]
+    assert "/api/cognix/admin/limits" in modules["cognix-admin-operations"]["routes"]
+    assert "/api/cognix/admin/limits/enforcement-plan" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/activity/aggregate" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/usage" in modules["cognix-admin-operations"]["routes"]
     assert modules["cognix-admin-chat-access"]["status"] == "enabled"
@@ -7094,6 +7100,213 @@ def test_admin_activity_monitoring_routes_are_admin_only_and_persist_rollups():
 
     actions = [log["action"] for log in cognix_db.list_audit_logs(limit = 20)]
     assert "admin_activity_aggregated" in actions
+
+
+def test_admin_limits_core_builds_effective_quota_matrix_and_enforcement():
+    users = [{"username": "alice", "role": "user"}]
+    matrix = cognix_admin_limits.build_quota_matrix(
+        users = users,
+        user_quotas = [
+            {
+                "username": "alice",
+                "quota_key": "tokens_daily",
+                "quota_value": 80,
+                "unit": "tokens",
+                "period": "day",
+                "status": "active",
+            }
+        ],
+        role_quotas = [
+            {
+                "role_key": "user",
+                "quota_key": "tokens_daily",
+                "quota_value": 100,
+                "unit": "tokens",
+                "period": "day",
+                "status": "active",
+            }
+        ],
+        quota_overrides = [],
+        quota_usage = [
+            {
+                "username": "alice",
+                "quota_key": "tokens_daily",
+                "used_value": 70,
+            }
+        ],
+        legacy_limits = [],
+    )
+    quota = matrix["users"][0]["quotas"]["tokens_daily"]
+    blocked = cognix_admin_limits.build_usage_enforcement_plan(
+        username = "alice",
+        quota_key = "tokens_daily",
+        requested_units = 15,
+        quota_matrix = matrix,
+    )
+
+    assert matrix["limitServiceVersion"] == "cognix_limit_service_v2"
+    assert quota["source"] == "user_quota"
+    assert quota["quotaValue"] == 80
+    assert quota["usedValue"] == 70
+    assert blocked["allowed"] is False
+    assert blocked["status"] == "quota_exceeded"
+    assert blocked["sideEffects"]["modelLoad"] is False
+    assert blocked["sideEffects"]["toolExecution"] is False
+
+    override_matrix = cognix_admin_limits.build_quota_matrix(
+        users = users,
+        user_quotas = [],
+        role_quotas = [],
+        quota_overrides = [
+            {
+                "target_type": "user",
+                "target_id": "alice",
+                "quota_key": "tokens_daily",
+                "quota_value": 120,
+                "unit": "tokens",
+                "period": "day",
+                "status": "active",
+            }
+        ],
+        quota_usage = [{"username": "alice", "quota_key": "tokens_daily", "used_value": 70}],
+        legacy_limits = [],
+    )
+    allowed = cognix_admin_limits.build_usage_enforcement_plan(
+        username = "alice",
+        quota_key = "tokens_daily",
+        requested_units = 15,
+        quota_matrix = override_matrix,
+    )
+    assert override_matrix["users"][0]["quotas"]["tokens_daily"]["source"] == "user_override"
+    assert allowed["allowed"] is True
+
+
+def test_admin_limits_routes_manage_user_role_usage_overrides_and_reset():
+    seed_accounts()
+
+    with pytest.raises(HTTPException) as user_read:
+        run_async(cognix_routes.admin_limits_blueprint(current_subject = "alice"))
+    assert user_read.value.status_code == 403
+
+    blueprint = run_async(cognix_routes.admin_limits_blueprint(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    assert blueprint["limitsBlueprint"]["services"] == [
+        "LimitService",
+        "QuotaManager",
+        "UsageEnforcer",
+    ]
+    assert "cognix_user_quotas" in blueprint["limitsBlueprint"]["tables"]
+
+    role_quota = run_async(
+        cognix_routes.admin_update_role_quota(
+            "user",
+            "tokens_daily",
+            cognix_routes.AdminQuotaRequest(quotaValue = 100, unit = "tokens", period = "day", reason = "role cap"),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert role_quota["quota"]["roleKey"] == "user"
+    assert role_quota["sideEffects"]["roleQuotaWrite"] is True
+
+    user_quota = run_async(
+        cognix_routes.admin_update_user_quota(
+            "alice",
+            "tokens_daily",
+            cognix_routes.AdminQuotaRequest(quotaValue = 50, unit = "tokens", period = "day", reason = "temporary cap"),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert user_quota["quota"]["quotaKey"] == "tokens_daily"
+    assert user_quota["quota"]["quotaValue"] == 50
+    assert user_quota["legacyLimit"]["limitKey"] == "tokens_daily"
+    assert user_quota["sideEffects"]["userQuotaWrite"] is True
+
+    usage = run_async(
+        cognix_routes.admin_record_user_quota_usage(
+            "alice",
+            cognix_routes.AdminQuotaUsageRequest(
+                quotaKey = "tokens_daily",
+                usedValue = 45,
+                unit = "tokens",
+                periodKey = "2026-06-29",
+            ),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert usage["usage"]["usedValue"] == 45
+    assert usage["sideEffects"]["quotaUsageWrite"] is True
+
+    blocked = run_async(
+        cognix_routes.admin_quota_enforcement_plan(
+            cognix_routes.AdminQuotaEnforcementRequest(
+                username = "alice",
+                quotaKey = "tokens_daily",
+                requestedUnits = 10,
+            ),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert blocked["enforcementPlan"]["allowed"] is False
+
+    override = run_async(
+        cognix_routes.admin_create_quota_override(
+            cognix_routes.AdminQuotaOverrideRequest(
+                targetType = "user",
+                targetId = "alice",
+                quotaKey = "tokens_daily",
+                quotaValue = 80,
+                unit = "tokens",
+                period = "day",
+                reason = "support exception",
+            ),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert override["override"]["targetType"] == "user"
+    assert override["sideEffects"]["quotaOverrideWrite"] is True
+
+    matrix = run_async(cognix_routes.admin_limits(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    alice = next(item for item in matrix["quotaMatrix"]["users"] if item["username"] == "alice")
+    assert alice["quotas"]["tokens_daily"]["source"] == "user_override"
+
+    allowed = run_async(
+        cognix_routes.admin_quota_enforcement_plan(
+            cognix_routes.AdminQuotaEnforcementRequest(
+                username = "alice",
+                quotaKey = "tokens_daily",
+                requestedUnits = 10,
+            ),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert allowed["enforcementPlan"]["allowed"] is True
+
+    legacy = run_async(
+        cognix_routes.admin_update_user_limit(
+            "alice",
+            "messages_daily",
+            cognix_routes.AdminUserLimitRequest(limitValue = 25, unit = "messages", period = "day", reason = "legacy sync"),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert legacy["quota"]["quotaKey"] == "messages_daily"
+    assert cognix_db.list_user_quotas("alice")
+
+    reset = run_async(
+        cognix_routes.admin_reset_user_quota(
+            "alice",
+            "tokens_daily",
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert reset["quotaDeleted"] is True
+    assert reset["legacyDeleted"] is True
+
+    actions = [log["action"] for log in cognix_db.list_audit_logs(limit = 40)]
+    assert "admin_role_quota_updated" in actions
+    assert "admin_user_quota_updated" in actions
+    assert "admin_quota_usage_recorded" in actions
+    assert "admin_quota_override_created" in actions
+    assert "admin_user_quota_reset" in actions
 
 
 def test_admin_users_endpoints_are_admin_only_audited_and_persist_limits():
