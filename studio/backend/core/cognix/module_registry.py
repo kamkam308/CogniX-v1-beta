@@ -121,6 +121,8 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
             "rag_candidate_detection",
             "dataset_candidate_detection",
             "asset_permission_scope",
+            "model_registration_gate",
+            "lora_adapter_registration_gate",
             "library_audit_logs",
         ],
         "routes": [

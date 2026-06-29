@@ -7814,6 +7814,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert modules["cognix-library"]["status"] == "enabled"
     assert "library_search" in modules["cognix-library"]["capabilities"]
     assert "asset_permission_scope" in modules["cognix-library"]["capabilities"]
+    assert "model_registration_gate" in modules["cognix-library"]["capabilities"]
+    assert "lora_adapter_registration_gate" in modules["cognix-library"]["capabilities"]
     assert "/api/cognix/library/search" in modules["cognix-library"]["routes"]
     assert modules["cognix-scheduled"]["status"] == "enabled"
     assert "queue_first_execution" in modules["cognix-scheduled"]["capabilities"]
@@ -8422,7 +8424,10 @@ def test_library_native_blueprint_search_and_audited_asset_creation():
     assert blueprint["blueprint"]["libraryVersion"] == cognix_library.COGNIX_LIBRARY_VERSION
     assert "directive" in blueprint["blueprint"]["assetTypes"]
     assert blueprint["blueprint"]["searchContract"]["crossUserSearchAllowed"] is False
+    assert blueprint["blueprint"]["modelRegistrationPolicy"]["evaluationReportRequired"] is True
+    assert blueprint["blueprint"]["modelRegistrationPolicy"]["genericModelWriteBypassAllowed"] is False
     assert blueprint["sideEffects"]["assetWrite"] is False
+    assert blueprint["sideEffects"]["modelRegistryWrite"] is False
 
     created = run_async(
         cognix_routes.create_library_item(
@@ -8463,6 +8468,103 @@ def test_library_native_blueprint_search_and_audited_asset_creation():
     assert admin_read["logs"][0]["action"] == "library_item_created"
     assert admin_read["logs"][0]["metadata"]["classification"]["assetFamily"] == "behavior"
     assert admin_read["logs"][0]["metadata"]["sideEffects"]["assetWrite"] is True
+
+
+def test_library_blocks_model_assets_without_evaluation_gate():
+    seed_accounts()
+    plan = cognix_library.build_library_asset_plan(
+        username = "alice",
+        kind = "lora_adapter",
+        name = "CogniX Style LoRA",
+        source = "fine_tuning",
+        metadata = {
+            "artifactId": "lora_style_v1",
+            "secretValue": "must not be stored",
+        },
+    )
+
+    gate = plan["registrationGate"]
+    assert gate["gateVersion"] == "cognix_model_library_registration_v1"
+    assert gate["required"] is True
+    assert gate["status"] == "blocked"
+    assert "evaluation_report_declared" in gate["blockedGateIds"]
+    assert "evaluation_status_passed" in gate["blockedGateIds"]
+    assert plan["sideEffects"]["assetWrite"] is False
+    assert plan["sideEffects"]["modelRegistryWrite"] is False
+    assert "secretValue" not in plan["asset"]["metadata"]
+    assert plan["asset"]["metadata"]["redactedMetadataKeys"] == ["secretValue"]
+
+    with pytest.raises(HTTPException) as exc:
+        run_async(
+            cognix_routes.create_library_item(
+                cognix_routes.LibraryItemRequest(
+                    kind = "lora_adapter",
+                    name = "CogniX Style LoRA",
+                    source = "fine_tuning",
+                    metadata = {
+                        "artifactId": "lora_style_v1",
+                        "secretValue": "must not be stored",
+                    },
+                ),
+                current_subject = "alice",
+            )
+        )
+
+    assert exc.value.status_code == 403
+    assert "evaluation_report_declared" in exc.value.detail["blockedGateIds"]
+    assert exc.value.detail["auditLogId"].startswith("aud_")
+    assert cognix_db.list_library_items("alice") == []
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["action"] == "library_model_registration_blocked"
+    assert log["metadata"]["sideEffects"]["assetWrite"] is False
+    assert "must not be stored" not in log["metadataJson"]
+
+
+def test_library_allows_evaluated_lora_registration_with_audit():
+    seed_accounts()
+    created = run_async(
+        cognix_routes.create_library_item(
+            cognix_routes.LibraryItemRequest(
+                kind = "lora_adapter",
+                name = "CogniX Style LoRA",
+                source = "fine_tuning",
+                metadata = {
+                    "artifactId": "lora_style_v1",
+                    "adapterRef": "artifact://lora/style-v1",
+                    "evaluationReportRef": "eval://reports/lora-style-v1",
+                    "evaluationStatus": "passed",
+                    "evaluationPlanVersion": "cognix_fine_tuning_evaluation_plan_v1",
+                    "safetyReviewPassed": True,
+                    "humanApproved": True,
+                    "projectId": "project-training",
+                },
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    gate = created["assetPlan"]["registrationGate"]
+    assert created["item"]["kind"] == "lora_adapter"
+    assert created["item"]["metadata"]["modelRegistrationGate"]["status"] == "ready"
+    assert gate["status"] == "ready"
+    assert gate["readyForLibraryWrite"] is True
+    assert gate["blockedGateIds"] == []
+    assert created["sideEffects"]["assetWrite"] is True
+    assert created["sideEffects"]["modelRegistryWrite"] is False
+    assert created["sideEffects"]["evaluationJob"] is False
+
+    search = run_async(cognix_routes.search_library(kind = "lora_adapter", current_subject = "alice"))
+    assert search["librarySearch"]["totalMatches"] == 1
+    assert search["librarySearch"]["matches"][0]["classification"]["assetFamily"] == "modeling"
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["action"] == "library_item_created"
+    assert log["metadata"]["registrationGate"]["status"] == "ready"
+    assert log["metadata"]["sideEffects"]["assetWrite"] is True
+    assert log["metadata"]["sideEffects"]["modelRegistryWrite"] is False
 
 
 def test_scheduled_native_plan_permission_ceiling_and_audited_runs():

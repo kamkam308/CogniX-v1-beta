@@ -10428,6 +10428,33 @@ async def create_library_item(
         metadata = payload.metadata,
     )
     planned_asset = asset_plan["asset"]
+    registration_gate = asset_plan.get("registrationGate", {})
+    if registration_gate.get("required") and not registration_gate.get("readyForLibraryWrite"):
+        audit = cognix_db.create_audit_log(
+            username = current_subject,
+            actor_username = current_subject,
+            action = "library_model_registration_blocked",
+            resource_type = "cognix_library_item",
+            resource_id = planned_asset["name"],
+            severity = "warning",
+            metadata = {
+                "libraryVersion": asset_plan.get("libraryVersion"),
+                "modelRegistrationGateVersion": registration_gate.get("gateVersion"),
+                "kind": planned_asset["kind"],
+                "source": planned_asset["source"],
+                "blockedGateIds": registration_gate.get("blockedGateIds", []),
+                "warningGateIds": registration_gate.get("warningGateIds", []),
+                "sideEffects": asset_plan.get("sideEffects", {}),
+            },
+        )
+        raise HTTPException(
+            status_code = 403,
+            detail = {
+                "message": "Model library registration blocked until evaluation, safety review, and human approval pass.",
+                "blockedGateIds": registration_gate.get("blockedGateIds", []),
+                "auditLogId": audit.get("id"),
+            },
+        )
     item = cognix_db.create_library_item(
         current_subject,
         kind = planned_asset["kind"],
@@ -10455,6 +10482,7 @@ async def create_library_item(
             "kind": planned_asset["kind"],
             "source": planned_asset["source"],
             "classification": asset_plan["classification"],
+            "registrationGate": registration_gate,
             "indexingPlan": asset_plan["indexingPlan"],
             "permissionScope": asset_plan["permissionPlan"]["scope"],
             "sideEffects": side_effects,
