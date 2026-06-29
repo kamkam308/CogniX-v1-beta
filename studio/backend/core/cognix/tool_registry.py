@@ -15,6 +15,7 @@ from typing import Any
 
 
 TOOL_REGISTRY_VERSION = "cognix_tool_registry_v1"
+TOOL_EXECUTION_CONTRACT_VERSION = "cognix_tool_execution_contract_v1"
 
 RISK_ORDER = {
     "low": 1,
@@ -470,6 +471,104 @@ def _action_decision(
     }
 
 
+def _contract_blocked_when(decision: dict[str, Any]) -> list[str]:
+    blocked = [
+        str(item.get("id"))
+        for item in decision.get("blockers", [])
+        if isinstance(item, dict) and item.get("id")
+    ]
+    if decision.get("requiresConfirmation"):
+        blocked.append("human_confirmation_required")
+    if decision.get("secretsRequired"):
+        blocked.append("secret_resolution_required")
+    if decision.get("sandboxRequired"):
+        blocked.append("sandbox_required")
+    if decision.get("rateLimitKey"):
+        blocked.append("rate_limit_check_required")
+    return sorted(set(blocked))
+
+
+def _execution_contract(
+    *,
+    tool: dict[str, Any],
+    action: dict[str, Any],
+    decision: dict[str, Any],
+    permission_context: dict[str, Any],
+) -> dict[str, Any]:
+    allowed_to_prepare = bool(decision.get("allowed"))
+    blocked_when = _contract_blocked_when(decision)
+    connector = str(tool.get("connector") or "unknown")
+    return {
+        "contractVersion": TOOL_EXECUTION_CONTRACT_VERSION,
+        "mode": "guarded_plan_only",
+        "toolId": tool.get("id"),
+        "connector": connector,
+        "actionId": action.get("id"),
+        "actionMode": action.get("mode"),
+        "allowedToPrepare": allowed_to_prepare,
+        "readyForExecution": False,
+        "automaticExecutionAllowed": False,
+        "frontendDirectExecutionAllowed": False,
+        "executorRequired": allowed_to_prepare,
+        "plannedExecutor": f"cognix_tool_executor:{connector}" if allowed_to_prepare else None,
+        "nextRequiredGate": (
+            blocked_when[0]
+            if blocked_when
+            else "executor_approval_gate"
+        ),
+        "allowedActions": [
+            "record_tool_plan",
+            "check_rate_limit",
+            "request_human_confirmation",
+            "resolve_secrets_server_side",
+            "prepare_sandbox",
+            "enqueue_tool_job_after_approval",
+        ]
+        if allowed_to_prepare
+        else ["record_tool_plan"],
+        "blockedActions": [
+            "tool_execution",
+            "network_tool_call",
+            "external_write",
+            "secret_read",
+            "permission_write",
+            "frontend_direct_execution",
+        ],
+        "preconditions": {
+            "connectorEnabled": bool(tool.get("enabled")),
+            "permissionsResolved": not bool(decision.get("missingPermissions")),
+            "humanConfirmationRequired": bool(decision.get("requiresConfirmation")),
+            "auditRequired": bool(decision.get("auditRequired")),
+            "sandboxRequired": bool(decision.get("sandboxRequired")),
+            "rateLimitRequired": bool(decision.get("rateLimitKey")),
+            "rateLimitChecked": False,
+            "rateLimitAllowed": None,
+            "secretsRequired": bool(decision.get("secretsRequired")),
+            "secretsStayServerSide": True,
+            "adminRequired": bool(decision.get("adminRequired")),
+        },
+        "permissionContext": {
+            "username": permission_context.get("username"),
+            "isAdmin": bool(permission_context.get("isAdmin")),
+            "developerMode": bool(permission_context.get("developerMode")),
+            "effectivePermissionCount": len(permission_context.get("effectivePermissions") or []),
+        },
+        "dataBoundary": {
+            "dataIsolation": tool.get("dataIsolation"),
+            "secretsStayServerSide": True,
+            "auditRawPayloadAllowed": False,
+        },
+        "blockedWhen": blocked_when,
+        "sideEffects": {
+            "toolExecution": False,
+            "networkToolCall": False,
+            "externalWrite": False,
+            "secretRead": False,
+            "permissionWrite": False,
+        },
+    }
+
+
 def build_tool_registry() -> dict[str, Any]:
     tools = deepcopy(TOOL_MANIFESTS)
     action_count = sum(len(tool.get("actions") or []) for tool in tools)
@@ -495,6 +594,7 @@ def build_tool_registry() -> dict[str, Any]:
             "adminOnlyForRiskAtLeast": "critical",
             "auditRequired": True,
             "rateLimitsEnabled": True,
+            "executionContractRequired": True,
             "secretsMustStayServerSide": True,
             "permissionMatrixAvailable": True,
             "frontendDirectExecutionAllowed": False,
@@ -626,6 +726,7 @@ def plan_tool_action(
     if found is None:
         return {
             "registryVersion": TOOL_REGISTRY_VERSION,
+            "executionContractVersion": TOOL_EXECUTION_CONTRACT_VERSION,
             "username": username,
             "toolId": tool_id,
             "actionId": action_id,
@@ -641,6 +742,36 @@ def plan_tool_action(
                 "externalWrite": False,
                 "secretRead": False,
                 "permissionWrite": False,
+            },
+            "executionContract": {
+                "contractVersion": TOOL_EXECUTION_CONTRACT_VERSION,
+                "mode": "guarded_plan_only",
+                "toolId": tool_id,
+                "actionId": action_id,
+                "allowedToPrepare": False,
+                "readyForExecution": False,
+                "automaticExecutionAllowed": False,
+                "frontendDirectExecutionAllowed": False,
+                "executorRequired": False,
+                "plannedExecutor": None,
+                "nextRequiredGate": "unknown_action",
+                "allowedActions": ["record_tool_plan"],
+                "blockedActions": [
+                    "tool_execution",
+                    "network_tool_call",
+                    "external_write",
+                    "secret_read",
+                    "permission_write",
+                    "frontend_direct_execution",
+                ],
+                "blockedWhen": ["unknown_action"],
+                "sideEffects": {
+                    "toolExecution": False,
+                    "networkToolCall": False,
+                    "externalWrite": False,
+                    "secretRead": False,
+                    "permissionWrite": False,
+                },
             },
         }
 
@@ -658,6 +789,7 @@ def plan_tool_action(
     )
     return {
         "registryVersion": TOOL_REGISTRY_VERSION,
+        "executionContractVersion": TOOL_EXECUTION_CONTRACT_VERSION,
         "username": username,
         "toolId": tool["id"],
         "toolName": tool["name"],
@@ -665,4 +797,56 @@ def plan_tool_action(
         "actionLabel": action["label"],
         "permissionContext": permission_context,
         **decision,
+        "executionContract": _execution_contract(
+            tool = tool,
+            action = action,
+            decision = decision,
+            permission_context = permission_context,
+        ),
     }
+
+
+def apply_rate_limit_result(
+    plan: dict[str, Any],
+    rate_limit: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Attach a rate-limit check to a tool plan without executing the tool."""
+
+    if rate_limit is None:
+        return plan
+    updated = deepcopy(plan)
+    updated["rateLimit"] = rate_limit
+    contract = updated.get("executionContract")
+    if not isinstance(contract, dict):
+        return updated
+    preconditions = contract.get("preconditions")
+    if isinstance(preconditions, dict):
+        preconditions["rateLimitChecked"] = True
+        preconditions["rateLimitAllowed"] = bool(rate_limit.get("allowed"))
+    contract["rateLimit"] = {
+        "allowed": bool(rate_limit.get("allowed")),
+        "remaining": rate_limit.get("remaining"),
+        "resetAt": rate_limit.get("resetAt"),
+    }
+    blocked_when = [
+        str(item)
+        for item in contract.get("blockedWhen", [])
+        if str(item or "").strip() and item != "rate_limit_check_required"
+    ]
+    if rate_limit.get("allowed"):
+        contract["blockedWhen"] = blocked_when
+        if contract.get("nextRequiredGate") == "rate_limit_check_required":
+            contract["nextRequiredGate"] = blocked_when[0] if blocked_when else "executor_approval_gate"
+        return updated
+
+    if "rate_limited" not in blocked_when:
+        blocked_when.append("rate_limited")
+    contract["blockedWhen"] = blocked_when
+    contract["nextRequiredGate"] = "rate_limited"
+    contract["allowedToPrepare"] = False
+    contract["executorRequired"] = False
+    contract["plannedExecutor"] = None
+    updated["allowed"] = False
+    updated["status"] = "rate_limited"
+    updated["reason"] = "Tool action rate limit reached."
+    return updated

@@ -6306,7 +6306,9 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/evolution/experiments/plan" in modules["cognix-ai-evolution-engine"]["routes"]
     assert "/api/cognix/evolution/proposals" in modules["cognix-ai-evolution-engine"]["routes"]
     assert "tool_permission_matrix" in modules["cognix-integrations"]["capabilities"]
+    assert "tool_execution_contract" in modules["cognix-integrations"]["capabilities"]
     assert "/api/cognix/tools/permission-matrix" in modules["cognix-integrations"]["routes"]
+    assert "/api/cognix/tools/plan" in modules["cognix-integrations"]["routes"]
     assert modules["cognix-plugin-marketplace"]["dependencyState"]["ready"] is True
     assert "plugin_manifest_validation" in modules["cognix-plugin-marketplace"]["capabilities"]
     assert "plugin_permission_scanning" in modules["cognix-plugin-marketplace"]["capabilities"]
@@ -6917,6 +6919,7 @@ def test_tool_registry_declares_permissions_and_guardrails():
     assert registry["globalPolicies"]["frontendDirectExecutionAllowed"] is False
     assert registry["globalPolicies"]["rateLimitsEnabled"] is True
     assert registry["globalPolicies"]["permissionMatrixAvailable"] is True
+    assert registry["globalPolicies"]["executionContractRequired"] is True
     assert registry["sideEffects"]["toolExecution"] is False
 
     tools = {tool["id"]: tool for tool in registry["tools"]}
@@ -6936,6 +6939,36 @@ def test_tool_registry_declares_permissions_and_guardrails():
     kali_actions = {action["id"]: action for action in tools["kali-isolated"]["actions"]}
     assert kali_actions["active_test"]["sandboxRequired"] is True
     assert "admin" in kali_actions["active_test"]["permissions"]
+
+
+def test_tool_action_plan_builds_execution_contract_without_execution():
+    plan = cognix_tool_registry.plan_tool_action(
+        tool_id = "codex-secure-agent",
+        action_id = "modify_code",
+        username = "alice",
+        has_developer_mode = True,
+        granted_permissions = set(),
+    )
+
+    contract = plan["executionContract"]
+    assert plan["executionContractVersion"] == "cognix_tool_execution_contract_v1"
+    assert plan["allowed"] is True
+    assert contract["contractVersion"] == "cognix_tool_execution_contract_v1"
+    assert contract["mode"] == "guarded_plan_only"
+    assert contract["allowedToPrepare"] is True
+    assert contract["readyForExecution"] is False
+    assert contract["automaticExecutionAllowed"] is False
+    assert contract["frontendDirectExecutionAllowed"] is False
+    assert contract["executorRequired"] is True
+    assert contract["preconditions"]["humanConfirmationRequired"] is True
+    assert contract["preconditions"]["sandboxRequired"] is True
+    assert contract["preconditions"]["rateLimitRequired"] is True
+    assert "human_confirmation_required" in contract["blockedWhen"]
+    assert "sandbox_required" in contract["blockedWhen"]
+    assert "rate_limit_check_required" in contract["blockedWhen"]
+    assert "tool_execution" in contract["blockedActions"]
+    assert contract["sideEffects"]["toolExecution"] is False
+    assert plan["sideEffects"]["toolExecution"] is False
 
 
 def test_tool_permission_matrix_summarizes_effective_permissions_without_execution():
@@ -7143,9 +7176,15 @@ def test_tool_plan_applies_rate_limit_guard(monkeypatch):
 
     assert first["allowed"] is True
     assert first["rateLimit"]["allowed"] is True
+    assert first["executionContract"]["preconditions"]["rateLimitChecked"] is True
+    assert first["executionContract"]["preconditions"]["rateLimitAllowed"] is True
+    assert first["executionContract"]["readyForExecution"] is False
     assert second["allowed"] is False
     assert second["status"] == "rate_limited"
     assert second["rateLimit"]["allowed"] is False
+    assert second["executionContract"]["nextRequiredGate"] == "rate_limited"
+    assert "rate_limited" in second["executionContract"]["blockedWhen"]
+    assert second["executionContract"]["allowedToPrepare"] is False
     assert second["sideEffects"]["toolExecution"] is False
 
 
@@ -7166,6 +7205,10 @@ def test_tool_plan_blocks_disabled_connectors_before_permissions():
     assert body["status"] == "connector_disabled"
     assert body["requiresConfirmation"] is True
     assert body["riskLevel"] == "medium"
+    assert body["executionContract"]["allowedToPrepare"] is False
+    assert body["executionContract"]["readyForExecution"] is False
+    assert body["executionContract"]["preconditions"]["connectorEnabled"] is False
+    assert "connector_disabled" in body["executionContract"]["blockedWhen"]
     assert body["sideEffects"]["externalWrite"] is False
     assert "developer_mode" in body["missingPermissions"]
 
@@ -7194,6 +7237,9 @@ def test_tool_plan_uses_database_permissions_for_connector_actions():
     assert "github:read" in body["permissionContext"]["explicitPermissions"]
     assert body["guardrails"]["auditRequired"] is True
     assert body["guardrails"]["frontendDirectExecutionAllowed"] is False
+    assert body["executionContract"]["contractVersion"] == "cognix_tool_execution_contract_v1"
+    assert body["executionContract"]["preconditions"]["secretsRequired"] is True
+    assert body["executionContract"]["dataBoundary"]["secretsStayServerSide"] is True
     assert body["sideEffects"]["secretRead"] is False
     assert body["sideEffects"]["toolExecution"] is False
 
@@ -7201,6 +7247,9 @@ def test_tool_plan_uses_database_permissions_for_connector_actions():
     log = admin_read["logs"][0]
     assert log["action"] == "tool_action_planned"
     assert log["metadata"]["missingPermissions"] == []
+    assert log["metadata"]["executionContractVersion"] == "cognix_tool_execution_contract_v1"
+    assert log["metadata"]["contract"]["readyForExecution"] is False
+    assert "connector_disabled" in log["metadata"]["contract"]["blockedWhen"]
     assert log["metadata"]["guardrails"]["frontendDirectExecutionAllowed"] is False
 
 

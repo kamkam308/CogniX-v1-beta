@@ -4671,11 +4671,10 @@ async def plan_tool_action(
                 "rateLimitKey": rate_limit_key,
                 "reason": "Invalid rate limit key",
             }
-        plan["rateLimit"] = rate_limit
-        if not rate_limit.get("allowed"):
-            plan["allowed"] = False
-            plan["status"] = "rate_limited"
-            plan["reason"] = "Tool action rate limit reached."
+        plan = cognix_tool_registry.apply_rate_limit_result(plan, rate_limit)
+        tool_rate_limited_status = "rate_limited"
+        if isinstance(rate_limit, dict) and plan.get("status") == tool_rate_limited_status:
+            rate_limit["status"] = tool_rate_limited_status
 
     audit = cognix_db.create_audit_log(
         username = current_subject,
@@ -4686,12 +4685,19 @@ async def plan_tool_action(
         severity = "notice" if plan.get("allowed") else "warning",
         metadata = {
             "toolRegistryVersion": plan.get("registryVersion"),
+            "executionContractVersion": plan.get("executionContractVersion"),
             "toolId": plan.get("toolId"),
             "actionId": plan.get("actionId"),
             "status": plan.get("status"),
             "riskLevel": plan.get("riskLevel"),
             "requiresConfirmation": plan.get("requiresConfirmation"),
             "guardrails": plan.get("guardrails", {}),
+            "contract": {
+                "allowedToPrepare": plan.get("executionContract", {}).get("allowedToPrepare"),
+                "readyForExecution": plan.get("executionContract", {}).get("readyForExecution"),
+                "nextRequiredGate": plan.get("executionContract", {}).get("nextRequiredGate"),
+                "blockedWhen": plan.get("executionContract", {}).get("blockedWhen", []),
+            },
             "missingPermissions": plan.get("missingPermissions", []),
             "rateLimit": rate_limit,
             "sideEffects": plan.get("sideEffects", {}),
