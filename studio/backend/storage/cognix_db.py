@@ -764,6 +764,41 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_context_heatmap_entries_project
             ON cognix_context_heatmap_entries(username, project_id, bucket, utility_score DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_memory_cleanup_suggestions (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            project_id TEXT,
+            memory_id TEXT NOT NULL,
+            reason_code TEXT NOT NULL,
+            recommended_action TEXT NOT NULL,
+            confidence REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'pending_review',
+            suggestion_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_memory_cleanup_suggestions_user
+            ON cognix_memory_cleanup_suggestions(username, status, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_memory_cleanup_suggestions_project
+            ON cognix_memory_cleanup_suggestions(username, project_id, status, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_memory_conflicts (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            project_id TEXT,
+            conflict_type TEXT NOT NULL,
+            memory_ids_json TEXT NOT NULL DEFAULT '[]',
+            summary TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending_review',
+            conflict_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_memory_conflicts_user
+            ON cognix_memory_conflicts(username, status, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_memory_conflicts_project
+            ON cognix_memory_conflicts(username, project_id, status, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_generated_datasets (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -4942,6 +4977,153 @@ def list_context_heatmap_entries(username: str, *, project_id: str | None = None
                 (username, safe_limit),
             ).fetchall()
         return [_hydrate_context_heatmap_entry(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_memory_cleanup_suggestion(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["suggestion"] = _json_or_default(item.get("suggestion_json"), {})
+    return item
+
+
+def _hydrate_memory_conflict(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["memoryIds"] = _json_or_default(item.get("memory_ids_json"), [])
+    item["conflict"] = _json_or_default(item.get("conflict_json"), {})
+    return item
+
+
+def create_memory_cleanup_plan_records(
+    username: str,
+    *,
+    plan: dict[str, Any],
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    created_at = _now()
+    normalized_project_id = project_id or plan.get("projectId")
+    suggestions = [item for item in plan.get("suggestions", []) if isinstance(item, dict)]
+    conflicts = [item for item in plan.get("conflicts", []) if isinstance(item, dict)]
+    conn = get_connection()
+    try:
+        for suggestion in suggestions:
+            conn.execute(
+                """
+                INSERT INTO cognix_memory_cleanup_suggestions
+                    (
+                        id, username, project_id, memory_id, reason_code,
+                        recommended_action, confidence, status,
+                        suggestion_json, created_at
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending_review', ?, ?)
+                """,
+                (
+                    _new_id("mcln"),
+                    username,
+                    normalized_project_id,
+                    str(suggestion.get("memoryId") or "unknown")[:180],
+                    str(suggestion.get("reasonCode") or "review")[:160],
+                    str(suggestion.get("recommendedAction") or "review")[:80],
+                    float(suggestion.get("confidence") or 0.0),
+                    json.dumps(suggestion, ensure_ascii = False),
+                    created_at,
+                ),
+            )
+        for conflict in conflicts:
+            conn.execute(
+                """
+                INSERT INTO cognix_memory_conflicts
+                    (
+                        id, username, project_id, conflict_type,
+                        memory_ids_json, summary, status,
+                        conflict_json, created_at
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, 'pending_review', ?, ?)
+                """,
+                (
+                    _new_id("mconf"),
+                    username,
+                    normalized_project_id,
+                    str(conflict.get("conflictType") or "memory_conflict")[:160],
+                    json.dumps(conflict.get("memoryIds") or [], ensure_ascii = False),
+                    str(conflict.get("summary") or "")[:2000],
+                    json.dumps(conflict, ensure_ascii = False),
+                    created_at,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return {
+        "suggestions": list_memory_cleanup_suggestions(username, project_id = normalized_project_id, limit = 300),
+        "conflicts": list_memory_conflicts(username, project_id = normalized_project_id, limit = 300),
+    }
+
+
+def list_memory_cleanup_suggestions(
+    username: str,
+    *,
+    project_id: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 100), 1), 500)
+    conn = get_connection()
+    try:
+        if project_id:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_memory_cleanup_suggestions
+                WHERE username = ? AND project_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, project_id, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_memory_cleanup_suggestions
+                WHERE username = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, safe_limit),
+            ).fetchall()
+        return [_hydrate_memory_cleanup_suggestion(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def list_memory_conflicts(
+    username: str,
+    *,
+    project_id: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 100), 1), 500)
+    conn = get_connection()
+    try:
+        if project_id:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_memory_conflicts
+                WHERE username = ? AND project_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, project_id, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_memory_conflicts
+                WHERE username = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, safe_limit),
+            ).fetchall()
+        return [_hydrate_memory_conflict(row) for row in _rows_to_dicts(rows)]
     finally:
         conn.close()
 

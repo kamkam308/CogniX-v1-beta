@@ -261,6 +261,15 @@ class ContextHeatmapPlanRequest(BaseModel):
     store_heatmap: bool = Field(True, alias = "storeHeatmap")
 
 
+class MemoryCleanupPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    memories: list[dict[str, Any]] = Field(default_factory = list)
+    usage_entries: list[dict[str, Any]] | None = Field(None, alias = "usageEntries")
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    store_suggestions: bool = Field(True, alias = "storeSuggestions")
+
+
 class IntentPredictionRequest(BaseModel):
     model_config = ConfigDict(populate_by_name = True)
 
@@ -934,6 +943,10 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "item_type": "itemType",
         "item_json": "itemJson",
         "relevance_score": "relevanceScore",
+        "suggestion_json": "suggestionJson",
+        "conflict_json": "conflictJson",
+        "memory_ids_json": "memoryIdsJson",
+        "conflict_type": "conflictType",
         "ram_used_percent": "ramUsedPercent",
         "cpu_used_percent": "cpuUsedPercent",
         "gpu_available": "gpuAvailable",
@@ -6086,6 +6099,95 @@ async def context_heatmap_entries(
         },
         "plannerVersion": cognix_context_heatmap.COGNIX_CONTEXT_HEATMAP_GENERATOR_VERSION,
     }
+
+
+@router.get("/memory/cleanup/blueprint")
+async def memory_cleanup_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_context_heatmap.build_memory_cleanup_blueprint()
+    return {
+        "username": current_subject,
+        "memoryCleanupBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_context_heatmap.COGNIX_MEMORY_GARBAGE_COLLECTOR_VERSION,
+    }
+
+
+@router.post("/memory/cleanup/plan")
+async def memory_cleanup_plan(
+    payload: MemoryCleanupPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_context_heatmap.build_memory_cleanup_plan(
+        username = current_subject,
+        memories = payload.memories,
+        usage_entries = payload.usage_entries,
+        project_id = payload.project_id,
+    )
+    stored = (
+        cognix_db.create_memory_cleanup_plan_records(
+            current_subject,
+            plan = plan,
+            project_id = payload.project_id,
+        )
+        if payload.store_suggestions
+        else {"suggestions": [], "conflicts": []}
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "suggestionWrite": bool(stored.get("suggestions")),
+        "conflictWrite": bool(stored.get("conflicts")),
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "memory_cleanup_plan_built",
+        resource_type = "cognix_memory_cleanup",
+        resource_id = current_subject,
+        severity = "warning" if plan.get("summary", {}).get("suggestionCount") else "notice",
+        metadata = {
+            "memoryGarbageCollectorVersion": plan.get("memoryGarbageCollectorVersion"),
+            "memoryConflictResolverVersion": plan.get("memoryConflictResolverVersion"),
+            "suggestionCount": plan.get("summary", {}).get("suggestionCount"),
+            "conflictCount": plan.get("summary", {}).get("conflictCount"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "memoryCleanupPlan": plan,
+        "storedSuggestions": _rows(stored.get("suggestions") or []),
+        "storedConflicts": _rows(stored.get("conflicts") or []),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_context_heatmap.COGNIX_MEMORY_GARBAGE_COLLECTOR_VERSION,
+    }
+
+
+@router.get("/memory/cleanup/suggestions")
+async def memory_cleanup_suggestions(
+    project_id: str | None = None,
+    limit: int = 100,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if project_id:
+        _require_owned_project(project_id, current_subject)
+    suggestions = cognix_db.list_memory_cleanup_suggestions(current_subject, project_id = project_id, limit = limit)
+    return {"username": current_subject, "suggestions": _rows(suggestions), "count": len(suggestions)}
+
+
+@router.get("/memory/cleanup/conflicts")
+async def memory_conflicts(
+    project_id: str | None = None,
+    limit: int = 100,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if project_id:
+        _require_owned_project(project_id, current_subject)
+    conflicts = cognix_db.list_memory_conflicts(current_subject, project_id = project_id, limit = limit)
+    return {"username": current_subject, "conflicts": _rows(conflicts), "count": len(conflicts)}
 
 
 @router.get("/prompt-compression/contexts")

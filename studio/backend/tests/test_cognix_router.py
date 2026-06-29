@@ -3850,6 +3850,113 @@ def test_context_heatmap_endpoint_stores_entries_and_logs_audit():
     assert log["metadata"]["heatmapGeneratorVersion"] == "cognix_context_heatmap_generator_v1"
 
 
+def test_memory_cleanup_detects_duplicates_stale_and_conflicts_without_delete():
+    plan = cognix_context_heatmap.build_memory_cleanup_plan(
+        username = "alice",
+        memories = [
+            {
+                "id": "mem-a",
+                "title": "Reponse en francais",
+                "content": "Toujours repondre en francais.",
+                "preferenceKey": "language",
+                "ageDays": 3,
+                "usageCount": 5,
+            },
+            {
+                "id": "mem-b",
+                "title": "Reponse en francais copie",
+                "content": "Toujours repondre en francais.",
+                "preferenceKey": "language-copy",
+                "ageDays": 2,
+            },
+            {
+                "id": "mem-old",
+                "title": "Ancien style",
+                "content": "Ancienne preference jamais reutilisee.",
+                "preferenceKey": "old-style",
+                "ageDays": 140,
+            },
+            {
+                "id": "mem-conflict",
+                "title": "Langue",
+                "content": "Toujours repondre en anglais.",
+                "preferenceKey": "language",
+                "ageDays": 1,
+            },
+        ],
+    )
+    reason_codes = {item["reasonCode"] for item in plan["suggestions"]}
+
+    assert plan["memoryGarbageCollectorVersion"] == "cognix_memory_garbage_collector_v1"
+    assert plan["memoryConflictResolverVersion"] == "cognix_memory_conflict_resolver_v1"
+    assert "duplicate_memory" in reason_codes
+    assert "stale_unused_memory" in reason_codes
+    assert "conflicting_memory" in reason_codes
+    assert plan["summary"]["conflictCount"] == 1
+    assert plan["reviewPolicy"]["reviewBeforeDelete"] is True
+    assert plan["reviewPolicy"]["permanentDeleteAllowedHere"] is False
+    assert plan["sideEffects"]["memoryDelete"] is False
+    assert plan["sideEffects"]["permanentDelete"] is False
+    assert plan["sideEffects"]["generation"] is False
+
+
+def test_memory_cleanup_endpoint_stores_suggestions_conflicts_and_audit():
+    seed_accounts()
+    body = run_async(
+        cognix_routes.memory_cleanup_plan(
+            cognix_routes.MemoryCleanupPlanRequest(
+                memories = [
+                    {
+                        "id": "mem-a",
+                        "title": "Ton",
+                        "content": "Utiliser un ton concis.",
+                        "preferenceKey": "tone",
+                        "usageCount": 4,
+                    },
+                    {
+                        "id": "mem-b",
+                        "title": "Ton contradictoire",
+                        "content": "Utiliser un ton tres detaille.",
+                        "preferenceKey": "tone",
+                    },
+                    {
+                        "id": "mem-old",
+                        "title": "Ancienne note",
+                        "content": "Note obsolete sans usage.",
+                        "preferenceKey": "obsolete",
+                        "ageDays": 180,
+                    },
+                ],
+                storeSuggestions = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_memory_garbage_collector_v1"
+    assert body["sideEffects"]["suggestionWrite"] is True
+    assert body["sideEffects"]["conflictWrite"] is True
+    assert body["sideEffects"]["memoryDelete"] is False
+    assert body["sideEffects"]["permanentDelete"] is False
+    assert body["memoryCleanupPlan"]["summary"]["automaticCleanupWillRun"] is False
+    assert body["storedSuggestions"][0]["id"].startswith("mcln_")
+    assert body["storedConflicts"][0]["id"].startswith("mconf_")
+
+    suggestions = run_async(cognix_routes.memory_cleanup_suggestions(current_subject = "alice"))
+    conflicts = run_async(cognix_routes.memory_conflicts(current_subject = "alice"))
+    assert suggestions["count"] >= 2
+    assert conflicts["count"] == 1
+    assert conflicts["conflicts"][0]["memoryIds"]
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "memory_cleanup_plan_built"
+    assert log["metadata"]["sideEffects"]["memoryDelete"] is False
+    assert log["metadata"]["sideEffects"]["permanentDelete"] is False
+
+
 def test_intent_prediction_blueprint_declares_single_suggestion_and_no_preload():
     blueprint = cognix_intent_prediction.build_intent_prediction_blueprint()
 
@@ -5119,8 +5226,12 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "context_usage_tracking" in modules["cognix-context-heatmap"]["capabilities"]
     assert "context_heatmap" in modules["cognix-context-heatmap"]["capabilities"]
     assert "memory_garbage_collection_planning" in modules["cognix-context-heatmap"]["capabilities"]
+    assert "memory_cleanup_suggestions" in modules["cognix-context-heatmap"]["capabilities"]
+    assert "memory_conflict_resolution" in modules["cognix-context-heatmap"]["capabilities"]
     assert "/api/cognix/context/heatmap/plan" in modules["cognix-context-heatmap"]["routes"]
     assert "/api/cognix/context/heatmap/entries" in modules["cognix-context-heatmap"]["routes"]
+    assert "/api/cognix/memory/cleanup/plan" in modules["cognix-context-heatmap"]["routes"]
+    assert "/api/cognix/memory/cleanup/conflicts" in modules["cognix-context-heatmap"]["routes"]
     assert modules["cognix-intent-prediction"]["dependencyState"]["ready"] is True
     assert "intent_prediction" in modules["cognix-intent-prediction"]["capabilities"]
     assert "preload_planning" in modules["cognix-intent-prediction"]["capabilities"]
