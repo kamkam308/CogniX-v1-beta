@@ -37,6 +37,7 @@ DEFAULT_RATE_LIMIT_POLICY = {
 }
 
 RATE_LIMIT_POLICIES: dict[str, dict[str, int]] = {
+    "calculator:evaluate": {"windowSeconds": 60, "maxEvents": 240},
     "github:read": {"windowSeconds": 60, "maxEvents": 120},
     "github:write": {"windowSeconds": 60, "maxEvents": 20},
     "github:merge": {"windowSeconds": 300, "maxEvents": 3},
@@ -99,6 +100,30 @@ SECRET_SOURCE_BY_CONNECTOR: dict[str, list[str]] = {
 
 
 TOOL_MANIFESTS: list[dict[str, Any]] = [
+    {
+        "id": "calculator",
+        "name": "CogniX Calculator",
+        "category": "math",
+        "description": "Calcul deterministe local pour maths, physique et verification numerique.",
+        "connector": "local-calculator",
+        "enabled": True,
+        "dataIsolation": "none",
+        "actions": [
+            {
+                "id": "evaluate_expression",
+                "label": "Evaluer une expression",
+                "description": "Evaluer une expression mathematique bornee sans modele ni reseau.",
+                "mode": "execute",
+                "permissions": [IMPLICIT_AUTHENTICATED_PERMISSION],
+                "riskLevel": "low",
+                "requiresConfirmation": False,
+                "auditRequired": True,
+                "sandboxRequired": False,
+                "rateLimitKey": "calculator:evaluate",
+                "secretsRequired": False,
+            },
+        ],
+    },
     {
         "id": "github",
         "name": "GitHub",

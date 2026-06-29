@@ -62,6 +62,7 @@ from core.cognix import model_comparison as cognix_model_comparison
 from core.cognix import model_lifecycle as cognix_model_lifecycle
 from core.cognix import model_translator as cognix_model_translator
 from core.cognix import module_registry as cognix_module_registry
+from core.cognix import native_tools as cognix_native_tools
 from core.cognix import onboarding as cognix_onboarding
 from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
@@ -1313,6 +1314,11 @@ class GovernancePlanRequest(BaseModel):
 class ToolActionPlanRequest(BaseModel):
     tool_id: str = Field(..., min_length = 1, max_length = 120)
     action_id: str = Field(..., min_length = 1, max_length = 120)
+
+
+class ToolCalculatorEvaluateRequest(BaseModel):
+    expression: str = Field(..., min_length = 1, max_length = 300)
+    precision: int = Field(12, ge = 1, le = 16)
 
 
 class ToolExecutionHandoffRequest(BaseModel):
@@ -5691,6 +5697,103 @@ async def plan_tool_action(
     )
     plan["auditLogId"] = audit.get("id")
     return plan
+
+
+@router.post("/tools/calculator/evaluate")
+async def tool_calculator_evaluate(
+    payload: ToolCalculatorEvaluateRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    is_admin = auth_storage.is_admin(current_subject)
+    has_developer_mode = cognix_db.user_has_permission(
+        current_subject,
+        cognix_db.DEVELOPER_MODE_PERMISSION,
+    )
+    plan = cognix_tool_registry.plan_tool_action(
+        tool_id = "calculator",
+        action_id = "evaluate_expression",
+        username = current_subject,
+        is_admin = is_admin,
+        has_developer_mode = has_developer_mode,
+        granted_permissions = _granted_permission_keys(current_subject),
+    )
+    rate_limit = None
+    rate_limit_policy = plan.get("rateLimitPolicy")
+    rate_limit_key = plan.get("rateLimitKey")
+    if isinstance(rate_limit_policy, dict) and rate_limit_key:
+        try:
+            rate_limit = cognix_db.check_rate_limit(
+                username = current_subject,
+                rate_limit_key = str(rate_limit_key),
+                action = "tool_calculator_evaluated",
+                window_seconds = int(rate_limit_policy.get("windowSeconds") or 60),
+                max_events = int(rate_limit_policy.get("maxEvents") or 60),
+                consume = True,
+            )
+        except ValueError:
+            rate_limit = {
+                "allowed": False,
+                "rateLimitKey": rate_limit_key,
+                "reason": "Invalid rate limit key",
+            }
+        plan = cognix_tool_registry.apply_rate_limit_result(plan, rate_limit)
+
+    result: dict[str, Any] | None = None
+    error: str | None = None
+    if plan.get("allowed") and (rate_limit is None or rate_limit.get("allowed")):
+        try:
+            result = cognix_native_tools.evaluate_calculator_expression(
+                payload.expression,
+                precision = payload.precision,
+            )
+        except (ValueError, ArithmeticError, OverflowError) as exc:
+            error = str(exc)
+    side_effects = {
+        "calculatorEvaluation": result is not None,
+        "modelLoad": False,
+        "generation": False,
+        "networkToolCall": False,
+        "externalWrite": False,
+        "secretRead": False,
+        "secretWrite": False,
+        "auditWrite": True,
+    }
+    status = "evaluated" if result is not None else ("blocked_invalid_expression" if error else "blocked_by_tool_guard")
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "tool_calculator_evaluated",
+        resource_type = "cognix_native_calculator",
+        resource_id = str(result.get("expressionHash") if result else "blocked"),
+        severity = "notice" if result is not None else "warning",
+        metadata = {
+            "calculatorVersion": (
+                result.get("calculatorVersion")
+                if result
+                else cognix_native_tools.COGNIX_NATIVE_CALCULATOR_VERSION
+            ),
+            "toolRegistryVersion": plan.get("registryVersion"),
+            "toolId": plan.get("toolId"),
+            "actionId": plan.get("actionId"),
+            "status": status,
+            "expressionHash": result.get("expressionHash") if result else None,
+            "expressionLength": len(payload.expression),
+            "precision": payload.precision,
+            "rateLimit": rate_limit,
+            "errorType": type(error).__name__ if error else None,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "status": status,
+        "toolPlan": plan,
+        "calculatorResult": result,
+        "error": error,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_native_tools.COGNIX_NATIVE_CALCULATOR_VERSION,
+    }
 
 
 @router.post("/tools/execution-handoff")

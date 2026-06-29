@@ -20,6 +20,15 @@ COGNIX_TOOL_CAPABILITY_REGISTRY_VERSION = "cognix_tool_capability_registry_v1"
 
 DISCOVERABLE_TOOL_CAPABILITIES: list[dict[str, Any]] = [
     {
+        "toolId": "calculator",
+        "name": "CogniX Calculator",
+        "category": "math",
+        "capabilities": ["safe_arithmetic", "formula_checking", "physics_numeric_checks"],
+        "installHint": "Native CogniX tool; no installation required.",
+        "connectorBacked": False,
+        "enabledByDefault": True,
+    },
+    {
         "toolId": "latex-renderer",
         "name": "LaTeX Renderer",
         "category": "rendering",
@@ -146,7 +155,7 @@ PROJECT_NEED_RULES: list[dict[str, Any]] = [
         "projectTypes": ["math", "maths", "physics", "physique", "research"],
         "keywords": ["latex", "tex", "equation", "formula", "formule", "theorem", "algebra", "calculus"],
         "extensions": [".tex", ".bib"],
-        "toolIds": ["latex-renderer"],
+        "toolIds": ["calculator", "latex-renderer"],
     },
     {
         "needId": "python_environment",

@@ -55,6 +55,7 @@ from core.cognix import model_lifecycle as cognix_model_lifecycle
 from core.cognix import model_comparison as cognix_model_comparison
 from core.cognix import model_translator as cognix_model_translator
 from core.cognix import module_registry as cognix_module_registry
+from core.cognix import native_tools as cognix_native_tools
 from core.cognix import onboarding as cognix_onboarding
 from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
@@ -5130,7 +5131,9 @@ def test_tool_discovery_capability_registry_blocks_auto_installation():
 
     assert registry["capabilityRegistryVersion"] == "cognix_tool_capability_registry_v1"
     assert registry["toolDiscoveryVersion"] == "cognix_tool_discovery_v1"
-    assert {"latex-renderer", "python-runtime", "pytorch", "ollama", "google-drive"}.issubset(tools)
+    assert {"calculator", "latex-renderer", "python-runtime", "pytorch", "ollama", "google-drive"}.issubset(tools)
+    assert tools["calculator"]["enabledByDefault"] is True
+    assert tools["calculator"]["connectorBacked"] is False
     assert registry["summary"]["automaticInstallAllowed"] is False
     assert registry["policies"]["automaticInstallationAllowed"] is False
     assert registry["policies"]["frontendDirectInstallationAllowed"] is False
@@ -5181,8 +5184,8 @@ def test_tool_discovery_endpoint_stores_recommendations_and_ignore_is_user_scope
     tool_ids = {item["toolId"] for item in body["toolDiscoveryPlan"]["recommendations"]}
     stored_ids = {item["toolId"] for item in body["storedRecommendations"]}
     assert body["auditLogId"].startswith("aud_")
-    assert {"latex-renderer", "rag-indexer"}.issubset(tool_ids)
-    assert {"latex-renderer", "rag-indexer"}.issubset(stored_ids)
+    assert {"calculator", "latex-renderer", "rag-indexer"}.issubset(tool_ids)
+    assert {"calculator", "latex-renderer", "rag-indexer"}.issubset(stored_ids)
     assert body["sideEffects"]["recommendationWrite"] is True
     assert body["sideEffects"]["installedToolWrite"] is True
     assert body["sideEffects"]["installation"] is False
@@ -8554,12 +8557,14 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "tool_execution_handoff" in modules["cognix-integrations"]["capabilities"]
     assert "tool_executor_queue_gate" in modules["cognix-integrations"]["capabilities"]
     assert "tool_secret_policy" in modules["cognix-integrations"]["capabilities"]
+    assert "native_calculator_tool" in modules["cognix-integrations"]["capabilities"]
+    assert "safe_math_evaluation" in modules["cognix-integrations"]["capabilities"]
     assert "connector_preflight_contract" in modules["cognix-integrations"]["capabilities"]
     assert "integration_activation_contract" in modules["cognix-integrations"]["capabilities"]
     assert "enterprise_connector_manifests" in modules["cognix-integrations"]["capabilities"]
     assert "education_connector_manifests" in modules["cognix-integrations"]["capabilities"]
     assert "business_system_connector_manifests" in modules["cognix-integrations"]["capabilities"]
-    assert {"sharepoint", "microsoft-teams", "slack", "moodle", "crm", "erp"}.issubset(
+    assert {"calculator", "sharepoint", "microsoft-teams", "slack", "moodle", "crm", "erp"}.issubset(
         set(modules["cognix-integrations"]["tools"])
     )
     assert "/api/cognix/integrations/plan" in modules["cognix-integrations"]["routes"]
@@ -8567,6 +8572,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/integrations/activation-contract" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/tools/permission-matrix" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/tools/plan" in modules["cognix-integrations"]["routes"]
+    assert "/api/cognix/tools/calculator/evaluate" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/tools/execution-handoff" in modules["cognix-integrations"]["routes"]
     assert modules["cognix-plugin-marketplace"]["dependencyState"]["ready"] is True
     assert "plugin_manifest_validation" in modules["cognix-plugin-marketplace"]["capabilities"]
@@ -9296,6 +9302,7 @@ def test_tool_registry_declares_permissions_and_guardrails():
 
     tools = {tool["id"]: tool for tool in registry["tools"]}
     assert {
+        "calculator",
         "github",
         "google-drive",
         "gmail",
@@ -9312,6 +9319,17 @@ def test_tool_registry_declares_permissions_and_guardrails():
         "codex-secure-agent",
         "kali-isolated",
     }.issubset(tools)
+    calculator_actions = {action["id"]: action for action in tools["calculator"]["actions"]}
+    evaluate = calculator_actions["evaluate_expression"]
+    assert tools["calculator"]["enabled"] is True
+    assert evaluate["riskLevel"] == "low"
+    assert evaluate["requiresConfirmation"] is False
+    assert evaluate["secretPolicy"]["requiresSecret"] is False
+    assert evaluate["secretPolicy"]["rawSecretExposureAllowed"] is False
+    assert cognix_tool_registry.rate_limit_policy_for_key(evaluate["rateLimitKey"]) == {
+        "windowSeconds": 60,
+        "maxEvents": 240,
+    }
     gmail_actions = {action["id"]: action for action in tools["gmail"]["actions"]}
     send_mail = gmail_actions["send_mail"]
     assert send_mail["riskLevel"] == "high"
@@ -9352,6 +9370,24 @@ def test_tool_registry_declares_permissions_and_guardrails():
 
     internal_actions = {action["id"]: action for action in tools["internal-tools"]["actions"]}
     assert internal_actions["run_internal_job"]["sandboxRequired"] is True
+
+
+def test_native_calculator_evaluates_expression_without_model_or_network():
+    result = cognix_native_tools.evaluate_calculator_expression("sqrt(81) + 2 * pi", precision = 10)
+
+    assert result["calculatorVersion"] == "cognix_native_calculator_v1"
+    assert result["status"] == "evaluated"
+    assert result["resultText"].startswith("15.28318")
+    assert result["safety"]["allowedFunctions"]
+    assert result["sideEffects"]["calculatorEvaluation"] is True
+    assert result["sideEffects"]["modelLoad"] is False
+    assert result["sideEffects"]["generation"] is False
+    assert result["sideEffects"]["networkToolCall"] is False
+
+
+def test_native_calculator_blocks_unsafe_ast_without_execution_side_effects():
+    with pytest.raises(cognix_native_tools.CalculatorValidationError):
+        cognix_native_tools.evaluate_calculator_expression("__import__('os').system('id')")
 
 
 def test_tool_action_plan_builds_execution_contract_without_execution():
@@ -9767,6 +9803,42 @@ def test_tool_execution_handoff_endpoint_logs_sanitized_packet_without_job_enque
     assert log["metadata"]["sideEffects"]["jobEnqueue"] is False
     assert "access_token" not in log["metadataJson"].lower()
     assert "secret_value" not in log["metadataJson"].lower()
+
+
+def test_tool_calculator_endpoint_evaluates_and_logs_sanitized_expression():
+    seed_accounts()
+
+    body = run_async(
+        cognix_routes.tool_calculator_evaluate(
+            cognix_routes.ToolCalculatorEvaluateRequest(
+                expression = "sqrt(144) + 3 * 7",
+                precision = 12,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    result = body["calculatorResult"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["status"] == "evaluated"
+    assert body["plannerVersion"] == "cognix_native_calculator_v1"
+    assert result["resultText"] == "33"
+    assert body["toolPlan"]["toolId"] == "calculator"
+    assert body["toolPlan"]["rateLimit"]["allowed"] is True
+    assert body["sideEffects"]["calculatorEvaluation"] is True
+    assert body["sideEffects"]["networkToolCall"] is False
+    assert body["sideEffects"]["generation"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "tool_calculator_evaluated"
+    assert log["resourceType"] == "cognix_native_calculator"
+    assert log["metadata"]["calculatorVersion"] == "cognix_native_calculator_v1"
+    assert log["metadata"]["status"] == "evaluated"
+    assert log["metadata"]["expressionLength"] == len("sqrt(144) + 3 * 7")
+    assert log["metadata"]["sideEffects"]["calculatorEvaluation"] is True
+    assert "sqrt(144)" not in log["metadataJson"]
 
 
 def test_tool_rate_limit_storage_blocks_after_capacity():
