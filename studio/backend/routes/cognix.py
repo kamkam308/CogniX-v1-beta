@@ -29,6 +29,7 @@ from core.cognix import admin_usage as cognix_admin_usage
 from core.cognix import admin_users as cognix_admin_users
 from core.cognix import apps as cognix_apps
 from core.cognix import benchmark as cognix_benchmark
+from core.cognix import batching as cognix_batching
 from core.cognix import background_agents as cognix_background_agents
 from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import codex_pipeline as cognix_codex_pipeline
@@ -1069,6 +1070,20 @@ class KvCacheEvictionPlanRequest(BaseModel):
     context_plan: dict[str, Any] | None = Field(None, alias = "contextPlan")
     context_blocks: list[dict[str, Any]] | None = Field(None, alias = "contextBlocks", max_length = 120)
     target_token_budget: int | None = Field(None, alias = "targetTokenBudget", ge = 256, le = 262144)
+
+
+class BatchingPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    runtime_adapter: dict[str, Any] | None = Field(None, alias = "runtimeAdapter")
+    deployment_target: str | None = Field(None, alias = "deploymentTarget", max_length = 120)
+    concurrent_users: int | None = Field(None, alias = "concurrentUsers", ge = 1, le = 100000)
+    request_rate_per_minute: float | None = Field(None, alias = "requestRatePerMinute", ge = 0, le = 10_000_000)
+    average_prompt_tokens: int | None = Field(None, alias = "averagePromptTokens", ge = 1, le = 1_000_000)
+    average_completion_tokens: int | None = Field(None, alias = "averageCompletionTokens", ge = 1, le = 1_000_000)
+    target_latency_ms: int | None = Field(None, alias = "targetLatencyMs", ge = 250, le = 600_000)
 
 
 class QuantizationPlanRequest(BaseModel):
@@ -6049,6 +6064,67 @@ async def kv_cache_eviction_plan(
         "kvCacheEvictionPlan": plan,
         "auditLogId": audit.get("id"),
         "plannerVersion": cognix_kv_cache.COGNIX_KV_CACHE_EVICTION_PLAN_VERSION,
+        "sideEffects": audit_side_effects,
+    }
+
+
+@router.post("/optimizations/batching-plan")
+async def batching_plan(
+    payload: BatchingPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_batching.build_batching_plan(
+        username = current_subject,
+        objective = payload.objective,
+        project_id = payload.project_id,
+        runtime_adapter = payload.runtime_adapter,
+        deployment_target = payload.deployment_target,
+        hardware = cognix_hardware.get_hardware_profile(),
+        latest_benchmark_run = cognix_db.get_latest_benchmark_run(current_subject),
+        concurrent_users = payload.concurrent_users,
+        request_rate_per_minute = payload.request_rate_per_minute,
+        average_prompt_tokens = payload.average_prompt_tokens,
+        average_completion_tokens = payload.average_completion_tokens,
+        target_latency_ms = payload.target_latency_ms,
+    )
+    audit_side_effects = {
+        **plan.get("sideEffects", {}),
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "batching_plan_built",
+        resource_type = "cognix_batching_plan",
+        resource_id = str(payload.project_id or plan.get("runtime", {}).get("runtimeType") or "general"),
+        severity = "notice" if plan.get("readyForExperiment") else "warning",
+        metadata = {
+            "batchingPlanVersion": plan.get("batchingPlanVersion"),
+            "microBatchPolicyVersion": plan.get("microBatchPolicyVersion"),
+            "throughputExperimentContractVersion": plan.get("throughputExperimentContractVersion"),
+            "status": plan.get("status"),
+            "readyForExperiment": plan.get("readyForExperiment"),
+            "readyForActivation": plan.get("readyForActivation"),
+            "runtimeType": plan.get("runtime", {}).get("runtimeType"),
+            "deploymentTarget": plan.get("runtime", {}).get("deploymentTarget"),
+            "directBatchingSupported": plan.get("runtime", {}).get("directBatchingSupported"),
+            "concurrentUsers": plan.get("workload", {}).get("concurrentUsers"),
+            "targetTokensPerSecond": plan.get("workload", {}).get("targetTokensPerSecond"),
+            "recommendedQueueId": plan.get("summary", {}).get("recommendedQueueId"),
+            "recommendedJobType": plan.get("summary", {}).get("recommendedJobType"),
+            "blockedGateIds": plan.get("summary", {}).get("blockedGateIds", []),
+            "warningGateIds": plan.get("summary", {}).get("warningGateIds", []),
+            "benchmarkStatus": plan.get("benchmarkEvidence", {}).get("status"),
+            "sideEffects": audit_side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "batchingPlan": plan,
+        "auditLogId": audit.get("id"),
+        "plannerVersion": cognix_batching.COGNIX_BATCHING_PLAN_VERSION,
         "sideEffects": audit_side_effects,
     }
 

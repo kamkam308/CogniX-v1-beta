@@ -59,6 +59,14 @@ QUEUE_DEFINITIONS: list[dict[str, Any]] = [
         "requiresHumanConfirmation": True,
     },
     {
+        "id": "enterprise_throughput",
+        "label": "Enterprise throughput",
+        "acceptedJobTypes": ["batching_experiment", "throughput_benchmark"],
+        "maxConcurrentJobs": 1,
+        "requiresAudit": True,
+        "requiresHumanConfirmation": True,
+    },
+    {
         "id": "codex_guarded",
         "label": "Codex guarded",
         "acceptedJobTypes": ["codex_pipeline"],

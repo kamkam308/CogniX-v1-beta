@@ -24,6 +24,7 @@ from core.cognix import admin_permissions as cognix_admin_permissions
 from core.cognix import admin_users as cognix_admin_users
 from core.cognix import apps as cognix_apps
 from core.cognix import background_agents as cognix_background_agents
+from core.cognix import batching as cognix_batching
 from core.cognix import cache_manager as cognix_cache_manager
 from core.cognix import codex_pipeline as cognix_codex_pipeline
 from core.cognix import command_palette as cognix_command_palette
@@ -2352,6 +2353,147 @@ def test_kv_cache_eviction_endpoint_logs_sanitized_contract(monkeypatch):
     assert log["metadata"]["sideEffects"]["kvCacheEviction"] is False
     assert "raw system secret" not in log["metadataJson"]
     assert "private chat sentence" not in log["metadataJson"]
+
+
+def test_batching_plan_prepares_vllm_throughput_experiment_without_activation():
+    plan = cognix_batching.build_batching_plan(
+        username = "alice",
+        objective = "Preparer batching multi-utilisateur enterprise pour CogniX",
+        runtime_adapter = {
+            "selectedAdapter": {
+                "runtimeType": "vllm",
+                "deploymentTarget": "server_gpu",
+            }
+        },
+        hardware = {
+            "memory": {"totalGb": 128, "availableGb": 96},
+            "gpu": {
+                "available": True,
+                "devices": [{"name": "A6000", "vramTotalGb": 48}],
+            },
+        },
+        latest_benchmark_run = {
+            "id": "bench-ready",
+            "benchmark": {
+                "benchmarkVersion": "cognix_benchmark_v1",
+                "overallScore": 88.0,
+                "estimatedTokensPerSecond": 140.0,
+            },
+        },
+        concurrent_users = 24,
+        request_rate_per_minute = 360,
+        average_prompt_tokens = 700,
+        average_completion_tokens = 300,
+        target_latency_ms = 1800,
+    )
+
+    assert plan["batchingPlanVersion"] == "cognix_batching_plan_v1"
+    assert plan["microBatchPolicyVersion"] == "cognix_micro_batch_policy_v1"
+    assert plan["throughputExperimentContractVersion"] == "cognix_throughput_experiment_contract_v1"
+    assert plan["status"] == "ready_for_experiment"
+    assert plan["readyForExperiment"] is True
+    assert plan["readyForActivation"] is False
+    assert plan["runtime"]["directBatchingSupported"] is True
+    assert plan["microBatchPolicy"]["strategy"] == "continuous_batching"
+    assert plan["microBatchPolicy"]["maxBatchSize"] >= 8
+    assert plan["queuePlan"]["queueId"] == "enterprise_throughput"
+    assert plan["queuePlan"]["jobType"] == "batching_experiment"
+    assert plan["queuePlan"]["willEnqueueNow"] is False
+    assert plan["experimentContract"]["automaticRuntimeEnableAllowed"] is False
+    assert plan["experimentContract"]["frontendDirectBatchingAllowed"] is False
+    assert plan["sideEffects"]["runtimeServerStart"] is False
+    assert plan["sideEffects"]["runtimeFlagWrite"] is False
+    assert plan["sideEffects"]["batchSchedulerEnable"] is False
+    assert plan["sideEffects"]["jobEnqueue"] is False
+    assert plan["sideEffects"]["generation"] is False
+
+
+def test_batching_plan_blocks_ollama_single_user_without_queue_mutation():
+    plan = cognix_batching.build_batching_plan(
+        username = "alice",
+        objective = "Tester batching local single user",
+        runtime_adapter = {"selectedAdapter": {"runtimeType": "ollama", "deploymentTarget": "local"}},
+        hardware = stub_hardware_profile(),
+        latest_benchmark_run = None,
+        concurrent_users = 1,
+        request_rate_per_minute = 4,
+    )
+
+    blocked = set(plan["summary"]["blockedGateIds"])
+    warnings = set(plan["summary"]["warningGateIds"])
+    assert plan["status"] == "blocked_by_gates"
+    assert plan["readyForExperiment"] is False
+    assert plan["runtime"]["unsupportedRuntime"] is True
+    assert {"runtime_supports_batching", "multi_user_load_declared", "benchmark_baseline_ready"}.issubset(blocked)
+    assert {"enterprise_or_server_target", "hardware_capacity_ready"}.issubset(warnings)
+    assert plan["queuePlan"]["willEnqueueNow"] is False
+    assert plan["sideEffects"]["runtimeServerStart"] is False
+    assert plan["sideEffects"]["jobEnqueue"] is False
+
+
+def test_batching_plan_endpoint_logs_sanitized_contract(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_routes.cognix_hardware,
+        "get_hardware_profile",
+        lambda: {
+            "memory": {"totalGb": 128, "availableGb": 96},
+            "gpu": {
+                "available": True,
+                "devices": [{"name": "A6000", "vramTotalGb": 48}],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        cognix_routes.cognix_db,
+        "get_latest_benchmark_run",
+        lambda username: {
+            "id": f"bench-{username}",
+            "benchmark": {
+                "benchmarkVersion": "cognix_benchmark_v1",
+                "overallScore": 88.0,
+                "estimatedTokensPerSecond": 140.0,
+            },
+        },
+    )
+
+    body = run_async(
+        cognix_routes.batching_plan(
+            cognix_routes.BatchingPlanRequest(
+                objective = "Preparer batching secret enterprise prompt should not leak",
+                runtimeAdapter = {
+                    "selectedAdapter": {
+                        "runtimeType": "vllm",
+                        "deploymentTarget": "server_gpu",
+                    }
+                },
+                concurrentUsers = 18,
+                requestRatePerMinute = 240,
+                averagePromptTokens = 600,
+                averageCompletionTokens = 220,
+                targetLatencyMs = 2000,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    plan = body["batchingPlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_batching_plan_v1"
+    assert body["sideEffects"]["auditWrite"] is True
+    assert body["sideEffects"]["batchSchedulerEnable"] is False
+    assert plan["status"] == "ready_for_experiment"
+    assert plan["queuePlan"]["queueId"] == "enterprise_throughput"
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "batching_plan_built"
+    assert log["metadata"]["batchingPlanVersion"] == "cognix_batching_plan_v1"
+    assert log["metadata"]["microBatchPolicyVersion"] == "cognix_micro_batch_policy_v1"
+    assert log["metadata"]["recommendedQueueId"] == "enterprise_throughput"
+    assert log["metadata"]["sideEffects"]["batchSchedulerEnable"] is False
+    assert "secret enterprise prompt" not in log["metadataJson"]
 
 
 def test_performance_monitor_collects_snapshot_without_execution_side_effects():
@@ -5961,6 +6103,10 @@ def test_worker_queue_registry_declares_cloud_training_without_execution():
     assert "cloud_training_job" in queues["cloud_training"]["acceptedJobTypes"]
     assert "cloud_distillation_job" in queues["cloud_training"]["acceptedJobTypes"]
     assert queues["cloud_training"]["requiresHumanConfirmation"] is True
+    assert "enterprise_throughput" in queues
+    assert "batching_experiment" in queues["enterprise_throughput"]["acceptedJobTypes"]
+    assert "throughput_benchmark" in queues["enterprise_throughput"]["acceptedJobTypes"]
+    assert queues["enterprise_throughput"]["requiresHumanConfirmation"] is True
 
 
 def test_worker_job_spec_plan_materializes_cloud_and_rag_jobs_without_enqueueing():
@@ -6953,11 +7099,15 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "kv_cache_policy_contract" in modules["cognix-optimization-engine"]["capabilities"]
     assert "context_retention_policy" in modules["cognix-optimization-engine"]["capabilities"]
     assert "speculative_decoding_contract" in modules["cognix-optimization-engine"]["capabilities"]
+    assert "multi_user_batching_planning" in modules["cognix-optimization-engine"]["capabilities"]
+    assert "micro_batch_policy_contract" in modules["cognix-optimization-engine"]["capabilities"]
+    assert "throughput_experiment_contract" in modules["cognix-optimization-engine"]["capabilities"]
     assert "/api/cognix/semantic-cache/plan" in modules["cognix-optimization-engine"]["routes"]
     assert "/api/cognix/optimizations/capabilities" in modules["cognix-optimization-engine"]["routes"]
     assert "/api/cognix/optimizations/experiment-plan" in modules["cognix-optimization-engine"]["routes"]
     assert "/api/cognix/optimizations/speculative-decoding-plan" in modules["cognix-optimization-engine"]["routes"]
     assert "/api/cognix/optimizations/kv-cache-plan" in modules["cognix-optimization-engine"]["routes"]
+    assert "/api/cognix/optimizations/batching-plan" in modules["cognix-optimization-engine"]["routes"]
     assert modules["cognix-performance-monitor"]["dependencyState"]["ready"] is True
     assert "runtime_metrics" in modules["cognix-performance-monitor"]["capabilities"]
     assert "metrics_streaming" in modules["cognix-performance-monitor"]["capabilities"]
@@ -7139,6 +7289,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/gpts/{gpt_id}/runtime-plan" in modules["cognix-gpts"]["routes"]
     assert "worker_job_specs" in modules["cognix-worker-queue"]["capabilities"]
     assert "cloud_training_job_specs" in modules["cognix-worker-queue"]["capabilities"]
+    assert "batching_experiment_job_specs" in modules["cognix-worker-queue"]["capabilities"]
+    assert "enterprise_throughput_queue" in modules["cognix-worker-queue"]["capabilities"]
     assert "/api/cognix/workers/registry" in modules["cognix-worker-queue"]["routes"]
     assert "/api/cognix/workers/job-spec-plan" in modules["cognix-worker-queue"]["routes"]
     assert "adaptive_quantization" in modules["cognix-optimization-engine"]["capabilities"]

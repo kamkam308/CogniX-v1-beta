@@ -361,6 +361,9 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
             "rag_compression_planning",
             "speculative_decoding_planning",
             "speculative_decoding_contract",
+            "multi_user_batching_planning",
+            "micro_batch_policy_contract",
+            "throughput_experiment_contract",
         ],
         "routes": [
             "/api/cognix/optimizations/capabilities",
@@ -368,6 +371,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
             "/api/cognix/optimizations/experiment-plan",
             "/api/cognix/optimizations/speculative-decoding-plan",
             "/api/cognix/optimizations/kv-cache-plan",
+            "/api/cognix/optimizations/batching-plan",
             "/api/cognix/semantic-cache/plan",
             "/api/cognix/quantization/variants",
             "/api/cognix/quantization/plan",
@@ -1079,6 +1083,8 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
             "cloud_training_job_specs",
             "rag_indexing_job_specs",
             "benchmark_job_planning",
+            "batching_experiment_job_specs",
+            "enterprise_throughput_queue",
         ],
         "routes": [
             "/api/cognix/workers/registry",
