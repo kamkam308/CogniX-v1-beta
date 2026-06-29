@@ -5661,6 +5661,9 @@ async def optimization_capabilities(
             "runtimeType": registry.get("runtimeType"),
             "compatibleCount": registry.get("summary", {}).get("compatibleCount"),
             "benchmarkReady": registry.get("benchmarkReady"),
+            "benchmarkEvidenceVersion": registry.get("benchmarkEvidence", {}).get("contractVersion"),
+            "benchmarkEvidenceStatus": registry.get("benchmarkEvidence", {}).get("status"),
+            "benchmarkEvidenceReady": registry.get("benchmarkEvidence", {}).get("readyForExperiment"),
             "sideEffects": registry.get("sideEffects", {}),
         },
     )
@@ -5701,6 +5704,9 @@ async def optimization_plan(
             "hardwareTier": optimization.get("hardwareTier"),
             "runtimeType": optimization.get("runtimeType"),
             "recommendedOptimizationIds": optimization.get("recommendedOptimizationIds", []),
+            "benchmarkEvidenceVersion": optimization.get("benchmarkEvidence", {}).get("contractVersion"),
+            "benchmarkEvidenceStatus": optimization.get("benchmarkEvidence", {}).get("status"),
+            "benchmarkEvidenceReady": optimization.get("benchmarkEvidence", {}).get("readyForExperiment"),
             "sideEffects": optimization.get("sideEffects", {}),
         },
     )
@@ -5749,6 +5755,9 @@ async def optimization_experiment_plan(
             "runtimeType": plan.get("runtimeType"),
             "ticketCount": plan.get("summary", {}).get("ticketCount"),
             "blockedGateIds": plan.get("summary", {}).get("blockedGateIds"),
+            "benchmarkEvidenceVersion": plan.get("benchmarkEvidence", {}).get("contractVersion"),
+            "benchmarkEvidenceStatus": plan.get("benchmarkEvidence", {}).get("status"),
+            "benchmarkEvidenceReady": plan.get("benchmarkEvidence", {}).get("readyForExperiment"),
             "sideEffects": plan.get("sideEffects", {}),
         },
     )

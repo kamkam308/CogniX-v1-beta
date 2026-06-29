@@ -340,6 +340,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "capabilities": [
             "optimization_capability_registry",
             "benchmark_gated_experiments",
+            "benchmark_evidence_contract",
             "adaptive_quantization",
             "quantization_advisor",
             "model_variant_registry",

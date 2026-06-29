@@ -1591,6 +1591,8 @@ def test_optimization_planner_recommends_memory_safe_profile_without_reconfigura
     assert plan["plannerVersion"] == "cognix_optimization_planner_v1"
     assert plan["hardwareTier"] == "small_local"
     assert plan["optimizationProfile"] == "memory_saver"
+    assert plan["benchmarkEvidence"]["contractVersion"] == "cognix_benchmark_evidence_contract_v1"
+    assert plan["benchmarkEvidence"]["status"] == "missing"
     assert "quantization_profile" in plan["recommendedOptimizationIds"]
     assert any(item["id"] == "single_resident_model" and item["status"] == "recommended" for item in plan["optimizations"])
     assert plan["sideEffects"]["modelReconfiguration"] is False
@@ -1625,6 +1627,7 @@ def test_optimization_plan_endpoint_logs_dry_run_decision(monkeypatch):
     assert body["auditLogId"].startswith("aud_")
     assert body["plannerVersion"] == "cognix_optimization_planner_v1"
     assert optimization["optimizationProfile"] == "balanced"
+    assert optimization["benchmarkEvidence"]["status"] == "missing"
     assert optimization["sideEffects"]["modelLoad"] is False
     assert optimization["sideEffects"]["modelReconfiguration"] is False
     assert optimization["sideEffects"]["networkModelCall"] is False
@@ -1634,6 +1637,7 @@ def test_optimization_plan_endpoint_logs_dry_run_decision(monkeypatch):
     assert log["id"] == body["auditLogId"]
     assert log["action"] == "optimization_plan_built"
     assert log["metadata"]["optimizationPlannerVersion"] == "cognix_optimization_planner_v1"
+    assert log["metadata"]["benchmarkEvidenceStatus"] == "missing"
     assert log["metadata"]["sideEffects"]["modelReconfiguration"] is False
 
 
@@ -1648,6 +1652,9 @@ def test_optimization_capability_registry_declares_benchmark_gated_features_with
     assert registry["registryVersion"] == "cognix_optimization_capability_registry_v1"
     assert registry["mode"] == "dry_run"
     assert registry["policies"]["benchmarkRequiredBeforeEnable"] is True
+    assert registry["policies"]["benchmarkEvidenceContractRequired"] is True
+    assert registry["benchmarkEvidence"]["contractVersion"] == "cognix_benchmark_evidence_contract_v1"
+    assert registry["benchmarkEvidence"]["status"] == "missing"
     assert registry["policies"]["frontendDirectOptimizationMutationAllowed"] is False
     assert registry["sideEffects"]["runtimeConfigWrite"] is False
     assert registry["sideEffects"]["benchmarkRun"] is False
@@ -1658,6 +1665,7 @@ def test_optimization_capability_registry_declares_benchmark_gated_features_with
     assert "kv_cache_eviction" in capabilities
     assert "flash_attention" in capabilities
     assert capabilities["semantic_cache"]["benchmarkGate"]["status"] == "required"
+    assert capabilities["semantic_cache"]["benchmarkGate"]["evidenceStatus"] == "missing"
     assert capabilities["semantic_cache"]["activationPolicy"]["automaticEnableAllowed"] is False
     assert capabilities["kv_cache_eviction"]["sideEffects"]["cacheMutation"] is False
 
@@ -1674,14 +1682,45 @@ def test_optimization_experiment_plan_requires_benchmark_before_enablement():
 
     assert plan["experimentPlanVersion"] == "cognix_optimization_experiment_plan_v1"
     assert plan["mode"] == "dry_run"
+    assert plan["benchmarkEvidence"]["status"] == "missing"
     assert plan["selectedOptimizationIds"] == ["semantic_cache", "kv_cache_eviction"]
     assert "benchmark_baseline" in plan["summary"]["blockedGateIds"]
+    assert "benchmark_evidence" in plan["summary"]["blockedGateIds"]
     assert all(ticket["status"] == "blocked_by_gates" for ticket in plan["tickets"])
     assert all(ticket["willEnableRuntime"] is False for ticket in plan["tickets"])
     assert all(ticket["willRunBenchmark"] is False for ticket in plan["tickets"])
     assert plan["sideEffects"]["runtimeConfigWrite"] is False
     assert plan["sideEffects"]["cacheMutation"] is False
     assert plan["sideEffects"]["generation"] is False
+
+
+def test_optimization_experiment_plan_accepts_complete_benchmark_evidence_without_enabling_runtime():
+    hardware = stub_hardware_profile()
+    plan = cognix_optimization_planner.build_optimization_experiment_plan(
+        objective = "Tester KV-cache eviction apres benchmark local",
+        hardware = hardware,
+        recommendation = stub_recommendation(hardware)["recommendation"],
+        latest_benchmark_run = {
+            "id": "bench-ready",
+            "created_at": "2026-06-29T00:00:00+00:00",
+            "benchmark": {
+                "benchmarkVersion": "cognix_benchmark_v1",
+                "overallScore": 70.0,
+                "estimatedTokensPerSecond": 18.5,
+            },
+        },
+        requested_optimizations = ["kv_cache_policy"],
+    )
+
+    ticket = plan["tickets"][0]
+    assert plan["benchmarkEvidence"]["status"] == "ready"
+    assert plan["benchmarkEvidence"]["readyForExperiment"] is True
+    assert "benchmark_baseline" not in plan["summary"]["blockedGateIds"]
+    assert "benchmark_evidence" not in plan["summary"]["blockedGateIds"]
+    assert ticket["status"] == "ready_for_experiment"
+    assert ticket["willEnableRuntime"] is False
+    assert ticket["willRunBenchmark"] is False
+    assert ticket["rollbackPlan"]["required"] is True
 
 
 def test_optimization_capability_registry_endpoint_logs_audit_without_mutation(monkeypatch):
@@ -1702,6 +1741,7 @@ def test_optimization_capability_registry_endpoint_logs_audit_without_mutation(m
     registry = body["registry"]
     assert body["auditLogId"].startswith("aud_")
     assert registry["registryVersion"] == "cognix_optimization_capability_registry_v1"
+    assert registry["benchmarkEvidence"]["status"] == "missing"
     assert body["sideEffects"]["runtimeConfigWrite"] is False
     assert body["sideEffects"]["benchmarkRun"] is False
     assert body["sideEffects"]["cacheMutation"] is False
@@ -1711,6 +1751,7 @@ def test_optimization_capability_registry_endpoint_logs_audit_without_mutation(m
     assert log["id"] == body["auditLogId"]
     assert log["action"] == "optimization_capability_registry_built"
     assert log["metadata"]["registryVersion"] == "cognix_optimization_capability_registry_v1"
+    assert log["metadata"]["benchmarkEvidenceStatus"] == "missing"
     assert log["metadata"]["sideEffects"]["runtimeConfigWrite"] is False
 
 
@@ -1740,8 +1781,10 @@ def test_optimization_experiment_plan_endpoint_blocks_enablement_until_benchmark
     plan = body["optimizationExperimentPlan"]
     assert body["auditLogId"].startswith("aud_")
     assert plan["experimentPlanVersion"] == "cognix_optimization_experiment_plan_v1"
+    assert plan["benchmarkEvidence"]["contractVersion"] == "cognix_benchmark_evidence_contract_v1"
     assert plan["selectedOptimizationIds"] == ["semantic_cache", "kv_cache_eviction"]
     assert "benchmark_baseline" in plan["summary"]["blockedGateIds"]
+    assert "benchmark_evidence" in plan["summary"]["blockedGateIds"]
     assert body["sideEffects"]["runtimeConfigWrite"] is False
     assert body["sideEffects"]["cacheMutation"] is False
     assert body["sideEffects"]["generation"] is False
@@ -1751,6 +1794,7 @@ def test_optimization_experiment_plan_endpoint_blocks_enablement_until_benchmark
     assert log["id"] == body["auditLogId"]
     assert log["action"] == "optimization_experiment_plan_built"
     assert log["metadata"]["experimentPlanVersion"] == "cognix_optimization_experiment_plan_v1"
+    assert log["metadata"]["benchmarkEvidenceStatus"] == "missing"
     assert "benchmark_baseline" in log["metadata"]["blockedGateIds"]
 
 
@@ -6258,6 +6302,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert modules["cognix-optimization-engine"]["dependencyState"]["ready"] is True
     assert "optimization_capability_registry" in modules["cognix-optimization-engine"]["capabilities"]
     assert "benchmark_gated_experiments" in modules["cognix-optimization-engine"]["capabilities"]
+    assert "benchmark_evidence_contract" in modules["cognix-optimization-engine"]["capabilities"]
     assert "/api/cognix/optimizations/capabilities" in modules["cognix-optimization-engine"]["routes"]
     assert "/api/cognix/optimizations/experiment-plan" in modules["cognix-optimization-engine"]["routes"]
     assert modules["cognix-performance-monitor"]["dependencyState"]["ready"] is True

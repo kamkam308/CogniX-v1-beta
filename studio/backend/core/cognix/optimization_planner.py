@@ -9,12 +9,18 @@ request. It never changes engine flags, cache state, or model files.
 
 from __future__ import annotations
 
+import json
 from typing import Any
+
+from core.cognix.benchmark import COGNIX_BENCHMARK_VERSION
 
 
 COGNIX_OPTIMIZATION_PLANNER_VERSION = "cognix_optimization_planner_v1"
 COGNIX_OPTIMIZATION_CAPABILITY_REGISTRY_VERSION = "cognix_optimization_capability_registry_v1"
 COGNIX_OPTIMIZATION_EXPERIMENT_PLAN_VERSION = "cognix_optimization_experiment_plan_v1"
+COGNIX_BENCHMARK_EVIDENCE_CONTRACT_VERSION = "cognix_benchmark_evidence_contract_v1"
+
+REQUIRED_BENCHMARK_EVIDENCE_METRICS = ("overallScore", "estimatedTokensPerSecond")
 
 OPTIMIZATION_CAPABILITIES: list[dict[str, Any]] = [
     {
@@ -148,6 +154,23 @@ def _as_float(value: Any) -> float | None:
     return parsed if parsed >= 0 else None
 
 
+def _benchmark_payload(latest_benchmark_run: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(latest_benchmark_run, dict):
+        return {}
+    raw = latest_benchmark_run.get("benchmark")
+    if raw is None:
+        raw = latest_benchmark_run.get("benchmark_json")
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            decoded = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
+    return {}
+
+
 def _hardware_tier(hardware: dict[str, Any]) -> str:
     memory = _as_dict(hardware.get("memory"))
     total_gb = _as_float(memory.get("totalGb"))
@@ -168,11 +191,104 @@ def _hardware_tier(hardware: dict[str, Any]) -> str:
 def _benchmark_available(latest_benchmark_run: dict[str, Any] | None) -> bool:
     if not isinstance(latest_benchmark_run, dict):
         return False
-    return bool(
-        latest_benchmark_run.get("benchmark")
-        or latest_benchmark_run.get("benchmark_json")
-        or latest_benchmark_run.get("id")
-    )
+    return bool(_benchmark_payload(latest_benchmark_run) or latest_benchmark_run.get("id"))
+
+
+def _benchmark_evidence_contract(
+    latest_benchmark_run: dict[str, Any] | None,
+    *,
+    hardware_tier: str,
+    runtime_type: str,
+) -> dict[str, Any]:
+    run_present = isinstance(latest_benchmark_run, dict)
+    payload = _benchmark_payload(latest_benchmark_run)
+    benchmark_version = str(payload.get("benchmarkVersion") or "")
+    observed_metric_ids = [
+        metric_id
+        for metric_id in REQUIRED_BENCHMARK_EVIDENCE_METRICS
+        if _as_float(payload.get(metric_id)) is not None
+    ]
+    missing_metric_ids = [
+        metric_id
+        for metric_id in REQUIRED_BENCHMARK_EVIDENCE_METRICS
+        if metric_id not in observed_metric_ids
+    ]
+    version_supported = benchmark_version == COGNIX_BENCHMARK_VERSION
+    if not run_present:
+        status = "missing"
+    elif not payload:
+        status = "incomplete_payload"
+    elif not benchmark_version:
+        status = "unknown_version"
+    elif not version_supported:
+        status = "unsupported_version"
+    elif missing_metric_ids:
+        status = "insufficient_metrics"
+    else:
+        status = "ready"
+    ready_for_experiment = status == "ready"
+    created_at = None
+    run_id = None
+    if isinstance(latest_benchmark_run, dict):
+        created_at = latest_benchmark_run.get("created_at") or latest_benchmark_run.get("createdAt")
+        run_id = latest_benchmark_run.get("id")
+    return {
+        "contractVersion": COGNIX_BENCHMARK_EVIDENCE_CONTRACT_VERSION,
+        "status": status,
+        "readyForExperiment": ready_for_experiment,
+        "readyForEnablement": False,
+        "runId": run_id,
+        "createdAt": created_at,
+        "freshness": {
+            "status": "recorded" if created_at else "unknown",
+            "createdAt": created_at,
+            "recencyEnforced": False,
+        },
+        "benchmarkVersion": benchmark_version or None,
+        "expectedBenchmarkVersion": COGNIX_BENCHMARK_VERSION,
+        "requiredMetricIds": list(REQUIRED_BENCHMARK_EVIDENCE_METRICS),
+        "observedMetricIds": observed_metric_ids,
+        "missingMetricIds": missing_metric_ids,
+        "hardwareTier": hardware_tier,
+        "runtimeType": runtime_type,
+        "gates": [
+            {
+                "id": "benchmark_run_present",
+                "status": "pass" if run_present else "blocked",
+                "requiredBefore": "experiment",
+            },
+            {
+                "id": "benchmark_payload_parsed",
+                "status": "pass" if payload else "blocked",
+                "requiredBefore": "experiment",
+            },
+            {
+                "id": "benchmark_version_supported",
+                "status": "pass" if version_supported else "blocked",
+                "requiredBefore": "experiment",
+            },
+            {
+                "id": "benchmark_metrics_available",
+                "status": "pass" if not missing_metric_ids else "blocked",
+                "requiredBefore": "experiment",
+            },
+        ],
+        "activationPolicy": {
+            "automaticEnableAllowed": False,
+            "runtimeMutationAllowed": False,
+            "requiresHumanConfirmation": True,
+            "requiresRollbackPlan": True,
+            "benchmarkRunWillStart": False,
+        },
+        "sideEffects": {
+            "benchmarkRun": False,
+            "modelLoad": False,
+            "generation": False,
+            "runtimeConfigWrite": False,
+            "cacheMutation": False,
+            "networkCall": False,
+        },
+    }
 
 
 def _normalized_capability_id(value: str) -> str:
@@ -205,6 +321,7 @@ def _capability_record(
     hardware_tier: str,
     runtime_type: str,
     benchmark_ready: bool,
+    benchmark_evidence: dict[str, Any],
 ) -> dict[str, Any]:
     compatible, reason = _capability_compatible(
         capability,
@@ -242,6 +359,9 @@ def _capability_record(
             "requiredBeforeEnable": True,
             "latestBenchmarkAvailable": benchmark_ready,
             "status": "satisfied" if benchmark_ready else "required",
+            "evidenceContractVersion": benchmark_evidence.get("contractVersion"),
+            "evidenceStatus": benchmark_evidence.get("status"),
+            "readyForExperiment": benchmark_evidence.get("readyForExperiment"),
         },
         "activationPolicy": {
             "automaticEnableAllowed": False,
@@ -269,12 +389,18 @@ def build_optimization_capability_registry(
     hardware_tier = _hardware_tier(hardware)
     runtime_type = str(recommendation.get("providerType") or "dry_run")
     benchmark_ready = _benchmark_available(latest_benchmark_run)
+    benchmark_evidence = _benchmark_evidence_contract(
+        latest_benchmark_run,
+        hardware_tier = hardware_tier,
+        runtime_type = runtime_type,
+    )
     capabilities = [
         _capability_record(
             item,
             hardware_tier = hardware_tier,
             runtime_type = runtime_type,
             benchmark_ready = benchmark_ready,
+            benchmark_evidence = benchmark_evidence,
         )
         for item in OPTIMIZATION_CAPABILITIES
     ]
@@ -295,14 +421,17 @@ def build_optimization_capability_registry(
             "compatibleCount": sum(1 for item in capabilities if item["compatible"]),
             "experimentalCount": sum(1 for item in capabilities if item["experimental"]),
             "benchmarkRequiredBeforeEnable": True,
+            "benchmarkEvidenceReady": benchmark_evidence["readyForExperiment"],
         },
         "policies": {
             "benchmarkRequiredBeforeEnable": True,
+            "benchmarkEvidenceContractRequired": True,
             "modelMetadataRequired": True,
             "frontendDirectOptimizationMutationAllowed": False,
             "experimentalModulesRequireManifest": True,
             "rollbackPlanRequired": True,
         },
+        "benchmarkEvidence": benchmark_evidence,
         "recommendedCapabilityIds": recommended,
         "capabilities": capabilities,
         "sideEffects": {
@@ -320,6 +449,8 @@ def _experiment_gates(
     capability: dict[str, Any],
     *,
     benchmark_ready: bool,
+    benchmark_evidence_ready: bool,
+    benchmark_evidence_status: str,
     compatible: bool,
 ) -> list[dict[str, Any]]:
     return [
@@ -337,6 +468,12 @@ def _experiment_gates(
             "id": "benchmark_baseline",
             "status": "pass" if benchmark_ready else "blocked",
             "requiredBefore": "enablement",
+        },
+        {
+            "id": "benchmark_evidence",
+            "status": "pass" if benchmark_evidence_ready else "blocked",
+            "requiredBefore": "experiment",
+            "evidenceStatus": benchmark_evidence_status,
         },
         {
             "id": "rollback_plan",
@@ -375,6 +512,8 @@ def build_optimization_experiment_plan(
         if item in lookup
     ]
     benchmark_ready = bool(registry["benchmarkReady"])
+    benchmark_evidence = _as_dict(registry.get("benchmarkEvidence"))
+    benchmark_evidence_ready = bool(benchmark_evidence.get("readyForExperiment"))
     tickets: list[dict[str, Any]] = []
     for capability_id in selected_ids:
         capability = lookup[capability_id]
@@ -382,6 +521,8 @@ def build_optimization_experiment_plan(
         gates = _experiment_gates(
             capability,
             benchmark_ready = benchmark_ready,
+            benchmark_evidence_ready = benchmark_evidence_ready,
+            benchmark_evidence_status = str(benchmark_evidence.get("status") or "missing"),
             compatible = compatible,
         )
         blocked_gate_ids = [
@@ -389,7 +530,7 @@ def build_optimization_experiment_plan(
             for gate in gates
             if gate["status"] == "blocked"
         ]
-        status = "ready_for_experiment" if compatible and benchmark_ready else "blocked_by_gates"
+        status = "ready_for_experiment" if compatible and benchmark_ready and benchmark_evidence_ready else "blocked_by_gates"
         tickets.append(
             {
                 "id": f"experiment_{capability_id}",
@@ -431,6 +572,7 @@ def build_optimization_experiment_plan(
         "hardwareTier": registry["hardwareTier"],
         "runtimeType": registry["runtimeType"],
         "benchmarkReady": benchmark_ready,
+        "benchmarkEvidence": benchmark_evidence,
         "requestedOptimizationIds": requested,
         "selectedOptimizationIds": selected_ids,
         "tickets": tickets,
@@ -491,6 +633,11 @@ def build_optimization_plan(
     memory_fit = _as_dict(recommendation.get("memoryFit"))
     memory_level = str(memory_fit.get("level") or "unknown")
     tier = _hardware_tier(hardware)
+    benchmark_evidence = _benchmark_evidence_contract(
+        latest_benchmark_run,
+        hardware_tier = tier,
+        runtime_type = provider_type,
+    )
     context_tokens = int(_as_float(_as_dict(context_plan.get("tokenBudget")).get("maxContextTokens")) or 0)
     rag_ready = bool(rag_plan.get("readyForRetrieval"))
     benchmark_available = isinstance(latest_benchmark_run, dict)
@@ -581,6 +728,8 @@ def build_optimization_plan(
     warnings: list[str] = []
     if not benchmark_available:
         warnings.append("Benchmark absent: mesurer avant d'appliquer les optimisations runtime.")
+    elif benchmark_evidence["status"] != "ready":
+        warnings.append("Preuve benchmark incomplete: relancer un benchmark CogniX avant activation.")
     if provider_type == "ollama" and any(item["id"] == "speculative_decoding" and item["status"] == "unsupported_for_current_runtime" for item in optimizations):
         warnings.append("Speculative decoding non active: support runtime non confirme pour Ollama.")
     if memory_level == "tight":
@@ -592,6 +741,7 @@ def build_optimization_plan(
         "hardwareTier": tier,
         "runtimeType": provider_type,
         "optimizationProfile": "memory_saver" if tier == "small_local" or memory_level == "tight" else "throughput_ready" if tier == "powerful_local" else "balanced",
+        "benchmarkEvidence": benchmark_evidence,
         "recommendedOptimizationIds": recommended,
         "optimizations": optimizations,
         "warnings": warnings,
