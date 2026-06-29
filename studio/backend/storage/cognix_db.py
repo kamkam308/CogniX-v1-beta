@@ -376,12 +376,14 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS cognix_token_usage_events (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
+            organization_id TEXT NOT NULL DEFAULT 'default',
             project_id TEXT,
             model_id TEXT NOT NULL DEFAULT 'unknown',
             provider TEXT NOT NULL DEFAULT 'local',
             input_tokens INTEGER NOT NULL DEFAULT 0,
             output_tokens INTEGER NOT NULL DEFAULT 0,
             total_tokens INTEGER NOT NULL DEFAULT 0,
+            message_count INTEGER NOT NULL DEFAULT 1,
             latency_ms REAL NOT NULL DEFAULT 0,
             estimated_cost_usd REAL NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL
@@ -391,6 +393,76 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
             ON cognix_token_usage_events(username, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_cognix_token_usage_events_model_created
             ON cognix_token_usage_events(model_id, created_at DESC);
+        CREATE TABLE IF NOT EXISTS cognix_daily_user_token_usage (
+            id TEXT PRIMARY KEY,
+            organization_id TEXT NOT NULL DEFAULT 'default',
+            username TEXT NOT NULL,
+            day TEXT NOT NULL,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0,
+            message_count INTEGER NOT NULL DEFAULT 0,
+            model_count INTEGER NOT NULL DEFAULT 0,
+            models_json TEXT NOT NULL DEFAULT '[]',
+            estimated_cost_usd REAL NOT NULL DEFAULT 0,
+            average_latency_ms REAL NOT NULL DEFAULT 0,
+            local_tokens INTEGER NOT NULL DEFAULT 0,
+            cloud_tokens INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            UNIQUE(organization_id, username, day)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_daily_user_token_usage_day
+            ON cognix_daily_user_token_usage(day DESC, username ASC);
+
+        CREATE TABLE IF NOT EXISTS cognix_daily_model_usage (
+            id TEXT PRIMARY KEY,
+            organization_id TEXT NOT NULL DEFAULT 'default',
+            model_id TEXT NOT NULL DEFAULT 'unknown',
+            day TEXT NOT NULL,
+            providers_json TEXT NOT NULL DEFAULT '[]',
+            user_count INTEGER NOT NULL DEFAULT 0,
+            users_json TEXT NOT NULL DEFAULT '[]',
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0,
+            message_count INTEGER NOT NULL DEFAULT 0,
+            estimated_cost_usd REAL NOT NULL DEFAULT 0,
+            average_latency_ms REAL NOT NULL DEFAULT 0,
+            local_tokens INTEGER NOT NULL DEFAULT 0,
+            cloud_tokens INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            UNIQUE(organization_id, model_id, day)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_daily_model_usage_day
+            ON cognix_daily_model_usage(day DESC, model_id ASC);
+
+        CREATE TABLE IF NOT EXISTS cognix_organization_usage_summary (
+            id TEXT PRIMARY KEY,
+            organization_id TEXT NOT NULL DEFAULT 'default',
+            period_type TEXT NOT NULL DEFAULT 'day',
+            period_key TEXT NOT NULL,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0,
+            message_count INTEGER NOT NULL DEFAULT 0,
+            user_count INTEGER NOT NULL DEFAULT 0,
+            model_count INTEGER NOT NULL DEFAULT 0,
+            project_count INTEGER NOT NULL DEFAULT 0,
+            estimated_cost_usd REAL NOT NULL DEFAULT 0,
+            average_latency_ms REAL NOT NULL DEFAULT 0,
+            local_tokens INTEGER NOT NULL DEFAULT 0,
+            cloud_tokens INTEGER NOT NULL DEFAULT 0,
+            top_users_json TEXT NOT NULL DEFAULT '[]',
+            top_models_json TEXT NOT NULL DEFAULT '[]',
+            peak_day TEXT,
+            updated_at TEXT NOT NULL,
+            UNIQUE(organization_id, period_type, period_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_organization_usage_summary_period
+            ON cognix_organization_usage_summary(period_type, period_key DESC);
 
         CREATE TABLE IF NOT EXISTS cognix_admin_user_views (
             id TEXT PRIMARY KEY,
@@ -2312,6 +2384,7 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         """
     )
     _ensure_approval_request_columns(conn)
+    _ensure_token_usage_columns(conn)
 
 
 def _ensure_approval_request_columns(conn: sqlite3.Connection) -> None:
@@ -2330,6 +2403,29 @@ def _ensure_approval_request_columns(conn: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_cognix_approval_risk
             ON cognix_approval_requests(risk_level, status, created_at DESC)
+        """
+    )
+
+
+def _ensure_token_usage_columns(conn: sqlite3.Connection) -> None:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(cognix_token_usage_events)").fetchall()}
+    additions = {
+        "organization_id": "ALTER TABLE cognix_token_usage_events ADD COLUMN organization_id TEXT NOT NULL DEFAULT 'default'",
+        "message_count": "ALTER TABLE cognix_token_usage_events ADD COLUMN message_count INTEGER NOT NULL DEFAULT 1",
+    }
+    for column, sql in additions.items():
+        if column not in columns:
+            conn.execute(sql)
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_cognix_token_usage_events_org_created
+            ON cognix_token_usage_events(organization_id, created_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_cognix_token_usage_events_project_created
+            ON cognix_token_usage_events(project_id, created_at DESC)
         """
     )
 
@@ -3894,11 +3990,13 @@ def list_organization_activity_daily(*, limit: int = 365) -> list[dict[str, Any]
 def create_token_usage_event(
     username: str,
     *,
+    organization_id: str = "default",
     project_id: str | None = None,
     model_id: str = "unknown",
     provider: str = "local",
     input_tokens: int = 0,
     output_tokens: int = 0,
+    message_count: int = 1,
     latency_ms: float = 0,
     estimated_cost_usd: float = 0,
 ) -> dict[str, Any]:
@@ -3913,20 +4011,22 @@ def create_token_usage_event(
             """
             INSERT INTO cognix_token_usage_events
                 (
-                    id, username, project_id, model_id, provider, input_tokens,
-                    output_tokens, total_tokens, latency_ms, estimated_cost_usd, created_at
+                    id, username, organization_id, project_id, model_id, provider, input_tokens,
+                    output_tokens, total_tokens, message_count, latency_ms, estimated_cost_usd, created_at
                 )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event_id,
                 username,
+                str(organization_id or "default")[:160],
                 str(project_id)[:160] if project_id else None,
                 str(model_id or "unknown")[:240],
                 str(provider or "local")[:120],
                 safe_input,
                 safe_output,
                 total_tokens,
+                max(1, int(message_count or 1)),
                 max(0.0, float(latency_ms or 0)),
                 max(0.0, float(estimated_cost_usd or 0)),
                 created_at,
@@ -3962,6 +4062,328 @@ def list_token_usage_events(username: str | None = None, *, limit: int = 1000) -
                 (safe_limit,),
             ).fetchall()
         return _rows_to_dicts(rows)
+    finally:
+        conn.close()
+
+
+def _hydrate_daily_user_token_usage(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    item = dict(row)
+    item["models"] = _json_or_default(item.get("models_json"), [])
+    return item
+
+
+def upsert_daily_user_token_usage(record: dict[str, Any]) -> dict[str, Any]:
+    organization_id = str(record.get("organizationId") or record.get("organization_id") or "default").strip() or "default"
+    username = str(record.get("username") or "").strip()
+    day = str(record.get("day") or "").strip()
+    if not username or not day:
+        raise ValueError("Daily user token usage requires username and day")
+    now = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_daily_user_token_usage
+                (
+                    id, organization_id, username, day, input_tokens, output_tokens,
+                    total_tokens, message_count, model_count, models_json,
+                    estimated_cost_usd, average_latency_ms, local_tokens, cloud_tokens,
+                    updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(organization_id, username, day) DO UPDATE SET
+                input_tokens = excluded.input_tokens,
+                output_tokens = excluded.output_tokens,
+                total_tokens = excluded.total_tokens,
+                message_count = excluded.message_count,
+                model_count = excluded.model_count,
+                models_json = excluded.models_json,
+                estimated_cost_usd = excluded.estimated_cost_usd,
+                average_latency_ms = excluded.average_latency_ms,
+                local_tokens = excluded.local_tokens,
+                cloud_tokens = excluded.cloud_tokens,
+                updated_at = excluded.updated_at
+            """,
+            (
+                _new_id("dutok"),
+                organization_id[:160],
+                username[:160],
+                day[:20],
+                max(0, int(record.get("inputTokens") or record.get("input_tokens") or 0)),
+                max(0, int(record.get("outputTokens") or record.get("output_tokens") or 0)),
+                max(0, int(record.get("totalTokens") or record.get("total_tokens") or 0)),
+                max(0, int(record.get("messageCount") or record.get("message_count") or 0)),
+                max(0, int(record.get("modelCount") or record.get("model_count") or record.get("modelsUsed") or 0)),
+                json.dumps(record.get("models") or [], ensure_ascii = False),
+                max(0.0, float(record.get("estimatedCostUsd") or record.get("estimated_cost_usd") or 0)),
+                max(0.0, float(record.get("averageLatencyMs") or record.get("average_latency_ms") or 0)),
+                max(0, int(record.get("localTokens") or record.get("local_tokens") or 0)),
+                max(0, int(record.get("cloudTokens") or record.get("cloud_tokens") or 0)),
+                now,
+            ),
+        )
+        conn.commit()
+        return _hydrate_daily_user_token_usage(
+            conn.execute(
+                """
+                SELECT * FROM cognix_daily_user_token_usage
+                WHERE organization_id = ? AND username = ? AND day = ?
+                """,
+                (organization_id[:160], username[:160], day[:20]),
+            ).fetchone()
+        ) or {}
+    finally:
+        conn.close()
+
+
+def list_daily_user_token_usage(
+    username: str | None = None,
+    *,
+    organization_id: str | None = None,
+    limit: int = 1000,
+) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        safe_limit = max(1, min(int(limit or 1000), 5000))
+        params: list[Any] = []
+        where: list[str] = []
+        if username:
+            where.append("username = ?")
+            params.append(username)
+        if organization_id:
+            where.append("organization_id = ?")
+            params.append(organization_id)
+        sql = "SELECT * FROM cognix_daily_user_token_usage"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY day DESC, username ASC LIMIT ?"
+        rows = conn.execute(sql, (*params, safe_limit)).fetchall()
+        return [
+            item
+            for item in (_hydrate_daily_user_token_usage(row) for row in rows)
+            if item is not None
+        ]
+    finally:
+        conn.close()
+
+
+def _hydrate_daily_model_usage(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    item = dict(row)
+    item["providers"] = _json_or_default(item.get("providers_json"), [])
+    item["users"] = _json_or_default(item.get("users_json"), [])
+    return item
+
+
+def upsert_daily_model_usage(record: dict[str, Any]) -> dict[str, Any]:
+    organization_id = str(record.get("organizationId") or record.get("organization_id") or "default").strip() or "default"
+    model_id = str(record.get("modelId") or record.get("model_id") or "unknown").strip() or "unknown"
+    day = str(record.get("day") or "").strip()
+    if not day:
+        raise ValueError("Daily model usage requires day")
+    now = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_daily_model_usage
+                (
+                    id, organization_id, model_id, day, providers_json, user_count,
+                    users_json, input_tokens, output_tokens, total_tokens, message_count,
+                    estimated_cost_usd, average_latency_ms, local_tokens, cloud_tokens,
+                    updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(organization_id, model_id, day) DO UPDATE SET
+                providers_json = excluded.providers_json,
+                user_count = excluded.user_count,
+                users_json = excluded.users_json,
+                input_tokens = excluded.input_tokens,
+                output_tokens = excluded.output_tokens,
+                total_tokens = excluded.total_tokens,
+                message_count = excluded.message_count,
+                estimated_cost_usd = excluded.estimated_cost_usd,
+                average_latency_ms = excluded.average_latency_ms,
+                local_tokens = excluded.local_tokens,
+                cloud_tokens = excluded.cloud_tokens,
+                updated_at = excluded.updated_at
+            """,
+            (
+                _new_id("dmod"),
+                organization_id[:160],
+                model_id[:240],
+                day[:20],
+                json.dumps(record.get("providers") or [], ensure_ascii = False),
+                max(0, int(record.get("userCount") or record.get("user_count") or 0)),
+                json.dumps(record.get("users") or [], ensure_ascii = False),
+                max(0, int(record.get("inputTokens") or record.get("input_tokens") or 0)),
+                max(0, int(record.get("outputTokens") or record.get("output_tokens") or 0)),
+                max(0, int(record.get("totalTokens") or record.get("total_tokens") or 0)),
+                max(0, int(record.get("messageCount") or record.get("message_count") or 0)),
+                max(0.0, float(record.get("estimatedCostUsd") or record.get("estimated_cost_usd") or 0)),
+                max(0.0, float(record.get("averageLatencyMs") or record.get("average_latency_ms") or 0)),
+                max(0, int(record.get("localTokens") or record.get("local_tokens") or 0)),
+                max(0, int(record.get("cloudTokens") or record.get("cloud_tokens") or 0)),
+                now,
+            ),
+        )
+        conn.commit()
+        return _hydrate_daily_model_usage(
+            conn.execute(
+                """
+                SELECT * FROM cognix_daily_model_usage
+                WHERE organization_id = ? AND model_id = ? AND day = ?
+                """,
+                (organization_id[:160], model_id[:240], day[:20]),
+            ).fetchone()
+        ) or {}
+    finally:
+        conn.close()
+
+
+def list_daily_model_usage(
+    *,
+    organization_id: str | None = None,
+    model_id: str | None = None,
+    limit: int = 1000,
+) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        safe_limit = max(1, min(int(limit or 1000), 5000))
+        params: list[Any] = []
+        where: list[str] = []
+        if organization_id:
+            where.append("organization_id = ?")
+            params.append(organization_id)
+        if model_id:
+            where.append("model_id = ?")
+            params.append(model_id)
+        sql = "SELECT * FROM cognix_daily_model_usage"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY day DESC, model_id ASC LIMIT ?"
+        rows = conn.execute(sql, (*params, safe_limit)).fetchall()
+        return [
+            item
+            for item in (_hydrate_daily_model_usage(row) for row in rows)
+            if item is not None
+        ]
+    finally:
+        conn.close()
+
+
+def _hydrate_organization_usage_summary(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    item = dict(row)
+    item["topUsers"] = _json_or_default(item.get("top_users_json"), [])
+    item["topModels"] = _json_or_default(item.get("top_models_json"), [])
+    return item
+
+
+def upsert_organization_usage_summary(record: dict[str, Any]) -> dict[str, Any]:
+    organization_id = str(record.get("organizationId") or record.get("organization_id") or "default").strip() or "default"
+    period_type = str(record.get("periodType") or record.get("period_type") or "day").strip() or "day"
+    period_key = str(record.get("periodKey") or record.get("period_key") or record.get("day") or "").strip()
+    if not period_key:
+        raise ValueError("Organization usage summary requires period key")
+    now = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_organization_usage_summary
+                (
+                    id, organization_id, period_type, period_key, input_tokens,
+                    output_tokens, total_tokens, message_count, user_count,
+                    model_count, project_count, estimated_cost_usd,
+                    average_latency_ms, local_tokens, cloud_tokens, top_users_json,
+                    top_models_json, peak_day, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(organization_id, period_type, period_key) DO UPDATE SET
+                input_tokens = excluded.input_tokens,
+                output_tokens = excluded.output_tokens,
+                total_tokens = excluded.total_tokens,
+                message_count = excluded.message_count,
+                user_count = excluded.user_count,
+                model_count = excluded.model_count,
+                project_count = excluded.project_count,
+                estimated_cost_usd = excluded.estimated_cost_usd,
+                average_latency_ms = excluded.average_latency_ms,
+                local_tokens = excluded.local_tokens,
+                cloud_tokens = excluded.cloud_tokens,
+                top_users_json = excluded.top_users_json,
+                top_models_json = excluded.top_models_json,
+                peak_day = excluded.peak_day,
+                updated_at = excluded.updated_at
+            """,
+            (
+                _new_id("ousage"),
+                organization_id[:160],
+                period_type[:40],
+                period_key[:80],
+                max(0, int(record.get("inputTokens") or record.get("input_tokens") or 0)),
+                max(0, int(record.get("outputTokens") or record.get("output_tokens") or 0)),
+                max(0, int(record.get("totalTokens") or record.get("total_tokens") or 0)),
+                max(0, int(record.get("messageCount") or record.get("message_count") or 0)),
+                max(0, int(record.get("userCount") or record.get("user_count") or 0)),
+                max(0, int(record.get("modelCount") or record.get("model_count") or record.get("modelsUsed") or 0)),
+                max(0, int(record.get("projectCount") or record.get("project_count") or 0)),
+                max(0.0, float(record.get("estimatedCostUsd") or record.get("estimated_cost_usd") or 0)),
+                max(0.0, float(record.get("averageLatencyMs") or record.get("average_latency_ms") or 0)),
+                max(0, int(record.get("localTokens") or record.get("local_tokens") or 0)),
+                max(0, int(record.get("cloudTokens") or record.get("cloud_tokens") or 0)),
+                json.dumps(record.get("topUsers") or record.get("top_users") or [], ensure_ascii = False),
+                json.dumps(record.get("topModels") or record.get("top_models") or [], ensure_ascii = False),
+                record.get("peakDay") or record.get("peak_day"),
+                now,
+            ),
+        )
+        conn.commit()
+        return _hydrate_organization_usage_summary(
+            conn.execute(
+                """
+                SELECT * FROM cognix_organization_usage_summary
+                WHERE organization_id = ? AND period_type = ? AND period_key = ?
+                """,
+                (organization_id[:160], period_type[:40], period_key[:80]),
+            ).fetchone()
+        ) or {}
+    finally:
+        conn.close()
+
+
+def list_organization_usage_summary(
+    *,
+    organization_id: str | None = None,
+    period_type: str | None = None,
+    limit: int = 365,
+) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        safe_limit = max(1, min(int(limit or 365), 1000))
+        params: list[Any] = []
+        where: list[str] = []
+        if organization_id:
+            where.append("organization_id = ?")
+            params.append(organization_id)
+        if period_type:
+            where.append("period_type = ?")
+            params.append(period_type)
+        sql = "SELECT * FROM cognix_organization_usage_summary"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY period_key DESC LIMIT ?"
+        rows = conn.execute(sql, (*params, safe_limit)).fetchall()
+        return [
+            item
+            for item in (_hydrate_organization_usage_summary(row) for row in rows)
+            if item is not None
+        ]
     finally:
         conn.close()
 

@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import Counter
 from typing import Any
 
 
@@ -262,29 +262,6 @@ def build_admin_user_detail(username: str, directory: dict[str, Any], admin_view
 
 
 def build_usage_dashboard(*, token_events: list[dict[str, Any]]) -> dict[str, Any]:
-    by_user: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
-    by_model: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
-    for event in token_events:
-        by_user[_username(event) or "unknown"].append(event)
-        by_model[str(event.get("model_id") or event.get("modelId") or "unknown")].append(event)
+    from core.cognix import admin_usage as cognix_admin_usage
 
-    def summarize(events: list[dict[str, Any]]) -> dict[str, Any]:
-        input_tokens = sum(_as_int(item.get("input_tokens") or item.get("inputTokens")) for item in events)
-        output_tokens = sum(_as_int(item.get("output_tokens") or item.get("outputTokens")) for item in events)
-        total_tokens = sum(_as_int(item.get("total_tokens") or item.get("totalTokens")) for item in events)
-        return {
-            "eventCount": len(events),
-            "inputTokens": input_tokens,
-            "outputTokens": output_tokens,
-            "totalTokens": total_tokens or input_tokens + output_tokens,
-            "estimatedCostUsd": round(sum(_as_float(item.get("estimated_cost_usd") or item.get("estimatedCostUsd")) for item in events), 6),
-        }
-
-    return {
-        "usageDashboardVersion": COGNIX_USAGE_DASHBOARD_VERSION,
-        "mode": "admin_usage_dashboard",
-        "summary": summarize(token_events),
-        "byUser": [{"username": key, **summarize(events)} for key, events in sorted(by_user.items())],
-        "byModel": [{"modelId": key, **summarize(events)} for key, events in sorted(by_model.items())],
-        "sideEffects": build_admin_users_blueprint()["sideEffects"],
-    }
+    return cognix_admin_usage.build_usage_dashboard(token_events = token_events)

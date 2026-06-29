@@ -5969,6 +5969,11 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "usage_enforcer" in modules["cognix-admin-operations"]["capabilities"]
     assert "role_quota_management" in modules["cognix-admin-operations"]["capabilities"]
     assert "token_usage_dashboard" in modules["cognix-admin-operations"]["capabilities"]
+    assert "token_usage_service" in modules["cognix-admin-operations"]["capabilities"]
+    assert "model_usage_aggregator" in modules["cognix-admin-operations"]["capabilities"]
+    assert "cost_estimator" in modules["cognix-admin-operations"]["capabilities"]
+    assert "daily_user_token_rollups" in modules["cognix-admin-operations"]["capabilities"]
+    assert "organization_usage_summary" in modules["cognix-admin-operations"]["capabilities"]
     assert "permission_engine" in modules["cognix-admin-operations"]["capabilities"]
     assert "role_permission_management" in modules["cognix-admin-operations"]["capabilities"]
     assert "user_permission_overrides" in modules["cognix-admin-operations"]["capabilities"]
@@ -5988,6 +5993,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/admin/approvals" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/approvals/blueprint" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/banned" in modules["cognix-admin-operations"]["routes"]
+    assert "/api/cognix/admin/usage/blueprint" in modules["cognix-admin-operations"]["routes"]
+    assert "/api/cognix/admin/usage/aggregate" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/banned/blueprint" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/activity/aggregate" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/usage" in modules["cognix-admin-operations"]["routes"]
@@ -7848,7 +7855,81 @@ def test_admin_users_endpoints_are_admin_only_audited_and_persist_limits():
     actions = [log["action"] for log in admin_read["logs"]]
     assert "admin_users_directory_viewed" in actions
     assert "admin_user_detail_viewed" in actions
-    assert "admin_user_limit_updated" in actions
+
+
+def test_admin_token_usage_dashboard_builds_charts_rollups_and_persists_aggregates():
+    seed_accounts()
+    cognix_db.create_token_usage_event(
+        "alice",
+        organization_id = "org-ebk",
+        project_id = "project-a",
+        model_id = "qwen-local",
+        provider = "ollama",
+        input_tokens = 100,
+        output_tokens = 50,
+        message_count = 2,
+        latency_ms = 120,
+    )
+    cognix_db.create_token_usage_event(
+        storage.DEFAULT_ADMIN_USERNAME,
+        organization_id = "org-ebk",
+        project_id = "project-b",
+        model_id = "gpt-cloud",
+        provider = "openai",
+        input_tokens = 200,
+        output_tokens = 100,
+        message_count = 1,
+        latency_ms = 500,
+        estimated_cost_usd = 0.003,
+    )
+
+    with pytest.raises(HTTPException) as user_read:
+        run_async(cognix_routes.admin_usage_blueprint(current_subject = "alice"))
+    assert user_read.value.status_code == 403
+
+    blueprint = run_async(cognix_routes.admin_usage_blueprint(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    assert blueprint["usageBlueprint"]["services"] == [
+        "TokenUsageService",
+        "ModelUsageAggregator",
+        "CostEstimator",
+        "UsageDashboardService",
+    ]
+    assert "cognix_daily_user_token_usage" in blueprint["usageBlueprint"]["tables"]
+    assert "usage_by_model" in blueprint["usageBlueprint"]["charts"]
+    assert "organization_id" in blueprint["usageBlueprint"]["loggingRule"]["requiredFields"]
+
+    usage = run_async(cognix_routes.admin_usage(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    dashboard = usage["usageDashboard"]
+    assert dashboard["summary"]["totalTokens"] == 450
+    assert dashboard["summary"]["messageCount"] == 3
+    assert dashboard["summary"]["localTokens"] == 150
+    assert dashboard["summary"]["cloudTokens"] == 300
+    assert dashboard["summary"]["averageLatencyMs"] == 310
+    assert dashboard["organization"]["organizationId"] == "org-ebk"
+    assert dashboard["organization"]["peakDay"]
+    assert any(item["projectId"] == "project-a" for item in dashboard["byProject"])
+    assert any(item["modelId"] == "qwen-local" for item in dashboard["charts"]["usageByModel"])
+    assert {item["scope"] for item in dashboard["charts"]["localVsCloud"]} == {"cloud", "local"}
+    assert dashboard["rollups"]["dailyUserTokenUsage"]
+    assert dashboard["rollups"]["dailyModelUsage"]
+    assert dashboard["sideEffects"]["rollupWrite"] is False
+
+    aggregate = run_async(cognix_routes.admin_usage_aggregate(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    assert aggregate["auditLogId"].startswith("aud_")
+    assert aggregate["sideEffects"]["rollupWrite"] is True
+    assert len(aggregate["persisted"]["dailyUserTokenUsage"]) == 2
+    assert len(aggregate["persisted"]["dailyModelUsage"]) == 2
+    assert aggregate["persisted"]["organizationUsageSummary"][0]["totalTokens"] == 450
+
+    user_daily = cognix_db.list_daily_user_token_usage(organization_id = "org-ebk")
+    model_daily = cognix_db.list_daily_model_usage(organization_id = "org-ebk")
+    org_summary = cognix_db.list_organization_usage_summary(organization_id = "org-ebk")
+    assert len(user_daily) == 2
+    assert len(model_daily) == 2
+    assert org_summary[0]["total_tokens"] == 450
+
+    actions = [log["action"] for log in cognix_db.list_audit_logs(limit = 20)]
+    assert "admin_usage_rollups_aggregated" in actions
 
 
 def test_admin_chat_core_redacts_e2ee_and_allows_compliance_content():

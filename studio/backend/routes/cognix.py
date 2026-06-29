@@ -25,6 +25,7 @@ from core.cognix import admin_chat as cognix_admin_chat
 from core.cognix import admin_limits as cognix_admin_limits
 from core.cognix import admin_permissions as cognix_admin_permissions
 from core.cognix import admin_security as cognix_admin_security
+from core.cognix import admin_usage as cognix_admin_usage
 from core.cognix import admin_users as cognix_admin_users
 from core.cognix import apps as cognix_apps
 from core.cognix import benchmark as cognix_benchmark
@@ -1260,6 +1261,9 @@ def _build_admin_user_bundle() -> dict[str, Any]:
     limits = cognix_db.list_user_limits()
     bans = cognix_db.list_bans()
     reports = cognix_db.list_reports()
+    persisted_user_daily = cognix_db.list_daily_user_token_usage(limit = 1000)
+    persisted_model_daily = cognix_db.list_daily_model_usage(limit = 1000)
+    persisted_org_summary = cognix_db.list_organization_usage_summary(limit = 365)
     directory = cognix_admin_users.build_admin_user_directory(
         users = users,
         permissions = permissions,
@@ -1272,7 +1276,12 @@ def _build_admin_user_bundle() -> dict[str, Any]:
         bans = bans,
         reports = reports,
     )
-    usage = cognix_admin_users.build_usage_dashboard(token_events = token_events)
+    usage = cognix_admin_usage.build_usage_dashboard(
+        token_events = token_events,
+        persisted_user_daily = persisted_user_daily,
+        persisted_model_daily = persisted_model_daily,
+        persisted_org_summary = persisted_org_summary,
+    )
     return {
         "users": users,
         "permissions": permissions,
@@ -1284,6 +1293,9 @@ def _build_admin_user_bundle() -> dict[str, Any]:
         "limits": limits,
         "bans": bans,
         "reports": reports,
+        "persistedUserDaily": persisted_user_daily,
+        "persistedModelDaily": persisted_model_daily,
+        "persistedOrgSummary": persisted_org_summary,
         "directory": directory,
         "usage": usage,
     }
@@ -1686,9 +1698,16 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "target_id": "targetId",
         "updated_by": "updatedBy",
         "event_type": "eventType",
+        "organization_id": "organizationId",
         "input_tokens": "inputTokens",
         "output_tokens": "outputTokens",
         "total_tokens": "totalTokens",
+        "average_latency_ms": "averageLatencyMs",
+        "local_tokens": "localTokens",
+        "cloud_tokens": "cloudTokens",
+        "providers_json": "providersJson",
+        "users_json": "usersJson",
+        "period_type": "periodType",
         "target_username": "targetUsername",
         "viewed_by": "viewedBy",
         "view_reason": "viewReason",
@@ -10881,6 +10900,39 @@ async def admin_activity_aggregate(current_subject: str = Depends(get_current_jw
     }
 
 
+def _persist_usage_rollups(usage_dashboard: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    rollups = usage_dashboard.get("rollups") if isinstance(usage_dashboard.get("rollups"), dict) else {}
+    user_daily = [
+        cognix_db.upsert_daily_user_token_usage(record)
+        for record in rollups.get("dailyUserTokenUsage", [])
+        if isinstance(record, dict)
+    ]
+    model_daily = [
+        cognix_db.upsert_daily_model_usage(record)
+        for record in rollups.get("dailyModelUsage", [])
+        if isinstance(record, dict)
+    ]
+    organization_summary = [
+        cognix_db.upsert_organization_usage_summary(record)
+        for record in rollups.get("organizationUsageSummary", [])
+        if isinstance(record, dict)
+    ]
+    return {
+        "dailyUserTokenUsage": user_daily,
+        "dailyModelUsage": model_daily,
+        "organizationUsageSummary": organization_summary,
+    }
+
+
+@router.get("/admin/usage/blueprint")
+async def admin_usage_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    return {
+        "username": current_subject,
+        "usageBlueprint": cognix_admin_usage.build_usage_blueprint(),
+    }
+
+
 @router.get("/admin/usage")
 async def admin_usage(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
     _require_admin(current_subject)
@@ -10889,7 +10941,47 @@ async def admin_usage(current_subject: str = Depends(get_current_jwt_subject)) -
         "username": current_subject,
         "usageDashboard": bundle["usage"],
         "sideEffects": bundle["usage"].get("sideEffects", {}),
-        "plannerVersion": cognix_admin_users.COGNIX_USAGE_DASHBOARD_VERSION,
+        "plannerVersion": cognix_admin_usage.COGNIX_USAGE_DASHBOARD_VERSION,
+    }
+
+
+@router.post("/admin/usage/aggregate")
+async def admin_usage_aggregate(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_user_bundle()
+    persisted = _persist_usage_rollups(bundle["usage"])
+    side_effects = {
+        **bundle["usage"].get("sideEffects", {}),
+        "rollupWrite": True,
+        "databaseWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "admin_usage_rollups_aggregated",
+        resource_type = "cognix_admin_usage",
+        resource_id = "token_model_usage",
+        severity = "notice",
+        metadata = {
+            "usageDashboardVersion": bundle["usage"].get("usageDashboardVersion"),
+            "dailyUserRows": len(persisted["dailyUserTokenUsage"]),
+            "dailyModelRows": len(persisted["dailyModelUsage"]),
+            "organizationSummaryRows": len(persisted["organizationUsageSummary"]),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "usageDashboard": bundle["usage"],
+        "persisted": {
+            "dailyUserTokenUsage": _rows(persisted["dailyUserTokenUsage"]),
+            "dailyModelUsage": _rows(persisted["dailyModelUsage"]),
+            "organizationUsageSummary": _rows(persisted["organizationUsageSummary"]),
+        },
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_admin_usage.COGNIX_USAGE_DASHBOARD_VERSION,
     }
 
 
