@@ -6512,6 +6512,12 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "tool_execution_contract" in modules["cognix-integrations"]["capabilities"]
     assert "tool_secret_policy" in modules["cognix-integrations"]["capabilities"]
     assert "integration_activation_contract" in modules["cognix-integrations"]["capabilities"]
+    assert "enterprise_connector_manifests" in modules["cognix-integrations"]["capabilities"]
+    assert "education_connector_manifests" in modules["cognix-integrations"]["capabilities"]
+    assert "business_system_connector_manifests" in modules["cognix-integrations"]["capabilities"]
+    assert {"sharepoint", "microsoft-teams", "slack", "moodle", "crm", "erp"}.issubset(
+        set(modules["cognix-integrations"]["tools"])
+    )
     assert "/api/cognix/integrations/plan" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/integrations/activation-contract" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/tools/permission-matrix" in modules["cognix-integrations"]["routes"]
@@ -7134,9 +7140,23 @@ def test_tool_registry_declares_permissions_and_guardrails():
     assert registry["sideEffects"]["toolExecution"] is False
 
     tools = {tool["id"]: tool for tool in registry["tools"]}
-    assert {"github", "google-drive", "gmail", "codex-secure-agent", "kali-isolated"}.issubset(
-        tools
-    )
+    assert {
+        "github",
+        "google-drive",
+        "gmail",
+        "notion",
+        "microsoft-365",
+        "google-workspace",
+        "sharepoint",
+        "microsoft-teams",
+        "slack",
+        "moodle",
+        "crm",
+        "erp",
+        "internal-tools",
+        "codex-secure-agent",
+        "kali-isolated",
+    }.issubset(tools)
     gmail_actions = {action["id"]: action for action in tools["gmail"]["actions"]}
     send_mail = gmail_actions["send_mail"]
     assert send_mail["riskLevel"] == "high"
@@ -7154,6 +7174,29 @@ def test_tool_registry_declares_permissions_and_guardrails():
     kali_actions = {action["id"]: action for action in tools["kali-isolated"]["actions"]}
     assert kali_actions["active_test"]["sandboxRequired"] is True
     assert "admin" in kali_actions["active_test"]["permissions"]
+
+    sharepoint_actions = {action["id"]: action for action in tools["sharepoint"]["actions"]}
+    assert sharepoint_actions["delete_site_file"]["riskLevel"] == "critical"
+    assert sharepoint_actions["delete_site_file"]["secretPolicy"]["rawSecretExposureAllowed"] is False
+    assert cognix_tool_registry.rate_limit_policy_for_key("sharepoint:delete") == {
+        "windowSeconds": 300,
+        "maxEvents": 2,
+    }
+
+    moodle_actions = {action["id"]: action for action in tools["moodle"]["actions"]}
+    assert moodle_actions["publish_grade"]["riskLevel"] == "critical"
+    assert moodle_actions["publish_grade"]["requiresConfirmation"] is True
+    assert "admin" in moodle_actions["publish_grade"]["permissions"]
+
+    crm_actions = {action["id"]: action for action in tools["crm"]["actions"]}
+    assert crm_actions["export_customer_data"]["sandboxRequired"] is True
+    assert crm_actions["export_customer_data"]["secretPolicy"]["serverSideResolutionRequired"] is True
+
+    erp_actions = {action["id"]: action for action in tools["erp"]["actions"]}
+    assert erp_actions["approve_payment"]["riskLevel"] == "critical"
+
+    internal_actions = {action["id"]: action for action in tools["internal-tools"]["actions"]}
+    assert internal_actions["run_internal_job"]["sandboxRequired"] is True
 
 
 def test_tool_action_plan_builds_execution_contract_without_execution():
@@ -7269,6 +7312,40 @@ def test_integration_manager_summarizes_connectors_without_secret_access():
     assert integrations["github"]["secretState"] == "required_unverified"
     assert any(item["id"] == "configure_server_secret" for item in integrations["github"]["nextActions"])
     assert integrations["codex-secure-agent"]["enabled"] is True
+    assert integrations["sharepoint"]["dataIsolation"] == "organization"
+    assert integrations["sharepoint"]["maxRiskLevel"] == "critical"
+    assert integrations["moodle"]["secretState"] == "required_unverified"
+    assert integrations["erp"]["maxRiskLevel"] == "critical"
+
+
+def test_enterprise_tool_action_plan_blocks_critical_exports_without_execution():
+    plan = cognix_tool_registry.plan_tool_action(
+        tool_id = "crm",
+        action_id = "export_customer_data",
+        username = "alice",
+        has_developer_mode = True,
+        granted_permissions = {"crm:read", "crm:export"},
+    )
+
+    assert plan["allowed"] is False
+    assert plan["status"] == "connector_disabled"
+    assert plan["riskLevel"] == "critical"
+    assert plan["guardrails"]["adminRequired"] is True
+    assert plan["guardrails"]["sandboxRequired"] is True
+    assert "admin" in plan["missingPermissions"]
+    assert plan["secretPolicy"]["allowedSecretSources"] == [
+        "connector_oauth_token",
+        "encrypted_user_token",
+        "crm_api_token",
+    ]
+    assert plan["executionContract"]["allowedToPrepare"] is False
+    assert plan["executionContract"]["readyForExecution"] is False
+    assert "connector_disabled" in plan["executionContract"]["blockedWhen"]
+    assert "sandbox_required" in plan["executionContract"]["blockedWhen"]
+    assert plan["executionContract"]["dataBoundary"]["clientSecretTransmitAllowed"] is False
+    assert plan["sideEffects"]["toolExecution"] is False
+    assert plan["sideEffects"]["externalWrite"] is False
+    assert plan["sideEffects"]["secretRead"] is False
 
 
 def test_integration_plan_endpoint_writes_sanitized_audit_log():
