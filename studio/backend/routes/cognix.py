@@ -1084,6 +1084,18 @@ class OptimizationExperimentPlanRequest(BaseModel):
     requested_optimizations: list[str] | None = Field(None, alias = "requestedOptimizations")
 
 
+class OptimizationApplicationContractRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    project_type: str | None = Field(None, max_length = 80)
+    project_id: str | None = Field(None, max_length = 160)
+    requested_optimizations: list[str] | None = Field(None, alias = "requestedOptimizations")
+    confirmation_id: str | None = Field(None, alias = "confirmationId", max_length = 180)
+    rollback_plan_id: str | None = Field(None, alias = "rollbackPlanId", max_length = 180)
+    request_id: str | None = Field(None, alias = "requestId", max_length = 180)
+
+
 class SpeculativeDecodingPlanRequest(BaseModel):
     model_config = ConfigDict(populate_by_name = True)
 
@@ -6497,6 +6509,71 @@ async def optimization_experiment_plan(
         "auditLogId": audit.get("id"),
         "sideEffects": plan.get("sideEffects", {}),
         "plannerVersion": cognix_optimization_planner.COGNIX_OPTIMIZATION_PLANNER_VERSION,
+    }
+
+
+@router.post("/optimizations/application-contract")
+async def optimization_application_contract(
+    payload: OptimizationApplicationContractRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    hardware = cognix_hardware.get_hardware_profile()
+    latest_benchmark = cognix_db.get_latest_benchmark_run(current_subject)
+    recommendation_payload = cognix_recommender.build_model_recommendation(
+        hardware,
+        latest_benchmark_run = latest_benchmark,
+    )
+    recommendation = recommendation_payload["recommendation"]
+    optimization = cognix_optimization_planner.build_optimization_plan(
+        hardware = hardware,
+        recommendation = recommendation,
+        latest_benchmark_run = latest_benchmark,
+    )
+    experiment = cognix_optimization_planner.build_optimization_experiment_plan(
+        objective = payload.objective,
+        hardware = hardware,
+        recommendation = recommendation,
+        latest_benchmark_run = latest_benchmark,
+        requested_optimizations = payload.requested_optimizations,
+    )
+    contract = cognix_optimization_planner.build_optimization_application_contract(
+        objective = payload.objective,
+        experiment_plan = experiment,
+        optimization_plan = optimization,
+        confirmation_id = payload.confirmation_id,
+        rollback_plan_id = payload.rollback_plan_id,
+        request_id = payload.request_id,
+        project_id = payload.project_id,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "optimization_application_contract_built",
+        resource_type = "cognix_optimization_application_contract",
+        resource_id = str(payload.project_id or contract.get("contractId") or "general"),
+        severity = "warning" if contract.get("blockedGateIds") else "notice",
+        metadata = {
+            "applicationContractVersion": contract.get("applicationContractVersion"),
+            "experimentPlanVersion": contract.get("experimentPlanVersion"),
+            "contractId": contract.get("contractId"),
+            "status": contract.get("status"),
+            "readyForExecutorReview": contract.get("readyForExecutorReview"),
+            "readyForRuntimeMutation": contract.get("readyForRuntimeMutation"),
+            "selectedOptimizationIds": contract.get("selectedOptimizationIds", []),
+            "readyOptimizationIds": contract.get("readyOptimizationIds", []),
+            "blockedGateIds": contract.get("blockedGateIds", []),
+            "benchmarkEvidenceStatus": contract.get("benchmarkEvidence", {}).get("status"),
+            "sideEffects": contract.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "optimizationPlan": optimization,
+        "optimizationExperimentPlan": experiment,
+        "optimizationApplicationContract": contract,
+        "auditLogId": audit.get("id"),
+        "sideEffects": contract.get("sideEffects", {}),
+        "plannerVersion": cognix_optimization_planner.COGNIX_OPTIMIZATION_APPLICATION_CONTRACT_VERSION,
     }
 
 

@@ -2023,6 +2023,89 @@ def test_optimization_experiment_plan_accepts_complete_benchmark_evidence_withou
     assert ticket["rollbackPlan"]["required"] is True
 
 
+def test_optimization_application_contract_blocks_without_benchmark_or_runtime_mutation():
+    hardware = stub_hardware_profile()
+    experiment = cognix_optimization_planner.build_optimization_experiment_plan(
+        objective = "Preparer application semantic cache",
+        hardware = hardware,
+        recommendation = stub_recommendation(hardware)["recommendation"],
+        latest_benchmark_run = None,
+        requested_optimizations = ["semantic_cache"],
+    )
+
+    contract = cognix_optimization_planner.build_optimization_application_contract(
+        objective = "Preparer application semantic cache",
+        experiment_plan = experiment,
+        confirmation_id = "conf_apply_semantic_cache",
+        rollback_plan_id = "rollback_semantic_cache",
+        request_id = "req_apply_semantic_cache",
+        project_id = "project-optimization",
+    )
+
+    assert contract["applicationContractVersion"] == "cognix_optimization_application_contract_v1"
+    assert contract["status"] == "blocked_missing_gate"
+    assert contract["readyForExecutorReview"] is False
+    assert contract["readyForRuntimeMutation"] is False
+    assert contract["applyAllowedHere"] is False
+    assert "benchmark_evidence_ready" in contract["blockedGateIds"]
+    assert "experiment_tickets_ready" in contract["blockedGateIds"]
+    assert contract["policies"]["benchmarkRequiredBeforeApply"] is True
+    assert contract["policies"]["runtimeMutationAllowedHere"] is False
+    assert contract["executionHandoff"]["willEnqueue"] is False
+    assert contract["runtimeChangeSet"]["willWriteRuntimeConfig"] is False
+    assert contract["sideEffects"]["runtimeConfigWrite"] is False
+    assert contract["sideEffects"]["cacheMutation"] is False
+    assert contract["sideEffects"]["jobEnqueue"] is False
+
+
+def test_optimization_application_contract_ready_for_executor_review_without_apply():
+    hardware = stub_hardware_profile()
+    benchmark = {
+        "id": "bench-ready",
+        "created_at": "2026-06-29T00:00:00+00:00",
+        "benchmark": {
+            "benchmarkVersion": "cognix_benchmark_v1",
+            "overallScore": 70.0,
+            "estimatedTokensPerSecond": 18.5,
+        },
+    }
+    recommendation = stub_recommendation(hardware)["recommendation"]
+    optimization = cognix_optimization_planner.build_optimization_plan(
+        hardware = hardware,
+        recommendation = recommendation,
+        latest_benchmark_run = benchmark,
+    )
+    experiment = cognix_optimization_planner.build_optimization_experiment_plan(
+        objective = "Preparer application KV-cache apres benchmark",
+        hardware = hardware,
+        recommendation = recommendation,
+        latest_benchmark_run = benchmark,
+        requested_optimizations = ["kv_cache_policy"],
+    )
+
+    contract = cognix_optimization_planner.build_optimization_application_contract(
+        objective = "Preparer application KV-cache apres benchmark",
+        experiment_plan = experiment,
+        optimization_plan = optimization,
+        confirmation_id = "conf_apply_kv_cache",
+        rollback_plan_id = "rollback_kv_cache",
+        request_id = "req_apply_kv_cache",
+        project_id = "project-optimization",
+    )
+
+    assert contract["status"] == "ready_for_executor_review"
+    assert contract["readyForExecutorReview"] is True
+    assert contract["readyForRuntimeMutation"] is False
+    assert contract["blockedGateIds"] == []
+    assert contract["readyOptimizationIds"] == ["kv_cache_eviction"]
+    assert contract["runtimeChangeSet"]["wouldApplyOptimizationIds"] == ["kv_cache_eviction"]
+    assert contract["runtimeChangeSet"]["willWriteRuntimeConfig"] is False
+    assert contract["executionHandoff"]["willStartWorker"] is False
+    assert contract["sideEffects"]["runtimeConfigWrite"] is False
+    assert contract["sideEffects"]["modelReconfiguration"] is False
+    assert contract["sideEffects"]["workerStart"] is False
+
+
 def test_optimization_capability_registry_endpoint_logs_audit_without_mutation(monkeypatch):
     seed_accounts()
     monkeypatch.setattr(
@@ -2096,6 +2179,53 @@ def test_optimization_experiment_plan_endpoint_blocks_enablement_until_benchmark
     assert log["metadata"]["experimentPlanVersion"] == "cognix_optimization_experiment_plan_v1"
     assert log["metadata"]["benchmarkEvidenceStatus"] == "missing"
     assert "benchmark_baseline" in log["metadata"]["blockedGateIds"]
+
+
+def test_optimization_application_contract_endpoint_logs_executor_gate(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_routes.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_routes.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+
+    body = run_async(
+        cognix_routes.optimization_application_contract(
+            cognix_routes.OptimizationApplicationContractRequest(
+                objective = "Preparer application semantic cache sans mutation runtime",
+                requestedOptimizations = ["semantic_cache"],
+                confirmationId = "conf_apply_semantic_cache",
+                rollbackPlanId = "rollback_semantic_cache",
+                requestId = "req_apply_semantic_cache",
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    contract = body["optimizationApplicationContract"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_optimization_application_contract_v1"
+    assert contract["status"] == "blocked_missing_gate"
+    assert contract["readyForRuntimeMutation"] is False
+    assert "benchmark_evidence_ready" in contract["blockedGateIds"]
+    assert contract["sideEffects"]["runtimeConfigWrite"] is False
+    assert contract["sideEffects"]["jobEnqueue"] is False
+    assert contract["sideEffects"]["workerStart"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "optimization_application_contract_built"
+    assert log["resourceType"] == "cognix_optimization_application_contract"
+    assert log["metadata"]["applicationContractVersion"] == "cognix_optimization_application_contract_v1"
+    assert log["metadata"]["readyForRuntimeMutation"] is False
+    assert "benchmark_evidence_ready" in log["metadata"]["blockedGateIds"]
+    assert log["metadata"]["sideEffects"]["runtimeConfigWrite"] is False
 
 
 def test_speculative_decoding_plan_allows_llama_cpp_experiment_without_activation():
@@ -7612,6 +7742,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "optimization_capability_registry" in modules["cognix-optimization-engine"]["capabilities"]
     assert "benchmark_gated_experiments" in modules["cognix-optimization-engine"]["capabilities"]
     assert "benchmark_evidence_contract" in modules["cognix-optimization-engine"]["capabilities"]
+    assert "optimization_application_contract" in modules["cognix-optimization-engine"]["capabilities"]
+    assert "runtime_optimization_executor_gate" in modules["cognix-optimization-engine"]["capabilities"]
     assert "semantic_cache_planning" in modules["cognix-optimization-engine"]["capabilities"]
     assert "semantic_reuse_contract" in modules["cognix-optimization-engine"]["capabilities"]
     assert "privacy_safe_cache_keys" in modules["cognix-optimization-engine"]["capabilities"]
@@ -7625,6 +7757,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/semantic-cache/plan" in modules["cognix-optimization-engine"]["routes"]
     assert "/api/cognix/optimizations/capabilities" in modules["cognix-optimization-engine"]["routes"]
     assert "/api/cognix/optimizations/experiment-plan" in modules["cognix-optimization-engine"]["routes"]
+    assert "/api/cognix/optimizations/application-contract" in modules["cognix-optimization-engine"]["routes"]
     assert "/api/cognix/optimizations/speculative-decoding-plan" in modules["cognix-optimization-engine"]["routes"]
     assert "/api/cognix/optimizations/kv-cache-plan" in modules["cognix-optimization-engine"]["routes"]
     assert "/api/cognix/optimizations/batching-plan" in modules["cognix-optimization-engine"]["routes"]

@@ -18,6 +18,7 @@ from core.cognix.benchmark import COGNIX_BENCHMARK_VERSION
 COGNIX_OPTIMIZATION_PLANNER_VERSION = "cognix_optimization_planner_v1"
 COGNIX_OPTIMIZATION_CAPABILITY_REGISTRY_VERSION = "cognix_optimization_capability_registry_v1"
 COGNIX_OPTIMIZATION_EXPERIMENT_PLAN_VERSION = "cognix_optimization_experiment_plan_v1"
+COGNIX_OPTIMIZATION_APPLICATION_CONTRACT_VERSION = "cognix_optimization_application_contract_v1"
 COGNIX_BENCHMARK_EVIDENCE_CONTRACT_VERSION = "cognix_benchmark_evidence_contract_v1"
 
 REQUIRED_BENCHMARK_EVIDENCE_METRICS = ("overallScore", "estimatedTokensPerSecond")
@@ -591,6 +592,162 @@ def build_optimization_experiment_plan(
             "networkCall": False,
             "codeModification": False,
             "generation": False,
+        },
+    }
+
+
+def _application_gate(
+    gate_id: str,
+    *,
+    required: bool,
+    passed: bool,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "id": gate_id,
+        "required": required,
+        "status": "pass" if passed else ("blocked" if required else "not_required"),
+        "passed": passed,
+        "reason": reason,
+    }
+
+
+def build_optimization_application_contract(
+    *,
+    objective: str,
+    experiment_plan: dict[str, Any],
+    optimization_plan: dict[str, Any] | None = None,
+    confirmation_id: str | None = None,
+    rollback_plan_id: str | None = None,
+    request_id: str | None = None,
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    optimization_plan = _as_dict(optimization_plan)
+    tickets = [item for item in experiment_plan.get("tickets") or [] if isinstance(item, dict)]
+    selected_ids = [
+        str(item or "")
+        for item in experiment_plan.get("selectedOptimizationIds") or []
+        if str(item or "").strip()
+    ]
+    ready_tickets = [item for item in tickets if item.get("status") == "ready_for_experiment"]
+    blocked_gate_ids = sorted(
+        {
+            str(gate_id)
+            for gate_id in _as_dict(experiment_plan.get("summary")).get("blockedGateIds") or []
+            if str(gate_id or "").strip()
+        }
+    )
+    benchmark_evidence = _as_dict(experiment_plan.get("benchmarkEvidence"))
+    benchmark_ready = bool(benchmark_evidence.get("readyForExperiment"))
+    confirmation_required = bool(ready_tickets)
+    rollback_required = bool(ready_tickets)
+    gates = [
+        _application_gate(
+            "optimization_selection_declared",
+            required = True,
+            passed = bool(selected_ids),
+            reason = "At least one optimization must be selected before application review.",
+        ),
+        _application_gate(
+            "benchmark_evidence_ready",
+            required = True,
+            passed = benchmark_ready,
+            reason = "A complete CogniX benchmark baseline is required before applying runtime optimizations.",
+        ),
+        _application_gate(
+            "experiment_tickets_ready",
+            required = True,
+            passed = bool(ready_tickets) and not blocked_gate_ids,
+            reason = "All selected optimization experiment tickets must pass their gates.",
+        ),
+        _application_gate(
+            "rollback_plan_registered",
+            required = rollback_required,
+            passed = (not rollback_required) or bool(str(rollback_plan_id or "").strip()),
+            reason = "A rollback plan id is required before a runtime optimization can be handed to an executor.",
+        ),
+        _application_gate(
+            "human_confirmation",
+            required = confirmation_required,
+            passed = (not confirmation_required) or bool(str(confirmation_id or "").strip()),
+            reason = "Human confirmation is required before runtime optimization mutation.",
+        ),
+        _application_gate(
+            "backend_executor_required",
+            required = True,
+            passed = True,
+            reason = "Only a guarded backend executor may apply runtime optimization changes.",
+        ),
+    ]
+    blocked_contract_gates = [gate["id"] for gate in gates if gate["required"] and not gate["passed"]]
+    if blocked_contract_gates:
+        status = "blocked_missing_gate"
+    elif ready_tickets:
+        status = "ready_for_executor_review"
+    else:
+        status = "no_ready_optimization"
+
+    import hashlib
+
+    idempotency_seed = "|".join([project_id or "global", ",".join(selected_ids), request_id or ""])
+    idempotency_key = hashlib.sha256(idempotency_seed.encode("utf-8")).hexdigest()[:18]
+    return {
+        "applicationContractVersion": COGNIX_OPTIMIZATION_APPLICATION_CONTRACT_VERSION,
+        "plannerVersion": experiment_plan.get("plannerVersion") or COGNIX_OPTIMIZATION_PLANNER_VERSION,
+        "experimentPlanVersion": experiment_plan.get("experimentPlanVersion") or COGNIX_OPTIMIZATION_EXPERIMENT_PLAN_VERSION,
+        "mode": "optimization_application_contract_dry_run",
+        "contractId": f"optimization_apply_{idempotency_key}",
+        "requestId": request_id,
+        "objectiveExcerpt": " ".join((objective or "").split())[:500],
+        "projectId": project_id,
+        "status": status,
+        "readyForExecutorReview": not blocked_contract_gates and bool(ready_tickets),
+        "readyForRuntimeMutation": False,
+        "applyAllowedHere": False,
+        "selectedOptimizationIds": selected_ids,
+        "readyOptimizationIds": [str(item.get("capabilityId")) for item in ready_tickets],
+        "blockedGateIds": sorted(set([*blocked_gate_ids, *blocked_contract_gates])),
+        "gates": gates,
+        "benchmarkEvidence": benchmark_evidence,
+        "executionHandoff": {
+            "jobType": "runtime_optimization_apply",
+            "queueId": "local_runtime",
+            "idempotencyKey": f"cognix:{project_id or 'global'}:optimization_apply:{idempotency_key}",
+            "requiresExecutorContract": True,
+            "willEnqueue": False,
+            "willStartWorker": False,
+            "rollbackPlanId": rollback_plan_id,
+            "confirmationId": confirmation_id,
+        },
+        "runtimeChangeSet": {
+            "optimizationProfile": optimization_plan.get("optimizationProfile"),
+            "runtimeType": experiment_plan.get("runtimeType") or optimization_plan.get("runtimeType"),
+            "hardwareTier": experiment_plan.get("hardwareTier") or optimization_plan.get("hardwareTier"),
+            "wouldApplyOptimizationIds": [str(item.get("capabilityId")) for item in ready_tickets],
+            "willWriteRuntimeConfig": False,
+            "willMutateCache": False,
+            "willLoadModel": False,
+        },
+        "policies": {
+            "benchmarkRequiredBeforeApply": True,
+            "rollbackPlanRequired": True,
+            "humanApprovalRequiredBeforeRuntimeMutation": True,
+            "frontendDirectOptimizationMutationAllowed": False,
+            "backendExecutorRequired": True,
+            "runtimeMutationAllowedHere": False,
+            "auditRequiredBeforeExecution": True,
+        },
+        "sideEffects": {
+            "runtimeConfigWrite": False,
+            "modelReconfiguration": False,
+            "modelLoad": False,
+            "cacheMutation": False,
+            "benchmarkRun": False,
+            "networkCall": False,
+            "generation": False,
+            "jobEnqueue": False,
+            "workerStart": False,
+            "fileWrite": False,
         },
     }
 
