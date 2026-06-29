@@ -13,7 +13,7 @@ from datetime import timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from auth import storage as auth_storage
@@ -27,6 +27,7 @@ from core.cognix import admin_permissions as cognix_admin_permissions
 from core.cognix import admin_security as cognix_admin_security
 from core.cognix import admin_usage as cognix_admin_usage
 from core.cognix import admin_users as cognix_admin_users
+from core.cognix import api_surface as cognix_api_surface
 from core.cognix import apps as cognix_apps
 from core.cognix import benchmark as cognix_benchmark
 from core.cognix import batching as cognix_batching
@@ -2246,6 +2247,55 @@ def _granted_permission_keys(username: str) -> set[str]:
         if isinstance(key, str) and key.strip():
             permissions.add(key.strip().lower())
     return permissions
+
+
+def _join_registered_route_path(prefix: str, path: str) -> str:
+    base = str(prefix or "").strip().rstrip("/")
+    suffix = str(path or "").strip()
+    if not suffix:
+        return base
+    if not suffix.startswith("/"):
+        suffix = f"/{suffix}"
+    if suffix == "/":
+        return base or "/"
+    return f"{base}{suffix}" if base else suffix
+
+
+def _iter_registered_api_routes(routes: Any, prefix: str = ""):
+    for route in routes or []:
+        original_router = getattr(route, "original_router", None)
+        if original_router is not None:
+            include_context = getattr(route, "include_context", None)
+            include_prefix = getattr(include_context, "prefix", "") if include_context is not None else ""
+            yield from _iter_registered_api_routes(
+                getattr(original_router, "routes", []),
+                _join_registered_route_path(prefix, include_prefix),
+            )
+            continue
+
+        path = getattr(route, "path", None)
+        methods = getattr(route, "methods", None)
+        nested_routes = getattr(route, "routes", None)
+        if nested_routes and path:
+            yield from _iter_registered_api_routes(
+                nested_routes,
+                _join_registered_route_path(prefix, str(path)),
+            )
+        if not path or not methods:
+            continue
+        yield (
+            {
+                "path": _join_registered_route_path(prefix, str(path)),
+                "methods": sorted(str(method).upper() for method in methods),
+            }
+        )
+
+
+def _registered_api_routes(request: Request) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for record in _iter_registered_api_routes(getattr(request.app, "routes", [])):
+        records.append(record)
+    return records
 
 
 def _rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -14228,6 +14278,20 @@ async def admin_database_blueprint(current_subject: str = Depends(get_current_jw
         "databaseBlueprint": blueprint,
         "plannerVersion": cognix_database_blueprint.COGNIX_DATABASE_BLUEPRINT_VERSION,
         "sideEffects": blueprint.get("sideEffects", {}),
+    }
+
+
+@router.get("/admin/api-surface-contract")
+async def admin_api_surface_contract(
+    request: Request,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    contract = cognix_api_surface.build_api_surface_contract(_registered_api_routes(request))
+    return {
+        "apiSurfaceContract": contract,
+        "plannerVersion": cognix_api_surface.COGNIX_API_SURFACE_CONTRACT_VERSION,
+        "sideEffects": contract.get("sideEffects", {}),
     }
 
 

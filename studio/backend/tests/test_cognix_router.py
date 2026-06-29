@@ -5,6 +5,7 @@ import sqlite3
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -22,6 +23,7 @@ from core.cognix import admin_chat as cognix_admin_chat
 from core.cognix import admin_limits as cognix_admin_limits
 from core.cognix import admin_permissions as cognix_admin_permissions
 from core.cognix import admin_users as cognix_admin_users
+from core.cognix import api_surface as cognix_api_surface
 from core.cognix import apps as cognix_apps
 from core.cognix import background_agents as cognix_background_agents
 from core.cognix import batching as cognix_batching
@@ -8523,6 +8525,119 @@ def test_database_blueprint_endpoint_is_admin_only_and_read_only():
     assert body["sideEffects"]["auditWrite"] is False
 
 
+def test_api_surface_contract_maps_roadmap_endpoints_without_route_mutation():
+    registered_routes = [
+        {"path": "/api/inference/chat/completions", "methods": ["POST"]},
+        {"path": "/api/inference/generate/stream", "methods": ["POST"]},
+        {"path": "/api/cognix/router/classify", "methods": ["POST"]},
+        {"path": "/api/cognix/models/install-contract", "methods": ["POST"]},
+        {"path": "/api/inference/load", "methods": ["POST"]},
+        {"path": "/api/inference/unload", "methods": ["POST"]},
+        {"path": "/api/models/list", "methods": ["GET"]},
+        {"path": "/api/cognix/hardware/profile", "methods": ["GET"]},
+        {"path": "/api/cognix/benchmark/run", "methods": ["POST"]},
+        {"path": "/api/cognix/rag/indexing-plan", "methods": ["POST"]},
+        {"path": "/api/train/start", "methods": ["POST"]},
+        {"path": "/api/train/runs", "methods": ["GET"]},
+        {"path": "/api/cognix/tools/execution-handoff", "methods": ["POST"]},
+        {"path": "/api/cognix/admin/audit-logs", "methods": ["GET"]},
+        {"path": "/api/cognix/codex/pipeline-plan", "methods": ["POST"]},
+    ]
+
+    contract = cognix_api_surface.build_api_surface_contract(registered_routes)
+
+    assert contract["apiSurfaceContractVersion"] == "cognix_api_surface_contract_v1"
+    assert contract["mode"] == "api_surface_contract_read_only"
+    assert contract["sourceOfTruth"] == "roadmap_section_28"
+    assert contract["summary"]["recommendedEndpointCount"] == 15
+    assert contract["summary"]["plannedEndpointCount"] == 0
+    assert contract["summary"]["readyForMvpApi"] is True
+    endpoints = {item["path"]: item for item in contract["endpoints"]}
+    assert endpoints["/api/chat"]["status"] == "equivalent"
+    assert endpoints["/api/chat"]["matchedRoute"] == "POST /api/inference/chat/completions"
+    assert endpoints["/api/router/classify"]["matchedRoute"] == "POST /api/cognix/router/classify"
+    assert endpoints["/api/tools/execute"]["frontendDirectModelCallAllowed"] is False
+    assert contract["policies"]["orchestratorRequiredForGeneration"] is True
+    assert contract["policies"]["routeRegistrationAllowedHere"] is False
+    assert contract["sideEffects"]["routeRegistration"] is False
+    assert contract["sideEffects"]["modelLoad"] is False
+    assert contract["sideEffects"]["generation"] is False
+    assert contract["sideEffects"]["toolExecution"] is False
+
+
+def test_registered_api_routes_traverses_included_routers_with_prefixes():
+    request = SimpleNamespace(
+        app = SimpleNamespace(
+            routes = [
+                SimpleNamespace(
+                    original_router = SimpleNamespace(
+                        routes = [
+                            SimpleNamespace(path = "/router/classify", methods = {"POST"}),
+                            SimpleNamespace(
+                                original_router = SimpleNamespace(
+                                    routes = [SimpleNamespace(path = "/indexing-plan", methods = {"POST"})]
+                                ),
+                                include_context = SimpleNamespace(prefix = "/rag"),
+                            ),
+                        ]
+                    ),
+                    include_context = SimpleNamespace(prefix = "/api/cognix"),
+                )
+            ]
+        )
+    )
+
+    records = cognix_routes._registered_api_routes(request)
+
+    assert {"path": "/api/cognix/router/classify", "methods": ["POST"]} in records
+    assert {"path": "/api/cognix/rag/indexing-plan", "methods": ["POST"]} in records
+
+
+def test_api_surface_contract_endpoint_is_admin_only_and_read_only():
+    seed_accounts()
+    fake_routes = [
+        SimpleNamespace(path = path, methods = {method})
+        for method, path in [
+            ("POST", "/api/inference/chat/completions"),
+            ("POST", "/api/inference/generate/stream"),
+            ("POST", "/api/cognix/router/classify"),
+            ("POST", "/api/cognix/models/install-contract"),
+            ("POST", "/api/inference/load"),
+            ("POST", "/api/inference/unload"),
+            ("GET", "/api/models/list"),
+            ("GET", "/api/cognix/hardware/profile"),
+            ("POST", "/api/cognix/benchmark/run"),
+            ("POST", "/api/cognix/rag/indexing-plan"),
+            ("POST", "/api/train/start"),
+            ("GET", "/api/train/runs"),
+            ("POST", "/api/cognix/tools/execution-handoff"),
+            ("GET", "/api/cognix/admin/audit-logs"),
+            ("POST", "/api/cognix/codex/pipeline-plan"),
+        ]
+    ]
+    request = SimpleNamespace(app = SimpleNamespace(routes = fake_routes))
+
+    with pytest.raises(HTTPException) as user_read:
+        run_async(cognix_routes.admin_api_surface_contract(request, current_subject = "alice"))
+    assert user_read.value.status_code == 403
+
+    body = run_async(
+        cognix_routes.admin_api_surface_contract(
+            request,
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+
+    contract = body["apiSurfaceContract"]
+    assert body["plannerVersion"] == "cognix_api_surface_contract_v1"
+    assert contract["summary"]["recommendedEndpointCount"] == 15
+    assert contract["coverage"]["missingEndpoints"] == []
+    assert body["sideEffects"]["routeRegistration"] is False
+    assert body["sideEffects"]["apiMutation"] is False
+    assert body["sideEffects"]["generation"] is False
+    assert body["sideEffects"]["auditWrite"] is False
+
+
 def test_audit_log_redacts_sensitive_metadata_before_storage():
     seed_accounts()
 
@@ -9040,6 +9155,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "database_blueprint_contract" in modules["cognix-admin-operations"]["capabilities"]
     assert "roadmap_schema_mapping" in modules["cognix-admin-operations"]["capabilities"]
     assert "read_only_schema_inspection" in modules["cognix-admin-operations"]["capabilities"]
+    assert "api_surface_contract" in modules["cognix-admin-operations"]["capabilities"]
+    assert "roadmap_endpoint_mapping" in modules["cognix-admin-operations"]["capabilities"]
     assert "ban_service" in modules["cognix-admin-operations"]["capabilities"]
     assert "ban_report_generator" in modules["cognix-admin-operations"]["capabilities"]
     assert "user_reactivation" in modules["cognix-admin-operations"]["capabilities"]
@@ -9052,6 +9169,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/admin/approvals/blueprint" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/audit-governance-contract" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/database-blueprint" in modules["cognix-admin-operations"]["routes"]
+    assert "/api/cognix/admin/api-surface-contract" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/banned" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/usage/blueprint" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/usage/aggregate" in modules["cognix-admin-operations"]["routes"]
