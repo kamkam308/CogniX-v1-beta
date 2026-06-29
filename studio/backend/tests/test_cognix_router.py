@@ -8395,6 +8395,69 @@ def test_audit_log_retention_prunes_old_entries():
     assert set(created_ids[:2]).isdisjoint(kept_ids)
 
 
+def test_audit_governance_contract_hashes_redacted_logs_without_mutation():
+    seed_accounts()
+    cognix_db.create_audit_log(
+        username = "alice",
+        actor_username = "alice",
+        action = "audit_governance_test",
+        resource_type = "test",
+        resource_id = "secret-resource",
+        severity = "warning",
+        metadata = {
+            "apiKey": "sk-secret-should-not-survive",
+            "url": "https://user:password@example.test/path?token=secret-token",
+            "safe": "visible",
+        },
+    )
+    logs = cognix_db.list_audit_logs(limit = 10)
+
+    contract = cognix_db.build_audit_governance_contract(logs, max_entries = 3)
+
+    assert contract["contractVersion"] == "cognix_audit_governance_contract_v1"
+    assert contract["mode"] == "audit_integrity_retention_dry_run"
+    assert contract["retentionPolicy"]["maxEntries"] == 3
+    assert contract["retentionPolicy"]["willPruneNow"] is False
+    assert contract["redactionPolicy"]["redactionEnabled"] is True
+    assert contract["redactionPolicy"]["rawSecretValuesAllowed"] is False
+    assert contract["redactionPolicy"]["metadataJsonReturnedInContract"] is False
+    assert contract["integrity"]["algorithm"] == "sha256_previous_hash_chain"
+    assert len(contract["integrity"]["chainHead"]) == 64
+    assert contract["integrity"]["checkpointCount"] >= 1
+    assert contract["sideEffects"]["auditWrite"] is False
+    assert contract["sideEffects"]["auditPrune"] is False
+    assert "sk-secret-should-not-survive" not in str(logs)
+    assert "secret-token" not in str(logs)
+    assert "sk-secret-should-not-survive" not in str(contract)
+    assert "secret-token" not in str(contract)
+
+
+def test_audit_governance_contract_endpoint_is_admin_only_and_read_only():
+    seed_accounts()
+    cognix_db.create_audit_log(
+        username = "alice",
+        actor_username = "alice",
+        action = "audit_governance_endpoint_test",
+        resource_type = "test",
+        metadata = {"secretValue": "secret_value"},
+    )
+
+    with pytest.raises(HTTPException) as user_read:
+        run_async(cognix_routes.admin_audit_governance_contract(current_subject = "alice"))
+    assert user_read.value.status_code == 403
+
+    body = run_async(
+        cognix_routes.admin_audit_governance_contract(current_subject = storage.DEFAULT_ADMIN_USERNAME)
+    )
+    contract = body["auditGovernanceContract"]
+    assert body["plannerVersion"] == "cognix_audit_governance_contract_v1"
+    assert contract["integrity"]["logCount"] >= 1
+    assert contract["auditReadPolicy"]["adminOnly"] is True
+    assert body["sideEffects"]["auditWrite"] is False
+    assert body["sideEffects"]["auditPrune"] is False
+    assert "secret_value" not in str(contract)
+
+
 def test_audit_log_redacts_sensitive_metadata_before_storage():
     seed_accounts()
 
@@ -8902,6 +8965,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "approval_service" in modules["cognix-admin-operations"]["capabilities"]
     assert "approval_queue" in modules["cognix-admin-operations"]["capabilities"]
     assert "approval_policy_engine" in modules["cognix-admin-operations"]["capabilities"]
+    assert "audit_governance_contract" in modules["cognix-admin-operations"]["capabilities"]
     assert "ban_service" in modules["cognix-admin-operations"]["capabilities"]
     assert "ban_report_generator" in modules["cognix-admin-operations"]["capabilities"]
     assert "user_reactivation" in modules["cognix-admin-operations"]["capabilities"]
@@ -8912,6 +8976,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/admin/permissions/decision" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/approvals" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/approvals/blueprint" in modules["cognix-admin-operations"]["routes"]
+    assert "/api/cognix/admin/audit-governance-contract" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/banned" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/usage/blueprint" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/usage/aggregate" in modules["cognix-admin-operations"]["routes"]

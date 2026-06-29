@@ -14174,6 +14174,18 @@ async def admin_audit_logs(current_subject: str = Depends(get_current_jwt_subjec
     return {"logs": _rows(cognix_db.list_audit_logs(limit = 500))}
 
 
+@router.get("/admin/audit-governance-contract")
+async def admin_audit_governance_contract(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    logs = cognix_db.list_audit_logs(limit = 500)
+    contract = cognix_db.build_audit_governance_contract(logs)
+    return {
+        "auditGovernanceContract": contract,
+        "plannerVersion": cognix_db.AUDIT_GOVERNANCE_CONTRACT_VERSION,
+        "sideEffects": contract.get("sideEffects", {}),
+    }
+
+
 @router.get("/admin/reports")
 async def admin_reports(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
     _require_admin(current_subject)

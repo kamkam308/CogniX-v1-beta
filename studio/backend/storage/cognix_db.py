@@ -10,6 +10,7 @@ import re
 import sqlite3
 import threading
 import uuid
+from hashlib import sha256
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -19,6 +20,7 @@ _schema_lock = threading.Lock()
 _schema_ready = False
 
 DEVELOPER_MODE_PERMISSION = "developer_mode"
+AUDIT_GOVERNANCE_CONTRACT_VERSION = "cognix_audit_governance_contract_v1"
 AUDIT_LOG_RETENTION_LIMIT = 5000
 PERMISSION_KEY_PATTERN = re.compile(r"^[a-z0-9:_-]{1,160}$")
 RATE_LIMIT_KEY_PATTERN = re.compile(r"^[a-z0-9:_-]{1,160}$")
@@ -5319,6 +5321,98 @@ def prune_audit_logs(max_entries: int = AUDIT_LOG_RETENTION_LIMIT) -> int:
         return deleted
     finally:
         conn.close()
+
+
+def _audit_integrity_hash(log: dict[str, Any], previous_hash: str) -> str:
+    payload = {
+        "previousHash": previous_hash,
+        "id": log.get("id"),
+        "username": log.get("username"),
+        "actorUsername": log.get("actor_username") or log.get("actorUsername"),
+        "action": log.get("action"),
+        "resourceType": log.get("resource_type") or log.get("resourceType"),
+        "resourceId": log.get("resource_id") or log.get("resourceId"),
+        "severity": log.get("severity"),
+        "metadataJson": log.get("metadata_json") or log.get("metadataJson") or "{}",
+        "createdAt": log.get("created_at") or log.get("createdAt"),
+    }
+    encoded = json.dumps(payload, sort_keys = True, ensure_ascii = False).encode("utf-8")
+    return sha256(encoded).hexdigest()
+
+
+def build_audit_governance_contract(
+    logs: list[dict[str, Any]] | None = None,
+    *,
+    max_entries: int = AUDIT_LOG_RETENTION_LIMIT,
+) -> dict[str, Any]:
+    normalized_limit = max(1, int(max_entries))
+    source_logs = logs if logs is not None else list_audit_logs(limit = min(normalized_limit, 500))
+    ordered_logs = sorted(
+        source_logs,
+        key = lambda item: (
+            str(item.get("created_at") or item.get("createdAt") or ""),
+            str(item.get("id") or ""),
+        ),
+    )
+    previous_hash = "0" * 64
+    checkpoints: list[dict[str, Any]] = []
+    for index, log in enumerate(ordered_logs):
+        previous_hash = _audit_integrity_hash(log, previous_hash)
+        if index in {0, len(ordered_logs) - 1}:
+            checkpoints.append(
+                {
+                    "id": log.get("id"),
+                    "createdAt": log.get("created_at") or log.get("createdAt"),
+                    "hashPrefix": previous_hash[:16],
+                }
+            )
+    log_count = len(source_logs)
+    return {
+        "contractVersion": AUDIT_GOVERNANCE_CONTRACT_VERSION,
+        "mode": "audit_integrity_retention_dry_run",
+        "retentionPolicy": {
+            "maxEntries": normalized_limit,
+            "pruneOnWrite": True,
+            "currentWindowCount": log_count,
+            "overLimitCount": max(0, log_count - normalized_limit),
+            "willPruneNow": False,
+        },
+        "redactionPolicy": {
+            "redactionEnabled": True,
+            "sensitiveKeyCount": len(AUDIT_SENSITIVE_KEYS),
+            "sensitiveKeysRemovedFromMetadata": True,
+            "tokenValueRegexEnabled": True,
+            "basicAuthRegexEnabled": True,
+            "urlCredentialRegexEnabled": True,
+            "querySecretRegexEnabled": True,
+            "assignmentSecretRegexEnabled": True,
+            "rawSecretValuesAllowed": False,
+            "metadataJsonReturnedInContract": False,
+        },
+        "integrity": {
+            "algorithm": "sha256_previous_hash_chain",
+            "logCount": log_count,
+            "chainHead": previous_hash if ordered_logs else None,
+            "checkpointCount": len(checkpoints),
+            "checkpoints": checkpoints,
+            "storedHashColumnPresent": False,
+            "schemaMigrationRequiredForPersistentHash": True,
+        },
+        "auditReadPolicy": {
+            "adminOnly": True,
+            "defaultListLimit": 500,
+            "metadataDecodedForAdmins": True,
+            "rawSensitiveMetadataAllowed": False,
+        },
+        "sideEffects": {
+            "auditWrite": False,
+            "auditPrune": False,
+            "schemaMigration": False,
+            "fileWrite": False,
+            "secretRead": False,
+            "networkCall": False,
+        },
+    }
 
 
 def create_audit_log(
