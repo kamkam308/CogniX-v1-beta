@@ -10,18 +10,24 @@ from __future__ import annotations
 
 import ast
 import math
+import re
 from hashlib import sha256
+from html import escape as html_escape
 from typing import Any, Callable
 
 
 COGNIX_NATIVE_CALCULATOR_VERSION = "cognix_native_calculator_v1"
 COGNIX_NATIVE_PHYSICS_SOLVER_VERSION = "cognix_native_physics_solver_v1"
+COGNIX_NATIVE_LATEX_RENDERER_VERSION = "cognix_native_latex_renderer_v1"
 
 MAX_CALCULATOR_EXPRESSION_LENGTH = 300
 MAX_CALCULATOR_AST_NODES = 80
 MAX_CALCULATOR_ABS_VALUE = 1_000_000_000_000
 MAX_CALCULATOR_EXPONENT_ABS = 12
 MAX_PHYSICS_ABS_VALUE = 1_000_000_000_000
+MAX_LATEX_SOURCE_LENGTH = 2000
+MAX_LATEX_COMMAND_COUNT = 160
+SAFE_LATEX_RENDER_TARGET = "streamdown_katex"
 
 CONSTANTS = {
     "pi": math.pi,
@@ -50,6 +56,73 @@ class CalculatorValidationError(ValueError):
 
 class PhysicsSolverValidationError(ValueError):
     """Raised when a physics formula request is not safe or solvable."""
+
+
+class LatexRendererValidationError(ValueError):
+    """Raised when a LaTeX render request is not safe or valid."""
+
+
+BLOCKED_LATEX_COMMANDS = {
+    "catcode",
+    "csname",
+    "def",
+    "directlua",
+    "edef",
+    "endinput",
+    "futurelet",
+    "gdef",
+    "href",
+    "htmlclass",
+    "htmldata",
+    "htmlid",
+    "htmlstyle",
+    "immediate",
+    "include",
+    "includegraphics",
+    "includeonly",
+    "input",
+    "let",
+    "loop",
+    "luaexec",
+    "newcommand",
+    "openout",
+    "providecommand",
+    "read",
+    "renewcommand",
+    "repeat",
+    "special",
+    "url",
+    "usepackage",
+    "verbatiminput",
+    "write",
+    "write18",
+    "xdef",
+}
+
+ALLOWED_LATEX_ENVIRONMENTS = {
+    "align",
+    "align*",
+    "aligned",
+    "bmatrix",
+    "cases",
+    "equation",
+    "equation*",
+    "gather",
+    "gather*",
+    "matrix",
+    "pmatrix",
+    "smallmatrix",
+    "split",
+    "vmatrix",
+    "Vmatrix",
+}
+
+LATEX_COMMAND_RE = re.compile(r"\\([A-Za-z]+|.)")
+LATEX_ENV_RE = re.compile(r"\\(begin|end)\s*\{([^}]+)\}")
+LATEX_HTML_RISK_RE = re.compile(
+    r"<\s*script\b|javascript:|onerror\s*=|onload\s*=|data:text/html",
+    re.IGNORECASE,
+)
 
 
 PHYSICS_FORMULAS: dict[str, dict[str, Any]] = {
@@ -198,6 +271,131 @@ def _finite_physics_number(value: Any) -> float:
     if abs(number) > MAX_PHYSICS_ABS_VALUE:
         raise PhysicsSolverValidationError("Physics value exceeds the safety bound.")
     return number
+
+
+def _clean_latex_source(source: Any) -> str:
+    text = str(source or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        raise LatexRendererValidationError("LaTeX source is required.")
+    if len(text) > MAX_LATEX_SOURCE_LENGTH:
+        raise LatexRendererValidationError("LaTeX source is too long.")
+    if any((ord(ch) < 32 and ch not in "\n\t") for ch in text):
+        raise LatexRendererValidationError("LaTeX source contains unsupported control characters.")
+    return "\n".join(line.strip() for line in text.splitlines()).strip()
+
+
+def _latex_commands(source: str) -> list[str]:
+    commands: list[str] = []
+    for match in LATEX_COMMAND_RE.finditer(source):
+        raw = match.group(1)
+        if raw.isalpha():
+            commands.append(raw.lower())
+        elif raw in {"\\", "{", "}", "_", "^", "&", "%", "#", "$"}:
+            commands.append(raw)
+    return commands
+
+
+def _validate_latex_braces(source: str) -> None:
+    depth = 0
+    escaped = False
+    for char in source:
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth < 0:
+                raise LatexRendererValidationError("LaTeX braces are not balanced.")
+    if depth != 0:
+        raise LatexRendererValidationError("LaTeX braces are not balanced.")
+
+
+def _latex_environments(source: str) -> list[str]:
+    begins: list[str] = []
+    ends: list[str] = []
+    for match in LATEX_ENV_RE.finditer(source):
+        env = match.group(2).strip()
+        if env not in ALLOWED_LATEX_ENVIRONMENTS:
+            raise LatexRendererValidationError("LaTeX environment is not allowed.")
+        if match.group(1) == "begin":
+            begins.append(env)
+        else:
+            ends.append(env)
+    for env in set(begins + ends):
+        if begins.count(env) != ends.count(env):
+            raise LatexRendererValidationError("LaTeX environments are not balanced.")
+    return sorted(set(begins + ends))
+
+
+def render_latex_expression(
+    *,
+    source: str,
+    display_mode: bool = True,
+    context: str = "math",
+) -> dict[str, Any]:
+    cleaned = _clean_latex_source(source)
+    if LATEX_HTML_RISK_RE.search(cleaned):
+        raise LatexRendererValidationError("LaTeX source contains unsupported HTML or script content.")
+    for command in BLOCKED_LATEX_COMMANDS:
+        if re.search(rf"\\{re.escape(command)}\b", cleaned, re.IGNORECASE):
+            raise LatexRendererValidationError("LaTeX command is not allowed.")
+    _validate_latex_braces(cleaned)
+    command_list = _latex_commands(cleaned)
+    if len(command_list) > MAX_LATEX_COMMAND_COUNT:
+        raise LatexRendererValidationError("LaTeX source has too many commands.")
+    blocked = sorted({command for command in command_list if command in BLOCKED_LATEX_COMMANDS})
+    if blocked:
+        raise LatexRendererValidationError("LaTeX command is not allowed.")
+    environments = _latex_environments(cleaned)
+    context_key = _normalize_key(context)
+    if context_key not in {"general", "math", "physics"}:
+        context_key = "math"
+    markdown = f"$$\n{cleaned}\n$$" if display_mode else f"${cleaned}$"
+    html_tag = "div" if display_mode else "span"
+    source_hash = sha256(cleaned.encode("utf-8")).hexdigest()[:18]
+    return {
+        "latexRendererVersion": COGNIX_NATIVE_LATEX_RENDERER_VERSION,
+        "mode": "native_latex_render_packet",
+        "status": "render_packet_ready",
+        "renderTarget": SAFE_LATEX_RENDER_TARGET,
+        "context": context_key,
+        "displayMode": bool(display_mode),
+        "source": cleaned,
+        "sourceHash": source_hash,
+        "sourceLength": len(cleaned),
+        "commands": sorted(set(command_list)),
+        "commandCount": len(command_list),
+        "environments": environments,
+        "markdown": markdown,
+        "htmlPreview": (
+            f'<{html_tag} data-cognix-latex="math" data-render-target="{SAFE_LATEX_RENDER_TARGET}">'
+            f"{html_escape(cleaned)}</{html_tag}>"
+        ),
+        "safety": {
+            "maxSourceLength": MAX_LATEX_SOURCE_LENGTH,
+            "maxCommandCount": MAX_LATEX_COMMAND_COUNT,
+            "blockedCommands": sorted(BLOCKED_LATEX_COMMANDS),
+            "allowedEnvironments": sorted(ALLOWED_LATEX_ENVIRONMENTS),
+            "serverSideCompilation": False,
+            "rendererTrustsHtml": False,
+        },
+        "sideEffects": {
+            "latexRenderPacket": True,
+            "modelLoad": False,
+            "generation": False,
+            "networkToolCall": False,
+            "fileRead": False,
+            "fileWrite": False,
+            "externalWrite": False,
+            "secretRead": False,
+            "secretWrite": False,
+        },
+    }
 
 
 def evaluate_calculator_expression(expression: str, *, precision: int = 12) -> dict[str, Any]:

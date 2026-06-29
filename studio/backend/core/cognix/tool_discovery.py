@@ -39,12 +39,12 @@ DISCOVERABLE_TOOL_CAPABILITIES: list[dict[str, Any]] = [
     },
     {
         "toolId": "latex-renderer",
-        "name": "LaTeX Renderer",
+        "name": "CogniX LaTeX Renderer",
         "category": "rendering",
-        "capabilities": ["latex_compile", "math_rendering", "pdf_export"],
-        "installHint": "Install a TeX distribution before rendering LaTeX documents.",
+        "capabilities": ["latex_safety_validation", "katex_math_rendering", "markdown_render_packet"],
+        "installHint": "Native CogniX tool; no installation required for chat rendering.",
         "connectorBacked": False,
-        "enabledByDefault": False,
+        "enabledByDefault": True,
     },
     {
         "toolId": "python-runtime",

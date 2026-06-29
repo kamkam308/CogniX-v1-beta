@@ -5144,6 +5144,8 @@ def test_tool_discovery_capability_registry_blocks_auto_installation():
     assert tools["calculator"]["connectorBacked"] is False
     assert tools["physics-solver"]["enabledByDefault"] is True
     assert tools["physics-solver"]["connectorBacked"] is False
+    assert tools["latex-renderer"]["enabledByDefault"] is True
+    assert tools["latex-renderer"]["connectorBacked"] is False
     assert registry["summary"]["automaticInstallAllowed"] is False
     assert registry["policies"]["automaticInstallationAllowed"] is False
     assert registry["policies"]["frontendDirectInstallationAllowed"] is False
@@ -8571,18 +8573,21 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "safe_math_evaluation" in modules["cognix-integrations"]["capabilities"]
     assert "native_physics_solver_tool" in modules["cognix-integrations"]["capabilities"]
     assert "safe_physics_formula_solving" in modules["cognix-integrations"]["capabilities"]
+    assert "native_latex_renderer_tool" in modules["cognix-integrations"]["capabilities"]
+    assert "safe_latex_render_packets" in modules["cognix-integrations"]["capabilities"]
     assert "connector_preflight_contract" in modules["cognix-integrations"]["capabilities"]
     assert "integration_activation_contract" in modules["cognix-integrations"]["capabilities"]
     assert "enterprise_connector_manifests" in modules["cognix-integrations"]["capabilities"]
     assert "education_connector_manifests" in modules["cognix-integrations"]["capabilities"]
     assert "business_system_connector_manifests" in modules["cognix-integrations"]["capabilities"]
-    assert {"calculator", "physics-solver", "sharepoint", "microsoft-teams", "slack", "moodle", "crm", "erp"}.issubset(
+    assert {"calculator", "physics-solver", "latex-renderer", "sharepoint", "microsoft-teams", "slack", "moodle", "crm", "erp"}.issubset(
         set(modules["cognix-integrations"]["tools"])
     )
     assert "/api/cognix/integrations/plan" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/integrations/preflight-contract" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/integrations/activation-contract" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/tools/permission-matrix" in modules["cognix-integrations"]["routes"]
+    assert "/api/cognix/tools/latex/render" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/tools/plan" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/tools/calculator/evaluate" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/tools/physics/solve" in modules["cognix-integrations"]["routes"]
@@ -9317,6 +9322,7 @@ def test_tool_registry_declares_permissions_and_guardrails():
     assert {
         "calculator",
         "physics-solver",
+        "latex-renderer",
         "github",
         "google-drive",
         "gmail",
@@ -9354,6 +9360,17 @@ def test_tool_registry_declares_permissions_and_guardrails():
     assert cognix_tool_registry.rate_limit_policy_for_key(solve_formula["rateLimitKey"]) == {
         "windowSeconds": 60,
         "maxEvents": 180,
+    }
+    latex_actions = {action["id"]: action for action in tools["latex-renderer"]["actions"]}
+    render_math = latex_actions["render_math"]
+    assert tools["latex-renderer"]["enabled"] is True
+    assert render_math["riskLevel"] == "low"
+    assert render_math["requiresConfirmation"] is False
+    assert render_math["secretPolicy"]["requiresSecret"] is False
+    assert render_math["secretPolicy"]["rawSecretExposureAllowed"] is False
+    assert cognix_tool_registry.rate_limit_policy_for_key(render_math["rateLimitKey"]) == {
+        "windowSeconds": 60,
+        "maxEvents": 240,
     }
     gmail_actions = {action["id"]: action for action in tools["gmail"]["actions"]}
     send_mail = gmail_actions["send_mail"]
@@ -9439,6 +9456,32 @@ def test_native_physics_solver_blocks_ambiguous_formula_without_execution_side_e
             formula_id = "speed",
             variables = {"speed": 10, "distance": 100, "time": 10},
         )
+
+
+def test_native_latex_renderer_builds_katex_packet_without_model_or_files():
+    result = cognix_native_tools.render_latex_expression(
+        source = r"\frac{a}{b} = c^2",
+        display_mode = True,
+        context = "physics",
+    )
+
+    assert result["latexRendererVersion"] == "cognix_native_latex_renderer_v1"
+    assert result["status"] == "render_packet_ready"
+    assert result["renderTarget"] == "streamdown_katex"
+    assert result["context"] == "physics"
+    assert result["markdown"].startswith("$$")
+    assert result["sourceHash"]
+    assert "frac" in result["commands"]
+    assert result["sideEffects"]["latexRenderPacket"] is True
+    assert result["sideEffects"]["fileRead"] is False
+    assert result["sideEffects"]["fileWrite"] is False
+    assert result["sideEffects"]["networkToolCall"] is False
+    assert result["sideEffects"]["modelLoad"] is False
+
+
+def test_native_latex_renderer_blocks_file_commands_without_side_effects():
+    with pytest.raises(cognix_native_tools.LatexRendererValidationError):
+        cognix_native_tools.render_latex_expression(source = r"\input{/etc/passwd}")
 
 
 def test_tool_action_plan_builds_execution_contract_without_execution():
@@ -9932,6 +9975,46 @@ def test_tool_physics_solver_endpoint_solves_and_logs_sanitized_values():
     assert log["metadata"]["sideEffects"]["physicsSolve"] is True
     assert "current" in log["metadataJson"]
     assert '"variables"' not in log["metadataJson"]
+
+
+def test_tool_latex_renderer_endpoint_returns_sanitized_render_packet():
+    seed_accounts()
+
+    body = run_async(
+        cognix_routes.tool_latex_render(
+            cognix_routes.ToolLatexRenderRequest(
+                source = r"\frac{F}{m}=a",
+                display_mode = True,
+                context = "physics",
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    result = body["latexResult"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["status"] == "render_packet_ready"
+    assert body["plannerVersion"] == "cognix_native_latex_renderer_v1"
+    assert result["renderTarget"] == "streamdown_katex"
+    assert result["markdown"].startswith("$$")
+    assert body["toolPlan"]["toolId"] == "latex-renderer"
+    assert body["toolPlan"]["rateLimit"]["allowed"] is True
+    assert body["sideEffects"]["latexRenderPacket"] is True
+    assert body["sideEffects"]["fileRead"] is False
+    assert body["sideEffects"]["networkToolCall"] is False
+    assert body["sideEffects"]["generation"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "tool_latex_rendered"
+    assert log["resourceType"] == "cognix_native_latex_renderer"
+    assert log["metadata"]["latexRendererVersion"] == "cognix_native_latex_renderer_v1"
+    assert log["metadata"]["sourceHash"] == result["sourceHash"]
+    assert log["metadata"]["commandCount"] == result["commandCount"]
+    assert log["metadata"]["sideEffects"]["latexRenderPacket"] is True
+    assert "source" not in log["metadata"]
+    assert r"\frac{F}{m}=a" not in log["metadataJson"]
 
 
 def test_tool_rate_limit_storage_blocks_after_capacity():
