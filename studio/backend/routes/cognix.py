@@ -21,6 +21,7 @@ from auth.authentication import get_current_jwt_subject
 from core.cognix import admin_activity as cognix_admin_activity
 from core.cognix import admin_chat as cognix_admin_chat
 from core.cognix import admin_limits as cognix_admin_limits
+from core.cognix import admin_permissions as cognix_admin_permissions
 from core.cognix import admin_security as cognix_admin_security
 from core.cognix import admin_users as cognix_admin_users
 from core.cognix import apps as cognix_apps
@@ -104,6 +105,44 @@ class ApprovalDecisionRequest(BaseModel):
 class AdminPermissionGrantRequest(BaseModel):
     permission_key: str = Field(..., min_length = 1, max_length = 160)
     expires_at: str | None = Field(None, max_length = 80)
+
+
+class AdminRoleRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    display_name: str = Field("", alias = "displayName", max_length = 160)
+    description: str = Field("", max_length = 1000)
+    status: Literal["active", "disabled"] = "active"
+
+
+class AdminRolePermissionRequest(BaseModel):
+    allowed: bool = True
+    reason: str | None = Field(None, max_length = 1000)
+
+
+class AdminPermissionOverrideRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    effect: Literal["allow", "deny"] = "allow"
+    reason: str | None = Field("", max_length = 1000)
+    expires_at: str | None = Field(None, alias = "expiresAt", max_length = 80)
+
+
+class AdminProjectPermissionRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    subject_type: Literal["user", "role", "group"] = Field(..., alias = "subjectType")
+    subject_id: str = Field(..., alias = "subjectId", min_length = 1, max_length = 160)
+    permission_key: str = Field(..., alias = "permissionKey", min_length = 1, max_length = 160)
+    allowed: bool = True
+
+
+class AdminPermissionDecisionRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    username: str = Field(..., min_length = 1, max_length = 160)
+    permission_key: str = Field(..., alias = "permissionKey", min_length = 1, max_length = 160)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 240)
 
 
 class AdminUserLimitRequest(BaseModel):
@@ -1191,6 +1230,40 @@ def _build_admin_limits_bundle() -> dict[str, Any]:
     }
 
 
+def _build_admin_permissions_bundle() -> dict[str, Any]:
+    users = auth_storage.list_user_profiles()
+    legacy_permissions = [
+        permission
+        for user in users
+        for permission in cognix_db.list_user_permissions(str(user.get("username") or ""))
+    ]
+    roles = cognix_db.list_roles()
+    permission_definitions = cognix_db.list_permission_definitions()
+    role_permissions = cognix_db.list_role_permissions()
+    user_overrides = cognix_db.list_user_permission_overrides()
+    project_permissions = cognix_db.list_project_permissions()
+    matrix = cognix_admin_permissions.build_permission_matrix(
+        users = users,
+        roles = roles,
+        permissions = permission_definitions,
+        role_permissions = role_permissions,
+        user_overrides = user_overrides,
+        project_permissions = project_permissions,
+        legacy_user_permissions = legacy_permissions,
+        organization_policy = [],
+    )
+    return {
+        "users": users,
+        "roles": roles,
+        "permissionDefinitions": permission_definitions,
+        "rolePermissions": role_permissions,
+        "userOverrides": user_overrides,
+        "projectPermissions": project_permissions,
+        "legacyPermissions": legacy_permissions,
+        "matrix": matrix,
+    }
+
+
 def _refresh_conversation_audit_metadata(
     threads: list[dict[str, Any]],
     messages: list[dict[str, Any]],
@@ -1334,6 +1407,12 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "client_key": "clientKey",
         "pattern_label": "patternLabel",
         "ban_id": "banId",
+        "role_key": "roleKey",
+        "module_key": "moduleKey",
+        "effect": "effect",
+        "allowed": "allowed",
+        "subject_type": "subjectType",
+        "subject_id": "subjectId",
         "updated_by": "updatedBy",
         "size_bytes": "sizeBytes",
         "metadata_json": "metadataJson",
@@ -10976,15 +11055,286 @@ async def admin_decide_approval(
     return {"request": _row(request)}
 
 
+@router.get("/admin/permissions/blueprint")
+async def admin_permissions_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    return {
+        "permissionsBlueprint": cognix_admin_permissions.build_permissions_blueprint(),
+    }
+
+
+@router.get("/admin/permissions/matrix")
+async def admin_permissions_matrix(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_permissions_bundle()
+    return {
+        **bundle,
+        "roles": _rows(bundle["roles"]),
+        "permissionDefinitions": _rows(bundle["permissionDefinitions"]),
+        "rolePermissions": _rows(bundle["rolePermissions"]),
+        "userOverrides": _rows(bundle["userOverrides"]),
+        "projectPermissions": _rows(bundle["projectPermissions"]),
+        "legacyPermissions": _rows(bundle["legacyPermissions"]),
+        "auditLogs": _rows(cognix_db.list_audit_logs(limit = 200)),
+    }
+
+
+@router.put("/admin/permissions/roles/{role_key}")
+async def admin_upsert_role(
+    role_key: str,
+    payload: AdminRoleRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    try:
+        role = cognix_db.upsert_role(
+            role_key,
+            display_name = payload.display_name,
+            description = payload.description,
+            status = payload.status,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from exc
+    audit = cognix_db.create_audit_log(
+        username = role.get("role_key") or role_key,
+        actor_username = current_subject,
+        action = "permission_role_upserted",
+        resource_type = "cognix_role",
+        resource_id = role.get("role_key") or role_key,
+        severity = "notice",
+        metadata = {
+            "roleKey": role.get("role_key") or role_key,
+            "status": role.get("status"),
+        },
+    )
+    return {
+        "role": _row(role),
+        "auditLogId": audit.get("id"),
+        "sideEffects": {"roleWrite": True, "auditWrite": True},
+    }
+
+
+@router.put("/admin/permissions/roles/{role_key}/{permission_key}")
+async def admin_upsert_role_permission(
+    role_key: str,
+    permission_key: str,
+    payload: AdminRolePermissionRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    try:
+        module_key = permission_key.split(":", 1)[0] if ":" in permission_key else "general"
+        permission_definition = cognix_db.upsert_permission_definition(
+            permission_key,
+            module_key = module_key,
+            display_name = permission_key,
+            risk_level = "high" if payload.allowed else "medium",
+        )
+        role_permission = cognix_db.upsert_role_permission(
+            role_key,
+            permission_key,
+            allowed = payload.allowed,
+            updated_by = current_subject,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from exc
+    audit = cognix_db.create_audit_log(
+        username = role_key,
+        actor_username = current_subject,
+        action = "role_permission_updated",
+        resource_type = "cognix_role_permission",
+        resource_id = f"{role_key}:{permission_key}",
+        severity = "notice",
+        metadata = {
+            "roleKey": role_key,
+            "permissionKey": permission_key,
+            "allowed": payload.allowed,
+            "reason": payload.reason,
+        },
+    )
+    return {
+        "permissionDefinition": _row(permission_definition),
+        "rolePermission": _row(role_permission),
+        "auditLogId": audit.get("id"),
+        "sideEffects": {
+            "permissionCatalogWrite": True,
+            "rolePermissionWrite": True,
+            "auditWrite": True,
+        },
+    }
+
+
+@router.put("/admin/permissions/users/{username}/{permission_key}/override")
+async def admin_upsert_user_permission_override(
+    username: str,
+    permission_key: str,
+    payload: AdminPermissionOverrideRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    try:
+        module_key = permission_key.split(":", 1)[0] if ":" in permission_key else "general"
+        permission_definition = cognix_db.upsert_permission_definition(
+            permission_key,
+            module_key = module_key,
+            display_name = permission_key,
+        )
+        override = cognix_db.upsert_user_permission_override(
+            username,
+            permission_key,
+            effect = payload.effect,
+            reason = payload.reason or "",
+            expires_at = payload.expires_at,
+            updated_by = current_subject,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from exc
+    audit = cognix_db.create_audit_log(
+        username = username,
+        actor_username = current_subject,
+        action = "user_permission_override_updated",
+        resource_type = "cognix_user_permission_override",
+        resource_id = f"{username}:{permission_key}",
+        severity = "notice" if payload.effect == "allow" else "warning",
+        metadata = {
+            "permissionKey": permission_key,
+            "effect": payload.effect,
+            "reason": payload.reason,
+            "expiresAt": payload.expires_at,
+        },
+    )
+    return {
+        "permissionDefinition": _row(permission_definition),
+        "override": _row(override),
+        "auditLogId": audit.get("id"),
+        "sideEffects": {
+            "permissionCatalogWrite": True,
+            "userOverrideWrite": True,
+            "auditWrite": True,
+        },
+    }
+
+
+@router.delete("/admin/permissions/users/{username}/{permission_key}/override")
+async def admin_delete_user_permission_override(
+    username: str,
+    permission_key: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    try:
+        deleted = cognix_db.delete_user_permission_override(username, permission_key)
+    except ValueError as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from exc
+    audit = cognix_db.create_audit_log(
+        username = username,
+        actor_username = current_subject,
+        action = "user_permission_override_deleted",
+        resource_type = "cognix_user_permission_override",
+        resource_id = f"{username}:{permission_key}",
+        severity = "notice" if deleted else "warning",
+        metadata = {
+            "permissionKey": permission_key,
+            "deleted": deleted,
+        },
+    )
+    return {
+        "deleted": deleted,
+        "auditLogId": audit.get("id"),
+        "sideEffects": {"userOverrideWrite": True, "auditWrite": True},
+    }
+
+
+@router.put("/admin/permissions/projects/{project_id}")
+async def admin_upsert_project_permission(
+    project_id: str,
+    payload: AdminProjectPermissionRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    try:
+        module_key = payload.permission_key.split(":", 1)[0] if ":" in payload.permission_key else "general"
+        permission_definition = cognix_db.upsert_permission_definition(
+            payload.permission_key,
+            module_key = module_key,
+            display_name = payload.permission_key,
+        )
+        project_permission = cognix_db.upsert_project_permission(
+            project_id,
+            subject_type = payload.subject_type,
+            subject_id = payload.subject_id,
+            permission_key = payload.permission_key,
+            allowed = payload.allowed,
+            updated_by = current_subject,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from exc
+    audit = cognix_db.create_audit_log(
+        username = payload.subject_id,
+        actor_username = current_subject,
+        action = "project_permission_updated",
+        resource_type = "cognix_project_permission",
+        resource_id = f"{project_id}:{payload.subject_type}:{payload.subject_id}:{payload.permission_key}",
+        severity = "notice",
+        metadata = {
+            "projectId": project_id,
+            "subjectType": payload.subject_type,
+            "subjectId": payload.subject_id,
+            "permissionKey": payload.permission_key,
+            "allowed": payload.allowed,
+        },
+    )
+    return {
+        "permissionDefinition": _row(permission_definition),
+        "projectPermission": _row(project_permission),
+        "auditLogId": audit.get("id"),
+        "sideEffects": {
+            "permissionCatalogWrite": True,
+            "projectPermissionWrite": True,
+            "auditWrite": True,
+        },
+    }
+
+
+@router.post("/admin/permissions/decision")
+async def admin_permission_decision(
+    payload: AdminPermissionDecisionRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_permissions_bundle()
+    decision = cognix_admin_permissions.build_permission_decision(
+        username = payload.username,
+        permission_key = payload.permission_key,
+        project_id = payload.project_id,
+        matrix = bundle["matrix"],
+    )
+    return {
+        "decision": decision,
+        "permissionEngineVersion": cognix_admin_permissions.COGNIX_PERMISSION_ENGINE_VERSION,
+    }
+
+
 @router.get("/admin/permissions/{username}")
 async def admin_user_permissions(
     username: str,
     current_subject: str = Depends(get_current_jwt_subject),
 ) -> dict[str, Any]:
     _require_admin(current_subject)
+    bundle = _build_admin_permissions_bundle()
+    effective_user = next(
+        (
+            user
+            for user in bundle["matrix"].get("users", [])
+            if str(user.get("username") or "").casefold() == username.casefold()
+        ),
+        None,
+    )
     return {
         "username": username,
         "permissions": _rows(cognix_db.list_user_permissions(username)),
+        "overrides": _rows(cognix_db.list_user_permission_overrides(username)),
+        "effectivePermissions": effective_user,
     }
 
 
@@ -10996,11 +11346,25 @@ async def admin_grant_permission(
 ) -> dict[str, Any]:
     _require_admin(current_subject)
     try:
+        module_key = payload.permission_key.split(":", 1)[0] if ":" in payload.permission_key else "general"
+        permission_definition = cognix_db.upsert_permission_definition(
+            payload.permission_key,
+            module_key = module_key,
+            display_name = payload.permission_key,
+        )
         permission = cognix_db.grant_user_permission(
             username,
             payload.permission_key,
             granted_by = current_subject,
             expires_at = payload.expires_at,
+        )
+        override = cognix_db.upsert_user_permission_override(
+            username,
+            payload.permission_key,
+            effect = "allow",
+            reason = "Legacy admin grant synchronized with native RBAC.",
+            expires_at = payload.expires_at,
+            updated_by = current_subject,
         )
     except ValueError as exc:
         raise HTTPException(status_code = 400, detail = str(exc)) from exc
@@ -11017,8 +11381,16 @@ async def admin_grant_permission(
         },
     )
     return {
+        "permissionDefinition": _row(permission_definition),
         "permission": _row(permission),
+        "override": _row(override),
         "auditLogId": audit.get("id"),
+        "sideEffects": {
+            "permissionCatalogWrite": True,
+            "legacyPermissionWrite": True,
+            "userOverrideWrite": True,
+            "auditWrite": True,
+        },
     }
 
 
@@ -11031,6 +11403,13 @@ async def admin_revoke_permission(
     _require_admin(current_subject)
     try:
         revoked = cognix_db.revoke_user_permission(username, permission_key)
+        override = cognix_db.upsert_user_permission_override(
+            username,
+            permission_key,
+            effect = "deny",
+            reason = "Legacy admin revoke synchronized with native RBAC.",
+            updated_by = current_subject,
+        )
     except ValueError as exc:
         raise HTTPException(status_code = 400, detail = str(exc)) from exc
     audit = cognix_db.create_audit_log(
@@ -11047,7 +11426,13 @@ async def admin_revoke_permission(
     )
     return {
         "revoked": revoked,
+        "override": _row(override),
         "auditLogId": audit.get("id"),
+        "sideEffects": {
+            "legacyPermissionWrite": True,
+            "userOverrideWrite": True,
+            "auditWrite": True,
+        },
     }
 
 

@@ -171,6 +171,80 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_role_quotas_role
             ON cognix_role_quotas(role_key, updated_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_roles (
+            id TEXT PRIMARY KEY,
+            role_key TEXT NOT NULL UNIQUE,
+            display_name TEXT NOT NULL DEFAULT '',
+            description TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_roles_status
+            ON cognix_roles(status, role_key);
+
+        CREATE TABLE IF NOT EXISTS cognix_permissions (
+            id TEXT PRIMARY KEY,
+            permission_key TEXT NOT NULL UNIQUE,
+            module_key TEXT NOT NULL DEFAULT '',
+            display_name TEXT NOT NULL DEFAULT '',
+            description TEXT NOT NULL DEFAULT '',
+            risk_level TEXT NOT NULL DEFAULT 'medium',
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_permissions_module
+            ON cognix_permissions(module_key, risk_level);
+
+        CREATE TABLE IF NOT EXISTS cognix_role_permissions (
+            id TEXT PRIMARY KEY,
+            role_key TEXT NOT NULL,
+            permission_key TEXT NOT NULL,
+            allowed INTEGER NOT NULL DEFAULT 1,
+            updated_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(role_key, permission_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_role_permissions_role
+            ON cognix_role_permissions(role_key, permission_key);
+
+        CREATE TABLE IF NOT EXISTS cognix_user_permission_overrides (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            permission_key TEXT NOT NULL,
+            effect TEXT NOT NULL DEFAULT 'allow',
+            reason TEXT NOT NULL DEFAULT '',
+            expires_at TEXT,
+            updated_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(username, permission_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_user_permission_overrides_user
+            ON cognix_user_permission_overrides(username, permission_key);
+
+        CREATE TABLE IF NOT EXISTS cognix_project_permissions (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            subject_type TEXT NOT NULL,
+            subject_id TEXT NOT NULL,
+            permission_key TEXT NOT NULL,
+            allowed INTEGER NOT NULL DEFAULT 1,
+            updated_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(project_id, subject_type, subject_id, permission_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_project_permissions_subject
+            ON cognix_project_permissions(project_id, subject_type, subject_id);
+
         CREATE TABLE IF NOT EXISTS cognix_quota_usage (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -2366,6 +2440,374 @@ def _normalize_admin_key(value: str, *, label: str) -> str:
     if not RATE_LIMIT_KEY_PATTERN.fullmatch(normalized):
         raise ValueError(f"Invalid {label}")
     return normalized
+
+
+def _normalize_permission_effect(effect: str) -> str:
+    normalized = (effect or "").strip().lower()
+    if normalized not in {"allow", "deny"}:
+        raise ValueError("Invalid permission effect")
+    return normalized
+
+
+def _normalize_permission_subject_type(subject_type: str) -> str:
+    normalized = (subject_type or "").strip().lower()
+    if normalized not in {"user", "role", "group"}:
+        raise ValueError("Invalid permission subject type")
+    return normalized
+
+
+def upsert_role(
+    role_key: str,
+    *,
+    display_name: str = "",
+    description: str = "",
+    status: str = "active",
+) -> dict[str, Any]:
+    normalized_role = _normalize_admin_key(role_key or "user", label = "role key")
+    normalized_status = _normalize_quota_status(status)
+    now = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_roles
+                (id, role_key, display_name, description, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(role_key) DO UPDATE SET
+                display_name = excluded.display_name,
+                description = excluded.description,
+                status = excluded.status,
+                updated_at = excluded.updated_at
+            """,
+            (
+                _new_id("role"),
+                normalized_role,
+                str(display_name or normalized_role)[:160],
+                str(description or "")[:1000],
+                normalized_status,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        return row_to_dict(
+            conn.execute("SELECT * FROM cognix_roles WHERE role_key = ?", (normalized_role,)).fetchone()
+        ) or {}
+    finally:
+        conn.close()
+
+
+def list_roles() -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        rows = conn.execute("SELECT * FROM cognix_roles ORDER BY role_key ASC").fetchall()
+        return _rows_to_dicts(rows)
+    finally:
+        conn.close()
+
+
+def upsert_permission_definition(
+    permission_key: str,
+    *,
+    module_key: str = "",
+    display_name: str = "",
+    description: str = "",
+    risk_level: str = "medium",
+    status: str = "active",
+) -> dict[str, Any]:
+    normalized_permission = _normalize_permission_key(permission_key)
+    normalized_module = _normalize_admin_key(module_key or "general", label = "module key")
+    normalized_risk = _normalize_admin_key(risk_level or "medium", label = "risk level")
+    normalized_status = _normalize_quota_status(status)
+    now = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_permissions
+                (id, permission_key, module_key, display_name, description, risk_level, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(permission_key) DO UPDATE SET
+                module_key = excluded.module_key,
+                display_name = excluded.display_name,
+                description = excluded.description,
+                risk_level = excluded.risk_level,
+                status = excluded.status,
+                updated_at = excluded.updated_at
+            """,
+            (
+                _new_id("perm"),
+                normalized_permission,
+                normalized_module,
+                str(display_name or normalized_permission)[:180],
+                str(description or "")[:1000],
+                normalized_risk,
+                normalized_status,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        return row_to_dict(
+            conn.execute(
+                "SELECT * FROM cognix_permissions WHERE permission_key = ?",
+                (normalized_permission,),
+            ).fetchone()
+        ) or {}
+    finally:
+        conn.close()
+
+
+def list_permission_definitions() -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM cognix_permissions ORDER BY module_key ASC, permission_key ASC"
+        ).fetchall()
+        return _rows_to_dicts(rows)
+    finally:
+        conn.close()
+
+
+def upsert_role_permission(
+    role_key: str,
+    permission_key: str,
+    *,
+    allowed: bool = True,
+    updated_by: str,
+) -> dict[str, Any]:
+    normalized_role = _normalize_admin_key(role_key or "user", label = "role key")
+    normalized_permission = _normalize_permission_key(permission_key)
+    now = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_role_permissions
+                (id, role_key, permission_key, allowed, updated_by, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(role_key, permission_key) DO UPDATE SET
+                allowed = excluded.allowed,
+                updated_by = excluded.updated_by,
+                updated_at = excluded.updated_at
+            """,
+            (
+                _new_id("rper"),
+                normalized_role,
+                normalized_permission,
+                1 if allowed else 0,
+                updated_by,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        return row_to_dict(
+            conn.execute(
+                "SELECT * FROM cognix_role_permissions WHERE role_key = ? AND permission_key = ?",
+                (normalized_role, normalized_permission),
+            ).fetchone()
+        ) or {}
+    finally:
+        conn.close()
+
+
+def list_role_permissions(role_key: str | None = None) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        if role_key:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_role_permissions
+                WHERE role_key = ?
+                ORDER BY permission_key ASC
+                """,
+                (_normalize_admin_key(role_key, label = "role key"),),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM cognix_role_permissions ORDER BY role_key ASC, permission_key ASC"
+            ).fetchall()
+        return _rows_to_dicts(rows)
+    finally:
+        conn.close()
+
+
+def upsert_user_permission_override(
+    username: str,
+    permission_key: str,
+    *,
+    effect: str = "allow",
+    reason: str = "",
+    expires_at: str | None = None,
+    updated_by: str,
+) -> dict[str, Any]:
+    normalized_permission = _normalize_permission_key(permission_key)
+    normalized_effect = _normalize_permission_effect(effect)
+    now = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_user_permission_overrides
+                (id, username, permission_key, effect, reason, expires_at, updated_by, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(username, permission_key) DO UPDATE SET
+                effect = excluded.effect,
+                reason = excluded.reason,
+                expires_at = excluded.expires_at,
+                updated_by = excluded.updated_by,
+                updated_at = excluded.updated_at
+            """,
+            (
+                _new_id("uper"),
+                username,
+                normalized_permission,
+                normalized_effect,
+                str(reason or "")[:1000],
+                expires_at,
+                updated_by,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        return row_to_dict(
+            conn.execute(
+                """
+                SELECT * FROM cognix_user_permission_overrides
+                WHERE username = ? AND permission_key = ?
+                """,
+                (username, normalized_permission),
+            ).fetchone()
+        ) or {}
+    finally:
+        conn.close()
+
+
+def list_user_permission_overrides(username: str | None = None) -> list[dict[str, Any]]:
+    now = _now()
+    conn = get_connection()
+    try:
+        if username:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_user_permission_overrides
+                WHERE username = ?
+                  AND (expires_at IS NULL OR expires_at > ?)
+                ORDER BY permission_key ASC
+                """,
+                (username, now),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_user_permission_overrides
+                WHERE expires_at IS NULL OR expires_at > ?
+                ORDER BY username ASC, permission_key ASC
+                """,
+                (now,),
+            ).fetchall()
+        return _rows_to_dicts(rows)
+    finally:
+        conn.close()
+
+
+def delete_user_permission_override(username: str, permission_key: str) -> bool:
+    normalized_permission = _normalize_permission_key(permission_key)
+    conn = get_connection()
+    try:
+        cur = conn.execute(
+            """
+            DELETE FROM cognix_user_permission_overrides
+            WHERE username = ? AND permission_key = ?
+            """,
+            (username, normalized_permission),
+        )
+        conn.commit()
+        return bool(cur.rowcount)
+    finally:
+        conn.close()
+
+
+def upsert_project_permission(
+    project_id: str,
+    *,
+    subject_type: str,
+    subject_id: str,
+    permission_key: str,
+    allowed: bool = True,
+    updated_by: str,
+) -> dict[str, Any]:
+    normalized_project = str(project_id or "").strip()
+    if not normalized_project:
+        raise ValueError("Invalid project id")
+    normalized_subject_type = _normalize_permission_subject_type(subject_type)
+    normalized_subject = str(subject_id or "").strip()
+    if not normalized_subject:
+        raise ValueError("Invalid permission subject")
+    normalized_permission = _normalize_permission_key(permission_key)
+    now = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_project_permissions
+                (id, project_id, subject_type, subject_id, permission_key, allowed, updated_by, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(project_id, subject_type, subject_id, permission_key) DO UPDATE SET
+                allowed = excluded.allowed,
+                updated_by = excluded.updated_by,
+                updated_at = excluded.updated_at
+            """,
+            (
+                _new_id("pper"),
+                normalized_project,
+                normalized_subject_type,
+                normalized_subject,
+                normalized_permission,
+                1 if allowed else 0,
+                updated_by,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        return row_to_dict(
+            conn.execute(
+                """
+                SELECT * FROM cognix_project_permissions
+                WHERE project_id = ? AND subject_type = ? AND subject_id = ? AND permission_key = ?
+                """,
+                (normalized_project, normalized_subject_type, normalized_subject, normalized_permission),
+            ).fetchone()
+        ) or {}
+    finally:
+        conn.close()
+
+
+def list_project_permissions(project_id: str | None = None) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        if project_id:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_project_permissions
+                WHERE project_id = ?
+                ORDER BY subject_type ASC, subject_id ASC, permission_key ASC
+                """,
+                (project_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_project_permissions
+                ORDER BY project_id ASC, subject_type ASC, subject_id ASC, permission_key ASC
+                """
+            ).fetchall()
+        return _rows_to_dicts(rows)
+    finally:
+        conn.close()
 
 
 def upsert_user_limit(

@@ -17,6 +17,7 @@ from auth.authentication import get_current_jwt_subject
 from core.cognix import admin_activity as cognix_admin_activity
 from core.cognix import admin_chat as cognix_admin_chat
 from core.cognix import admin_limits as cognix_admin_limits
+from core.cognix import admin_permissions as cognix_admin_permissions
 from core.cognix import admin_users as cognix_admin_users
 from core.cognix import apps as cognix_apps
 from core.cognix import background_agents as cognix_background_agents
@@ -35,6 +36,7 @@ from core.cognix import decision_engine as cognix_decision_engine
 from core.cognix import decision_explainer as cognix_decision_explainer
 from core.cognix import dynamic_ui as cognix_dynamic_ui
 from core.cognix import evolution_engine as cognix_evolution_engine
+from core.cognix import fine_tuning_planner as cognix_fine_tuning_planner
 from core.cognix import governance_manager as cognix_governance_manager
 from core.cognix import gpts as cognix_gpts
 from core.cognix import images as cognix_images
@@ -5963,9 +5965,16 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "usage_enforcer" in modules["cognix-admin-operations"]["capabilities"]
     assert "role_quota_management" in modules["cognix-admin-operations"]["capabilities"]
     assert "token_usage_dashboard" in modules["cognix-admin-operations"]["capabilities"]
+    assert "permission_engine" in modules["cognix-admin-operations"]["capabilities"]
+    assert "role_permission_management" in modules["cognix-admin-operations"]["capabilities"]
+    assert "user_permission_overrides" in modules["cognix-admin-operations"]["capabilities"]
+    assert "project_permission_scopes" in modules["cognix-admin-operations"]["capabilities"]
+    assert "ceo_cloud_training_permissions" in modules["cognix-admin-operations"]["capabilities"]
     assert "/api/cognix/admin/users" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/limits" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/limits/enforcement-plan" in modules["cognix-admin-operations"]["routes"]
+    assert "/api/cognix/admin/permissions/matrix" in modules["cognix-admin-operations"]["routes"]
+    assert "/api/cognix/admin/permissions/decision" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/activity/aggregate" in modules["cognix-admin-operations"]["routes"]
     assert "/api/cognix/admin/usage" in modules["cognix-admin-operations"]["routes"]
     assert modules["cognix-admin-chat-access"]["status"] == "enabled"
@@ -7179,6 +7188,260 @@ def test_admin_limits_core_builds_effective_quota_matrix_and_enforcement():
     )
     assert override_matrix["users"][0]["quotas"]["tokens_daily"]["source"] == "user_override"
     assert allowed["allowed"] is True
+
+
+def test_admin_permissions_core_builds_rbac_overrides_project_scopes_and_ceo_cloud_training():
+    matrix = cognix_admin_permissions.build_permission_matrix(
+        users = [
+            {"username": "alice", "role": "user", "plan": "free"},
+            {"username": "ceo_user", "role": "user", "plan": "CEO"},
+        ],
+        roles = [],
+        permissions = [],
+        role_permissions = [
+            {
+                "role_key": "user",
+                "permission_key": "tools:execute",
+                "allowed": 1,
+                "updated_by": "admin",
+            }
+        ],
+        user_overrides = [
+            {
+                "username": "alice",
+                "permission_key": "tools:execute",
+                "effect": "deny",
+                "reason": "pause tools",
+            }
+        ],
+        project_permissions = [
+            {
+                "project_id": "proj_1",
+                "subject_type": "user",
+                "subject_id": "alice",
+                "permission_key": "projects:collaborate",
+                "allowed": 1,
+                "updated_by": "admin",
+            }
+        ],
+        legacy_user_permissions = [
+            {
+                "username": "alice",
+                "permission_key": "github:read",
+                "granted_by": "admin",
+            }
+        ],
+        organization_policy = [],
+    )
+
+    alice_tools = cognix_admin_permissions.build_permission_decision(
+        username = "alice",
+        permission_key = "tools:execute",
+        matrix = matrix,
+    )
+    assert alice_tools["allowed"] is False
+    assert alice_tools["source"] == "user_override"
+    assert alice_tools["sideEffects"]["networkCall"] is False
+
+    alice_github = cognix_admin_permissions.build_permission_decision(
+        username = "alice",
+        permission_key = "github:read",
+        matrix = matrix,
+    )
+    assert alice_github["allowed"] is True
+    assert alice_github["source"] == "legacy_user_permission"
+
+    alice_project = cognix_admin_permissions.build_permission_decision(
+        username = "alice",
+        permission_key = "projects:collaborate",
+        project_id = "proj_1",
+        matrix = matrix,
+    )
+    assert alice_project["allowed"] is True
+    assert alice_project["source"] == "project_permission"
+
+    ceo_training = cognix_admin_permissions.build_permission_decision(
+        username = "ceo_user",
+        permission_key = "tools:cloud_training",
+        matrix = matrix,
+    )
+    assert ceo_training["allowed"] is True
+    assert ceo_training["source"] == "builtin_ceo_cloud_training"
+
+
+def test_admin_permissions_routes_manage_roles_overrides_project_permissions_and_legacy_sync():
+    seed_accounts()
+
+    with pytest.raises(HTTPException) as user_read:
+        run_async(cognix_routes.admin_permissions_blueprint(current_subject = "alice"))
+    assert user_read.value.status_code == 403
+
+    blueprint = run_async(
+        cognix_routes.admin_permissions_blueprint(current_subject = storage.DEFAULT_ADMIN_USERNAME)
+    )
+    assert blueprint["permissionsBlueprint"]["services"] == [
+        "PermissionEngine",
+        "RoleManager",
+        "PermissionOverrideService",
+    ]
+    assert "cognix_user_permission_overrides" in blueprint["permissionsBlueprint"]["tables"]
+
+    role = run_async(
+        cognix_routes.admin_upsert_role(
+            "user",
+            cognix_routes.AdminRoleRequest(displayName = "User", description = "Base users"),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert role["role"]["roleKey"] == "user"
+    assert role["sideEffects"]["roleWrite"] is True
+
+    role_permission = run_async(
+        cognix_routes.admin_upsert_role_permission(
+            "user",
+            "tools:execute",
+            cognix_routes.AdminRolePermissionRequest(allowed = True, reason = "tools enabled"),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert role_permission["rolePermission"]["permissionKey"] == "tools:execute"
+    assert role_permission["rolePermission"]["allowed"] == 1
+
+    allowed = run_async(
+        cognix_routes.admin_permission_decision(
+            cognix_routes.AdminPermissionDecisionRequest(
+                username = "alice",
+                permissionKey = "tools:execute",
+            ),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert allowed["decision"]["allowed"] is True
+    assert allowed["decision"]["source"] == "role_permission"
+
+    denied = run_async(
+        cognix_routes.admin_upsert_user_permission_override(
+            "alice",
+            "tools:execute",
+            cognix_routes.AdminPermissionOverrideRequest(effect = "deny", reason = "temporary"),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert denied["override"]["effect"] == "deny"
+    assert denied["sideEffects"]["userOverrideWrite"] is True
+
+    denied_decision = run_async(
+        cognix_routes.admin_permission_decision(
+            cognix_routes.AdminPermissionDecisionRequest(
+                username = "alice",
+                permissionKey = "tools:execute",
+            ),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert denied_decision["decision"]["allowed"] is False
+    assert denied_decision["decision"]["source"] == "user_override"
+
+    project_permission = run_async(
+        cognix_routes.admin_upsert_project_permission(
+            "proj_1",
+            cognix_routes.AdminProjectPermissionRequest(
+                subjectType = "user",
+                subjectId = "alice",
+                permissionKey = "projects:collaborate",
+                allowed = True,
+            ),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert project_permission["projectPermission"]["projectId"] == "proj_1"
+    assert project_permission["projectPermission"]["subjectType"] == "user"
+
+    project_decision = run_async(
+        cognix_routes.admin_permission_decision(
+            cognix_routes.AdminPermissionDecisionRequest(
+                username = "alice",
+                permissionKey = "projects:collaborate",
+                projectId = "proj_1",
+            ),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert project_decision["decision"]["allowed"] is True
+    assert project_decision["decision"]["source"] == "project_permission"
+
+    granted = run_async(
+        cognix_routes.admin_grant_permission(
+            "alice",
+            cognix_routes.AdminPermissionGrantRequest(permission_key = "developer_mode"),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert granted["override"]["effect"] == "allow"
+    assert granted["sideEffects"]["legacyPermissionWrite"] is True
+
+    grant_decision = run_async(
+        cognix_routes.admin_permission_decision(
+            cognix_routes.AdminPermissionDecisionRequest(
+                username = "alice",
+                permissionKey = "developer_mode",
+            ),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert grant_decision["decision"]["allowed"] is True
+
+    revoked = run_async(
+        cognix_routes.admin_revoke_permission(
+            "alice",
+            "developer_mode",
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert revoked["override"]["effect"] == "deny"
+
+    revoke_decision = run_async(
+        cognix_routes.admin_permission_decision(
+            cognix_routes.AdminPermissionDecisionRequest(
+                username = "alice",
+                permissionKey = "developer_mode",
+            ),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert revoke_decision["decision"]["allowed"] is False
+    assert revoke_decision["decision"]["source"] == "user_override"
+
+
+def test_ceo_cloud_training_access_does_not_require_local_amd_or_nvidia_gpu():
+    profile = {"username": "ceo_user", "role": "user", "plan": "CEO"}
+    assert storage.has_ceo_training_entitlement("ceo_user", profile) is True
+
+    plan = cognix_fine_tuning_planner.build_fine_tuning_plan(
+        objective = "Fine tune a Qwen model in the cloud",
+        classification = {"selectedDomain": "general"},
+        task_strategy = {"path": "guided_fine_tuning"},
+        recommendation = {"modelId": "qwen-test", "modelLabel": "Qwen test", "providerId": "local"},
+        hardware = {
+            "gpu": {"available": False, "devices": []},
+            "memory": {"totalGb": 8, "availableGb": 4},
+        },
+        dataset = {
+            "format": "sharegpt",
+            "sampleCount": 250,
+            "estimatedTokens": 75000,
+            "duplicateRatio": 0.0,
+            "invalidRows": 0,
+            "license": "mit",
+            "containsSensitiveData": False,
+        },
+        user_plan = "CEO",
+    )
+
+    assert plan["method"]["type"] == "cloud_qlora"
+    assert plan["method"]["requiresLocalGpu"] is False
+    assert plan["resourceTargetPlan"]["cloudTrainingAllowed"] is True
+    assert plan["resourceTargetPlan"]["localGpuBypassAllowed"] is True
 
 
 def test_admin_limits_routes_manage_user_role_usage_overrides_and_reset():
