@@ -1489,6 +1489,45 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_image_username_created
             ON cognix_image_history(username, created_at DESC);
 
+        CREATE TABLE IF NOT EXISTS cognix_research_topics (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            topic TEXT NOT NULL,
+            topic_key TEXT NOT NULL,
+            project_id TEXT,
+            frequency TEXT NOT NULL DEFAULT 'weekly',
+            output_format TEXT NOT NULL DEFAULT 'brief',
+            sources_json TEXT NOT NULL DEFAULT '[]',
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_research_topics_username_created
+            ON cognix_research_topics(username, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_research_topics_project
+            ON cognix_research_topics(username, project_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cognix_research_items (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            topic_id TEXT,
+            title TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            source TEXT NOT NULL,
+            item_type TEXT NOT NULL DEFAULT 'research_item',
+            url TEXT,
+            published_at TEXT,
+            relevance_score REAL NOT NULL DEFAULT 0,
+            item_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_research_items_topic
+            ON cognix_research_items(username, topic_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_cognix_research_items_source
+            ON cognix_research_items(username, source, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_research_reports (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -7545,6 +7584,187 @@ def create_image_request(username: str, prompt: str, model: str | None = None) -
         )
         conn.commit()
         return row_to_dict(conn.execute("SELECT * FROM cognix_image_history WHERE id = ?", (request_id,)).fetchone()) or {}
+    finally:
+        conn.close()
+
+
+def _hydrate_research_topic(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["sources"] = _json_or_default(item.get("sources_json"), [])
+    return item
+
+
+def _hydrate_research_item(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["item"] = _json_or_default(item.get("item_json"), {})
+    return item
+
+
+def create_research_topic(
+    username: str,
+    *,
+    topic_plan: dict[str, Any],
+) -> dict[str, Any]:
+    now = _now()
+    topic_id = _new_id("rtop")
+    topic = topic_plan.get("topic") if isinstance(topic_plan.get("topic"), dict) else {}
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_research_topics
+                (
+                    id, username, topic, topic_key, project_id,
+                    frequency, output_format, sources_json,
+                    status, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+            """,
+            (
+                topic_id,
+                username,
+                str(topic.get("name") or "")[:240],
+                str(topic.get("topicKey") or topic_id)[:160],
+                topic.get("projectId"),
+                str(topic.get("frequency") or "weekly")[:80],
+                str(topic.get("outputFormat") or "brief")[:80],
+                json.dumps(topic_plan.get("sources") or [], ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM cognix_research_topics WHERE id = ?", (topic_id,)).fetchone()
+        return _hydrate_research_topic(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_research_topics(username: str, *, project_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(int(limit), 300))
+    conn = get_connection()
+    try:
+        if project_id:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_research_topics
+                WHERE username = ? AND project_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, project_id, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_research_topics
+                WHERE username = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, safe_limit),
+            ).fetchall()
+        return [_hydrate_research_topic(row_to_dict(row) or {}) for row in rows]
+    finally:
+        conn.close()
+
+
+def get_research_topic(username: str, topic_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT * FROM cognix_research_topics
+            WHERE username = ? AND id = ?
+            """,
+            (username, topic_id),
+        ).fetchone()
+        return _hydrate_research_topic(row_to_dict(row) or {}) if row else None
+    finally:
+        conn.close()
+
+
+def create_research_items(
+    username: str,
+    *,
+    topic_id: str | None,
+    items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    created_at = _now()
+    conn = get_connection()
+    created_ids: list[str] = []
+    try:
+        for item in items:
+            item_id = _new_id("ritm")
+            created_ids.append(item_id)
+            conn.execute(
+                """
+                INSERT INTO cognix_research_items
+                    (
+                        id, username, topic_id, title, summary, source,
+                        item_type, url, published_at, relevance_score,
+                        item_json, created_at
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    item_id,
+                    username,
+                    topic_id,
+                    str(item.get("title") or "")[:240],
+                    str(item.get("summary") or "")[:4000],
+                    str(item.get("source") or "provided")[:160],
+                    str(item.get("itemType") or "research_item")[:80],
+                    str(item.get("url") or "")[:1000] or None,
+                    item.get("publishedAt"),
+                    float(item.get("relevanceScore") or 0.0),
+                    json.dumps(item, ensure_ascii = False),
+                    created_at,
+                ),
+            )
+        conn.commit()
+        if not created_ids:
+            return []
+        placeholders = ", ".join("?" for _ in created_ids)
+        rows = conn.execute(
+            f"SELECT * FROM cognix_research_items WHERE id IN ({placeholders}) ORDER BY created_at DESC",
+            created_ids,
+        ).fetchall()
+        return [_hydrate_research_item(row_to_dict(row) or {}) for row in rows]
+    finally:
+        conn.close()
+
+
+def list_research_items(
+    username: str,
+    *,
+    topic_id: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(int(limit), 300))
+    conn = get_connection()
+    try:
+        if topic_id:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_research_items
+                WHERE username = ? AND topic_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, topic_id, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM cognix_research_items
+                WHERE username = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (username, safe_limit),
+            ).fetchall()
+        return [_hydrate_research_item(row_to_dict(row) or {}) for row in rows]
     finally:
         conn.close()
 

@@ -4750,6 +4750,115 @@ def test_research_watch_registry_and_plan_require_benchmark_evidence():
     assert plan["sideEffects"]["modelLoad"] is False
 
 
+def test_research_assistant_plans_topic_and_report_without_network_or_generation():
+    blueprint = cognix_research_watch.build_research_assistant_blueprint()
+    topic_plan = cognix_research_watch.build_research_topic_plan(
+        topic = "optimisations RAG open-weight",
+        sources = ["arxiv", "hugging-face-papers", "official-blogs"],
+        frequency = "weekly",
+        output_format = "technical",
+    )
+    report_plan = cognix_research_watch.build_research_report_plan(
+        topic = "optimisations RAG open-weight",
+        items = [
+            {
+                "title": "New RAG reranker benchmark",
+                "summary": "A benchmark compares rerankers for citation accuracy.",
+                "source": "arxiv",
+                "relevanceScore": 0.91,
+            },
+            {
+                "title": "Open-weight embedding model update",
+                "summary": "A model card describes retrieval improvements.",
+                "source": "hugging-face-papers",
+                "relevanceScore": 0.82,
+            },
+        ],
+        output_format = "technical",
+    )
+
+    assert blueprint["researchAssistantVersion"] == "cognix_research_assistant_v1"
+    assert "ResearchAssistantService" in blueprint["services"]
+    assert topic_plan["collectionPlan"]["sourceCount"] == 3
+    assert topic_plan["collectionPlan"]["willFetchNow"] is False
+    assert topic_plan["collectionPlan"]["willEnqueueNow"] is False
+    assert topic_plan["reportPlan"]["style"] == "cognix_document"
+    assert topic_plan["sideEffects"]["networkResearch"] is False
+    assert topic_plan["sideEffects"]["jobEnqueue"] is False
+    assert report_plan["report"]["sections"][0]["id"] == "key_findings"
+    assert report_plan["report"]["comparison"][0]["title"] == "New RAG reranker benchmark"
+    assert report_plan["sideEffects"]["generation"] is False
+    assert report_plan["sideEffects"]["reportWrite"] is False
+
+
+def test_research_assistant_endpoints_store_topic_items_report_and_audit():
+    seed_accounts()
+    topic_body = run_async(
+        cognix_routes.plan_research_topic(
+            cognix_routes.ResearchTopicPlanRequest(
+                topic = "Suis les techniques RAG avec citations",
+                sources = ["arxiv", "hugging-face-papers"],
+                frequency = "weekly",
+                outputFormat = "brief",
+                storeTopic = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    topic_id = topic_body["topic"]["id"]
+    assert topic_id.startswith("rtop_")
+    assert topic_body["plannerVersion"] == "cognix_research_assistant_v1"
+    assert topic_body["researchTopicPlan"]["collectionPlan"]["willFetchNow"] is False
+    assert topic_body["sideEffects"]["networkResearch"] is False
+    assert topic_body["sideEffects"]["topicWrite"] is True
+
+    report_body = run_async(
+        cognix_routes.plan_research_report(
+            cognix_routes.ResearchReportPlanRequest(
+                topicId = topic_id,
+                items = [
+                    {
+                        "title": "Citation-aware RAG evaluation",
+                        "summary": "Paper compares citation fidelity for retrieval systems.",
+                        "source": "arxiv",
+                        "relevanceScore": 0.93,
+                    },
+                    {
+                        "title": "Hybrid retrieval model card",
+                        "summary": "Model card reports better recall on technical documents.",
+                        "source": "hugging-face-papers",
+                        "relevanceScore": 0.86,
+                    },
+                ],
+                storeItems = True,
+                storeReport = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    topics = run_async(cognix_routes.research_topics(current_subject = "alice"))
+    reports = run_async(cognix_routes.my_research(current_subject = "alice"))
+    stored_items = cognix_db.list_research_items("alice", topic_id = topic_id)
+    assert topics["count"] == 1
+    assert report_body["report"]["id"].startswith("res_")
+    assert len(report_body["items"]) == 2
+    assert len(stored_items) == 2
+    assert reports["reports"][0]["id"] == report_body["report"]["id"]
+    assert report_body["sideEffects"]["itemWrite"] is True
+    assert report_body["sideEffects"]["reportWrite"] is True
+    assert report_body["sideEffects"]["generation"] is False
+    assert report_body["sideEffects"]["networkResearch"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    actions = {item["action"]: item for item in admin_read["logs"]}
+    assert "research_topic_planned" in actions
+    assert "research_report_plan_built" in actions
+    assert actions["research_report_plan_built"]["metadata"]["sideEffects"]["networkResearch"] is False
+    assert actions["research_report_plan_built"]["metadata"]["itemCount"] == 2
+
+
 def test_research_integration_endpoint_logs_audited_dry_run(monkeypatch):
     seed_accounts()
     monkeypatch.setattr(cognix_routes.cognix_hardware, "get_hardware_profile", stub_hardware_profile)
@@ -5152,7 +5261,11 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/costs/providers" in modules["cognix-optimization-engine"]["routes"]
     assert "technology_watch" in modules["cognix-research-watch"]["capabilities"]
     assert "benchmark_gate" in modules["cognix-research-watch"]["capabilities"]
+    assert "research_topics" in modules["cognix-research-watch"]["capabilities"]
+    assert "research_report_generation" in modules["cognix-research-watch"]["capabilities"]
     assert "/api/cognix/research/integration-plan" in modules["cognix-research-watch"]["routes"]
+    assert "/api/cognix/research/assistant/topics" in modules["cognix-research-watch"]["routes"]
+    assert "/api/cognix/research/assistant/reports/plan" in modules["cognix-research-watch"]["routes"]
     assert "tool_permission_matrix" in modules["cognix-integrations"]["capabilities"]
     assert "/api/cognix/tools/permission-matrix" in modules["cognix-integrations"]["routes"]
     assert modules["cognix-plugin-marketplace"]["dependencyState"]["ready"] is True

@@ -549,6 +549,29 @@ class ResearchRequest(BaseModel):
     query: str = Field(..., min_length = 2, max_length = 500)
 
 
+class ResearchTopicPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    topic: str = Field(..., min_length = 2, max_length = 500)
+    sources: list[Any] | None = None
+    frequency: str | None = Field(None, max_length = 80)
+    output_format: str | None = Field(None, alias = "outputFormat", max_length = 80)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    store_topic: bool = Field(True, alias = "storeTopic")
+
+
+class ResearchReportPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    topic_id: str | None = Field(None, alias = "topicId", max_length = 160)
+    topic: str | None = Field(None, max_length = 500)
+    items: list[dict[str, Any]] | None = None
+    sources: list[Any] | None = None
+    output_format: str | None = Field(None, alias = "outputFormat", max_length = 80)
+    store_items: bool = Field(True, alias = "storeItems")
+    store_report: bool = Field(True, alias = "storeReport")
+
+
 class AgentRunRequest(BaseModel):
     goal: str = Field(..., min_length = 2, max_length = 2000)
     mode: Literal["agent", "research", "automation"] = "agent"
@@ -905,6 +928,12 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "explanation_json": "explanationJson",
         "reason_code": "reasonCode",
         "evidence_json": "evidenceJson",
+        "topic_id": "topicId",
+        "topic_key": "topicKey",
+        "output_format": "outputFormat",
+        "item_type": "itemType",
+        "item_json": "itemJson",
+        "relevance_score": "relevanceScore",
         "ram_used_percent": "ramUsedPercent",
         "cpu_used_percent": "cpuUsedPercent",
         "gpu_available": "gpuAvailable",
@@ -6876,6 +6905,153 @@ async def research_integration_plan(
         "auditLogId": audit.get("id"),
         "sideEffects": plan.get("sideEffects", {}),
         "plannerVersion": cognix_research_watch.COGNIX_RESEARCH_WATCH_VERSION,
+    }
+
+
+@router.get("/research/assistant/blueprint")
+async def research_assistant_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_research_watch.build_research_assistant_blueprint()
+    return {
+        "username": current_subject,
+        "researchAssistantBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_research_watch.COGNIX_RESEARCH_ASSISTANT_VERSION,
+    }
+
+
+@router.post("/research/assistant/topics")
+async def plan_research_topic(
+    payload: ResearchTopicPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_research_watch.build_research_topic_plan(
+        topic = payload.topic,
+        sources = payload.sources,
+        frequency = payload.frequency,
+        output_format = payload.output_format,
+        project_id = payload.project_id,
+    )
+    topic_record = (
+        cognix_db.create_research_topic(current_subject, topic_plan = plan)
+        if payload.store_topic
+        else None
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "topicWrite": topic_record is not None,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "research_topic_planned",
+        resource_type = "cognix_research_topic",
+        resource_id = str((topic_record or {}).get("id") or plan.get("topic", {}).get("topicKey") or "research-topic"),
+        severity = "notice",
+        metadata = {
+            "researchAssistantVersion": plan.get("researchAssistantVersion"),
+            "topicKey": plan.get("topic", {}).get("topicKey"),
+            "sourceCount": plan.get("collectionPlan", {}).get("sourceCount"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "researchTopicPlan": plan,
+        "topic": _row(topic_record) if topic_record else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_research_watch.COGNIX_RESEARCH_ASSISTANT_VERSION,
+    }
+
+
+@router.get("/research/assistant/topics")
+async def research_topics(
+    project_id: str | None = None,
+    limit: int = 100,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if project_id:
+        _require_owned_project(project_id, current_subject)
+    topics = cognix_db.list_research_topics(current_subject, project_id = project_id, limit = limit)
+    return {"username": current_subject, "topics": _rows(topics), "count": len(topics)}
+
+
+@router.post("/research/assistant/reports/plan")
+async def plan_research_report(
+    payload: ResearchReportPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    topic_record = cognix_db.get_research_topic(current_subject, payload.topic_id) if payload.topic_id else None
+    if payload.topic_id and topic_record is None:
+        raise HTTPException(status_code = status.HTTP_404_NOT_FOUND, detail = "Research topic not found")
+    topic_name = payload.topic or (topic_record or {}).get("topic") or "Veille CogniX"
+    sources = payload.sources if payload.sources is not None else (topic_record or {}).get("sources")
+    plan = cognix_research_watch.build_research_report_plan(
+        topic = topic_name,
+        items = payload.items,
+        output_format = payload.output_format or (topic_record or {}).get("output_format"),
+        sources = sources,
+    )
+    stored_items = (
+        cognix_db.create_research_items(
+            current_subject,
+            topic_id = payload.topic_id,
+            items = plan.get("items") or [],
+        )
+        if payload.store_items
+        else []
+    )
+    report_record = (
+        cognix_db.create_research_report(
+            current_subject,
+            topic_name,
+            plan.get("report", {}).get("title") or f"Veille CogniX: {topic_name[:90]}",
+            plan.get("report", {}).get("summary") or "",
+            [
+                {
+                    "title": item.get("title"),
+                    "url": item.get("url"),
+                    "source": item.get("source"),
+                    "publishedAt": item.get("publishedAt"),
+                    "topicId": payload.topic_id,
+                }
+                for item in plan.get("items") or []
+            ],
+        )
+        if payload.store_report
+        else None
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "itemWrite": bool(stored_items),
+        "reportWrite": report_record is not None,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "research_report_plan_built",
+        resource_type = "cognix_research_report",
+        resource_id = str((report_record or {}).get("id") or payload.topic_id or "research-report"),
+        severity = "notice",
+        metadata = {
+            "researchAssistantVersion": plan.get("researchAssistantVersion"),
+            "topicId": payload.topic_id,
+            "itemCount": len(plan.get("items") or []),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "researchReportPlan": plan,
+        "items": _rows(stored_items),
+        "report": _row(report_record) if report_record else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_research_watch.COGNIX_RESEARCH_ASSISTANT_VERSION,
     }
 
 

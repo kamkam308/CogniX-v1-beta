@@ -16,6 +16,9 @@ from typing import Any
 
 
 COGNIX_RESEARCH_WATCH_VERSION = "cognix_research_watch_v1"
+COGNIX_RESEARCH_ASSISTANT_VERSION = "cognix_research_assistant_v1"
+COGNIX_SOURCE_MONITOR_VERSION = "cognix_source_monitor_v1"
+COGNIX_RESEARCH_REPORT_GENERATOR_VERSION = "cognix_research_report_generator_v1"
 
 
 RESEARCH_SOURCES: list[dict[str, Any]] = [
@@ -156,6 +159,45 @@ TECHNIQUE_CATEGORIES: list[dict[str, Any]] = [
 MEASURABLE_GAIN_TYPES = ["speed", "memory", "cost", "quality", "security", "stability"]
 
 
+RESEARCH_ASSISTANT_SOURCE_CATALOG: list[dict[str, Any]] = [
+    {
+        "id": "arxiv",
+        "label": "arXiv",
+        "sourceTypes": ["paper", "preprint"],
+        "requiresNetwork": True,
+        "requiresSecret": False,
+    },
+    {
+        "id": "hugging-face-papers",
+        "label": "Hugging Face Papers",
+        "sourceTypes": ["paper_page", "model_card", "dataset_card"],
+        "requiresNetwork": True,
+        "requiresSecret": False,
+    },
+    {
+        "id": "github-trending",
+        "label": "GitHub",
+        "sourceTypes": ["reference_repo", "release_notes"],
+        "requiresNetwork": True,
+        "requiresSecret": False,
+    },
+    {
+        "id": "official-blogs",
+        "label": "Official AI Labs",
+        "sourceTypes": ["official_blog", "safety_report"],
+        "requiresNetwork": True,
+        "requiresSecret": False,
+    },
+    {
+        "id": "local-library",
+        "label": "CogniX Library",
+        "sourceTypes": ["saved_report", "project_document", "memory"],
+        "requiresNetwork": False,
+        "requiresSecret": False,
+    },
+]
+
+
 INTEGRATION_GATES: list[dict[str, Any]] = [
     {
         "id": "official_source_review",
@@ -236,6 +278,222 @@ def _normalize_key(value: Any) -> str:
 
 def _excerpt(value: Any, limit: int = 500) -> str:
     return _normalize_text(value)[:limit]
+
+
+def _source_catalog_record(source: Any, index: int = 0) -> dict[str, Any]:
+    if isinstance(source, str):
+        source_id = _normalize_key(source) or f"source_{index + 1}"
+        label = _normalize_text(source) or f"Source {index + 1}"
+        raw = {"id": source_id, "label": label}
+    else:
+        raw = _as_dict(source)
+        source_id = _normalize_key(raw.get("id") or raw.get("name") or raw.get("label")) or f"source_{index + 1}"
+        label = _normalize_text(raw.get("label") or raw.get("name") or raw.get("id")) or f"Source {index + 1}"
+
+    catalog = next(
+        (
+            item for item in RESEARCH_ASSISTANT_SOURCE_CATALOG
+            if source_id == _normalize_key(item["id"]) or source_id == _normalize_key(item["label"])
+        ),
+        None,
+    )
+    if catalog:
+        record = deepcopy(catalog)
+    else:
+        record = {
+            "id": source_id[:120],
+            "label": label[:180],
+            "sourceTypes": _as_list(raw.get("sourceTypes")) or ["web_reference"],
+            "requiresNetwork": bool(raw.get("requiresNetwork", True)),
+            "requiresSecret": bool(raw.get("requiresSecret", False)),
+        }
+    record["selected"] = True
+    record["monitorMode"] = "planned_only"
+    return record
+
+
+def _normalize_research_sources(sources: list[Any] | None) -> list[dict[str, Any]]:
+    normalized = [
+        _source_catalog_record(source, index)
+        for index, source in enumerate(_as_list(sources))
+    ]
+    if normalized:
+        return normalized
+    return [
+        _source_catalog_record("arxiv", 0),
+        _source_catalog_record("hugging-face-papers", 1),
+        _source_catalog_record("official-blogs", 2),
+    ]
+
+
+def build_research_assistant_blueprint() -> dict[str, Any]:
+    return {
+        "researchAssistantVersion": COGNIX_RESEARCH_ASSISTANT_VERSION,
+        "sourceMonitorVersion": COGNIX_SOURCE_MONITOR_VERSION,
+        "researchReportGeneratorVersion": COGNIX_RESEARCH_REPORT_GENERATOR_VERSION,
+        "researchWatchVersion": COGNIX_RESEARCH_WATCH_VERSION,
+        "services": ["ResearchAssistantService", "SourceMonitor", "ResearchReportGenerator"],
+        "sourceCatalog": deepcopy(RESEARCH_ASSISTANT_SOURCE_CATALOG),
+        "frequencies": ["manual", "daily", "weekly", "monthly"],
+        "reportFormats": ["brief", "technical", "executive", "timeline"],
+        "pipeline": ["sources", "collection_plan", "summary_plan", "comparison", "archive", "report"],
+        "policies": {
+            "networkCollectionRequiresWorker": True,
+            "sourceAttributionRequired": True,
+            "reportGenerationUsesProvidedItemsOnly": True,
+            "automaticCollectionStartsNow": False,
+            "rawSourceArchivalByDefault": False,
+        },
+        "sideEffects": {
+            "networkResearch": False,
+            "sourceFetch": False,
+            "modelLoad": False,
+            "generation": False,
+            "reportWrite": False,
+            "topicWrite": False,
+            "itemWrite": False,
+            "jobEnqueue": False,
+        },
+    }
+
+
+def build_research_topic_plan(
+    *,
+    topic: str,
+    sources: list[Any] | None = None,
+    frequency: str | None = None,
+    output_format: str | None = None,
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    normalized_topic = _normalize_text(topic)
+    normalized_sources = _normalize_research_sources(sources)
+    frequency_id = _normalize_key(frequency or "weekly") or "weekly"
+    if frequency_id not in {"manual", "daily", "weekly", "monthly"}:
+        frequency_id = "weekly"
+    format_id = _normalize_key(output_format or "brief") or "brief"
+    if format_id not in {"brief", "technical", "executive", "timeline"}:
+        format_id = "brief"
+    network_sources = [item for item in normalized_sources if item.get("requiresNetwork")]
+    secret_sources = [item for item in normalized_sources if item.get("requiresSecret")]
+    warnings: list[str] = []
+    if not normalized_topic:
+        warnings.append("Sujet de veille vide: CogniX attend un theme clair avant collecte.")
+    if secret_sources:
+        warnings.append("Certaines sources demandent un secret; la collecte reste bloquee sans permission.")
+    if network_sources:
+        warnings.append("Collecte reseau planifiee via worker dedie, jamais lancee par ce planner.")
+
+    return {
+        "researchAssistantVersion": COGNIX_RESEARCH_ASSISTANT_VERSION,
+        "sourceMonitorVersion": COGNIX_SOURCE_MONITOR_VERSION,
+        "researchReportGeneratorVersion": COGNIX_RESEARCH_REPORT_GENERATOR_VERSION,
+        "mode": "dry_run_research_watch",
+        "topic": {
+            "name": normalized_topic,
+            "topicKey": _normalize_key(normalized_topic)[:160],
+            "projectId": project_id,
+            "frequency": frequency_id,
+            "outputFormat": format_id,
+        },
+        "sources": normalized_sources,
+        "collectionPlan": {
+            "sourceCount": len(normalized_sources),
+            "networkSourceCount": len(network_sources),
+            "secretSourceCount": len(secret_sources),
+            "collector": "worker_required",
+            "willFetchNow": False,
+            "willEnqueueNow": False,
+        },
+        "reportPlan": {
+            "format": format_id,
+            "sections": ["key_findings", "source_table", "comparison", "next_actions"],
+            "archivePolicy": "store_summary_and_source_metadata",
+            "style": "cognix_document",
+        },
+        "warnings": warnings,
+        "sideEffects": build_research_assistant_blueprint()["sideEffects"],
+    }
+
+
+def _research_item_record(item: dict[str, Any], index: int) -> dict[str, Any]:
+    title = _normalize_text(item.get("title") or item.get("name") or f"Research item {index + 1}")[:240]
+    summary = _excerpt(item.get("summary") or item.get("abstract") or item.get("description"), 1200)
+    source = _normalize_text(item.get("source") or item.get("sourceId") or item.get("provider") or "provided")
+    url = _normalize_text(item.get("url") or item.get("link"))[:1000]
+    relevance = _as_float(item.get("relevanceScore") or item.get("score"))
+    return {
+        "title": title,
+        "summary": summary,
+        "source": source[:160],
+        "url": url or None,
+        "itemType": _normalize_key(item.get("type") or item.get("itemType") or "research_item")[:80],
+        "publishedAt": _normalize_text(item.get("publishedAt") or item.get("published_at"))[:80] or None,
+        "relevanceScore": relevance if relevance is not None else round(max(0.1, 1.0 - index * 0.08), 2),
+    }
+
+
+def build_research_report_plan(
+    *,
+    topic: str,
+    items: list[dict[str, Any]] | None = None,
+    output_format: str | None = None,
+    sources: list[Any] | None = None,
+) -> dict[str, Any]:
+    normalized_topic = _normalize_text(topic)
+    records = [
+        _research_item_record(item, index)
+        for index, item in enumerate(_as_list(items))
+        if isinstance(item, dict)
+    ]
+    format_id = _normalize_key(output_format or "brief") or "brief"
+    if format_id not in {"brief", "technical", "executive", "timeline"}:
+        format_id = "brief"
+    top_titles = [item["title"] for item in records[:5] if item.get("title")]
+    if top_titles:
+        summary = (
+            f"Veille CogniX sur '{normalized_topic}'. "
+            "Points a suivre: " + "; ".join(top_titles) + "."
+        )
+    else:
+        summary = (
+            f"Veille CogniX sur '{normalized_topic}'. "
+            "Aucun item fourni pour ce rapport; la collecte reste planifiee via worker."
+        )
+    comparison = [
+        {
+            "title": item["title"],
+            "source": item["source"],
+            "relevanceScore": item["relevanceScore"],
+            "status": "candidate",
+        }
+        for item in records[:8]
+    ]
+    return {
+        "researchAssistantVersion": COGNIX_RESEARCH_ASSISTANT_VERSION,
+        "sourceMonitorVersion": COGNIX_SOURCE_MONITOR_VERSION,
+        "researchReportGeneratorVersion": COGNIX_RESEARCH_REPORT_GENERATOR_VERSION,
+        "mode": "dry_run_report_plan",
+        "topic": normalized_topic,
+        "format": format_id,
+        "items": records,
+        "report": {
+            "title": f"Veille CogniX: {normalized_topic[:90]}",
+            "summary": summary,
+            "sections": [
+                {"id": "key_findings", "title": "Elements importants", "itemCount": len(records)},
+                {"id": "comparison", "title": "Comparaison", "itemCount": len(comparison)},
+                {"id": "sources", "title": "Sources", "itemCount": len(_normalize_research_sources(sources))},
+                {"id": "next_actions", "title": "Prochaines actions", "itemCount": 3},
+            ],
+            "comparison": comparison,
+            "nextActions": [
+                "Verifier les sources officielles avant adoption.",
+                "Comparer avec un benchmark CogniX si une optimisation est candidate.",
+                "Archiver le rapport dans la bibliotheque CogniX.",
+            ],
+        },
+        "sideEffects": build_research_assistant_blueprint()["sideEffects"],
+    }
 
 
 def _source_for(source_name: str | None) -> dict[str, Any]:
