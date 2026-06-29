@@ -14,6 +14,8 @@ from typing import Any
 
 
 COGNIX_THINKING_STATUS_VERSION = "cognix_thinking_status_v1"
+COGNIX_VISIBLE_THINKING_TIMELINE_VERSION = "cognix_visible_thinking_timeline_v1"
+COGNIX_THINKING_REDACTION_CONTRACT_VERSION = "cognix_thinking_redaction_contract_v1"
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -26,6 +28,60 @@ def _as_list(value: Any) -> list[Any]:
 
 def _objective_excerpt(value: Any) -> str:
     return " ".join(str(value or "").split())[:500]
+
+
+def _clean_label(value: Any, fallback: str = "General") -> str:
+    text = " ".join(str(value or fallback).replace("_", " ").split()).strip()
+    return text[:80] or fallback
+
+
+def _technical_markers(
+    *,
+    classification: dict[str, Any],
+    recommendation: dict[str, Any],
+    model_lifecycle_plan: dict[str, Any],
+    project_expert_plan: dict[str, Any],
+) -> list[str]:
+    markers: list[str] = []
+
+    def add(value: Any) -> None:
+        if not isinstance(value, str):
+            return
+        clean = value.strip()
+        if len(clean) >= 4 and clean.casefold() not in {"code", "maths", "general"}:
+            markers.append(clean.casefold())
+
+    add(recommendation.get("modelId"))
+    add(recommendation.get("baseUrl"))
+    add(classification.get("recommendedModelId"))
+    add(_as_dict(_as_dict(model_lifecycle_plan.get("targetModel")).get("model")).get("id"))
+    add(_as_dict(model_lifecycle_plan.get("target")).get("modelId"))
+    primary = _as_dict(project_expert_plan.get("primaryExpert"))
+    add(primary.get("profileModelId"))
+    add(_as_dict(primary.get("selectedModel")).get("modelId"))
+    external_moe = _as_dict(classification.get("externalMoePlan"))
+    add(_as_dict(external_moe.get("primaryExpert")).get("modelId"))
+    for item in _as_list(external_moe.get("secondaryExperts")):
+        add(_as_dict(item).get("modelId"))
+    return sorted(set(markers), key = len, reverse = True)
+
+
+def _visible_text(value: Any) -> str:
+    if isinstance(value, dict):
+        return " ".join(_visible_text(item) for item in value.values())
+    if isinstance(value, list):
+        return " ".join(_visible_text(item) for item in value)
+    return str(value or "")
+
+
+def _contains_technical_marker(value: Any, markers: list[str]) -> bool:
+    text = _visible_text(value).casefold()
+    return any(marker and marker in text for marker in markers)
+
+
+def _contains_routing_score(value: Any) -> bool:
+    text = _visible_text(value).casefold()
+    return "routing_score" in text or "scores" in text or "0." in text
 
 
 def _visibility_status(
@@ -60,6 +116,8 @@ def _current_message(status: str) -> str:
 def _timeline_status(status: str, step_id: str) -> str:
     if step_id in {"analyze_request", "choose_strategy"}:
         return "attention" if status == "needs_clarification" and step_id == "analyze_request" else "complete"
+    if step_id == "select_expert":
+        return "attention" if status == "needs_clarification" else "complete"
     if step_id == "prepare_model":
         return "attention" if status in {"needs_setup", "model_preparation_required", "blocked"} else "complete"
     if step_id in {"prepare_context", "check_permissions"}:
@@ -82,6 +140,67 @@ def _prepare_model_detail(status: str, model_lifecycle_plan: dict[str, Any]) -> 
     if load_action.startswith("defer"):
         return "Chargement reporte."
     return "Preparation du modele."
+
+
+def _expert_detail(classification: dict[str, Any], project_expert_plan: dict[str, Any]) -> str:
+    external_moe = _as_dict(classification.get("externalMoePlan"))
+    primary = _as_dict(external_moe.get("primaryExpert"))
+    label = _clean_label(primary.get("label") or classification.get("label"), "General")
+    if _as_dict(external_moe.get("clarification")).get("required"):
+        return "Plusieurs expertises possibles; precision utile avant chargement."
+    if label.casefold().startswith("cognix "):
+        return f"{label} prepare comme expert principal."
+    return f"Expert {label} prepare comme expert principal."
+
+
+def _visible_status_events(
+    *,
+    status: str,
+    classification: dict[str, Any],
+    task_strategy: dict[str, Any],
+    rag_plan: dict[str, Any],
+) -> list[dict[str, Any]]:
+    external_moe = _as_dict(classification.get("externalMoePlan"))
+    primary = _as_dict(external_moe.get("primaryExpert"))
+    expert_label = _clean_label(primary.get("label") or classification.get("label"), "General")
+    rag_path = str(rag_plan.get("recommendedPath") or "no_rag_needed")
+    events = [
+        {
+            "id": "request_understood",
+            "message": "Analyse de la demande...",
+            "status": _timeline_status(status, "analyze_request"),
+        },
+        {
+            "id": "expert_selection",
+            "message": f"Selection de {expert_label}...",
+            "status": _timeline_status(status, "select_expert"),
+        },
+        {
+            "id": "strategy_prepared",
+            "message": "Preparation de la strategie adaptee...",
+            "status": _timeline_status(status, "choose_strategy"),
+        },
+        {
+            "id": "context_prepared",
+            "message": "Consultation du contexte utile..." if rag_path == "rag_first" else "Preparation du contexte...",
+            "status": _timeline_status(status, "prepare_context"),
+        },
+        {
+            "id": "guardrails_applied",
+            "message": "Verification des permissions...",
+            "status": _timeline_status(status, "check_permissions"),
+        },
+    ]
+    if str(task_strategy.get("path") or "") == "codex_guarded_pipeline":
+        events.insert(
+            3,
+            {
+                "id": "code_guard_ready",
+                "message": "Pipeline code securise prepare...",
+                "status": _timeline_status(status, "choose_strategy"),
+            },
+        )
+    return events
 
 
 def _progress_for_status(status: str) -> int:
@@ -117,6 +236,12 @@ def _visible_timeline(
             "label": "Choix de la strategie",
             "status": _timeline_status(status, "choose_strategy"),
             "detail": strategy_label,
+        },
+        {
+            "id": "select_expert",
+            "label": "Selection de l'expert",
+            "status": _timeline_status(status, "select_expert"),
+            "detail": _expert_detail(classification = project_expert_plan.get("classification", {}), project_expert_plan = project_expert_plan),
         },
         {
             "id": "prepare_model",
@@ -168,8 +293,27 @@ def build_thinking_status_plan(
         task_strategy = task_strategy,
         model_lifecycle_plan = model_lifecycle_plan,
         rag_plan = rag_plan,
+        project_expert_plan = {**project_expert_plan, "classification": classification},
+    )
+    visible_events = _visible_status_events(
+        status = status,
+        classification = classification,
+        task_strategy = task_strategy,
+        rag_plan = rag_plan,
+    )
+    technical_markers = _technical_markers(
+        classification = classification,
+        recommendation = recommendation,
+        model_lifecycle_plan = model_lifecycle_plan,
         project_expert_plan = project_expert_plan,
     )
+    visible_payload = {
+        "currentMessage": _current_message(status),
+        "visibleTimeline": timeline,
+        "visibleStatusEvents": visible_events,
+    }
+    timeline_contains_model_ids = _contains_technical_marker(visible_payload, technical_markers)
+    timeline_contains_scores = _contains_routing_score(visible_payload)
     hidden_fields = [
         "modelId",
         "selectedModelId",
@@ -181,6 +325,7 @@ def build_thinking_status_plan(
     ]
     return {
         "thinkingStatusVersion": COGNIX_THINKING_STATUS_VERSION,
+        "visibleTimelineVersion": COGNIX_VISIBLE_THINKING_TIMELINE_VERSION,
         "mode": "dry_run",
         "audience": audience or "chat",
         "objectiveExcerpt": _objective_excerpt(objective),
@@ -188,6 +333,7 @@ def build_thinking_status_plan(
         "currentMessage": _current_message(status),
         "progress": _progress_for_status(status),
         "visibleTimeline": timeline,
+        "visibleStatusEvents": visible_events,
         "visibleSummary": {
             "domain": classification.get("label") or classification.get("selectedDomain") or "General",
             "strategy": task_strategy.get("label") or task_strategy.get("path") or "CogniX",
@@ -203,10 +349,12 @@ def build_thinking_status_plan(
             "technicalDetailsAvailableOnlyInAudit": True,
         },
         "redaction": {
+            "redactionContractVersion": COGNIX_THINKING_REDACTION_CONTRACT_VERSION,
             "hiddenTechnicalFields": hidden_fields,
-            "visibleTimelineContainsModelIds": False,
-            "visibleTimelineContainsRoutingScores": False,
+            "visibleTimelineContainsModelIds": timeline_contains_model_ids,
+            "visibleTimelineContainsRoutingScores": timeline_contains_scores,
             "visibleTimelineContainsRawHistory": False,
+            "verifiedNoTechnicalLeak": not timeline_contains_model_ids and not timeline_contains_scores,
         },
         "policySummary": {
             "automaticExecutionAllowed": bool(execution_policy.get("automaticExecutionAllowed")),

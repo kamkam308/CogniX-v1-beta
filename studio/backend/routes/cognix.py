@@ -3849,10 +3849,13 @@ async def thinking_status_plan(
         severity = "warning" if thinking.get("status") != "ready" else "notice",
         metadata = {
             "thinkingStatusVersion": thinking.get("thinkingStatusVersion"),
+            "visibleTimelineVersion": thinking.get("visibleTimelineVersion"),
             "status": thinking.get("status"),
             "audience": thinking.get("audience"),
             "progress": thinking.get("progress"),
             "hiddenTechnicalFields": thinking.get("redaction", {}).get("hiddenTechnicalFields", []),
+            "redactionContractVersion": thinking.get("redaction", {}).get("redactionContractVersion"),
+            "verifiedNoTechnicalLeak": thinking.get("redaction", {}).get("verifiedNoTechnicalLeak"),
             "sideEffects": thinking.get("sideEffects", {}),
         },
     )

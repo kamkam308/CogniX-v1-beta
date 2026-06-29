@@ -4677,7 +4677,21 @@ def test_thinking_status_redacts_technical_model_details():
 
     plan = cognix_thinking_status.build_thinking_status_plan(
         objective = "Explique ce bug avec huihui_ai/qwen3-vl-abliterated:4b-instruct",
-        classification = {"selectedDomain": "code", "label": "Code", "needsClarification": False},
+        classification = {
+            "selectedDomain": "code",
+            "label": "Code",
+            "recommendedModelId": "cognix-code-4b-q4",
+            "needsClarification": False,
+            "externalMoePlan": {
+                "routerVersion": "cognix_external_moe_router_v1",
+                "primaryExpert": {
+                    "expertId": "cognix-code",
+                    "label": "CogniX Code",
+                    "modelId": "cognix-code-4b-q4",
+                },
+                "secondaryExperts": [],
+            },
+        },
         task_strategy = {"label": "Assistant code", "path": "codex_guarded_pipeline"},
         recommendation = {"readiness": "ready", "modelId": "huihui_ai/qwen3-vl-abliterated:4b-instruct"},
         model_lifecycle_plan = lifecycle,
@@ -4691,13 +4705,23 @@ def test_thinking_status_redacts_technical_model_details():
     )
 
     visible_text = str(plan["visibleTimeline"]).casefold()
+    visible_events = str(plan["visibleStatusEvents"]).casefold()
     assert plan["thinkingStatusVersion"] == "cognix_thinking_status_v1"
+    assert plan["visibleTimelineVersion"] == "cognix_visible_thinking_timeline_v1"
     assert plan["status"] == "ready"
     assert plan["progress"] == 100
+    assert any(item["id"] == "select_expert" for item in plan["visibleTimeline"])
+    assert any(item["id"] == "expert_selection" for item in plan["visibleStatusEvents"])
     assert plan["displayContract"]["frontendMustHideModelIdentifiers"] is True
+    assert plan["redaction"]["redactionContractVersion"] == "cognix_thinking_redaction_contract_v1"
     assert plan["redaction"]["visibleTimelineContainsModelIds"] is False
+    assert plan["redaction"]["visibleTimelineContainsRoutingScores"] is False
+    assert plan["redaction"]["verifiedNoTechnicalLeak"] is True
     assert "qwen" not in visible_text
+    assert "qwen" not in visible_events
     assert "cognix-code-4b-q4" not in visible_text
+    assert "cognix-code-4b-q4" not in visible_events
+    assert "0." not in visible_text
     assert plan["sideEffects"]["modelLoad"] is False
     assert plan["sideEffects"]["uiMutation"] is False
 
@@ -4761,7 +4785,10 @@ def test_thinking_status_endpoint_logs_audited_visible_plan(monkeypatch):
     assert body["auditLogId"].startswith("aud_")
     assert body["plannerVersion"] == "cognix_thinking_status_v1"
     assert thinking["displayContract"]["frontendMayShowOnlyTimeline"] is True
+    assert thinking["visibleTimelineVersion"] == "cognix_visible_thinking_timeline_v1"
+    assert any(item["id"] == "expert_selection" for item in thinking["visibleStatusEvents"])
     assert thinking["redaction"]["visibleTimelineContainsRoutingScores"] is False
+    assert thinking["redaction"]["verifiedNoTechnicalLeak"] is True
     assert thinking["sideEffects"]["generation"] is False
     assert thinking["sideEffects"]["uiMutation"] is False
 
@@ -4771,6 +4798,9 @@ def test_thinking_status_endpoint_logs_audited_visible_plan(monkeypatch):
     assert log["action"] == "thinking_status_plan_built"
     assert log["resourceType"] == "cognix_thinking_status"
     assert log["metadata"]["thinkingStatusVersion"] == "cognix_thinking_status_v1"
+    assert log["metadata"]["visibleTimelineVersion"] == "cognix_visible_thinking_timeline_v1"
+    assert log["metadata"]["redactionContractVersion"] == "cognix_thinking_redaction_contract_v1"
+    assert log["metadata"]["verifiedNoTechnicalLeak"] is True
     assert "modelId" in log["metadata"]["hiddenTechnicalFields"]
     assert log["metadata"]["sideEffects"]["uiMutation"] is False
 
