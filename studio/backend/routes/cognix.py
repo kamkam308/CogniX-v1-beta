@@ -11876,6 +11876,7 @@ async def project_expert_plan(
         rag_plan = plan["ragPlan"],
         context_plan = plan["contextPlan"],
     )
+    project_session_contract = expert_plan.get("projectSessionContract", {})
     audit = cognix_db.create_audit_log(
         username = current_subject,
         actor_username = current_subject,
@@ -11891,6 +11892,9 @@ async def project_expert_plan(
             "primaryDomain": expert_plan.get("primaryExpert", {}).get("domain"),
             "selectedModelId": expert_plan.get("primaryExpert", {}).get("selectedModel", {}).get("modelId"),
             "selectionSource": expert_plan.get("selectionSource"),
+            "projectSessionContractVersion": project_session_contract.get("contractVersion"),
+            "projectSessionMode": project_session_contract.get("sessionMode"),
+            "projectSessionWillLoadModel": False,
             "secondaryExpertIds": [
                 item.get("expertId") for item in expert_plan.get("secondaryExperts", []) if isinstance(item, dict)
             ],

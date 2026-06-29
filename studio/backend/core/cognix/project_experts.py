@@ -17,6 +17,7 @@ from typing import Any
 
 
 COGNIX_PROJECT_EXPERTS_VERSION = "cognix_project_experts_v1"
+COGNIX_PROJECT_SESSION_CONTRACT_VERSION = "cognix_project_session_contract_v1"
 
 EXPERT_PROFILES: dict[str, dict[str, Any]] = {
     "general": {
@@ -242,6 +243,142 @@ def _preload_intent(preload_plan: dict[str, Any], selected_model: dict[str, Any]
     }
 
 
+def _project_session_contract(
+    *,
+    project_id: str | None,
+    project_type: str | None,
+    project_mode: str,
+    primary: dict[str, Any],
+    selected_model: dict[str, Any],
+    secondary: list[dict[str, Any]],
+    use_generalist_verifier: bool,
+    classification: dict[str, Any],
+    preload_plan: dict[str, Any],
+    rag_plan: dict[str, Any],
+    context_plan: dict[str, Any],
+) -> dict[str, Any]:
+    token_budget = _as_dict(context_plan.get("tokenBudget"))
+    preload_queue = _as_dict(preload_plan.get("preloadQueueContract"))
+    preload_gate = _as_dict(preload_queue.get("executionGate"))
+    preload_action = (_as_list(preload_plan.get("actions")) or [{}])[0]
+    session_mode = (
+        "direct_project_expert"
+        if (project_id or project_type) and primary.get("domain") != "general"
+        else "router_guided_project"
+    )
+    startup_sequence = [
+        {
+            "id": "resolve_project_scope",
+            "status": "ready" if project_id or project_type else "optional",
+            "sideEffects": {"projectMutation": False},
+        },
+        {
+            "id": "select_primary_expert",
+            "status": "ready",
+            "expertId": primary.get("id"),
+            "modelId": selected_model.get("modelId"),
+            "sideEffects": {"modelLoad": False},
+        },
+        {
+            "id": "assemble_project_context",
+            "status": "ready",
+            "assemblyStrategy": context_plan.get("assemblyStrategy"),
+            "rawHistoryAllowed": bool(token_budget.get("rawHistoryAllowed")),
+            "sideEffects": {"memoryWrite": False, "ragRetrieval": False},
+        },
+        {
+            "id": "plan_project_preload",
+            "status": preload_queue.get("status") or preload_action.get("type") or "deferred",
+            "preloadQueueContractVersion": preload_queue.get("contractVersion"),
+            "willLoadNow": bool(preload_gate.get("willLoadNow")),
+            "sideEffects": {"modelLoad": False, "cacheMutation": False},
+        },
+    ]
+    if use_generalist_verifier:
+        startup_sequence.append(
+            {
+                "id": "attach_generalist_verifier",
+                "status": "ready",
+                "expertId": "cognix-general",
+                "sideEffects": {"modelLoad": False, "generation": False},
+            }
+        )
+
+    return {
+        "contractVersion": COGNIX_PROJECT_SESSION_CONTRACT_VERSION,
+        "mode": "project_session_dry_run",
+        "sessionMode": session_mode,
+        "projectId": project_id,
+        "projectType": project_type,
+        "projectMode": project_mode,
+        "primaryExpertId": primary.get("id"),
+        "primaryDomain": primary.get("domain"),
+        "primaryModelId": selected_model.get("modelId"),
+        "secondaryExpertIds": [item.get("expertId") for item in secondary if isinstance(item, dict)],
+        "startupSequence": startup_sequence,
+        "routingPolicy": {
+            "directPrimaryExpertPreferred": session_mode == "direct_project_expert",
+            "lightweightRouterFallbackOnly": True,
+            "secondaryExpertAllowed": bool(secondary),
+            "generalistVerifierEnabled": use_generalist_verifier,
+            "backendOrchestratorRequired": True,
+            "frontendDirectModelCallAllowed": False,
+            "automaticModelLoadAllowed": False,
+        },
+        "contextBoundary": {
+            "contextManagerVersion": context_plan.get("contextManagerVersion"),
+            "assemblyStrategy": context_plan.get("assemblyStrategy"),
+            "includedChannelIds": context_plan.get("includedChannelIds", []),
+            "maxContextTokens": token_budget.get("maxContextTokens"),
+            "rawHistoryAllowed": bool(token_budget.get("rawHistoryAllowed")),
+            "projectMemoryRequired": bool(project_id),
+            "ragRecommendedPath": rag_plan.get("recommendedPath"),
+            "ragStrategy": _as_dict(rag_plan.get("retrieval")).get("strategy"),
+            "memoryWriteAllowedNow": False,
+            "ragRetrievalAllowedNow": False,
+        },
+        "preloadBoundary": {
+            "preloadAction": preload_action.get("type") or "defer_preload",
+            "preloadQueueContractVersion": preload_queue.get("contractVersion"),
+            "preloadQueueStatus": preload_queue.get("status"),
+            "willLoadNow": bool(preload_gate.get("willLoadNow")),
+            "automaticPreloadAllowed": bool(preload_gate.get("automaticPreloadAllowed")),
+            "frontendDirectModelLoadAllowed": False,
+        },
+        "clarification": {
+            "required": bool(classification.get("needsClarification")) and not project_type,
+            "reason": classification.get("reason"),
+        },
+        "approvalGates": [
+            "project_context_ready",
+            "model_residency_policy",
+            "user_message_submitted",
+        ],
+        "blockedActions": [
+            "model_load",
+            "model_unload",
+            "runtime_mutation",
+            "cache_mutation",
+            "generation",
+            "network_model_call",
+            "memory_write",
+            "rag_retrieval",
+            "frontend_direct_model_call",
+        ],
+        "sideEffects": {
+            "modelLoad": False,
+            "modelUnload": False,
+            "generation": False,
+            "networkModelCall": False,
+            "projectMutation": False,
+            "defaultModelWrite": False,
+            "cacheMutation": False,
+            "ragRetrieval": False,
+            "memoryWrite": False,
+        },
+    }
+
+
 def build_project_expert_registry() -> dict[str, Any]:
     experts = []
     for expert in EXPERT_PROFILES.values():
@@ -261,6 +398,7 @@ def build_project_expert_registry() -> dict[str, Any]:
         },
         "globalPolicies": {
             "specializedProjectsPreferPrimaryExpert": True,
+            "directProjectSessionContract": True,
             "fallbackToGeneralist": True,
             "projectMemoryRequired": True,
             "frontendCannotLoadExpertDirectly": True,
@@ -308,6 +446,19 @@ def build_project_expert_plan(
         warnings.append("Modele par defaut projet prioritaire sur le profil expert CogniX.")
     if recommendation.get("readiness") not in {"ready", "ready_with_caution", "model_missing"}:
         warnings.append("Runtime local pas pret: l'expert projet reste en planification.")
+    project_session_contract = _project_session_contract(
+        project_id = project_id,
+        project_type = project_type,
+        project_mode = project_mode,
+        primary = primary,
+        selected_model = selected_model,
+        secondary = secondary,
+        use_generalist_verifier = use_generalist_verifier,
+        classification = classification,
+        preload_plan = preload_plan,
+        rag_plan = rag_plan,
+        context_plan = context_plan,
+    )
 
     return {
         "projectExpertsVersion": COGNIX_PROJECT_EXPERTS_VERSION,
@@ -346,8 +497,11 @@ def build_project_expert_plan(
             "willRetrieveRag": False,
         },
         "preloadIntent": _preload_intent(preload_plan, selected_model),
+        "projectSessionContract": project_session_contract,
         "executionContract": {
             "routingMode": "direct_expert_for_specialized_project" if project_id or project_type else "router_guided_expert",
+            "projectSessionContractVersion": project_session_contract.get("contractVersion"),
+            "projectSessionMode": project_session_contract.get("sessionMode"),
             "frontendDirectModelCallAllowed": False,
             "backendOrchestratorRequired": True,
             "fallbackExpertId": "cognix-general",

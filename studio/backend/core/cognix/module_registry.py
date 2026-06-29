@@ -931,6 +931,8 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
             "project_decisions",
             "specialized_projects",
             "project_expert_routing",
+            "project_session_contract",
+            "direct_project_expert_session",
             "generalist_verifier",
         ],
         "routes": [

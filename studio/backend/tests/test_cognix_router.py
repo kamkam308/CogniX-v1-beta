@@ -349,10 +349,17 @@ def test_orchestrator_builds_dry_run_plan_without_loading(monkeypatch):
     assert plan["projectExpertPlan"]["primaryExpert"]["selectedModel"]["source"] == "expert_profile"
     assert plan["projectExpertPlan"]["generalistVerifier"]["enabled"] is True
     assert plan["projectExpertPlan"]["executionContract"]["frontendDirectModelCallAllowed"] is False
+    assert plan["projectExpertPlan"]["projectSessionContract"]["contractVersion"] == "cognix_project_session_contract_v1"
+    assert plan["projectExpertPlan"]["projectSessionContract"]["sessionMode"] == "direct_project_expert"
+    assert plan["projectExpertPlan"]["projectSessionContract"]["routingPolicy"]["automaticModelLoadAllowed"] is False
+    assert plan["projectExpertPlan"]["projectSessionContract"]["preloadBoundary"]["willLoadNow"] is False
     assert plan["projectExpertPlan"]["sideEffects"]["modelLoad"] is False
     assert plan["projectExpertPlan"]["sideEffects"]["projectMutation"] is False
     assert plan["executionStrategy"]["projectExpertId"] == "cognix-code"
     assert plan["executionStrategy"]["projectExpertDomain"] == "code"
+    assert plan["executionStrategy"]["projectSessionContractVersion"] == "cognix_project_session_contract_v1"
+    assert plan["executionStrategy"]["projectSessionMode"] == "direct_project_expert"
+    assert plan["executionStrategy"]["projectSessionWillLoadModel"] is False
     assert plan["ragPlan"]["plannerVersion"] == "cognix_rag_planner_v1"
     assert plan["ragPlan"]["recommendedPath"] == "no_rag_needed"
     assert plan["ragPlan"]["sideEffects"]["ragIndexing"] is False
@@ -3884,6 +3891,17 @@ def test_project_experts_plan_specialized_project_without_loading():
     assert plan["projectMemoryPlan"]["rawHistoryAllowed"] is False
     assert plan["preloadIntent"]["willPreload"] is False
     assert plan["executionContract"]["routingMode"] == "direct_expert_for_specialized_project"
+    assert plan["executionContract"]["projectSessionContractVersion"] == "cognix_project_session_contract_v1"
+    session = plan["projectSessionContract"]
+    assert session["contractVersion"] == "cognix_project_session_contract_v1"
+    assert session["sessionMode"] == "direct_project_expert"
+    assert session["routingPolicy"]["directPrimaryExpertPreferred"] is True
+    assert session["routingPolicy"]["frontendDirectModelCallAllowed"] is False
+    assert session["routingPolicy"]["automaticModelLoadAllowed"] is False
+    assert session["contextBoundary"]["projectMemoryRequired"] is True
+    assert session["contextBoundary"]["rawHistoryAllowed"] is False
+    assert session["preloadBoundary"]["willLoadNow"] is False
+    assert "model_load" in session["blockedActions"]
     assert plan["executionContract"]["willLoadModel"] is False
     assert plan["sideEffects"]["modelLoad"] is False
     assert plan["sideEffects"]["defaultModelWrite"] is False
@@ -4029,6 +4047,10 @@ def test_project_expert_plan_endpoint_uses_project_default_and_logs_audit(monkey
     assert body["defaultModel"]["modelId"] == "huihui_ai/qwen3-vl-abliterated:4b-instruct"
     assert expert_plan["primaryExpert"]["expertId"] == "cognix-code"
     assert expert_plan["primaryExpert"]["selectedModel"]["source"] == "project_default_model"
+    assert expert_plan["projectSessionContract"]["contractVersion"] == "cognix_project_session_contract_v1"
+    assert expert_plan["projectSessionContract"]["sessionMode"] == "direct_project_expert"
+    assert expert_plan["projectSessionContract"]["routingPolicy"]["frontendDirectModelCallAllowed"] is False
+    assert expert_plan["projectSessionContract"]["routingPolicy"]["automaticModelLoadAllowed"] is False
     assert expert_plan["sideEffects"]["modelLoad"] is False
     assert expert_plan["sideEffects"]["projectMutation"] is False
     assert expert_plan["sideEffects"]["cacheMutation"] is False
@@ -4041,6 +4063,9 @@ def test_project_expert_plan_endpoint_uses_project_default_and_logs_audit(monkey
     assert log["metadata"]["projectExpertsVersion"] == "cognix_project_experts_v1"
     assert log["metadata"]["primaryExpertId"] == "cognix-code"
     assert log["metadata"]["selectedModelId"] == "huihui_ai/qwen3-vl-abliterated:4b-instruct"
+    assert log["metadata"]["projectSessionContractVersion"] == "cognix_project_session_contract_v1"
+    assert log["metadata"]["projectSessionMode"] == "direct_project_expert"
+    assert log["metadata"]["projectSessionWillLoadModel"] is False
     assert log["metadata"]["sideEffects"]["modelLoad"] is False
 
 
@@ -8401,6 +8426,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "project_dna_context_injection" in modules["cognix-projects"]["capabilities"]
     assert "project_constraints" in modules["cognix-projects"]["capabilities"]
     assert "project_decisions" in modules["cognix-projects"]["capabilities"]
+    assert "project_session_contract" in modules["cognix-projects"]["capabilities"]
+    assert "direct_project_expert_session" in modules["cognix-projects"]["capabilities"]
     assert "/api/cognix/projects/{project_id}/dna" in modules["cognix-projects"]["routes"]
     assert "/api/cognix/projects/{project_id}/dna/injection-plan" in modules["cognix-projects"]["routes"]
     assert modules["cognix-model-lifecycle"]["activationState"] == "ready"

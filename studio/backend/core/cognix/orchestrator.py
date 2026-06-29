@@ -109,6 +109,8 @@ def _architecture_decision(
     selected_adapter = _as_dict(runtime_adapter_plan.get("selectedAdapter"))
     selected_expert = _as_dict(project_expert_plan.get("primaryExpert"))
     selected_expert_model = _as_dict(selected_expert.get("selectedModel"))
+    project_session_contract = _as_dict(project_expert_plan.get("projectSessionContract"))
+    project_session_routing = _as_dict(project_session_contract.get("routingPolicy"))
     external_moe_plan = _as_dict(classification.get("externalMoePlan"))
     cache_next_action = _as_dict(cache.get("nextAction"))
     context_budget = _as_dict(context_plan.get("tokenBudget"))
@@ -214,6 +216,10 @@ def _architecture_decision(
             "domain": selected_expert.get("domain"),
             "modelId": selected_expert_model.get("modelId"),
             "generalistVerifierEnabled": bool(_as_dict(project_expert_plan.get("generalistVerifier")).get("enabled")),
+            "projectSessionContractVersion": project_session_contract.get("contractVersion"),
+            "sessionMode": project_session_contract.get("sessionMode"),
+            "directPrimaryExpertPreferred": bool(project_session_routing.get("directPrimaryExpertPreferred")),
+            "automaticModelLoadAllowed": bool(project_session_routing.get("automaticModelLoadAllowed")),
         },
         "fineTuning": {
             "recommendedPath": fine_tuning_plan.get("recommendedPath"),
@@ -610,6 +616,8 @@ def build_execution_plan(
     external_moe_plan = _as_dict(classification.get("externalMoePlan"))
     preload_queue_contract = _as_dict(preload_plan.get("preloadQueueContract"))
     preload_queue_gate = _as_dict(preload_queue_contract.get("executionGate"))
+    project_session_contract = _as_dict(project_expert_plan.get("projectSessionContract"))
+    project_session_routing = _as_dict(project_session_contract.get("routingPolicy"))
 
     execution_strategy = {
         "status": status,
@@ -637,6 +645,10 @@ def build_execution_plan(
         "projectExpertId": project_expert_plan.get("primaryExpert", {}).get("expertId"),
         "projectExpertDomain": project_expert_plan.get("primaryExpert", {}).get("domain"),
         "projectExpertModelId": project_expert_plan.get("primaryExpert", {}).get("selectedModel", {}).get("modelId"),
+        "projectSessionMode": project_session_contract.get("sessionMode"),
+        "projectSessionContractVersion": project_session_contract.get("contractVersion"),
+        "projectSessionDirectPrimaryExpert": bool(project_session_routing.get("directPrimaryExpertPreferred")),
+        "projectSessionWillLoadModel": False,
         "secondaryExpertIds": [
             item.get("expertId")
             for item in project_expert_plan.get("secondaryExperts", [])
