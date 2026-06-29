@@ -109,6 +109,7 @@ def _architecture_decision(
     selected_adapter = _as_dict(runtime_adapter_plan.get("selectedAdapter"))
     selected_expert = _as_dict(project_expert_plan.get("primaryExpert"))
     selected_expert_model = _as_dict(selected_expert.get("selectedModel"))
+    external_moe_plan = _as_dict(classification.get("externalMoePlan"))
     cache_next_action = _as_dict(cache.get("nextAction"))
     context_budget = _as_dict(context_plan.get("tokenBudget"))
     fine_tuning_method = _as_dict(fine_tuning_plan.get("method"))
@@ -159,6 +160,18 @@ def _architecture_decision(
             "routingMode": classification.get("routingMode"),
             "needsClarification": bool(classification.get("needsClarification")),
             "scores": classification.get("scores", {}),
+            "externalMoeRouterVersion": external_moe_plan.get("routerVersion"),
+            "externalMoeStrategy": external_moe_plan.get("strategy"),
+            "primaryExpertId": _as_dict(external_moe_plan.get("primaryExpert")).get("expertId"),
+            "secondaryExpertIds": [
+                item.get("expertId")
+                for item in external_moe_plan.get("secondaryExperts", [])
+                if isinstance(item, dict)
+            ],
+            "backendOrchestratorRequired": bool(
+                _as_dict(external_moe_plan.get("executionBoundary")).get("backendOrchestratorRequired", True)
+            ),
+            "frontendDirectModelCallAllowed": False,
         },
         "context": {
             "assemblyStrategy": context_plan.get("assemblyStrategy"),
@@ -586,6 +599,7 @@ def build_execution_plan(
         optimization_plan = optimization_plan,
         latest_benchmark_run = latest_benchmark_run,
     )
+    external_moe_plan = _as_dict(classification.get("externalMoePlan"))
 
     execution_strategy = {
         "status": status,
@@ -597,6 +611,8 @@ def build_execution_plan(
         "selectedModelId": recommendation.get("modelId"),
         "selectedModelLabel": recommendation.get("modelLabel"),
         "domainModelLabel": classification.get("recommendedModelLabel"),
+        "domainModelId": classification.get("recommendedModelId"),
+        "recommendedExpertId": classification.get("recommendedExpertId"),
         "recommendedPath": task_strategy.get("path"),
         "primaryCapability": task_strategy.get("primaryCapability"),
         "requiresHumanConfirmation": task_strategy.get("requiresHumanConfirmation"),
@@ -613,6 +629,15 @@ def build_execution_plan(
             if isinstance(item, dict)
         ],
         "generalistVerifierEnabled": project_expert_plan.get("generalistVerifier", {}).get("enabled"),
+        "externalMoeRouterVersion": external_moe_plan.get("routerVersion"),
+        "externalMoeStrategy": external_moe_plan.get("strategy"),
+        "externalMoePrimaryExpertId": _as_dict(external_moe_plan.get("primaryExpert")).get("expertId"),
+        "externalMoeSecondaryExpertIds": [
+            item.get("expertId")
+            for item in external_moe_plan.get("secondaryExperts", [])
+            if isinstance(item, dict)
+        ],
+        "externalMoeClarificationRequired": _as_dict(external_moe_plan.get("clarification")).get("required"),
         "ragReadyForRetrieval": rag_plan.get("readyForRetrieval"),
         "ragStrategy": rag_plan.get("retrieval", {}).get("strategy"),
         "contextAssemblyStrategy": context_plan.get("assemblyStrategy"),

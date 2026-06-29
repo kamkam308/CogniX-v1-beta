@@ -224,10 +224,22 @@ def stub_recommendation(
 def test_router_selects_code_for_python_bug():
     classification = classify_objective("Corrige ce bug Python dans mon backend API")
 
+    assert classification["routerVersion"] == "cognix_model_router_v2"
     assert classification["selectedDomain"] == "code"
     assert classification["recommendedModelLabel"] == "CogniX Code 4B"
+    assert classification["recommendedModelId"] == "cognix-code-4b-q4"
+    assert classification["recommendedExpertId"] == "cognix-code"
     assert classification["confidence"] >= 0.75
     assert classification["needsClarification"] is False
+    external_moe = classification["externalMoePlan"]
+    assert external_moe["routerVersion"] == "cognix_external_moe_router_v1"
+    assert external_moe["strategy"] == "direct_primary_expert"
+    assert external_moe["primaryExpert"]["expertId"] == "cognix-code"
+    assert external_moe["primaryExpert"]["willLoad"] is False
+    assert "cognix-general" in {item["expertId"] for item in external_moe["secondaryExperts"]}
+    assert external_moe["executionBoundary"]["backendOrchestratorRequired"] is True
+    assert external_moe["executionBoundary"]["frontendDirectModelCallAllowed"] is False
+    assert external_moe["sideEffects"]["modelLoad"] is False
 
 
 def test_router_flags_close_math_physics_domains():
@@ -237,6 +249,14 @@ def test_router_flags_close_math_physics_domains():
     assert classification["needsClarification"] is True
     assert classification["scores"]["maths"] > 0.4
     assert classification["scores"]["physique"] > 0.4
+    external_moe = classification["externalMoePlan"]
+    assert external_moe["strategy"] == "clarify_before_expert_load"
+    assert external_moe["clarification"]["required"] is True
+    assert {
+        external_moe["primaryExpert"]["expertId"],
+        *(item["expertId"] for item in external_moe["secondaryExperts"]),
+    }.issuperset({"cognix-maths", "cognix-physique"})
+    assert external_moe["sideEffects"]["generation"] is False
 
 
 def test_decision_engine_prefers_rag_before_fine_tuning_for_documents():
@@ -287,6 +307,10 @@ def test_orchestrator_builds_dry_run_plan_without_loading(monkeypatch):
     assert plan["architectureDecision"]["primaryCapability"] == "codex_secure_agent"
     assert plan["architectureDecision"]["selectedModel"]["modelLabel"] == "Qwen 4B local via Ollama"
     assert plan["architectureDecision"]["runtime"]["adapterId"] == "ollama"
+    assert plan["architectureDecision"]["routing"]["externalMoeRouterVersion"] == "cognix_external_moe_router_v1"
+    assert plan["architectureDecision"]["routing"]["externalMoeStrategy"] == "direct_primary_expert"
+    assert plan["architectureDecision"]["routing"]["primaryExpertId"] == "cognix-code"
+    assert plan["architectureDecision"]["routing"]["frontendDirectModelCallAllowed"] is False
     assert plan["architectureDecision"]["context"]["rawHistoryAllowed"] is False
     assert plan["architectureDecision"]["cache"]["cacheMutationAllowed"] is False
     assert plan["architectureDecision"]["preload"]["loadPredictionStatus"] == "predicted"
@@ -297,6 +321,11 @@ def test_orchestrator_builds_dry_run_plan_without_loading(monkeypatch):
     assert plan["architectureDecision"]["sideEffects"]["generation"] is False
     assert plan["executionStrategy"]["selectedModelLabel"] == "Qwen 4B local via Ollama"
     assert plan["executionStrategy"]["domainModelLabel"] == "CogniX Code 4B"
+    assert plan["executionStrategy"]["domainModelId"] == "cognix-code-4b-q4"
+    assert plan["executionStrategy"]["recommendedExpertId"] == "cognix-code"
+    assert plan["executionStrategy"]["externalMoeRouterVersion"] == "cognix_external_moe_router_v1"
+    assert plan["executionStrategy"]["externalMoePrimaryExpertId"] == "cognix-code"
+    assert plan["executionStrategy"]["externalMoeClarificationRequired"] is False
     assert plan["taskStrategy"]["decisionEngineVersion"] == "cognix_decision_engine_v1"
     assert plan["taskStrategy"]["path"] == "codex_guarded_pipeline"
     assert plan["executionStrategy"]["recommendedPath"] == "codex_guarded_pipeline"
@@ -8294,6 +8323,9 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/command-palette/plan" in modules["cognix-command-palette"]["routes"]
     assert modules["cognix-local-core"]["activationState"] == "ready"
     assert "module_manifest_registry" in modules["cognix-local-core"]["capabilities"]
+    assert "external_moe_model_router" in modules["cognix-local-core"]["capabilities"]
+    assert "multi_expert_routing_contract" in modules["cognix-local-core"]["capabilities"]
+    assert "secondary_expert_planning" in modules["cognix-local-core"]["capabilities"]
     assert "architecture_decision_contract" in modules["cognix-local-core"]["capabilities"]
     assert "orchestrator_runtime_plan" in modules["cognix-local-core"]["capabilities"]
     assert "runtime_optimization_contract" in modules["cognix-local-core"]["capabilities"]
@@ -11754,6 +11786,8 @@ def test_router_endpoint_uses_project_hint():
     assert classification["routingMode"] == "local_keyword_router_v1"
     assert classification["selectedDomain"] == "code"
     assert classification["recommendedModelLabel"] == "CogniX Code 4B"
+    assert classification["externalMoePlan"]["primaryExpert"]["expertId"] == "cognix-code"
+    assert classification["externalMoePlan"]["executionBoundary"]["backendOrchestratorRequired"] is True
 
 
 def test_orchestrator_plan_endpoint_logs_dry_run_decision(monkeypatch):
@@ -11785,6 +11819,8 @@ def test_orchestrator_plan_endpoint_logs_dry_run_decision(monkeypatch):
     assert body["mode"] == "dry_run"
     assert body["architectureDecision"]["architectureDecisionVersion"] == "cognix_architecture_decision_v1"
     assert body["architectureDecision"]["runtime"]["adapterId"] == "ollama"
+    assert body["architectureDecision"]["routing"]["externalMoeRouterVersion"] == "cognix_external_moe_router_v1"
+    assert body["architectureDecision"]["routing"]["primaryExpertId"] == "cognix-code"
     assert body["architectureDecision"]["security"]["automaticExecutionAllowed"] is False
     assert body["architectureDecision"]["sideEffects"]["codeModification"] is False
     assert body["classification"]["selectedDomain"] == "code"
@@ -11818,6 +11854,7 @@ def test_orchestrator_plan_endpoint_logs_dry_run_decision(monkeypatch):
     assert decision_log["decision"]["sideEffects"]["generation"] is False
     assert decision_log["decision"]["architectureDecisionVersion"] == "cognix_architecture_decision_v1"
     assert decision_log["decision"]["architectureDecision"]["runtime"]["adapterId"] == "ollama"
+    assert decision_log["decision"]["architectureDecision"]["routing"]["externalMoeRouterVersion"] == "cognix_external_moe_router_v1"
     assert decision_log["decision"]["architectureDecision"]["security"]["frontendDirectModelCallAllowed"] is False
 
 
