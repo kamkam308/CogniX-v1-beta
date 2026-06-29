@@ -646,6 +646,27 @@ class ModelLifecyclePlanRequest(BaseModel):
     offline_required: bool = Field(False, alias = "offlineRequired")
 
 
+class ModelInstallContractRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    model_id: str | None = Field(None, alias = "modelId", max_length = 240)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    project_type: str | None = Field(None, alias = "projectType", max_length = 80)
+    provider_type: str | None = Field(None, alias = "providerType", max_length = 80)
+    source: str | None = Field(None, max_length = 120)
+    revision: str | None = Field(None, max_length = 160)
+    license_id: str | None = Field(None, alias = "licenseId", max_length = 160)
+    license_accepted: bool = Field(False, alias = "licenseAccepted")
+    allow_network: bool = Field(False, alias = "allowNetwork")
+    offline_required: bool = Field(False, alias = "offlineRequired")
+    gated_model: bool = Field(False, alias = "gatedModel")
+    confirmation_id: str | None = Field(None, alias = "confirmationId", max_length = 180)
+    request_id: str | None = Field(None, alias = "requestId", max_length = 180)
+    estimated_storage_gb: float | None = Field(None, alias = "estimatedStorageGb", ge = 0)
+    estimated_ram_gb: float | None = Field(None, alias = "estimatedRamGb", ge = 0)
+
+
 class ModelComparisonPlanRequest(BaseModel):
     model_config = ConfigDict(populate_by_name = True)
 
@@ -3357,6 +3378,114 @@ async def model_lifecycle_plan(
         "auditLogId": audit.get("id"),
         "sideEffects": lifecycle.get("sideEffects", {}),
         "plannerVersion": cognix_model_lifecycle.COGNIX_MODEL_LIFECYCLE_VERSION,
+    }
+
+
+@router.post("/models/install-contract")
+async def model_install_contract(
+    payload: ModelInstallContractRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    runtime = _current_model_cache_runtime()
+    latest_benchmark = cognix_db.get_latest_benchmark_run(current_subject)
+    model_registry_payload = cognix_registry.build_model_registry()
+    plan = cognix_orchestrator.build_execution_plan(
+        payload.objective,
+        current_subject = current_subject,
+        project_type = payload.project_type,
+        project_id = payload.project_id,
+        runtime_snapshot = runtime,
+        latest_benchmark_run = latest_benchmark,
+        rag_available = _rag_available(),
+    )
+    lifecycle = cognix_model_lifecycle.build_model_lifecycle_plan(
+        objective = payload.objective,
+        hardware = plan["hardware"],
+        recommendation = plan["recommendation"],
+        cache = plan["cache"],
+        classification = plan["classification"],
+        project_expert_plan = plan["projectExpertPlan"],
+        runtime_adapter_plan = plan["runtimeAdapterPlan"],
+        model_registry = model_registry_payload,
+        latest_benchmark_run = latest_benchmark,
+        project_id = payload.project_id,
+        project_type = payload.project_type,
+        requested_model_id = payload.model_id,
+        execution_target = "local",
+        quality_priority = None,
+        offline_required = payload.offline_required,
+    )
+    model_id = str(payload.model_id or "")
+    provider_type = str(payload.provider_type or "")
+    source = str(payload.source or "")
+    source_key = source.strip().lower().replace("-", "_")
+    provider_key = provider_type.strip().lower().replace("-", "_")
+    external_model = None
+    if model_id and (
+        source_key in {"hf", "huggingface", "hugging_face", "huggingface_hub"}
+        or provider_key in {"hf", "huggingface", "hugging_face", "hf_transformers", "transformers"}
+        or "/" in model_id and provider_key not in {"ollama", "local_gguf"}
+    ):
+        external_model = {
+            "modelId": model_id,
+            "providerType": provider_type or "hf_transformers",
+            "format": "hf_transformers",
+            "source": source or "huggingface_hub",
+            "estimatedStorageGb": payload.estimated_storage_gb,
+            "estimatedRamGb": payload.estimated_ram_gb,
+            "runtimeAdapterId": "transformers",
+        }
+    install_contract = cognix_model_lifecycle.build_model_install_contract(
+        objective = payload.objective,
+        lifecycle_plan = lifecycle,
+        hardware = plan["hardware"],
+        external_model = external_model,
+        revision = payload.revision,
+        license_id = payload.license_id,
+        license_accepted = payload.license_accepted,
+        allow_network = payload.allow_network,
+        offline_required = payload.offline_required,
+        gated_model = payload.gated_model,
+        confirmation_id = payload.confirmation_id,
+        request_id = payload.request_id,
+        project_id = payload.project_id,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "model_install_contract_built",
+        resource_type = "cognix_model_install_contract",
+        resource_id = str(install_contract.get("targetModel", {}).get("modelId") or "none"),
+        severity = "notice" if install_contract.get("readyForDownloadReview") else "warning",
+        metadata = {
+            "modelLifecycleVersion": install_contract.get("modelLifecycleVersion"),
+            "installContractVersion": install_contract.get("installContractVersion"),
+            "contractId": install_contract.get("contractId"),
+            "targetModelId": install_contract.get("targetModel", {}).get("modelId"),
+            "providerType": install_contract.get("targetModel", {}).get("providerType"),
+            "sourceId": install_contract.get("sourcePolicy", {}).get("sourceId"),
+            "readyForDownloadReview": install_contract.get("readyForDownloadReview"),
+            "readyForWorkerEnqueue": install_contract.get("readyForWorkerEnqueue"),
+            "blockedWhen": install_contract.get("blockedWhen", []),
+            "workerJobType": install_contract.get("workerHandoff", {}).get("jobType"),
+            "sideEffects": install_contract.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "runtimeError": runtime.get("error"),
+        "latestBenchmark": latest_benchmark,
+        "modelRegistry": model_registry_payload,
+        "classification": plan["classification"],
+        "taskStrategy": plan["taskStrategy"],
+        "modelLifecyclePlan": lifecycle,
+        "modelInstallContract": install_contract,
+        "executionPolicy": plan["executionPolicy"],
+        "auditLogId": audit.get("id"),
+        "sideEffects": install_contract.get("sideEffects", {}),
+        "plannerVersion": cognix_model_lifecycle.COGNIX_MODEL_INSTALL_CONTRACT_VERSION,
     }
 
 

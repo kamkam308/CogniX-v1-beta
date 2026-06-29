@@ -3582,6 +3582,65 @@ def test_model_lifecycle_plans_expert_pack_without_loading():
     assert plan["sideEffects"]["runtimeMutation"] is False
 
 
+def test_model_install_contract_prepares_huggingface_download_without_network_or_files():
+    hardware = stub_hardware_profile()
+    cache = cognix_cache_manager.build_cache_state(
+        hardware,
+        active_model = None,
+        loaded_models = [],
+        loading_models = [],
+        runtime_type = "transformers",
+    )
+    lifecycle = cognix_model_lifecycle.build_model_lifecycle_plan(
+        objective = "Prepare Hugging Face model install",
+        hardware = hardware,
+        recommendation = stub_recommendation(hardware)["recommendation"],
+        cache = cache,
+        classification = {"selectedDomain": "general", "scores": {"general": 0.91}},
+        model_registry = {"models": []},
+        requested_model_id = "Qwen/Qwen2.5-3B-Instruct",
+        project_type = "research",
+    )
+
+    contract = cognix_model_lifecycle.build_model_install_contract(
+        objective = "Prepare Hugging Face model install",
+        lifecycle_plan = lifecycle,
+        external_model = {
+            "modelId": "Qwen/Qwen2.5-3B-Instruct",
+            "providerType": "hf_transformers",
+            "source": "huggingface_hub",
+            "estimatedStorageGb": 6.2,
+            "estimatedRamGb": 8.0,
+        },
+        revision = "main",
+        license_id = "apache-2.0",
+        license_accepted = True,
+        allow_network = True,
+        confirmation_id = "conf_hf_install",
+        request_id = "req_hf_install",
+        project_id = "project-hf",
+    )
+
+    assert contract["installContractVersion"] == "cognix_model_install_contract_v1"
+    assert contract["status"] == "ready_for_download_review"
+    assert contract["readyForDownloadReview"] is True
+    assert contract["readyForWorkerEnqueue"] is False
+    assert contract["downloadAllowedHere"] is False
+    assert contract["targetModel"]["modelId"] == "Qwen/Qwen2.5-3B-Instruct"
+    assert contract["sourcePolicy"]["sourceId"] == "huggingface_hub"
+    assert contract["sourcePolicy"]["revisionPinRequired"] is True
+    assert contract["sourcePolicy"]["rawSecretReadAllowed"] is False
+    assert contract["workerHandoff"]["jobType"] == "model_download"
+    assert contract["workerHandoff"]["queueId"] == "local_runtime"
+    assert contract["workerHandoff"]["willEnqueue"] is False
+    assert contract["storagePlan"]["willWriteFiles"] is False
+    assert contract["policies"]["downloadsMustUseWorkerQueue"] is True
+    assert contract["sideEffects"]["networkCall"] is False
+    assert contract["sideEffects"]["fileWrite"] is False
+    assert contract["sideEffects"]["modelDownload"] is False
+    assert contract["sideEffects"]["jobEnqueue"] is False
+
+
 def test_model_lifecycle_endpoint_logs_audited_dry_run(monkeypatch):
     seed_accounts()
     monkeypatch.setattr(
@@ -3655,6 +3714,79 @@ def test_model_lifecycle_endpoint_logs_audited_dry_run(monkeypatch):
     assert log["metadata"]["modelLifecycleVersion"] == "cognix_model_lifecycle_v1"
     assert log["metadata"]["selectedPackId"] == "ollama-qwen-4b-local"
     assert log["metadata"]["sideEffects"]["modelLoad"] is False
+
+
+def test_model_install_contract_endpoint_logs_sanitized_hf_plan_without_download(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+    monkeypatch.setattr(
+        cognix_routes,
+        "_current_model_cache_runtime",
+        lambda: {"runtimeType": "transformers", "activeModel": None, "loadedModels": [], "loadingModels": []},
+    )
+    monkeypatch.setattr(
+        cognix_routes.cognix_registry,
+        "build_model_registry",
+        lambda: {
+            "registryVersion": "local_model_registry_v1",
+            "providers": [],
+            "models": [],
+            "defaultModelId": None,
+            "recommendedModelId": None,
+        },
+    )
+
+    body = run_async(
+        cognix_routes.model_install_contract(
+            cognix_routes.ModelInstallContractRequest(
+                objective = "Prepare HF install without exposing secrets",
+                modelId = "Qwen/Qwen2.5-3B-Instruct",
+                providerType = "hf_transformers",
+                source = "huggingface_hub",
+                revision = "main",
+                licenseId = "apache-2.0",
+                licenseAccepted = True,
+                allowNetwork = True,
+                confirmationId = "conf_hf_install",
+                requestId = "req_hf_install",
+                estimatedStorageGb = 6.2,
+                estimatedRamGb = 8.0,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    contract = body["modelInstallContract"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_model_install_contract_v1"
+    assert contract["readyForDownloadReview"] is True
+    assert contract["readyForWorkerEnqueue"] is False
+    assert contract["sourcePolicy"]["sourceId"] == "huggingface_hub"
+    assert contract["sideEffects"]["networkCall"] is False
+    assert contract["sideEffects"]["fileWrite"] is False
+    assert contract["sideEffects"]["modelDownload"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "model_install_contract_built"
+    assert log["resourceType"] == "cognix_model_install_contract"
+    assert log["metadata"]["installContractVersion"] == "cognix_model_install_contract_v1"
+    assert log["metadata"]["sourceId"] == "huggingface_hub"
+    assert log["metadata"]["readyForWorkerEnqueue"] is False
+    assert log["metadata"]["sideEffects"]["modelDownload"] is False
+    assert "access_token" not in log["metadataJson"].lower()
+    assert "hf_token" not in log["metadataJson"].lower()
+    assert "secret_value" not in log["metadataJson"].lower()
 
 
 def test_model_comparison_plan_compares_outputs_without_generation():
@@ -7313,7 +7445,11 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "preload_execution_contract" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "load_prediction" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "model_warmup_contract" in modules["cognix-model-lifecycle"]["capabilities"]
+    assert "model_install_contract" in modules["cognix-model-lifecycle"]["capabilities"]
+    assert "hugging_face_install_contract" in modules["cognix-model-lifecycle"]["capabilities"]
+    assert "download_worker_handoff" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "/api/cognix/models/lifecycle-plan" in modules["cognix-model-lifecycle"]["routes"]
+    assert "/api/cognix/models/install-contract" in modules["cognix-model-lifecycle"]["routes"]
     assert "/api/cognix/models/cache/load-plan" in modules["cognix-model-lifecycle"]["routes"]
     assert "/api/cognix/models/preload-plan" in modules["cognix-model-lifecycle"]["routes"]
     assert modules["cognix-live-model-comparison"]["dependencyState"]["ready"] is True

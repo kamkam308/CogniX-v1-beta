@@ -268,6 +268,9 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "capabilities": [
             "model_packs",
             "install_planning",
+            "model_install_contract",
+            "hugging_face_install_contract",
+            "download_worker_handoff",
             "load_unload_planning",
             "cache_load_planning",
             "preload_execution_contract",
@@ -279,6 +282,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "routes": [
             "/api/cognix/models/packs",
             "/api/cognix/models/lifecycle-plan",
+            "/api/cognix/models/install-contract",
             "/api/cognix/models/cache/load-plan",
             "/api/cognix/models/preload-plan",
         ],

@@ -18,6 +18,7 @@ from core.cognix import registry as cognix_registry
 
 
 COGNIX_MODEL_LIFECYCLE_VERSION = "cognix_model_lifecycle_v1"
+COGNIX_MODEL_INSTALL_CONTRACT_VERSION = "cognix_model_install_contract_v1"
 
 
 MODEL_PACKS: list[dict[str, Any]] = [
@@ -276,6 +277,13 @@ def _objective_excerpt(value: Any) -> str:
     return " ".join(str(value or "").split())[:500]
 
 
+def _stable_key(*parts: Any) -> str:
+    payload = "|".join(str(part or "") for part in parts)
+    import hashlib
+
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:18]
+
+
 def _hardware_tier(hardware: dict[str, Any]) -> str:
     memory = _as_dict(hardware.get("memory"))
     total_gb = _as_float(memory.get("totalGb")) or 0.0
@@ -409,6 +417,10 @@ def build_model_pack_registry(
             "frontendCannotDownloadModels": True,
             "frontendCannotLoadModelsDirectly": True,
             "installRequiresBackendAudit": True,
+            "installContractRequired": True,
+            "installContractVersion": COGNIX_MODEL_INSTALL_CONTRACT_VERSION,
+            "huggingFaceDownloadsRequireRevisionPin": True,
+            "downloadsMustUseWorkerQueue": True,
             "loadRequiresLifecyclePlan": True,
             "cacheEvictionRequiresLifecyclePlan": True,
         },
@@ -423,6 +435,266 @@ def build_model_pack_registry(
             "generation": False,
             "settingsWrite": False,
             "fileWrite": False,
+        },
+    }
+
+
+def _is_hugging_face_source(source: str, provider_type: str, model_id: str) -> bool:
+    normalized = _normalize(source)
+    provider = _normalize(provider_type)
+    return normalized in {"hf", "huggingface", "hugging_face", "huggingface_hub"} or provider in {
+        "hf",
+        "huggingface",
+        "hugging_face",
+        "hf_transformers",
+        "transformers",
+    } or "/" in model_id and provider not in {"ollama", "local_gguf"}
+
+
+def _install_source_policy(
+    *,
+    source: str,
+    provider_type: str,
+    model_id: str,
+    gated_model: bool,
+) -> dict[str, Any]:
+    if _is_hugging_face_source(source, provider_type, model_id):
+        return {
+            "sourceId": "huggingface_hub",
+            "connector": "hugging-face",
+            "networkRequired": True,
+            "revisionPinRequired": True,
+            "licenseReviewRequired": True,
+            "checksumPolicyRequired": True,
+            "gatedModelRequiresToken": gated_model,
+            "allowedSecretRefs": ["hf_token"] if gated_model else [],
+            "rawSecretReadAllowed": False,
+            "termsMustBeAcceptedOutsidePlanner": True,
+        }
+    if _normalize(provider_type) == "ollama" or _normalize(source) == "ollama_catalog":
+        return {
+            "sourceId": "ollama_catalog",
+            "connector": "ollama",
+            "networkRequired": True,
+            "revisionPinRequired": False,
+            "licenseReviewRequired": False,
+            "checksumPolicyRequired": True,
+            "gatedModelRequiresToken": False,
+            "allowedSecretRefs": [],
+            "rawSecretReadAllowed": False,
+            "termsMustBeAcceptedOutsidePlanner": False,
+        }
+    return {
+        "sourceId": source or "cognix_pack_catalog",
+        "connector": "cognix-model-pack",
+        "networkRequired": True,
+        "revisionPinRequired": False,
+        "licenseReviewRequired": True,
+        "checksumPolicyRequired": True,
+        "gatedModelRequiresToken": gated_model,
+        "allowedSecretRefs": [],
+        "rawSecretReadAllowed": False,
+        "termsMustBeAcceptedOutsidePlanner": True,
+    }
+
+
+def _contract_gate(
+    gate_id: str,
+    *,
+    required: bool,
+    passed: bool,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "id": gate_id,
+        "required": required,
+        "status": "pass" if passed else ("blocked" if required else "not_required"),
+        "passed": passed,
+        "reason": reason,
+    }
+
+
+def _target_from_lifecycle_or_external(
+    *,
+    lifecycle_plan: dict[str, Any],
+    external_model: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if isinstance(external_model, dict) and external_model.get("modelId"):
+        return {
+            "packId": external_model.get("packId") or f"external_{_stable_key(external_model.get('modelId'))}",
+            "modelId": external_model.get("modelId"),
+            "label": external_model.get("label") or external_model.get("modelId"),
+            "providerType": external_model.get("providerType") or "hf_transformers",
+            "format": external_model.get("format") or "hf_transformers",
+            "installSource": external_model.get("source") or "huggingface_hub",
+            "runtimeAdapterId": external_model.get("runtimeAdapterId") or "transformers",
+            "estimatedRamGb": external_model.get("estimatedRamGb"),
+            "estimatedStorageGb": external_model.get("estimatedStorageGb"),
+            "availability": {"installed": False, "status": "external_contract_planned"},
+            "fit": {"status": "unknown", "reason": "External model requires executor-side metadata validation."},
+        }
+    return deepcopy(_as_dict(lifecycle_plan.get("selectedPack")))
+
+
+def build_model_install_contract(
+    *,
+    objective: str,
+    lifecycle_plan: dict[str, Any],
+    hardware: dict[str, Any] | None = None,
+    external_model: dict[str, Any] | None = None,
+    revision: str | None = None,
+    license_id: str | None = None,
+    license_accepted: bool = False,
+    allow_network: bool = False,
+    offline_required: bool = False,
+    gated_model: bool = False,
+    confirmation_id: str | None = None,
+    request_id: str | None = None,
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    target = _target_from_lifecycle_or_external(
+        lifecycle_plan = lifecycle_plan,
+        external_model = external_model,
+    )
+    model_id = str(target.get("modelId") or "")
+    provider_type = str(target.get("providerType") or "")
+    source = str(target.get("installSource") or target.get("source") or "")
+    source_policy = _install_source_policy(
+        source = source,
+        provider_type = provider_type,
+        model_id = model_id,
+        gated_model = gated_model,
+    )
+    installed = bool(_as_dict(target.get("availability")).get("installed"))
+    estimated_storage = _as_float(target.get("estimatedStorageGb"))
+    estimated_ram = _as_float(target.get("estimatedRamGb"))
+    network_required = bool(source_policy.get("networkRequired")) and not installed
+    revision_required = bool(source_policy.get("revisionPinRequired"))
+    license_required = bool(source_policy.get("licenseReviewRequired"))
+    confirmation_required = network_required or license_required or gated_model
+    gates = [
+        _contract_gate(
+            "target_model_declared",
+            required = True,
+            passed = bool(model_id),
+            reason = "A model id must be selected before an install contract can be reviewed.",
+        ),
+        _contract_gate(
+            "source_policy_declared",
+            required = True,
+            passed = bool(source_policy.get("sourceId")),
+            reason = "Every install source must map to a CogniX source policy.",
+        ),
+        _contract_gate(
+            "storage_estimate_present",
+            required = True,
+            passed = estimated_storage is not None and estimated_storage > 0,
+            reason = "Disk reservation must be estimated before download.",
+        ),
+        _contract_gate(
+            "hardware_fit_reviewed",
+            required = True,
+            passed = _as_dict(target.get("fit")).get("status") != "blocked",
+            reason = "Hardware fit must not be blocked before install planning.",
+        ),
+        _contract_gate(
+            "revision_pinned",
+            required = revision_required,
+            passed = (not revision_required) or bool(str(revision or "").strip()),
+            reason = "Hugging Face downloads require a pinned revision for reproducibility.",
+        ),
+        _contract_gate(
+            "license_reviewed",
+            required = license_required,
+            passed = (not license_required) or bool(license_accepted and str(license_id or "").strip()),
+            reason = "Model license and usage terms must be reviewed before download.",
+        ),
+        _contract_gate(
+            "network_allowed",
+            required = network_required,
+            passed = (not network_required) or bool(allow_network and not offline_required),
+            reason = "Network downloads require explicit backend approval and cannot run in offline mode.",
+        ),
+        _contract_gate(
+            "human_confirmation",
+            required = confirmation_required,
+            passed = (not confirmation_required) or bool(str(confirmation_id or "").strip()),
+            reason = "Human confirmation is required before model download handoff.",
+        ),
+        _contract_gate(
+            "checksum_policy_declared",
+            required = True,
+            passed = bool(source_policy.get("checksumPolicyRequired")),
+            reason = "Executor must verify checksums or content hashes before marking an install complete.",
+        ),
+    ]
+    blocked_gates = [gate["id"] for gate in gates if gate["required"] and not gate["passed"]]
+    ready_for_download_review = not blocked_gates
+    idempotency_key = f"cognix:{project_id or 'global'}:model_download:{_stable_key(model_id, revision, request_id)}"
+    return {
+        "installContractVersion": COGNIX_MODEL_INSTALL_CONTRACT_VERSION,
+        "modelLifecycleVersion": lifecycle_plan.get("modelLifecycleVersion") or COGNIX_MODEL_LIFECYCLE_VERSION,
+        "mode": "model_install_contract_dry_run",
+        "contractId": f"model_install_{_stable_key(model_id, revision, request_id)}",
+        "requestId": request_id,
+        "objectiveExcerpt": _objective_excerpt(objective),
+        "projectId": project_id,
+        "targetModel": {
+            "packId": target.get("packId"),
+            "modelId": model_id,
+            "label": target.get("label"),
+            "providerType": provider_type,
+            "format": target.get("format"),
+            "runtimeAdapterId": target.get("runtimeAdapterId"),
+            "revision": revision,
+            "licenseId": license_id,
+            "estimatedRamGb": estimated_ram,
+            "estimatedStorageGb": estimated_storage,
+            "installed": installed,
+        },
+        "sourcePolicy": source_policy,
+        "status": "ready_for_download_review" if ready_for_download_review else "blocked_missing_gate",
+        "readyForDownloadReview": ready_for_download_review,
+        "readyForWorkerEnqueue": False,
+        "downloadAllowedHere": False,
+        "installAllowedHere": False,
+        "gates": gates,
+        "blockedWhen": sorted(set(blocked_gates + ["worker_enqueue_contract_required"])),
+        "workerHandoff": {
+            "jobType": "model_download" if network_required else "model_register",
+            "queueId": "local_runtime",
+            "idempotencyKey": idempotency_key,
+            "requiresWorkerEnqueueContract": True,
+            "willEnqueue": False,
+            "willStartWorker": False,
+        },
+        "storagePlan": {
+            "estimatedStorageGb": estimated_storage,
+            "willReserveDisk": False,
+            "willWriteFiles": False,
+            "checksumVerificationRequired": True,
+        },
+        "policies": {
+            "frontendCannotDownloadModels": True,
+            "backendExecutorRequired": True,
+            "humanApprovalRequiredBeforeDownload": True,
+            "downloadsMustUseWorkerQueue": True,
+            "idempotencyKeyRequired": True,
+            "rawSecretReadAllowed": False,
+            "rawPayloadStorageAllowed": False,
+            "networkCallAllowedHere": False,
+            "fileWriteAllowedHere": False,
+        },
+        "sideEffects": {
+            "modelDownload": False,
+            "modelInstall": False,
+            "modelLoad": False,
+            "networkCall": False,
+            "fileWrite": False,
+            "settingsWrite": False,
+            "secretRead": False,
+            "jobEnqueue": False,
+            "workerStart": False,
         },
     }
 
