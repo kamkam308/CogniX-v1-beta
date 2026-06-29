@@ -8520,6 +8520,10 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert registry["mode"] == "declarative_dry_run"
     assert registry["summary"]["uiMutationAllowed"] is False
     assert registry["summary"]["routeMutationAllowed"] is False
+    assert registry["summary"]["serviceCount"] == 10
+    assert registry["summary"]["coveredServiceCount"] == 10
+    assert registry["globalPolicies"]["serviceTopologyVersion"] == "cognix_module_service_topology_v1"
+    assert registry["globalPolicies"]["serviceTopologyAvailable"] is True
     assert registry["sideEffects"]["moduleActivation"] is False
     assert registry["sideEffects"]["uiMutation"] is False
     assert registry["sideEffects"]["toolExecution"] is False
@@ -8605,6 +8609,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/command-palette/plan" in modules["cognix-command-palette"]["routes"]
     assert modules["cognix-local-core"]["activationState"] == "ready"
     assert "module_manifest_registry" in modules["cognix-local-core"]["capabilities"]
+    assert "module_service_topology" in modules["cognix-local-core"]["capabilities"]
     assert "external_moe_model_router" in modules["cognix-local-core"]["capabilities"]
     assert "multi_expert_routing_contract" in modules["cognix-local-core"]["capabilities"]
     assert "secondary_expert_planning" in modules["cognix-local-core"]["capabilities"]
@@ -8621,6 +8626,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/runtime/fallback-plan" in modules["cognix-local-core"]["routes"]
     assert "/api/cognix/runtime/frontend-boundary-contract" in modules["cognix-local-core"]["routes"]
     assert "/api/cognix/modules/manifests" in modules["cognix-local-core"]["routes"]
+    assert "/api/cognix/modules/service-topology" in modules["cognix-local-core"]["routes"]
     assert "project_dna" in modules["cognix-projects"]["capabilities"]
     assert "project_dna_context_injection" in modules["cognix-projects"]["capabilities"]
     assert "project_constraints" in modules["cognix-projects"]["capabilities"]
@@ -9024,6 +9030,7 @@ def test_module_manifest_bundle_exports_declarative_contract_without_mutation():
     assert bundle["schemaVersion"] == "cognix_module_manifest_schema_v1"
     assert bundle["mode"] == "declarative_dry_run"
     assert bundle["contract"]["sourceOfTruth"] == "backend_source_manifest"
+    assert bundle["contract"]["serviceTopologyVersion"] == "cognix_module_service_topology_v1"
     assert bundle["contract"]["runtimeRouteMutationAllowed"] is False
     assert bundle["contract"]["frontendSelfRegistrationAllowed"] is False
     assert bundle["validation"]["ready"] is True
@@ -9043,7 +9050,12 @@ def test_module_manifest_bundle_exports_declarative_contract_without_mutation():
     assert manifests["cognix-local-core"]["kind"] == "cognix.module.manifest"
     assert manifests["cognix-local-core"]["runtimeMutationAllowed"] is False
     assert "module_manifest_registry" in manifests["cognix-local-core"]["capabilities"]
+    assert "module_service_topology" in manifests["cognix-local-core"]["capabilities"]
     assert "/api/cognix/modules/manifests" in manifests["cognix-local-core"]["routes"]
+    assert "/api/cognix/modules/service-topology" in manifests["cognix-local-core"]["routes"]
+    assert {"backend-api", "frontend", "orchestrator-service"}.issubset(
+        set(manifests["cognix-local-core"]["serviceIds"])
+    )
     assert manifests["cognix-local-core"]["manifestValidation"]["ready"] is True
     assert "developer_mode" in manifests["cognix-codex-secure-agent"]["permissions"]
     assert "github" in manifests["cognix-codex-secure-agent"]["tools"]
@@ -9052,6 +9064,39 @@ def test_module_manifest_bundle_exports_declarative_contract_without_mutation():
     assert developer_bundle["editionFilter"] == "developer"
     assert developer_bundle["validation"]["ready"] is True
     assert all("developer" in item["editionTargets"] for item in developer_bundle["manifests"])
+
+
+def test_module_service_topology_maps_roadmap_services_without_mutation():
+    topology = cognix_module_registry.build_module_service_topology()
+
+    assert topology["serviceTopologyVersion"] == "cognix_module_service_topology_v1"
+    assert topology["mode"] == "declarative_service_topology_dry_run"
+    assert topology["coverage"]["ready"] is True
+    assert topology["coverage"]["missingServiceIds"] == []
+    assert {
+        "frontend",
+        "backend-api",
+        "orchestrator-service",
+        "model-runtime-adapter",
+        "memory-service",
+        "rag-service",
+        "fine-tuning-service",
+        "tool-service",
+        "codex-agent-service",
+        "worker-queue",
+    } == set(topology["coverage"]["requiredServiceIds"])
+
+    services = {item["id"]: item for item in topology["services"]}
+    assert "cognix-rag" in services["rag-service"]["moduleIds"]
+    assert "cognix-fine-tuning" in services["fine-tuning-service"]["moduleIds"]
+    assert "cognix-tool-discovery" in services["tool-service"]["moduleIds"]
+    assert "cognix-codex-secure-agent" in services["codex-agent-service"]["moduleIds"]
+    assert "cognix-worker-queue" in services["worker-queue"]["moduleIds"]
+    assert topology["contract"]["matchesRoadmapInternalServices"] is True
+    assert topology["sideEffects"]["moduleActivation"] is False
+    assert topology["sideEffects"]["routeRegistration"] is False
+    assert topology["sideEffects"]["serviceStart"] is False
+    assert topology["sideEffects"]["toolExecution"] is False
 
 
 def test_module_manifest_endpoint_writes_sanitized_audit_log():
@@ -9079,6 +9124,34 @@ def test_module_manifest_endpoint_writes_sanitized_audit_log():
     assert log["metadata"]["validationReady"] is True
     assert log["metadata"]["sideEffects"]["moduleActivation"] is False
     assert log["metadata"]["sideEffects"]["secretRead"] is False
+
+
+def test_module_service_topology_endpoint_writes_sanitized_audit_log():
+    seed_accounts()
+
+    body = run_async(cognix_routes.module_service_topology(edition = "developer", current_subject = "alice"))
+
+    topology = body["serviceTopology"]
+    assert body["auditLogId"].startswith("aud_")
+    assert topology["serviceTopologyVersion"] == "cognix_module_service_topology_v1"
+    assert topology["editionFilter"] == "developer"
+    assert topology["coverage"]["ready"] is True
+    assert topology["coverage"]["missingServiceIds"] == []
+    assert body["sideEffects"]["serviceStart"] is False
+    assert body["sideEffects"]["moduleActivation"] is False
+    assert body["sideEffects"]["toolExecution"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "module_service_topology_built"
+    assert log["resourceType"] == "cognix_module_service_topology"
+    assert log["metadata"]["serviceTopologyVersion"] == "cognix_module_service_topology_v1"
+    assert log["metadata"]["editionFilter"] == "developer"
+    assert log["metadata"]["coverageReady"] is True
+    assert log["metadata"]["missingServiceIds"] == []
+    assert log["metadata"]["sideEffects"]["serviceStart"] is False
+    assert log["metadata"]["sideEffects"]["routeRegistration"] is False
 
 
 def test_module_plan_endpoint_writes_sanitized_audit_log():

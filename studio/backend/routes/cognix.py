@@ -5052,6 +5052,39 @@ async def module_manifests(
     }
 
 
+@router.get("/modules/service-topology")
+async def module_service_topology(
+    edition: str | None = None,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    topology = cognix_module_registry.build_module_service_topology(edition = edition)
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "module_service_topology_built",
+        resource_type = "cognix_module_service_topology",
+        resource_id = str(topology.get("serviceTopologyVersion")),
+        severity = "notice" if topology.get("coverage", {}).get("ready") else "warning",
+        metadata = {
+            "serviceTopologyVersion": topology.get("serviceTopologyVersion"),
+            "moduleRegistryVersion": topology.get("moduleRegistryVersion"),
+            "manifestBundleVersion": topology.get("manifestBundleVersion"),
+            "editionFilter": topology.get("editionFilter"),
+            "serviceCount": topology.get("summary", {}).get("serviceCount"),
+            "coveredServiceCount": topology.get("summary", {}).get("coveredServiceCount"),
+            "missingServiceIds": topology.get("coverage", {}).get("missingServiceIds", []),
+            "coverageReady": topology.get("coverage", {}).get("ready"),
+            "sideEffects": topology.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "serviceTopology": topology,
+        "auditLogId": audit.get("id"),
+        "sideEffects": topology.get("sideEffects", {}),
+    }
+
+
 @router.post("/modules/plan")
 async def plan_module_activation(
     payload: ModulePlanRequest,

@@ -16,6 +16,7 @@ from typing import Any
 COGNIX_MODULE_REGISTRY_VERSION = "cognix_module_registry_v1"
 COGNIX_MODULE_MANIFEST_SCHEMA_VERSION = "cognix_module_manifest_schema_v1"
 COGNIX_MODULE_MANIFEST_BUNDLE_VERSION = "cognix_module_manifest_bundle_v1"
+COGNIX_MODULE_SERVICE_TOPOLOGY_VERSION = "cognix_module_service_topology_v1"
 
 MANIFEST_REQUIRED_FIELDS = (
     "id",
@@ -42,6 +43,59 @@ MANIFEST_LIST_FIELDS = (
 )
 MANIFEST_STATUS_VALUES = {"enabled", "planned"}
 
+SERVICE_DEFINITIONS: list[dict[str, Any]] = [
+    {
+        "id": "frontend",
+        "label": "Frontend",
+        "description": "Interface chat, projets, onboarding et model hub.",
+    },
+    {
+        "id": "backend-api",
+        "label": "Backend API",
+        "description": "Auth, projets, messages et parametres.",
+    },
+    {
+        "id": "orchestrator-service",
+        "label": "Orchestrator Service",
+        "description": "Routing, decision et strategie.",
+    },
+    {
+        "id": "model-runtime-adapter",
+        "label": "Model Runtime Adapter",
+        "description": "Ollama, llama.cpp, vLLM, Transformers et APIs cloud.",
+    },
+    {
+        "id": "memory-service",
+        "label": "Memory Service",
+        "description": "Memoire utilisateur, projet et organisation.",
+    },
+    {
+        "id": "rag-service",
+        "label": "RAG Service",
+        "description": "Documents, chunks, retrieval et injection contexte.",
+    },
+    {
+        "id": "fine-tuning-service",
+        "label": "Fine-tuning Service",
+        "description": "Unsloth, LoRA, datasets, jobs et evaluations.",
+    },
+    {
+        "id": "tool-service",
+        "label": "Tool Service",
+        "description": "Connecteurs, permissions, logs et execution gardee.",
+    },
+    {
+        "id": "codex-agent-service",
+        "label": "Codex Agent Service",
+        "description": "Modification code securisee avec branche, tests et approval.",
+    },
+    {
+        "id": "worker-queue",
+        "label": "Worker Queue",
+        "description": "Taches longues: telechargement, indexation, training, benchmark.",
+    },
+]
+
 
 MODULE_MANIFESTS: list[dict[str, Any]] = [
     {
@@ -54,6 +108,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
             "model_registry",
             "module_registry",
             "module_manifest_registry",
+            "module_service_topology",
             "hardware_profiler",
             "model_recommender",
             "model_pack_registry",
@@ -79,6 +134,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
             "/api/cognix/runtime/frontend-boundary-contract",
             "/api/cognix/modules/registry",
             "/api/cognix/modules/manifests",
+            "/api/cognix/modules/service-topology",
             "/api/cognix/modules/plan",
         ],
         "permissions": ["authenticated"],
@@ -1545,6 +1601,37 @@ def _dependency_status(module: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _service_ids_for_module(module: dict[str, Any]) -> list[str]:
+    module_id = str(module.get("id") or "")
+    capabilities = " ".join(str(item).lower() for item in module.get("capabilities") or [])
+    routes = [str(item) for item in module.get("routes") or []]
+    tools = [str(item) for item in module.get("tools") or []]
+    ui_panels = [str(item) for item in module.get("uiPanels") or []]
+    text = " ".join([module_id.lower(), capabilities, " ".join(routes).lower(), " ".join(tools).lower()])
+    services: set[str] = set()
+    if ui_panels:
+        services.add("frontend")
+    if routes:
+        services.add("backend-api")
+    if any(token in text for token in ("router", "orchestrator", "decision", "strategy", "fallback")):
+        services.add("orchestrator-service")
+    if any(token in text for token in ("model", "runtime", "ollama", "llama", "vllm", "transformers", "quantization", "cache")):
+        services.add("model-runtime-adapter")
+    if any(token in text for token in ("memory", "memoire", "persona", "gpt", "context", "skill", "twin")):
+        services.add("memory-service")
+    if any(token in text for token in ("rag", "document", "library", "retrieval", "chunk", "citation")):
+        services.add("rag-service")
+    if any(token in text for token in ("fine", "tuning", "lora", "qlora", "dataset", "distillation", "training")):
+        services.add("fine-tuning-service")
+    if tools or any(token in text for token in ("tool", "integration", "connector", "plugin", "microsoft", "google", "gmail", "slack", "crm", "erp")):
+        services.add("tool-service")
+    if any(token in text for token in ("codex", "branch_pipeline", "code", "preview", "merge_gate")):
+        services.add("codex-agent-service")
+    if any(token in text for token in ("worker", "queue", "job", "download", "benchmark", "preload", "sandbox")):
+        services.add("worker-queue")
+    return sorted(services)
+
+
 def _check_record(check_id: str, passed: bool, detail: str, **metadata: Any) -> dict[str, Any]:
     record: dict[str, Any] = {
         "id": check_id,
@@ -1674,6 +1761,7 @@ def _module_record(module: dict[str, Any]) -> dict[str, Any]:
         if "developer_mode" in record.get("permissions", [])
         else "low"
     )
+    record["serviceIds"] = _service_ids_for_module(record)
     return record
 
 
@@ -1685,6 +1773,14 @@ def build_module_registry() -> dict[str, Any]:
         "modules": modules,
         "summary": {
             "moduleCount": len(modules),
+            "serviceCount": len(SERVICE_DEFINITIONS),
+            "coveredServiceCount": len(
+                {
+                    service_id
+                    for module in modules
+                    for service_id in module.get("serviceIds", [])
+                }
+            ),
             "enabledCount": sum(1 for item in modules if item.get("status") == "enabled"),
             "plannedCount": sum(1 for item in modules if item.get("status") == "planned"),
             "blockedCount": sum(1 for item in modules if item.get("activationState") == "blocked"),
@@ -1694,6 +1790,8 @@ def build_module_registry() -> dict[str, Any]:
         "globalPolicies": {
             "declarativeManifestRequired": True,
             "manifestSchemaVersion": COGNIX_MODULE_MANIFEST_SCHEMA_VERSION,
+            "serviceTopologyVersion": COGNIX_MODULE_SERVICE_TOPOLOGY_VERSION,
+            "serviceTopologyAvailable": True,
             "dependenciesMustResolve": True,
             "permissionsMustBeDeclared": True,
             "activationRequiresAudit": True,
@@ -1754,6 +1852,7 @@ def build_module_manifest_bundle(edition: str | None = None) -> dict[str, Any]:
         "contract": {
             "sourceOfTruth": "backend_source_manifest",
             "declarativeManifestRequired": True,
+            "serviceTopologyVersion": COGNIX_MODULE_SERVICE_TOPOLOGY_VERSION,
             "dependenciesMustResolve": True,
             "permissionsMustBeDeclared": True,
             "activationRequiresAudit": True,
@@ -1785,6 +1884,145 @@ def build_module_manifest_bundle(edition: str | None = None) -> dict[str, Any]:
             "secretRead": False,
             "modelLoad": False,
             "trainingRun": False,
+        },
+    }
+
+
+def build_module_service_topology(edition: str | None = None) -> dict[str, Any]:
+    bundle = build_module_manifest_bundle(edition = edition)
+    manifests = bundle["manifests"]
+    service_definitions = {str(item["id"]): deepcopy(item) for item in SERVICE_DEFINITIONS}
+    services: dict[str, dict[str, Any]] = {
+        service_id: {
+            **definition,
+            "moduleIds": [],
+            "routeCount": 0,
+            "toolCount": 0,
+            "permissionCount": 0,
+            "riskLevels": [],
+        }
+        for service_id, definition in service_definitions.items()
+    }
+    module_nodes: list[dict[str, Any]] = []
+    dependency_edges: list[dict[str, Any]] = []
+    service_edges: list[dict[str, Any]] = []
+    for module in manifests:
+        module_id = str(module.get("id"))
+        service_ids = [service_id for service_id in module.get("serviceIds", []) if service_id in services]
+        module_nodes.append(
+            {
+                "moduleId": module_id,
+                "displayName": module.get("displayName"),
+                "status": module.get("status"),
+                "activationState": module.get("activationState"),
+                "riskLevel": module.get("riskLevel"),
+                "serviceIds": service_ids,
+                "routeCount": len(module.get("routes") or []),
+                "permissionCount": len(module.get("permissions") or []),
+                "toolCount": len(module.get("tools") or []),
+                "defaultModelCount": len(module.get("defaultModels") or []),
+                "uiPanelCount": len(module.get("uiPanels") or []),
+                "dependencyIds": module.get("dependencies", []),
+            }
+        )
+        for service_id in service_ids:
+            service = services[service_id]
+            service["moduleIds"].append(module_id)
+            service["routeCount"] += len(module.get("routes") or [])
+            service["toolCount"] += len(module.get("tools") or [])
+            service["permissionCount"] += len(module.get("permissions") or [])
+            service["riskLevels"].append(module.get("riskLevel") or "low")
+        for dependency_id in module.get("dependencies") or []:
+            dependency_edges.append(
+                {
+                    "fromModuleId": module_id,
+                    "toModuleId": dependency_id,
+                    "type": "module_dependency",
+                    "declaredInManifest": True,
+                    "runtimeMutationAllowed": False,
+                }
+            )
+            dependency_module = next(
+                (item for item in manifests if item.get("id") == dependency_id),
+                {},
+            )
+            dependency_service_ids = (
+                dependency_module.get("serviceIds", [])
+                if isinstance(dependency_module, dict)
+                else []
+            )
+            for from_service in service_ids:
+                for to_service in dependency_service_ids:
+                    if from_service == to_service:
+                        continue
+                    service_edges.append(
+                        {
+                            "fromServiceId": from_service,
+                            "toServiceId": to_service,
+                            "viaModuleId": module_id,
+                            "viaDependencyId": dependency_id,
+                            "runtimeMutationAllowed": False,
+                        }
+                    )
+    covered_service_ids = sorted(
+        service_id for service_id, service in services.items() if service["moduleIds"]
+    )
+    missing_service_ids = sorted(set(services) - set(covered_service_ids))
+    service_records = []
+    for service_id, service in services.items():
+        service_records.append(
+            {
+                **service,
+                "moduleIds": sorted(set(service["moduleIds"])),
+                "riskLevels": sorted(set(service["riskLevels"])),
+                "covered": bool(service["moduleIds"]),
+            }
+        )
+    return {
+        "serviceTopologyVersion": COGNIX_MODULE_SERVICE_TOPOLOGY_VERSION,
+        "moduleRegistryVersion": COGNIX_MODULE_REGISTRY_VERSION,
+        "manifestBundleVersion": COGNIX_MODULE_MANIFEST_BUNDLE_VERSION,
+        "mode": "declarative_service_topology_dry_run",
+        "editionFilter": bundle.get("editionFilter"),
+        "summary": {
+            "serviceCount": len(service_records),
+            "coveredServiceCount": len(covered_service_ids),
+            "missingServiceCount": len(missing_service_ids),
+            "moduleCount": len(module_nodes),
+            "dependencyEdgeCount": len(dependency_edges),
+            "serviceEdgeCount": len(service_edges),
+            "runtimeMutationAllowed": False,
+        },
+        "coverage": {
+            "requiredServiceIds": sorted(services),
+            "coveredServiceIds": covered_service_ids,
+            "missingServiceIds": missing_service_ids,
+            "ready": not missing_service_ids and bundle["validation"]["ready"],
+        },
+        "contract": {
+            "sourceOfTruth": "backend_source_manifest",
+            "matchesRoadmapInternalServices": True,
+            "declarativeManifestRequired": True,
+            "activationRequiresModulePlan": True,
+            "runtimeRouteMutationAllowed": False,
+            "frontendSelfRegistrationAllowed": False,
+            "serviceRuntimeStartAllowedHere": False,
+            "toolExecutionAllowedHere": False,
+        },
+        "services": service_records,
+        "modules": module_nodes,
+        "dependencyEdges": dependency_edges,
+        "serviceEdges": service_edges,
+        "sideEffects": {
+            "moduleActivation": False,
+            "routeRegistration": False,
+            "serviceStart": False,
+            "uiMutation": False,
+            "permissionWrite": False,
+            "toolExecution": False,
+            "modelLoad": False,
+            "networkCall": False,
+            "secretRead": False,
         },
     }
 

@@ -253,6 +253,8 @@ def build_training_access_payload(subject: str) -> dict[str, object]:
     has_cloud_training = auth_storage.has_ceo_training_entitlement(subject, profile)
     cloud_training_unlocked = bool(has_cloud_training)
     local_training_available = not bool(_hw_module.CHAT_ONLY)
+    local_gpu_bypass_allowed = cloud_training_unlocked
+    local_gpu_required = not local_training_available and not local_gpu_bypass_allowed
     training_access = "locked"
     training_mode = "locked"
     training_mode_unlocked = False
@@ -276,6 +278,9 @@ def build_training_access_payload(subject: str) -> dict[str, object]:
         "training_mode_unlocked": training_mode_unlocked,
         "training_local_available": local_training_available,
         "training_cloud_available": cloud_training_unlocked,
+        "training_local_gpu_required": local_gpu_required,
+        "training_local_gpu_bypass_allowed": local_gpu_bypass_allowed,
+        "training_default_cloud_target": CLOUD_TRAINING_PROVIDERS[0] if cloud_training_unlocked else None,
     }
 
 
