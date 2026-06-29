@@ -114,6 +114,8 @@ def _architecture_decision(
     external_moe_plan = _as_dict(classification.get("externalMoePlan"))
     cache_next_action = _as_dict(cache.get("nextAction"))
     context_budget = _as_dict(context_plan.get("tokenBudget"))
+    context_boundary = _as_dict(context_plan.get("contextBoundaryContract"))
+    context_gate = _as_dict(context_boundary.get("executionGate"))
     fine_tuning_method = _as_dict(fine_tuning_plan.get("method"))
     worker_summary = _as_dict(worker_queue_plan.get("summary"))
     preload_queue_contract = _as_dict(preload_plan.get("preloadQueueContract"))
@@ -178,10 +180,14 @@ def _architecture_decision(
             "frontendDirectModelCallAllowed": False,
         },
         "context": {
+            "contextBoundaryContractVersion": context_boundary.get("contractVersion"),
             "assemblyStrategy": context_plan.get("assemblyStrategy"),
             "maxContextTokens": context_budget.get("maxContextTokens"),
             "rawHistoryAllowed": bool(context_budget.get("rawHistoryAllowed")),
             "includedChannelIds": context_plan.get("includedChannelIds", []),
+            "frontendRawHistoryUploadAllowed": bool(context_gate.get("frontendRawHistoryUploadAllowed")),
+            "memoryWriteAllowedNow": bool(context_gate.get("memoryWriteAllowedNow")),
+            "ragRetrievalAllowedNow": bool(context_gate.get("ragRetrievalAllowedNow")),
         },
         "rag": {
             "recommendedPath": rag_plan.get("recommendedPath"),
@@ -618,6 +624,8 @@ def build_execution_plan(
     preload_queue_gate = _as_dict(preload_queue_contract.get("executionGate"))
     project_session_contract = _as_dict(project_expert_plan.get("projectSessionContract"))
     project_session_routing = _as_dict(project_session_contract.get("routingPolicy"))
+    context_boundary = _as_dict(context_plan.get("contextBoundaryContract"))
+    context_gate = _as_dict(context_boundary.get("executionGate"))
 
     execution_strategy = {
         "status": status,
@@ -667,8 +675,10 @@ def build_execution_plan(
         "ragReadyForRetrieval": rag_plan.get("readyForRetrieval"),
         "ragStrategy": rag_plan.get("retrieval", {}).get("strategy"),
         "contextAssemblyStrategy": context_plan.get("assemblyStrategy"),
+        "contextBoundaryContractVersion": context_boundary.get("contractVersion"),
         "maxContextTokens": context_plan.get("tokenBudget", {}).get("maxContextTokens"),
         "rawHistoryAllowed": context_plan.get("tokenBudget", {}).get("rawHistoryAllowed"),
+        "frontendRawHistoryUploadAllowed": bool(context_gate.get("frontendRawHistoryUploadAllowed")),
         "optimizationProfile": optimization_plan.get("optimizationProfile"),
         "optimizationHardwareTier": optimization_plan.get("hardwareTier"),
         "runtimeAdapterId": runtime_adapter_plan.get("selectedAdapter", {}).get("adapterId"),

@@ -748,6 +748,8 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
             "memory_policy",
             "conversation_summarization_planning",
             "compressed_context_injection",
+            "context_boundary_contract",
+            "raw_history_boundary",
             "document_memory_planning",
         ],
         "routes": ["/api/cognix/memory/blueprint", "/api/cognix/memory/plan", "/api/cognix/context/pack"],

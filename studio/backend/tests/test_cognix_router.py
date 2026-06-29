@@ -365,10 +365,13 @@ def test_orchestrator_builds_dry_run_plan_without_loading(monkeypatch):
     assert plan["ragPlan"]["sideEffects"]["ragIndexing"] is False
     assert plan["executionStrategy"]["ragReadyForRetrieval"] is False
     assert plan["contextPlan"]["contextManagerVersion"] == "cognix_context_manager_v1"
+    assert plan["contextPlan"]["contextBoundaryContract"]["contractVersion"] == "cognix_context_boundary_contract_v1"
     assert plan["contextPlan"]["tokenBudget"]["rawHistoryAllowed"] is False
     assert plan["contextPlan"]["sideEffects"]["memoryWrite"] is False
     assert plan["executionStrategy"]["contextAssemblyStrategy"] == "memory_project_recent"
+    assert plan["executionStrategy"]["contextBoundaryContractVersion"] == "cognix_context_boundary_contract_v1"
     assert plan["executionStrategy"]["rawHistoryAllowed"] is False
+    assert plan["executionStrategy"]["frontendRawHistoryUploadAllowed"] is False
     assert plan["optimizationPlan"]["plannerVersion"] == "cognix_optimization_planner_v1"
     assert plan["optimizationPlan"]["optimizationProfile"] == "balanced"
     assert plan["optimizationPlan"]["sideEffects"]["modelReconfiguration"] is False
@@ -7994,12 +7997,17 @@ def test_context_manager_builds_bounded_context_packet():
     )
 
     assert packet["contextManagerVersion"] == "cognix_context_manager_v1"
+    assert packet["contextBoundaryContract"]["contractVersion"] == "cognix_context_boundary_contract_v1"
+    assert packet["contextBoundaryContract"]["inputPolicy"]["rawHistoryAllowed"] is False
+    assert packet["contextBoundaryContract"]["executionGate"]["frontendRawHistoryUploadAllowed"] is False
+    assert packet["contextBoundaryContract"]["executionGate"]["memoryWriteAllowedNow"] is False
     assert packet["mode"] == "minimal"
     assert packet["includedSectionIds"] == ["user_memory", "project_instructions"]
     assert "<cognix_context>" in packet["systemInstruction"]
     assert "<user_memory>" in packet["systemInstruction"]
     assert "<project_instructions>" in packet["systemInstruction"]
     assert packet["contextPlan"]["tokenBudget"]["rawHistoryAllowed"] is False
+    assert packet["contextPlan"]["contextBoundaryContract"]["contractVersion"] == "cognix_context_boundary_contract_v1"
     assert packet["sideEffects"]["modelLoad"] is False
     assert packet["sideEffects"]["generation"] is False
     assert packet["sideEffects"]["networkModelCall"] is False
@@ -8042,6 +8050,8 @@ def test_context_manager_injects_rag_retrieval_packet_with_citations_without_ret
     assert "rag_chunks" in packet["includedSectionIds"]
     assert "rag_chunks" in packet["contextPlan"]["includedChannelIds"]
     assert packet["contextPlan"]["assemblyStrategy"] == "rag_augmented_context"
+    assert packet["contextBoundaryContract"]["contractVersion"] == "cognix_context_boundary_contract_v1"
+    assert packet["contextBoundaryContract"]["executionGate"]["ragRetrievalAllowedNow"] is False
     assert "[S1]" in packet["systemInstruction"]
     assert "<rag_chunks>" in packet["systemInstruction"]
     assert packet["contextPlan"]["sideEffects"]["ragRetrieval"] is False
@@ -8083,6 +8093,8 @@ def test_context_pack_endpoint_combines_user_memory_and_project_instructions():
     assert body["projectId"] == "project-code"
     assert body["includedSectionIds"] == ["user_memory", "project_instructions"]
     assert body["contextPlan"]["assemblyStrategy"] == "memory_project_recent"
+    assert body["contextBoundaryContract"]["contractVersion"] == "cognix_context_boundary_contract_v1"
+    assert body["contextBoundaryContract"]["executionGate"]["frontendRawHistoryUploadAllowed"] is False
     assert body["contextPlan"]["tokenBudget"]["rawHistoryAllowed"] is False
     assert "Reponds en francais" in body["systemInstruction"]
     assert "Priorite a la securite" in body["systemInstruction"]
@@ -8133,6 +8145,8 @@ def test_context_pack_endpoint_injects_rag_packet_without_audit_leak():
     admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
     log = next(item for item in admin_read["logs"] if item["id"] == body["auditLogId"])
     assert log["metadata"]["hasRagPacket"] is True
+    assert log["metadata"]["contextBoundaryContractVersion"] == "cognix_context_boundary_contract_v1"
+    assert log["metadata"]["frontendRawHistoryUploadAllowed"] is False
     assert log["metadata"]["ragCitationCount"] == 1
     assert log["metadata"]["ragSelectedChunkCount"] == 1
     assert "passages cites" not in log["metadataJson"]
@@ -8574,6 +8588,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert modules["cognix-memory-manager"]["activationState"] == "ready"
     assert "central_memory_layers" in modules["cognix-memory-manager"]["capabilities"]
     assert "compressed_context_injection" in modules["cognix-memory-manager"]["capabilities"]
+    assert "context_boundary_contract" in modules["cognix-memory-manager"]["capabilities"]
+    assert "raw_history_boundary" in modules["cognix-memory-manager"]["capabilities"]
     assert "/api/cognix/memory/plan" in modules["cognix-memory-manager"]["routes"]
     assert modules["cognix-long-term-skill-memory"]["dependencyState"]["ready"] is True
     assert "skill_memory_candidates" in modules["cognix-long-term-skill-memory"]["capabilities"]

@@ -10919,6 +10919,7 @@ async def build_context_pack(
         objective = payload.objective,
         warnings = warnings,
     )
+    context_boundary = packet.get("contextBoundaryContract", {})
     audit = cognix_db.create_audit_log(
         username = current_subject,
         actor_username = current_subject,
@@ -10930,8 +10931,12 @@ async def build_context_pack(
             "mode": packet.get("mode"),
             "projectId": payload.project_id,
             "objectiveChars": len(payload.objective or ""),
+            "contextBoundaryContractVersion": context_boundary.get("contractVersion"),
             "assemblyStrategy": packet.get("contextPlan", {}).get("assemblyStrategy"),
             "rawHistoryAllowed": packet.get("contextPlan", {}).get("tokenBudget", {}).get("rawHistoryAllowed"),
+            "frontendRawHistoryUploadAllowed": context_boundary.get("executionGate", {}).get("frontendRawHistoryUploadAllowed"),
+            "memoryWriteAllowedNow": context_boundary.get("executionGate", {}).get("memoryWriteAllowedNow"),
+            "ragRetrievalAllowedNow": context_boundary.get("executionGate", {}).get("ragRetrievalAllowedNow"),
             "sectionIds": packet.get("includedSectionIds", []),
             "channelIds": packet.get("contextPlan", {}).get("includedChannelIds", []),
             "compressedContextId": (packet.get("compressedContext") or {}).get("id"),

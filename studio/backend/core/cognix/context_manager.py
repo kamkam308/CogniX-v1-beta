@@ -9,6 +9,7 @@ import re
 from typing import Any
 
 CONTEXT_MANAGER_VERSION = "cognix_context_manager_v1"
+CONTEXT_BOUNDARY_CONTRACT_VERSION = "cognix_context_boundary_contract_v1"
 MAX_SECTION_CHARS = 4000
 MAX_SYSTEM_INSTRUCTION_CHARS = 10000
 
@@ -246,6 +247,84 @@ def _context_budget(
     }
 
 
+def _context_boundary_contract(context_plan: dict[str, Any]) -> dict[str, Any]:
+    token_budget = _as_dict(context_plan.get("tokenBudget"))
+    channels = [item for item in _as_list(context_plan.get("channels")) if isinstance(item, dict)]
+    included_channel_ids = [
+        str(item.get("id"))
+        for item in channels
+        if item.get("included") and item.get("id")
+    ]
+    required_channel_ids = [
+        str(item.get("id"))
+        for item in channels
+        if item.get("required") and item.get("id")
+    ]
+    return {
+        "contractVersion": CONTEXT_BOUNDARY_CONTRACT_VERSION,
+        "mode": "context_boundary_dry_run",
+        "contextManagerVersion": context_plan.get("contextManagerVersion"),
+        "assemblyStrategy": context_plan.get("assemblyStrategy"),
+        "maxContextTokens": token_budget.get("maxContextTokens"),
+        "recentMessageLimit": token_budget.get("recentMessageLimit"),
+        "includedChannelIds": included_channel_ids,
+        "requiredChannelIds": required_channel_ids,
+        "channelStates": [
+            {
+                "id": item.get("id"),
+                "status": item.get("status"),
+                "included": bool(item.get("included")),
+                "required": bool(item.get("required")),
+                "maxTokens": item.get("maxTokens"),
+                "source": item.get("source"),
+            }
+            for item in channels
+        ],
+        "inputPolicy": {
+            "rawHistoryAllowed": bool(token_budget.get("rawHistoryAllowed")),
+            "fullConversationHistoryAllowed": False,
+            "uncitedRagContentAllowed": False,
+            "secretValuesAllowed": False,
+            "unboundedProjectFilesAllowed": False,
+            "recentMessagesMustBeCapped": True,
+        },
+        "allowedInputs": [
+            "system_instruction",
+            "user_memory_summary",
+            "project_dna",
+            "project_memory_summary",
+            "conversation_summary",
+            "rag_cited_chunks",
+            "recent_messages_capped",
+            "current_request",
+        ],
+        "blockedInputs": [
+            "full_raw_history",
+            "uncited_rag_content",
+            "secret_values",
+            "unbounded_project_files",
+            "frontend_assembled_prompt_override",
+        ],
+        "executionGate": {
+            "backendContextManagerRequired": True,
+            "frontendRawHistoryUploadAllowed": False,
+            "memoryWriteAllowedNow": False,
+            "ragRetrievalAllowedNow": False,
+            "generationAllowedHere": False,
+            "networkModelCallAllowed": False,
+            "contextMutationAllowed": False,
+        },
+        "sideEffects": {
+            "modelLoad": False,
+            "generation": False,
+            "networkModelCall": False,
+            "memoryWrite": False,
+            "ragRetrieval": False,
+            "contextMutation": False,
+        },
+    }
+
+
 def build_context_plan(
     *,
     current_subject: str,
@@ -379,7 +458,7 @@ def build_context_plan(
     if classification.get("needsClarification"):
         compression.append("defer_context_until_clarified")
 
-    return {
+    context_plan = {
         "username": current_subject,
         "contextManagerVersion": CONTEXT_MANAGER_VERSION,
         "mode": "dry_run",
@@ -411,6 +490,8 @@ def build_context_plan(
             "contextMutation": False,
         },
     }
+    context_plan["contextBoundaryContract"] = _context_boundary_contract(context_plan)
+    return context_plan
 
 
 def build_context_packet(
@@ -519,6 +600,7 @@ def build_context_packet(
     return {
         "username": current_subject,
         "contextManagerVersion": CONTEXT_MANAGER_VERSION,
+        "contextBoundaryContract": context_plan.get("contextBoundaryContract"),
         "mode": "minimal",
         "projectId": project_id,
         "objectiveExcerpt": objective_excerpt,
