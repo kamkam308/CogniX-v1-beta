@@ -14,10 +14,18 @@ from typing import Any
 
 COGNIX_FINE_TUNING_PLANNER_VERSION = "cognix_fine_tuning_planner_v1"
 COGNIX_DATASET_VALIDATION_PLAN_VERSION = "cognix_dataset_validation_plan_v1"
+COGNIX_FINE_TUNING_EVALUATION_PLAN_VERSION = "cognix_fine_tuning_evaluation_plan_v1"
 
 SUPPORTED_DATASET_FORMATS = {"jsonl", "csv", "parquet", "hf_dataset", "folder"}
 LICENSE_WARNING_VALUES = {"unknown", "unverified", "restricted", "proprietary"}
 CEO_CLOUD_TRAINING_TOKENS = {"ceo", "cloud_ceo", "local_plus_cloud_ceo"}
+DEFAULT_FINE_TUNING_EVALUATION_METRICS = [
+    "instruction_following",
+    "format_consistency",
+    "baseline_quality_delta",
+    "safety_regression",
+    "latency_tokens_per_second",
+]
 CLOUD_TRAINING_TARGETS: list[dict[str, Any]] = [
     {
         "id": "google_colab",
@@ -487,6 +495,260 @@ def _cloud_handoff_steps(target: dict[str, Any], fine_tuning_plan: dict[str, Any
             "detail": "Synchroniser les artefacts seulement apres job termine et evaluation.",
         },
     ]
+
+
+def _clean_evaluation_metric(value: Any) -> str | None:
+    raw = str(value or "").strip().casefold()
+    if not raw:
+        return None
+    cleaned = "".join(ch if ch.isalnum() else "_" for ch in raw).strip("_")
+    while "__" in cleaned:
+        cleaned = cleaned.replace("__", "_")
+    return cleaned[:80] or None
+
+
+def _evaluation_metrics(requested_metrics: list[str] | None) -> list[dict[str, Any]]:
+    metric_ids: list[str] = []
+    sources: dict[str, str] = {}
+    for item in requested_metrics or []:
+        cleaned = _clean_evaluation_metric(item)
+        if cleaned and cleaned not in metric_ids:
+            metric_ids.append(cleaned)
+            sources[cleaned] = "requested"
+    for item in DEFAULT_FINE_TUNING_EVALUATION_METRICS:
+        if item not in metric_ids:
+            metric_ids.append(item)
+            sources[item] = "default"
+    return [
+        {
+            "id": metric_id,
+            "source": sources.get(metric_id, "default"),
+            "requiresGeneration": metric_id
+            in {
+                "instruction_following",
+                "format_consistency",
+                "baseline_quality_delta",
+                "safety_regression",
+            },
+            "willGenerateNow": False,
+        }
+        for metric_id in metric_ids
+    ]
+
+
+def _artifact_descriptor(training_artifact: dict[str, Any] | None) -> dict[str, Any]:
+    artifact = _as_dict(training_artifact)
+    artifact_id = str(artifact.get("artifactId") or artifact.get("id") or "").strip()[:240]
+    adapter_ref = str(artifact.get("adapterRef") or artifact.get("adapterPath") or artifact.get("path") or "").strip()[:240]
+    training_run_id = str(artifact.get("trainingRunId") or artifact.get("runId") or "").strip()[:160]
+    eval_report_ref = str(artifact.get("evalReportRef") or artifact.get("evaluationReportRef") or "").strip()[:240]
+    return {
+        "artifactId": artifact_id or None,
+        "adapterRef": adapter_ref or None,
+        "trainingRunId": training_run_id or None,
+        "format": str(artifact.get("format") or "lora_adapter").strip()[:80],
+        "hasArtifactReference": bool(artifact_id or adapter_ref),
+        "hasTrainingRunReference": bool(training_run_id),
+        "evalReportRef": eval_report_ref or None,
+        "rawPreviewIncluded": False,
+        "secretValuesIncluded": False,
+    }
+
+
+def build_fine_tuning_evaluation_plan(
+    *,
+    username: str,
+    objective: str,
+    fine_tuning_plan: dict[str, Any] | None = None,
+    dataset_validation_plan: dict[str, Any] | None = None,
+    training_artifact: dict[str, Any] | None = None,
+    baseline_model: dict[str, Any] | None = None,
+    project_id: str | None = None,
+    requested_metrics: list[str] | None = None,
+) -> dict[str, Any]:
+    plan = _as_dict(fine_tuning_plan)
+    validation = _as_dict(dataset_validation_plan)
+    artifact = _artifact_descriptor(training_artifact)
+    baseline = _as_dict(baseline_model)
+    method = str(_as_dict(plan.get("method")).get("type") or "").strip()
+    recommended_path = str(plan.get("recommendedPath") or "").strip()
+    plan_side_effects = _as_dict(plan.get("sideEffects"))
+    base_model = _as_dict(plan.get("baseModel"))
+    baseline_model_id = str(baseline.get("modelId") or base_model.get("modelId") or "").strip()[:240]
+    baseline_provider_type = str(baseline.get("providerType") or base_model.get("providerType") or "").strip()[:80]
+    validation_quality = _as_dict(validation.get("quality"))
+    validation_summary = _as_dict(validation.get("summary"))
+    validation_status = str(validation.get("status") or "missing").strip()
+    validation_ready = bool(validation_quality.get("readyForFineTuning") or validation_summary.get("readyForFineTuning"))
+    quality_label = str(validation_quality.get("label") or "missing").strip()
+    metrics = _evaluation_metrics(requested_metrics)
+    fine_tuning_plan_ready = (
+        recommended_path == "guided_fine_tuning"
+        and method in {"lora", "qlora", "qlora_cpu_experimental", "cloud_qlora"}
+        and plan_side_effects.get("fineTuningJob") is False
+        and plan_side_effects.get("cloudTrainingJob") is False
+    )
+    dataset_gate_status = "pass" if validation_status == "ready" and validation_ready else "warning" if validation_ready else "blocked"
+    dataset_gate_severity = "info" if dataset_gate_status == "pass" else "warning" if dataset_gate_status == "warning" else "error"
+    gates = [
+        _validation_gate(
+            gate_id = "fine_tuning_plan_ready",
+            status = "pass" if fine_tuning_plan_ready else "blocked",
+            severity = "info" if fine_tuning_plan_ready else "error",
+            reason = "Fine-tuning plan is reviewable." if fine_tuning_plan_ready else "A guided fine-tuning plan is required before evaluation.",
+            detail = {"recommendedPath": recommended_path, "method": method},
+        ),
+        _validation_gate(
+            gate_id = "training_artifact_declared",
+            status = "pass" if artifact["hasArtifactReference"] else "blocked",
+            severity = "info" if artifact["hasArtifactReference"] else "error",
+            reason = "A trained adapter artifact is declared." if artifact["hasArtifactReference"] else "An adapter artifact id or ref is required before evaluation.",
+            detail = {"artifactId": artifact["artifactId"], "adapterRef": artifact["adapterRef"]},
+        ),
+        _validation_gate(
+            gate_id = "dataset_validation_ready",
+            status = dataset_gate_status,
+            severity = dataset_gate_severity,
+            reason = "Dataset validation can support evaluation."
+            if validation_ready
+            else "Dataset validation must pass before post-training evaluation.",
+            detail = {"status": validation_status, "qualityLabel": quality_label},
+        ),
+        _validation_gate(
+            gate_id = "baseline_model_declared",
+            status = "pass" if baseline_model_id else "blocked",
+            severity = "info" if baseline_model_id else "error",
+            reason = "Baseline model is available for comparison." if baseline_model_id else "A baseline model id is required for quality delta.",
+            detail = {"modelId": baseline_model_id or None, "providerType": baseline_provider_type or None},
+        ),
+        _validation_gate(
+            gate_id = "evaluation_metrics_declared",
+            status = "pass" if metrics else "blocked",
+            severity = "info" if metrics else "error",
+            reason = "Evaluation metrics are declared." if metrics else "At least one metric is required before evaluation.",
+            detail = [item["id"] for item in metrics],
+        ),
+        _validation_gate(
+            gate_id = "human_review_before_library",
+            status = "warning",
+            severity = "warning",
+            reason = "Library registration stays blocked until a human reviews the evaluation report.",
+            detail = {"readyForLibraryRegistration": False},
+        ),
+    ]
+    blocked_gate_ids = [str(item["id"]) for item in gates if item.get("severity") == "error"]
+    warning_gate_ids = [str(item["id"]) for item in gates if item.get("severity") == "warning"]
+    ready_for_evaluation_review = not blocked_gate_ids
+    candidate_model_id = artifact["artifactId"] or artifact["adapterRef"] or (
+        f"{baseline_model_id}:fine-tuned" if baseline_model_id else None
+    )
+    return {
+        "plannerVersion": COGNIX_FINE_TUNING_PLANNER_VERSION,
+        "evaluationPlanVersion": COGNIX_FINE_TUNING_EVALUATION_PLAN_VERSION,
+        "mode": "post_training_evaluation_dry_run",
+        "username": username,
+        "projectId": project_id,
+        "objectiveExcerpt": " ".join((objective or "").split())[:500],
+        "status": "ready_for_evaluation_review" if ready_for_evaluation_review else "blocked_missing_gate",
+        "readyForEvaluationReview": ready_for_evaluation_review,
+        "readyForEvaluationJob": False,
+        "fineTuning": {
+            "recommendedPath": recommended_path or None,
+            "method": method or None,
+            "baseModel": base_model,
+            "planReady": fine_tuning_plan_ready,
+        },
+        "trainingArtifact": artifact,
+        "baseline": {
+            "modelId": baseline_model_id or None,
+            "providerType": baseline_provider_type or None,
+            "requiresBaseline": True,
+        },
+        "datasetValidation": {
+            "status": validation_status,
+            "quality": validation_quality,
+            "summary": validation_summary,
+            "rawDatasetRead": False,
+        },
+        "qualityGates": gates,
+        "summary": {
+            "blockedGateIds": blocked_gate_ids,
+            "warningGateIds": warning_gate_ids,
+            "metricIds": [item["id"] for item in metrics],
+            "requiresHumanReview": True,
+            "readyForLibraryRegistration": False,
+        },
+        "evaluationPlan": {
+            "metrics": metrics,
+            "comparison": {
+                "candidateArtifactId": artifact["artifactId"],
+                "candidateAdapterRef": artifact["adapterRef"],
+                "baselineModelId": baseline_model_id or None,
+                "baselineProviderType": baseline_provider_type or None,
+                "requiresBaseline": True,
+            },
+            "executorRequired": True,
+            "willRunEvaluation": False,
+            "willLoadModel": False,
+            "willGenerate": False,
+            "willReadRawDataset": False,
+        },
+        "libraryRegistrationPlan": {
+            "candidateModelId": candidate_model_id,
+            "willRegisterModel": False,
+            "readyForLibraryRegistration": False,
+            "requiresHumanApproval": True,
+            "requiresEvaluationReport": True,
+            "requiresSafetyReview": True,
+            "requiresModelCard": True,
+        },
+        "policies": {
+            "ragBeforeFineTuningReviewRequired": True,
+            "evaluationRequiredBeforeLibraryRegistration": True,
+            "rawDatasetReadAllowed": False,
+            "frontendDirectTrainingJobAllowed": False,
+            "backendEvaluatorRequired": True,
+            "libraryRegistrationRequiresAudit": True,
+        },
+        "blockedActions": [
+            {
+                "id": "evaluation_job",
+                "reason": "This route only plans evaluation; an evaluator executor must run it after approval.",
+            },
+            {
+                "id": "model_load",
+                "reason": "No baseline or tuned model is loaded while building this evaluation plan.",
+            },
+            {
+                "id": "generation",
+                "reason": "No prompts are generated during this dry-run planning step.",
+            },
+            {
+                "id": "model_registration",
+                "reason": "Library registration is blocked until evaluation and human review pass.",
+            },
+            {
+                "id": "dataset_read",
+                "reason": "Evaluation planning uses validation metadata only; raw dataset content is not read here.",
+            },
+        ],
+        "sideEffects": {
+            "trainingJob": False,
+            "fineTuningJob": False,
+            "cloudTrainingJob": False,
+            "evaluationJob": False,
+            "modelLoad": False,
+            "generation": False,
+            "datasetRead": False,
+            "datasetUpload": False,
+            "libraryWrite": False,
+            "modelRegistryWrite": False,
+            "networkCall": False,
+            "fileWrite": False,
+            "jobEnqueue": False,
+            "workerStart": False,
+        },
+    }
 
 
 def build_cloud_training_handoff_plan(

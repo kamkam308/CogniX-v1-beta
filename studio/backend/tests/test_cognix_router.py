@@ -672,6 +672,150 @@ def test_fine_tuning_dataset_validation_endpoint_audits_without_raw_dataset_leak
     assert "private training sentence" not in log["metadataJson"]
 
 
+def test_fine_tuning_evaluation_plan_blocks_missing_artifact_without_jobs():
+    plan = cognix_fine_tuning_planner.build_fine_tuning_evaluation_plan(
+        username = "alice",
+        objective = "Evaluer un LoRA avant ajout bibliotheque",
+        fine_tuning_plan = {
+            "recommendedPath": "guided_fine_tuning",
+            "method": {"type": "qlora"},
+            "baseModel": {"modelId": "qwen-test-4b", "providerType": "ollama"},
+            "sideEffects": {"fineTuningJob": False, "cloudTrainingJob": False},
+        },
+        dataset_validation_plan = {
+            "status": "ready",
+            "quality": {"label": "ready", "readyForFineTuning": True},
+            "summary": {"readyForFineTuning": True},
+        },
+        training_artifact = None,
+        baseline_model = {"modelId": "qwen-test-4b", "providerType": "ollama"},
+    )
+
+    assert plan["evaluationPlanVersion"] == "cognix_fine_tuning_evaluation_plan_v1"
+    assert plan["status"] == "blocked_missing_gate"
+    assert "training_artifact_declared" in plan["summary"]["blockedGateIds"]
+    assert plan["readyForEvaluationReview"] is False
+    assert plan["readyForEvaluationJob"] is False
+    assert plan["libraryRegistrationPlan"]["readyForLibraryRegistration"] is False
+    assert plan["sideEffects"]["evaluationJob"] is False
+    assert plan["sideEffects"]["modelLoad"] is False
+    assert plan["sideEffects"]["libraryWrite"] is False
+    assert plan["sideEffects"]["modelRegistryWrite"] is False
+    assert plan["sideEffects"]["jobEnqueue"] is False
+
+
+def test_fine_tuning_evaluation_plan_prepares_quality_review_without_generation():
+    plan = cognix_fine_tuning_planner.build_fine_tuning_evaluation_plan(
+        username = storage.DEFAULT_ADMIN_USERNAME,
+        objective = "Comparer le LoRA CogniX style au modele de base",
+        fine_tuning_plan = {
+            "recommendedPath": "guided_fine_tuning",
+            "method": {"type": "cloud_qlora"},
+            "baseModel": {"modelId": "huihui_ai/qwen3-vl-abliterated:4b-instruct", "providerType": "ollama"},
+            "sideEffects": {"fineTuningJob": False, "cloudTrainingJob": False},
+        },
+        dataset_validation_plan = {
+            "status": "ready",
+            "quality": {"label": "ready", "readyForFineTuning": True},
+            "summary": {"readyForFineTuning": True},
+        },
+        training_artifact = {
+            "artifactId": "lora_style_v1",
+            "adapterRef": "artifact://lora/style-v1",
+            "trainingRunId": "run_style_v1",
+            "rawPreview": "secret row should not appear",
+        },
+        baseline_model = {
+            "modelId": "huihui_ai/qwen3-vl-abliterated:4b-instruct",
+            "providerType": "ollama",
+        },
+        requested_metrics = ["Instruction Following", "baseline-quality-delta"],
+    )
+
+    assert plan["status"] == "ready_for_evaluation_review"
+    assert plan["readyForEvaluationReview"] is True
+    assert plan["evaluationPlan"]["willRunEvaluation"] is False
+    assert plan["evaluationPlan"]["willLoadModel"] is False
+    assert plan["evaluationPlan"]["willGenerate"] is False
+    assert plan["evaluationPlan"]["comparison"]["baselineModelId"] == "huihui_ai/qwen3-vl-abliterated:4b-instruct"
+    assert "instruction_following" in plan["summary"]["metricIds"]
+    assert "baseline_quality_delta" in plan["summary"]["metricIds"]
+    assert plan["libraryRegistrationPlan"]["willRegisterModel"] is False
+    assert plan["libraryRegistrationPlan"]["requiresEvaluationReport"] is True
+    assert plan["policies"]["evaluationRequiredBeforeLibraryRegistration"] is True
+    assert plan["sideEffects"]["evaluationJob"] is False
+    assert plan["sideEffects"]["generation"] is False
+    assert "secret row" not in str(plan)
+
+
+def test_fine_tuning_evaluation_endpoint_logs_sanitized_plan_without_library_write(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_gpu_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+
+    body = run_async(
+        cognix_routes.fine_tuning_evaluation_plan(
+            cognix_routes.FineTuningEvaluationPlanRequest(
+                objective = "Je veux fine-tuning LoRA pour specialiser CogniX sur mon style",
+                project_type = "education",
+                project_id = "project-training",
+                dataset = {
+                    "format": "jsonl",
+                    "sampleCount": 900,
+                    "estimatedTokens": 220000,
+                    "duplicateRatio": 0.01,
+                    "invalidRows": 0,
+                    "averageResponseTokens": 52,
+                    "license": "mit",
+                    "containsSensitiveData": False,
+                    "sourceRef": "style-dataset-v1",
+                    "rawPreview": "private eval row should stay out of audit",
+                },
+                training_artifact = {
+                    "artifactId": "lora_style_v1",
+                    "adapterRef": "artifact://lora/style-v1",
+                    "trainingRunId": "run_style_v1",
+                    "secretValue": "secret_value",
+                },
+                baseline_model = {"modelId": "qwen-test-4b", "providerType": "ollama"},
+                requested_metrics = ["instruction_following", "baseline_quality_delta"],
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    evaluation = body["fineTuningEvaluationPlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert evaluation["evaluationPlanVersion"] == "cognix_fine_tuning_evaluation_plan_v1"
+    assert evaluation["status"] == "ready_for_evaluation_review"
+    assert evaluation["readyForEvaluationJob"] is False
+    assert evaluation["trainingArtifact"]["rawPreviewIncluded"] is False
+    assert evaluation["trainingArtifact"]["secretValuesIncluded"] is False
+    assert evaluation["libraryRegistrationPlan"]["readyForLibraryRegistration"] is False
+    assert evaluation["sideEffects"]["evaluationJob"] is False
+    assert evaluation["sideEffects"]["libraryWrite"] is False
+    assert evaluation["sideEffects"]["modelRegistryWrite"] is False
+    assert body["executionPolicy"]["automaticExecutionAllowed"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "fine_tuning_evaluation_plan_built"
+    assert log["metadata"]["evaluationPlanVersion"] == "cognix_fine_tuning_evaluation_plan_v1"
+    assert log["metadata"]["readyForLibraryRegistration"] is False
+    assert log["metadata"]["sideEffects"]["libraryWrite"] is False
+    assert "private eval row" not in log["metadataJson"]
+    assert "secret_value" not in log["metadataJson"]
+
+
 def test_fine_tuning_plan_allows_ceo_cloud_training_without_local_gpu(monkeypatch):
     seed_accounts()
     monkeypatch.setattr(
@@ -7919,7 +8063,11 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "dataset_validation_plan" in modules["cognix-fine-tuning"]["capabilities"]
     assert "distillation_planning" in modules["cognix-fine-tuning"]["capabilities"]
     assert "teacher_student_contract" in modules["cognix-fine-tuning"]["capabilities"]
+    assert "fine_tuning_evaluation_plan" in modules["cognix-fine-tuning"]["capabilities"]
+    assert "post_training_quality_review" in modules["cognix-fine-tuning"]["capabilities"]
+    assert "model_library_registration_gate" in modules["cognix-fine-tuning"]["capabilities"]
     assert "/api/cognix/fine-tuning/dataset/validate" in modules["cognix-fine-tuning"]["routes"]
+    assert "/api/cognix/fine-tuning/evaluation-plan" in modules["cognix-fine-tuning"]["routes"]
     assert "/api/cognix/fine-tuning/cloud-handoff-plan" in modules["cognix-fine-tuning"]["routes"]
     assert "/api/cognix/fine-tuning/distillation-plan" in modules["cognix-fine-tuning"]["routes"]
     assert modules["cognix-dataset-builder"]["dependencyState"]["ready"] is True

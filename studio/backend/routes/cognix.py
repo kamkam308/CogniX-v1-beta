@@ -969,6 +969,18 @@ class FineTuningCloudHandoffPlanRequest(BaseModel):
     dataset: dict[str, Any] | None = None
 
 
+class FineTuningEvaluationPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    project_type: str | None = Field(None, alias = "projectType", max_length = 80)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    dataset: dict[str, Any] | None = None
+    training_artifact: dict[str, Any] | None = Field(None, alias = "trainingArtifact")
+    baseline_model: dict[str, Any] | None = Field(None, alias = "baselineModel")
+    requested_metrics: list[str] | None = Field(None, alias = "requestedMetrics")
+
+
 class FineTuningDistillationPlanRequest(BaseModel):
     model_config = ConfigDict(populate_by_name = True)
 
@@ -5632,6 +5644,83 @@ async def fine_tuning_dataset_validation(
         "datasetValidationPlan": validation,
         "auditLogId": audit.get("id"),
         "sideEffects": validation.get("sideEffects", {}),
+    }
+
+
+@router.post("/fine-tuning/evaluation-plan")
+async def fine_tuning_evaluation_plan(
+    payload: FineTuningEvaluationPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    runtime = _current_model_cache_runtime()
+    user_profile = auth_storage.get_user_profile(current_subject) or {}
+    user_plan = _effective_training_plan(current_subject, user_profile)
+    plan = cognix_orchestrator.build_execution_plan(
+        payload.objective,
+        current_subject = current_subject,
+        project_type = payload.project_type,
+        project_id = payload.project_id,
+        runtime_snapshot = runtime,
+        latest_benchmark_run = cognix_db.get_latest_benchmark_run(current_subject),
+        fine_tuning_dataset = payload.dataset,
+        user_plan = user_plan,
+    )
+    tuning_plan = plan["fineTuningPlan"]
+    dataset_validation = cognix_fine_tuning_planner.build_dataset_validation_plan(
+        username = current_subject,
+        dataset = payload.dataset,
+        objective = payload.objective,
+        project_id = payload.project_id,
+    )
+    evaluation = cognix_fine_tuning_planner.build_fine_tuning_evaluation_plan(
+        username = current_subject,
+        objective = payload.objective,
+        project_id = payload.project_id,
+        fine_tuning_plan = tuning_plan,
+        dataset_validation_plan = dataset_validation,
+        training_artifact = payload.training_artifact,
+        baseline_model = payload.baseline_model,
+        requested_metrics = payload.requested_metrics,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "fine_tuning_evaluation_plan_built",
+        resource_type = "cognix_fine_tuning_evaluation_plan",
+        resource_id = str(
+            evaluation.get("trainingArtifact", {}).get("artifactId")
+            or evaluation.get("baseline", {}).get("modelId")
+            or payload.project_id
+            or current_subject
+        ),
+        severity = "notice" if evaluation.get("readyForEvaluationReview") else "warning",
+        metadata = {
+            "plannerVersion": evaluation.get("plannerVersion"),
+            "evaluationPlanVersion": evaluation.get("evaluationPlanVersion"),
+            "status": evaluation.get("status"),
+            "readyForEvaluationReview": evaluation.get("readyForEvaluationReview"),
+            "readyForLibraryRegistration": evaluation.get("libraryRegistrationPlan", {}).get("readyForLibraryRegistration"),
+            "artifactId": evaluation.get("trainingArtifact", {}).get("artifactId"),
+            "adapterRef": evaluation.get("trainingArtifact", {}).get("adapterRef"),
+            "baselineModelId": evaluation.get("baseline", {}).get("modelId"),
+            "metricIds": evaluation.get("summary", {}).get("metricIds", []),
+            "blockedGateIds": evaluation.get("summary", {}).get("blockedGateIds", []),
+            "warningGateIds": evaluation.get("summary", {}).get("warningGateIds", []),
+            "sideEffects": evaluation.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "runtimeError": runtime.get("error"),
+        "classification": plan["classification"],
+        "taskStrategy": plan["taskStrategy"],
+        "fineTuningPlan": tuning_plan,
+        "datasetValidationPlan": dataset_validation,
+        "fineTuningEvaluationPlan": evaluation,
+        "executionPolicy": plan["executionPolicy"],
+        "auditLogId": audit.get("id"),
+        "plannerVersion": cognix_fine_tuning_planner.COGNIX_FINE_TUNING_PLANNER_VERSION,
+        "sideEffects": evaluation.get("sideEffects", {}),
     }
 
 
