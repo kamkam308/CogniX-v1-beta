@@ -64,6 +64,7 @@ from core.cognix import model_comparison as cognix_model_comparison
 from core.cognix import model_lifecycle as cognix_model_lifecycle
 from core.cognix import model_translator as cognix_model_translator
 from core.cognix import module_registry as cognix_module_registry
+from core.cognix import mvp_readiness as cognix_mvp_readiness
 from core.cognix import native_tools as cognix_native_tools
 from core.cognix import onboarding as cognix_onboarding
 from core.cognix import optimization_planner as cognix_optimization_planner
@@ -14291,6 +14292,27 @@ async def admin_api_surface_contract(
     return {
         "apiSurfaceContract": contract,
         "plannerVersion": cognix_api_surface.COGNIX_API_SURFACE_CONTRACT_VERSION,
+        "sideEffects": contract.get("sideEffects", {}),
+    }
+
+
+@router.get("/admin/mvp-readiness")
+async def admin_mvp_readiness(
+    request: Request,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    api_surface_contract = cognix_api_surface.build_api_surface_contract(_registered_api_routes(request))
+    database_blueprint = cognix_database_blueprint.build_database_blueprint()
+    service_topology = cognix_module_registry.build_module_service_topology()
+    contract = cognix_mvp_readiness.build_mvp_readiness_contract(
+        api_surface_contract = api_surface_contract,
+        database_blueprint = database_blueprint,
+        service_topology = service_topology,
+    )
+    return {
+        "mvpReadiness": contract,
+        "plannerVersion": cognix_mvp_readiness.COGNIX_MVP_READINESS_VERSION,
         "sideEffects": contract.get("sideEffects", {}),
     }
 

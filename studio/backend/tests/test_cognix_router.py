@@ -58,6 +58,7 @@ from core.cognix import model_lifecycle as cognix_model_lifecycle
 from core.cognix import model_comparison as cognix_model_comparison
 from core.cognix import model_translator as cognix_model_translator
 from core.cognix import module_registry as cognix_module_registry
+from core.cognix import mvp_readiness as cognix_mvp_readiness
 from core.cognix import native_tools as cognix_native_tools
 from core.cognix import onboarding as cognix_onboarding
 from core.cognix import optimization_planner as cognix_optimization_planner
@@ -8636,6 +8637,144 @@ def test_api_surface_contract_endpoint_is_admin_only_and_read_only():
     assert body["sideEffects"]["apiMutation"] is False
     assert body["sideEffects"]["generation"] is False
     assert body["sideEffects"]["auditWrite"] is False
+
+
+def test_mvp_readiness_contract_maps_roadmap_phases_without_mutation():
+    registered_routes = [
+        {"path": "/api/inference/chat/completions", "methods": ["POST"]},
+        {"path": "/api/inference/generate/stream", "methods": ["POST"]},
+        {"path": "/api/cognix/router/classify", "methods": ["POST"]},
+        {"path": "/api/cognix/models/install-contract", "methods": ["POST"]},
+        {"path": "/api/inference/load", "methods": ["POST"]},
+        {"path": "/api/inference/unload", "methods": ["POST"]},
+        {"path": "/api/models/list", "methods": ["GET"]},
+        {"path": "/api/cognix/hardware/profile", "methods": ["GET"]},
+        {"path": "/api/cognix/benchmark/run", "methods": ["POST"]},
+        {"path": "/api/cognix/rag/indexing-plan", "methods": ["POST"]},
+        {"path": "/api/train/start", "methods": ["POST"]},
+        {"path": "/api/train/runs", "methods": ["GET"]},
+        {"path": "/api/cognix/tools/execution-handoff", "methods": ["POST"]},
+        {"path": "/api/cognix/admin/audit-logs", "methods": ["GET"]},
+        {"path": "/api/cognix/codex/pipeline-plan", "methods": ["POST"]},
+    ]
+    api_contract = cognix_api_surface.build_api_surface_contract(registered_routes)
+    database_blueprint = cognix_database_blueprint.build_database_blueprint(
+        auth_tables = {"auth_user"},
+        studio_tables = {
+            "chat_projects",
+            "chat_threads",
+            "chat_messages",
+            "cognix_models",
+            "cognix_installed_models",
+            "cognix_memories",
+            "cognix_router_logs",
+            "cognix_tool_integrations",
+            "cognix_tool_permissions",
+            "cognix_audit_logs",
+            "cognix_fine_tuning_jobs",
+            "cognix_datasets",
+            "cognix_lora_adapters",
+            "cognix_organizations",
+            "cognix_deployment_targets",
+        },
+        rag_tables = {"documents", "chunks"},
+    )
+    service_topology = cognix_module_registry.build_module_service_topology()
+
+    contract = cognix_mvp_readiness.build_mvp_readiness_contract(
+        api_surface_contract = api_contract,
+        database_blueprint = database_blueprint,
+        service_topology = service_topology,
+    )
+
+    assert contract["mvpReadinessVersion"] == "cognix_mvp_readiness_v1"
+    assert contract["mode"] == "mvp_readiness_read_only"
+    assert contract["sourceOfTruth"] == "roadmap_section_31"
+    assert contract["summary"]["phaseCount"] == 9
+    assert contract["summary"]["coreMvpBlocked"] is False
+    phases = {item["id"]: item for item in contract["phases"]}
+    assert phases["phase_1_core_local"]["status"] == "ready"
+    assert phases["phase_3_orchestrator"]["status"] == "partial"
+    assert phases["phase_9_native_codex_secure"]["status"] == "partial"
+    assert phases["phase_1_core_local"]["missingRequirements"] == []
+    assert contract["policies"]["moduleActivationAllowedHere"] is False
+    assert contract["policies"]["databaseMigrationAllowedHere"] is False
+    assert contract["sideEffects"]["routeRegistration"] is False
+    assert contract["sideEffects"]["databaseWrite"] is False
+    assert contract["sideEffects"]["jobEnqueue"] is False
+    assert contract["sideEffects"]["modelLoad"] is False
+    assert contract["sideEffects"]["codeModification"] is False
+
+
+def test_mvp_readiness_endpoint_is_admin_only_and_read_only():
+    seed_accounts()
+    request = SimpleNamespace(
+        app = SimpleNamespace(
+            routes = [
+                SimpleNamespace(
+                    original_router = SimpleNamespace(
+                        routes = [
+                            SimpleNamespace(path = "/chat/completions", methods = {"POST"}),
+                            SimpleNamespace(path = "/generate/stream", methods = {"POST"}),
+                            SimpleNamespace(path = "/load", methods = {"POST"}),
+                            SimpleNamespace(path = "/unload", methods = {"POST"}),
+                        ]
+                    ),
+                    include_context = SimpleNamespace(prefix = "/api/inference"),
+                ),
+                SimpleNamespace(
+                    original_router = SimpleNamespace(
+                        routes = [
+                            SimpleNamespace(path = "/router/classify", methods = {"POST"}),
+                            SimpleNamespace(path = "/models/install-contract", methods = {"POST"}),
+                            SimpleNamespace(path = "/hardware/profile", methods = {"GET"}),
+                            SimpleNamespace(path = "/benchmark/run", methods = {"POST"}),
+                            SimpleNamespace(path = "/rag/indexing-plan", methods = {"POST"}),
+                            SimpleNamespace(path = "/tools/execution-handoff", methods = {"POST"}),
+                            SimpleNamespace(path = "/admin/audit-logs", methods = {"GET"}),
+                            SimpleNamespace(path = "/codex/pipeline-plan", methods = {"POST"}),
+                        ]
+                    ),
+                    include_context = SimpleNamespace(prefix = "/api/cognix"),
+                ),
+                SimpleNamespace(
+                    original_router = SimpleNamespace(routes = [SimpleNamespace(path = "/list", methods = {"GET"})]),
+                    include_context = SimpleNamespace(prefix = "/api/models"),
+                ),
+                SimpleNamespace(
+                    original_router = SimpleNamespace(
+                        routes = [
+                            SimpleNamespace(path = "/start", methods = {"POST"}),
+                            SimpleNamespace(path = "/runs", methods = {"GET"}),
+                        ]
+                    ),
+                    include_context = SimpleNamespace(prefix = "/api/train"),
+                ),
+            ]
+        )
+    )
+
+    with pytest.raises(HTTPException) as user_read:
+        run_async(cognix_routes.admin_mvp_readiness(request, current_subject = "alice"))
+    assert user_read.value.status_code == 403
+
+    body = run_async(
+        cognix_routes.admin_mvp_readiness(
+            request,
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+
+    contract = body["mvpReadiness"]
+    assert body["plannerVersion"] == "cognix_mvp_readiness_v1"
+    assert contract["summary"]["phaseCount"] == 9
+    assert contract["inputContracts"]["apiSurfaceContractVersion"] == "cognix_api_surface_contract_v1"
+    assert contract["inputContracts"]["serviceTopologyVersion"] == "cognix_module_service_topology_v1"
+    assert body["sideEffects"]["databaseWrite"] is False
+    assert body["sideEffects"]["migrationRun"] is False
+    assert body["sideEffects"]["jobEnqueue"] is False
+    assert body["sideEffects"]["modelLoad"] is False
+    assert body["sideEffects"]["codeModification"] is False
 
 
 def test_audit_log_redacts_sensitive_metadata_before_storage():
