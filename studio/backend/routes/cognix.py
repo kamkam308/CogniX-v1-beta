@@ -1280,6 +1280,10 @@ class IntegrationActivationContractRequest(BaseModel):
     tool_id: str = Field(..., min_length = 1, max_length = 120)
 
 
+class IntegrationPreflightContractRequest(BaseModel):
+    tool_id: str = Field(..., min_length = 1, max_length = 120)
+
+
 class ModulePlanRequest(BaseModel):
     module_id: str = Field(..., min_length = 1, max_length = 160)
 
@@ -5088,6 +5092,57 @@ async def plan_integration(
     )
     plan["auditLogId"] = audit.get("id")
     return plan
+
+
+@router.post("/integrations/preflight-contract")
+async def integration_preflight_contract(
+    payload: IntegrationPreflightContractRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    is_admin = auth_storage.is_admin(current_subject)
+    has_developer_mode = cognix_db.user_has_permission(
+        current_subject,
+        cognix_db.DEVELOPER_MODE_PERMISSION,
+    )
+    contract = cognix_integration_manager.build_connector_preflight_contract(
+        tool_id = payload.tool_id,
+        username = current_subject,
+        is_admin = is_admin,
+        has_developer_mode = has_developer_mode,
+        granted_permissions = _granted_permission_keys(current_subject),
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "integration_preflight_contract_built",
+        resource_type = "cognix_connector_preflight_contract",
+        resource_id = str(payload.tool_id),
+        severity = "notice" if contract.get("readyForActivationRequest") else "warning",
+        metadata = {
+            "integrationManagerVersion": cognix_integration_manager.COGNIX_INTEGRATION_MANAGER_VERSION,
+            "preflightContractVersion": contract.get("contractVersion"),
+            "toolId": contract.get("toolId"),
+            "connector": contract.get("connector"),
+            "status": contract.get("status"),
+            "readyForActivationRequest": contract.get("readyForActivationRequest"),
+            "readyForConnectorActivation": contract.get("readyForConnectorActivation"),
+            "nextRequiredGate": contract.get("nextRequiredGate"),
+            "secretContract": {
+                "required": contract.get("secretContract", {}).get("required"),
+                "secretSourceNames": contract.get("secretContract", {}).get("secretSourceNames", []),
+                "actualSecretValuesIncluded": contract.get("secretContract", {}).get("actualSecretValuesIncluded"),
+            },
+            "blockedGateIds": contract.get("summary", {}).get("blockedGateIds", []),
+            "warningGateIds": contract.get("summary", {}).get("warningGateIds", []),
+            "sideEffects": contract.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "preflightContract": contract,
+        "auditLogId": audit.get("id"),
+        "sideEffects": contract.get("sideEffects", {}),
+    }
 
 
 @router.post("/integrations/activation-contract")

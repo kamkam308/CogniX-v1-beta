@@ -1195,6 +1195,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
             "tool_execution_handoff",
             "tool_executor_queue_gate",
             "tool_secret_policy",
+            "connector_preflight_contract",
             "integration_activation_contract",
             "enterprise_connector_manifests",
             "education_connector_manifests",
@@ -1203,6 +1204,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "routes": [
             "/api/cognix/integrations/status",
             "/api/cognix/integrations/plan",
+            "/api/cognix/integrations/preflight-contract",
             "/api/cognix/integrations/activation-contract",
             "/api/cognix/tools/registry",
             "/api/cognix/tools/permission-matrix",

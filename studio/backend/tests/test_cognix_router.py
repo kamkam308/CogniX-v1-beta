@@ -8131,6 +8131,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "tool_execution_handoff" in modules["cognix-integrations"]["capabilities"]
     assert "tool_executor_queue_gate" in modules["cognix-integrations"]["capabilities"]
     assert "tool_secret_policy" in modules["cognix-integrations"]["capabilities"]
+    assert "connector_preflight_contract" in modules["cognix-integrations"]["capabilities"]
     assert "integration_activation_contract" in modules["cognix-integrations"]["capabilities"]
     assert "enterprise_connector_manifests" in modules["cognix-integrations"]["capabilities"]
     assert "education_connector_manifests" in modules["cognix-integrations"]["capabilities"]
@@ -8139,6 +8140,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
         set(modules["cognix-integrations"]["tools"])
     )
     assert "/api/cognix/integrations/plan" in modules["cognix-integrations"]["routes"]
+    assert "/api/cognix/integrations/preflight-contract" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/integrations/activation-contract" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/tools/permission-matrix" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/tools/plan" in modules["cognix-integrations"]["routes"]
@@ -9181,6 +9183,83 @@ def test_integration_activation_contract_endpoint_blocks_activation_without_secr
     assert log["metadata"]["readyForActivation"] is False
     assert "server_secret_required" in log["metadata"]["blockedWhen"]
     assert "secret_value" not in log["metadataJson"].lower()
+
+
+def test_connector_preflight_contract_summarizes_provider_without_secret_or_network_access():
+    contract = cognix_integration_manager.build_connector_preflight_contract(
+        tool_id = "github",
+        username = "alice",
+        is_admin = False,
+        has_developer_mode = True,
+        granted_permissions = {"github:read"},
+    )
+
+    assert contract["contractVersion"] == "cognix_connector_preflight_contract_v1"
+    assert contract["mode"] == "connector_preflight_dry_run"
+    assert contract["toolId"] == "github"
+    assert contract["connector"] == "github"
+    assert contract["status"] == "ready_for_admin_review"
+    assert contract["readyForActivationRequest"] is True
+    assert contract["readyForConnectorActivation"] is False
+    assert contract["authProfile"]["authMode"] == "oauth_user_token"
+    assert contract["authProfile"]["actualSecretValuesIncluded"] is False
+    assert contract["secretContract"]["secretSourceNames"] == [
+        "connector_oauth_token",
+        "encrypted_user_token",
+    ]
+    assert contract["secretContract"]["actualSecretValuesIncluded"] is False
+    assert "github:write" in contract["permissionContract"]["missingPermissions"]
+    assert "admin" in contract["permissionContract"]["missingPermissions"]
+    assert contract["riskContract"]["maxRiskLevel"] == "critical"
+    assert "merge_pull_request" in contract["riskContract"]["criticalActionIds"]
+    assert contract["dataBoundary"]["networkCallPlanned"] is False
+    assert contract["sideEffects"]["secretRead"] is False
+    assert contract["sideEffects"]["networkToolCall"] is False
+    assert contract["sideEffects"]["integrationActivation"] is False
+
+
+def test_connector_preflight_unknown_integration_blocks_everything_without_execution():
+    contract = cognix_integration_manager.build_connector_preflight_contract(
+        tool_id = "unknown-connector",
+        username = "alice",
+    )
+
+    assert contract["contractVersion"] == "cognix_connector_preflight_contract_v1"
+    assert contract["status"] == "unknown_integration"
+    assert contract["readyForActivationRequest"] is False
+    assert contract["nextRequiredGate"] == "manifest_missing"
+    assert "network_tool_call" in contract["blockedActions"]
+    assert contract["sideEffects"]["secretRead"] is False
+    assert contract["sideEffects"]["toolExecution"] is False
+
+
+def test_integration_preflight_endpoint_logs_sanitized_contract():
+    seed_accounts()
+
+    body = run_async(
+        cognix_routes.integration_preflight_contract(
+            cognix_routes.IntegrationPreflightContractRequest(tool_id = "github"),
+            current_subject = "alice",
+        )
+    )
+
+    contract = body["preflightContract"]
+    assert body["auditLogId"].startswith("aud_")
+    assert contract["contractVersion"] == "cognix_connector_preflight_contract_v1"
+    assert contract["readyForConnectorActivation"] is False
+    assert contract["secretContract"]["actualSecretValuesIncluded"] is False
+    assert contract["sideEffects"]["secretRead"] is False
+    assert contract["sideEffects"]["networkToolCall"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "integration_preflight_contract_built"
+    assert log["metadata"]["preflightContractVersion"] == "cognix_connector_preflight_contract_v1"
+    assert log["metadata"]["secretContract"]["actualSecretValuesIncluded"] is False
+    assert log["metadata"]["sideEffects"]["secretRead"] is False
+    assert "secret_value" not in log["metadataJson"].lower()
+    assert "access_token" not in log["metadataJson"].lower()
 
 
 def test_tool_plan_endpoint_allows_safe_declared_action_and_logs_audit():

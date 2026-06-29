@@ -17,6 +17,25 @@ from core.cognix import tool_registry as cognix_tool_registry
 
 COGNIX_INTEGRATION_MANAGER_VERSION = "cognix_integration_manager_v1"
 COGNIX_INTEGRATION_ACTIVATION_CONTRACT_VERSION = "cognix_integration_activation_contract_v1"
+COGNIX_CONNECTOR_PREFLIGHT_CONTRACT_VERSION = "cognix_connector_preflight_contract_v1"
+
+CONNECTOR_AUTH_PROFILES: dict[str, dict[str, Any]] = {
+    "github": {"authMode": "oauth_user_token", "tokenBoundary": "user"},
+    "google-drive": {"authMode": "oauth_user_token", "tokenBoundary": "user"},
+    "gmail": {"authMode": "oauth_user_token", "tokenBoundary": "user"},
+    "notion": {"authMode": "oauth_user_token", "tokenBoundary": "user"},
+    "microsoft-365": {"authMode": "oauth_user_token_or_graph_app", "tokenBoundary": "organization"},
+    "google-workspace": {"authMode": "oauth_user_token_or_service_account", "tokenBoundary": "organization"},
+    "sharepoint": {"authMode": "microsoft_graph_connector", "tokenBoundary": "organization"},
+    "microsoft-teams": {"authMode": "microsoft_graph_connector", "tokenBoundary": "organization"},
+    "slack": {"authMode": "slack_bot_or_user_token", "tokenBoundary": "organization"},
+    "moodle": {"authMode": "moodle_service_token", "tokenBoundary": "organization"},
+    "crm": {"authMode": "crm_api_token", "tokenBoundary": "organization"},
+    "erp": {"authMode": "erp_api_token", "tokenBoundary": "organization"},
+    "internal-tools": {"authMode": "internal_gateway_token", "tokenBoundary": "workspace"},
+    "local-codex": {"authMode": "local_workspace_trust", "tokenBoundary": "workspace"},
+    "isolated-container": {"authMode": "sandbox_runtime_trust", "tokenBoundary": "workspace"},
+}
 
 
 def _normalize_permission(permission: str) -> str:
@@ -64,6 +83,33 @@ def _required_permissions(actions: list[dict[str, Any]]) -> set[str]:
             if normalized and normalized != cognix_tool_registry.IMPLICIT_AUTHENTICATED_PERMISSION:
                 required.add(normalized)
     return required
+
+
+def _action_preflight(action: dict[str, Any], permissions: set[str]) -> dict[str, Any]:
+    required_permissions = [
+        _normalize_permission(str(item))
+        for item in action.get("permissions") or []
+        if item
+    ]
+    missing_permissions = [
+        item
+        for item in required_permissions
+        if item != cognix_tool_registry.IMPLICIT_AUTHENTICATED_PERMISSION and item not in permissions
+    ]
+    risk_level = str(action.get("riskLevel") or "low")
+    return {
+        "actionId": action.get("id"),
+        "mode": action.get("mode"),
+        "riskLevel": risk_level,
+        "requiresConfirmation": bool(action.get("requiresConfirmation")),
+        "auditRequired": bool(action.get("auditRequired")),
+        "sandboxRequired": bool(action.get("sandboxRequired")),
+        "rateLimitKey": action.get("rateLimitKey"),
+        "secretsRequired": bool(action.get("secretsRequired")),
+        "requiredPermissions": required_permissions,
+        "missingPermissions": missing_permissions,
+        "readyForExecutorPlanning": not missing_permissions and bool(action.get("auditRequired")),
+    }
 
 
 def _next_actions(
@@ -121,6 +167,213 @@ def _next_actions(
             }
         )
     return actions
+
+
+def build_connector_preflight_contract(
+    *,
+    tool_id: str,
+    username: str,
+    is_admin: bool = False,
+    has_developer_mode: bool = False,
+    granted_permissions: set[str] | None = None,
+) -> dict[str, Any]:
+    permissions = _permission_set(
+        is_admin = is_admin,
+        has_developer_mode = has_developer_mode,
+        granted_permissions = granted_permissions,
+    )
+    registry = cognix_tool_registry.build_tool_registry()
+    tool = next(
+        (item for item in registry.get("tools") or [] if isinstance(item, dict) and item.get("id") == tool_id),
+        None,
+    )
+    side_effects = {
+        "integrationActivation": False,
+        "secretRead": False,
+        "secretWrite": False,
+        "toolExecution": False,
+        "networkToolCall": False,
+        "externalWrite": False,
+        "permissionWrite": False,
+        "auditWrite": False,
+    }
+    if tool is None:
+        return {
+            "contractVersion": COGNIX_CONNECTOR_PREFLIGHT_CONTRACT_VERSION,
+            "mode": "connector_preflight_dry_run",
+            "username": username,
+            "toolId": tool_id,
+            "connector": None,
+            "status": "unknown_integration",
+            "readyForActivationRequest": False,
+            "readyForConnectorActivation": False,
+            "nextRequiredGate": "manifest_missing",
+            "gates": [
+                {
+                    "id": "manifest_declared",
+                    "status": "blocked",
+                    "severity": "error",
+                    "reason": "Connector manifest is not declared in the Tool Registry.",
+                }
+            ],
+            "blockedActions": [
+                "secret_read",
+                "network_tool_call",
+                "connector_activation",
+                "tool_execution",
+                "external_write",
+                "permission_write",
+            ],
+            "sideEffects": side_effects,
+        }
+
+    actions = [action for action in tool.get("actions") or [] if isinstance(action, dict)]
+    connector = str(tool.get("connector") or "unknown")
+    auth_profile = CONNECTOR_AUTH_PROFILES.get(
+        connector,
+        {"authMode": "connector_secret", "tokenBoundary": tool.get("dataIsolation") or "unknown"},
+    )
+    action_contracts = [_action_preflight(action, permissions) for action in actions]
+    required_permissions = sorted(_required_permissions(actions))
+    missing_permissions = sorted(
+        permission
+        for permission in required_permissions
+        if permission not in permissions
+    )
+    secret_names = list(cognix_tool_registry.SECRET_SOURCE_BY_CONNECTOR.get(connector, []))
+    max_risk = _max_risk(actions)
+    high_risk = _risk_rank(max_risk) >= _risk_rank("high")
+    enabled = bool(tool.get("enabled"))
+    gates = [
+        {
+            "id": "manifest_declared",
+            "status": "pass",
+            "severity": "info",
+            "reason": "Connector manifest is declared in the Tool Registry.",
+        },
+        {
+            "id": "connector_declared",
+            "status": "pass" if connector != "unknown" else "blocked",
+            "severity": "info" if connector != "unknown" else "error",
+            "reason": "Connector id is declared." if connector != "unknown" else "Connector id is missing.",
+            "detail": connector,
+        },
+        {
+            "id": "permissions_declared",
+            "status": "pass" if required_permissions else "warning",
+            "severity": "info" if required_permissions else "warning",
+            "reason": "Action permissions are declared." if required_permissions else "No explicit connector permissions are declared.",
+            "detail": required_permissions,
+        },
+        {
+            "id": "secret_reference_declared",
+            "status": "pass" if secret_names or not any(item.get("secretsRequired") for item in actions) else "blocked",
+            "severity": "info" if secret_names or not any(item.get("secretsRequired") for item in actions) else "error",
+            "reason": "Secret source names are declared server-side." if secret_names else "No secret source required.",
+            "detail": secret_names,
+        },
+        {
+            "id": "risk_policy_declared",
+            "status": "warning" if high_risk else "pass",
+            "severity": "warning" if high_risk else "info",
+            "reason": "High-risk connector actions require admin review." if high_risk else "Risk policy is declared.",
+            "detail": max_risk,
+        },
+        {
+            "id": "audit_policy_declared",
+            "status": "pass" if all(bool(action.get("auditRequired")) for action in actions) else "blocked",
+            "severity": "info" if all(bool(action.get("auditRequired")) for action in actions) else "error",
+            "reason": "All connector actions require audit logs." if actions else "Connector actions are not declared.",
+        },
+        {
+            "id": "executor_boundary_declared",
+            "status": "pass",
+            "severity": "info",
+            "reason": "Connector execution is delegated to guarded backend executors only.",
+        },
+    ]
+    blocked_gate_ids = [str(item["id"]) for item in gates if item.get("severity") == "error"]
+    warning_gate_ids = [str(item["id"]) for item in gates if item.get("severity") == "warning"]
+    next_required_gate = (
+        "manifest_review"
+        if blocked_gate_ids
+        else "enable_connector"
+        if not enabled
+        else "resolve_missing_permissions"
+        if missing_permissions
+        else "configure_server_secret"
+        if secret_names
+        else "human_approval"
+    )
+    return {
+        "contractVersion": COGNIX_CONNECTOR_PREFLIGHT_CONTRACT_VERSION,
+        "mode": "connector_preflight_dry_run",
+        "username": username,
+        "toolId": tool.get("id"),
+        "connector": connector,
+        "status": "ready_for_admin_review" if not blocked_gate_ids else "blocked_manifest_review",
+        "readyForActivationRequest": not blocked_gate_ids,
+        "readyForConnectorActivation": False,
+        "nextRequiredGate": next_required_gate,
+        "authProfile": {
+            **auth_profile,
+            "actualSecretValuesIncluded": False,
+            "clientSideSecretAccessAllowed": False,
+            "serverSideOnly": True,
+        },
+        "secretContract": {
+            "secretSourceNames": secret_names,
+            "required": bool(secret_names),
+            "actualSecretValuesIncluded": False,
+            "secretReadPlanned": False,
+            "secretWritePlanned": False,
+        },
+        "permissionContract": {
+            "requiredPermissions": required_permissions,
+            "missingPermissions": missing_permissions,
+            "grantedPermissionsUsed": sorted(permissions),
+            "permissionWritePlanned": False,
+        },
+        "dataBoundary": {
+            "dataIsolation": tool.get("dataIsolation"),
+            "tokenBoundary": auth_profile.get("tokenBoundary"),
+            "crossUserReadAllowed": False,
+            "rawExternalContentStoredByPreflight": False,
+            "networkRequiredForRealConnector": bool(secret_names or actions),
+            "networkCallPlanned": False,
+        },
+        "riskContract": {
+            "maxRiskLevel": max_risk,
+            "highRiskReviewRequired": high_risk,
+            "humanConfirmationRequiredForWrites": any(
+                str(action.get("mode") or "") in {"write", "delete"} for action in actions
+            ),
+            "criticalActionIds": [
+                str(action.get("id"))
+                for action in actions
+                if _risk_rank(str(action.get("riskLevel") or "low")) >= _risk_rank("critical")
+            ],
+        },
+        "actions": action_contracts,
+        "gates": gates,
+        "summary": {
+            "actionCount": len(action_contracts),
+            "readActionCount": sum(1 for item in action_contracts if item.get("mode") == "read"),
+            "writeActionCount": sum(1 for item in action_contracts if item.get("mode") in {"write", "delete"}),
+            "blockedGateIds": blocked_gate_ids,
+            "warningGateIds": warning_gate_ids,
+        },
+        "blockedActions": [
+            "secret_read",
+            "network_tool_call",
+            "connector_activation",
+            "tool_execution",
+            "external_write",
+            "permission_write",
+            "frontend_direct_connector_call",
+        ],
+        "sideEffects": side_effects,
+    }
 
 
 def _activation_contract(
