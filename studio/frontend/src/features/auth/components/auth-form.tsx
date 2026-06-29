@@ -164,12 +164,14 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
           if (hasRefreshToken()) {
             const refreshed = await refreshSession();
             if (refreshed) {
+              await fetchDeviceType({ force: true }).catch(() => undefined);
               if (!canceled) setStatusLoading(false);
               navigate({ to: getPostAuthRoute() });
               return;
             }
           }
           if (hasAuthToken()) {
+            await fetchDeviceType({ force: true }).catch(() => undefined);
             if (!canceled) setStatusLoading(false);
             navigate({ to: getPostAuthRoute() });
             return;

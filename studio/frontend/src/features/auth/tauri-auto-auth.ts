@@ -2,6 +2,7 @@
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
 import { isTauri } from "@/lib/api-base";
+import { fetchDeviceType } from "@/config/env";
 import {
   hasAuthToken,
   hasRefreshToken,
@@ -75,6 +76,7 @@ async function doTauriAutoAuth(options: TauriAutoAuthOptions): Promise<boolean> 
     const tokens = await invoke<DesktopAuthResponse>("desktop_auth");
     storeAuthTokens(tokens.access_token, tokens.refresh_token);
     setMustChangePassword(false);
+    void fetchDeviceType({ force: true }).catch(() => undefined);
     clearTauriAuthFailure();
     return true;
   } catch (error) {

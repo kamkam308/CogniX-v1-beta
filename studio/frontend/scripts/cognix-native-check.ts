@@ -454,6 +454,22 @@ const checks: Check[] = [
     ],
   },
   {
+    file: "src/features/auth/api.ts",
+    includes: [
+      'import { fetchDeviceType } from "@/config/env";',
+      "storeAuthTokens(payload.access_token, payload.refresh_token)",
+      "fetchDeviceType({ force: true })",
+    ],
+  },
+  {
+    file: "src/features/auth/tauri-auto-auth.ts",
+    includes: [
+      'import { fetchDeviceType } from "@/config/env";',
+      "storeAuthTokens(tokens.access_token, tokens.refresh_token)",
+      "fetchDeviceType({ force: true })",
+    ],
+  },
+  {
     file: "src/features/chat/api/chat-api.ts",
     includes: [
       "CogniXContextPack",
