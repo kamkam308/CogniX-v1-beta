@@ -16,6 +16,7 @@ from typing import Any
 COGNIX_CODEX_PIPELINE_VERSION = "cognix_codex_pipeline_v1"
 COGNIX_CODEX_RUN_CONTRACT_VERSION = "cognix_codex_run_contract_v1"
 COGNIX_CODEX_PREVIEW_CONTRACT_VERSION = "cognix_codex_preview_contract_v1"
+COGNIX_CODEX_APPROVAL_GATE_VERSION = "cognix_codex_approval_gate_v1"
 
 CODEX_PIPELINE_STEPS: list[dict[str, Any]] = [
     {
@@ -293,6 +294,185 @@ def build_codex_preview_contract(
             "networkCall": False,
             "fileWrite": False,
             "toolExecution": False,
+        },
+    }
+
+
+def _latest_approval_decision(decisions: list[dict[str, Any]] | None) -> dict[str, Any]:
+    if not decisions:
+        return {}
+    return _as_dict(decisions[0])
+
+
+def _approval_metadata(request: dict[str, Any]) -> dict[str, Any]:
+    metadata = request.get("metadata")
+    if isinstance(metadata, dict):
+        return metadata
+    return {}
+
+
+def _approval_branch(request: dict[str, Any]) -> str:
+    metadata = _approval_metadata(request)
+    return str(
+        metadata.get("branchName")
+        or metadata.get("codexBranchName")
+        or metadata.get("targetBranch")
+        or request.get("resource_id")
+        or request.get("resourceId")
+        or ""
+    ).strip()
+
+
+def build_codex_approval_gate_contract(
+    *,
+    username: str,
+    preview_contract: dict[str, Any] | None = None,
+    approval_request: dict[str, Any] | None = None,
+    approval_decisions: list[dict[str, Any]] | None = None,
+    branch_name: str | None = None,
+) -> dict[str, Any]:
+    preview_contract = _as_dict(preview_contract)
+    approval_request = _as_dict(approval_request)
+    latest_decision = _latest_approval_decision(approval_decisions)
+    preview_branch = str(
+        branch_name
+        or _as_dict(preview_contract.get("branch")).get("name")
+        or ""
+    ).strip()
+    request_type = str(
+        approval_request.get("request_type") or approval_request.get("requestType") or ""
+    ).strip().lower()
+    requester = str(approval_request.get("username") or approval_request.get("requester") or "").strip()
+    request_status = str(approval_request.get("status") or "").strip().lower()
+    decision_status = str(latest_decision.get("status") or "").strip().lower()
+    decision_actor = str(
+        latest_decision.get("decided_by")
+        or latest_decision.get("decidedBy")
+        or approval_request.get("decided_by")
+        or approval_request.get("decidedBy")
+        or ""
+    ).strip()
+    approval_branch = _approval_branch(approval_request)
+
+    preview_ready = preview_contract.get("readyForPreviewReview") is True
+    request_present = bool(approval_request)
+    type_matches = request_type == "codex:run"
+    requester_matches = requester == username
+    branch_matches = bool(preview_branch and approval_branch and preview_branch == approval_branch)
+    approved = request_status == "approved" and decision_status == "approved"
+    decision_recorded = bool(decision_actor)
+    gates = [
+        _preview_gate(
+            "preview_contract_ready",
+            "Contrat preview pret",
+            preview_ready,
+            "codex_preview_contract_ready_for_review",
+        ),
+        _preview_gate(
+            "approval_request_present",
+            "Demande approval presente",
+            request_present,
+            "approval_request_loaded",
+        ),
+        _preview_gate(
+            "approval_request_type_codex_run",
+            "Approval cible Codex",
+            type_matches,
+            "approval_request_type_codex_run",
+        ),
+        _preview_gate(
+            "approval_requester_matches_user",
+            "Approval rattache au demandeur",
+            requester_matches,
+            "approval_username_matches_current_subject",
+        ),
+        _preview_gate(
+            "approval_branch_matches_preview",
+            "Approval rattache a la branche preview",
+            branch_matches,
+            "approval_branch_matches_preview_branch",
+        ),
+        _preview_gate(
+            "approval_status_approved",
+            "Approval admin approuvee",
+            approved,
+            "latest_approval_decision_status_approved",
+        ),
+        _preview_gate(
+            "admin_decision_recorded",
+            "Decision admin tracee",
+            decision_recorded,
+            "approval_decision_has_actor",
+        ),
+        {
+            "id": "human_merge_execution_required",
+            "label": "Merge manuel obligatoire",
+            "required": True,
+            "passed": True,
+            "status": "required",
+            "evidence": "merge_execution_must_happen_outside_this_contract",
+        },
+    ]
+    blocked_gate_ids = [
+        gate["id"] for gate in gates if gate.get("required") and gate.get("status") == "blocked"
+    ]
+    ready_for_merge_review = not blocked_gate_ids
+    return {
+        "contractVersion": COGNIX_CODEX_APPROVAL_GATE_VERSION,
+        "mode": "codex_approval_gate_dry_run",
+        "username": username,
+        "status": "ready_for_human_merge_review" if ready_for_merge_review else "blocked_missing_approval_gate",
+        "readyForMergeReview": ready_for_merge_review,
+        "readyForMerge": False,
+        "mergeAllowedHere": False,
+        "blockedGateIds": blocked_gate_ids,
+        "approvalRequest": {
+            "id": approval_request.get("id"),
+            "present": request_present,
+            "requestType": request_type or None,
+            "status": request_status or None,
+            "riskLevel": approval_request.get("risk_level") or approval_request.get("riskLevel"),
+            "metadataKeys": sorted(_approval_metadata(approval_request).keys())[:12],
+        },
+        "approvalDecision": {
+            "present": bool(latest_decision),
+            "status": decision_status or None,
+            "decidedByPresent": bool(decision_actor),
+        },
+        "branch": {
+            "previewBranch": preview_branch or None,
+            "approvalBranch": approval_branch or None,
+            "matches": branch_matches,
+        },
+        "mergePolicy": {
+            "automaticMergeAllowed": False,
+            "humanApprovalRequired": True,
+            "approvedRequestRequired": True,
+            "branchScopedApprovalRequired": True,
+            "mainBranchWriteAllowed": False,
+            "mergeAllowedWithoutApproval": False,
+            "readyForHumanMergeReview": ready_for_merge_review,
+        },
+        "gates": gates,
+        "blockedActions": [
+            "merge",
+            "main_branch_write",
+            "git_push",
+            "deployment",
+            "file_write",
+            "tool_execution",
+            "network_call",
+        ],
+        "sideEffects": {
+            "merge": False,
+            "mainBranchWrite": False,
+            "gitPush": False,
+            "deployment": False,
+            "fileWrite": False,
+            "toolExecution": False,
+            "networkCall": False,
+            "approvalWrite": False,
+            "decisionWrite": False,
         },
     }
 

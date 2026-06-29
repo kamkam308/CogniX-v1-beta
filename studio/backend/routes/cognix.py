@@ -1213,6 +1213,21 @@ class CodexPreviewContractRequest(BaseModel):
     preview_target: str | None = Field(None, alias = "previewTarget", max_length = 120)
 
 
+class CodexApprovalGateRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    project_type: str | None = Field(None, max_length = 80)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    approval_request_id: str | None = Field(None, alias = "approvalRequestId", max_length = 120)
+    branch_name: str | None = Field(None, alias = "branchName", max_length = 180)
+    feature_request: dict[str, Any] | None = Field(None, alias = "featureRequest")
+    test_results: dict[str, Any] | None = Field(None, alias = "testResults")
+    build_result: dict[str, Any] | None = Field(None, alias = "buildResult")
+    security_scan: dict[str, Any] | None = Field(None, alias = "securityScan")
+    preview_target: str | None = Field(None, alias = "previewTarget", max_length = 120)
+
+
 class WorkerQueuePlanRequest(BaseModel):
     objective: str = Field(..., min_length = 1, max_length = 4000)
     project_type: str | None = Field(None, max_length = 80)
@@ -4557,6 +4572,85 @@ async def codex_preview_contract(
         "sideEffects": contract.get("sideEffects", {}),
         "plannerVersion": cognix_codex_pipeline.COGNIX_CODEX_PIPELINE_VERSION,
         "contractVersion": cognix_codex_pipeline.COGNIX_CODEX_PREVIEW_CONTRACT_VERSION,
+    }
+
+
+@router.post("/codex/approval-gate")
+async def codex_approval_gate(
+    payload: CodexApprovalGateRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    runtime = _current_model_cache_runtime()
+    plan = cognix_orchestrator.build_execution_plan(
+        payload.objective,
+        current_subject = current_subject,
+        project_type = payload.project_type,
+        project_id = payload.project_id,
+        runtime_snapshot = runtime,
+        latest_benchmark_run = cognix_db.get_latest_benchmark_run(current_subject),
+    )
+    pipeline = plan["codexPipelinePlan"]
+    preview_contract = cognix_codex_pipeline.build_codex_preview_contract(
+        username = current_subject,
+        feature_request = payload.feature_request,
+        pipeline_plan = pipeline,
+        branch_name = payload.branch_name,
+        test_results = payload.test_results,
+        build_result = payload.build_result,
+        security_scan = payload.security_scan,
+        preview_target = payload.preview_target,
+    )
+    approval_request = (
+        cognix_db.get_approval_request(payload.approval_request_id)
+        if payload.approval_request_id
+        else None
+    )
+    approval_decisions = (
+        cognix_db.list_approval_decisions(payload.approval_request_id)
+        if payload.approval_request_id
+        else []
+    )
+    approval_gate = cognix_codex_pipeline.build_codex_approval_gate_contract(
+        username = current_subject,
+        preview_contract = preview_contract,
+        approval_request = approval_request,
+        approval_decisions = approval_decisions,
+        branch_name = payload.branch_name,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "codex_approval_gate_built",
+        resource_type = "cognix_codex_approval_gate",
+        resource_id = str(payload.approval_request_id or payload.project_id or "none"),
+        severity = "notice" if approval_gate.get("readyForMergeReview") else "warning",
+        metadata = {
+            "previewContractVersion": preview_contract.get("contractVersion"),
+            "approvalGateVersion": approval_gate.get("contractVersion"),
+            "status": approval_gate.get("status"),
+            "readyForMergeReview": approval_gate.get("readyForMergeReview"),
+            "readyForMerge": approval_gate.get("readyForMerge"),
+            "blockedGateIds": approval_gate.get("blockedGateIds", []),
+            "approvalRequest": approval_gate.get("approvalRequest", {}),
+            "approvalDecision": approval_gate.get("approvalDecision", {}),
+            "branch": approval_gate.get("branch", {}),
+            "mergePolicy": approval_gate.get("mergePolicy", {}),
+            "sideEffects": approval_gate.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "runtimeError": runtime.get("error"),
+        "classification": plan["classification"],
+        "taskStrategy": plan["taskStrategy"],
+        "codexPipelinePlan": pipeline,
+        "codexPreviewContract": preview_contract,
+        "codexApprovalGate": approval_gate,
+        "executionPolicy": plan["executionPolicy"],
+        "auditLogId": audit.get("id"),
+        "sideEffects": approval_gate.get("sideEffects", {}),
+        "plannerVersion": cognix_codex_pipeline.COGNIX_CODEX_PIPELINE_VERSION,
+        "contractVersion": cognix_codex_pipeline.COGNIX_CODEX_APPROVAL_GATE_VERSION,
     }
 
 

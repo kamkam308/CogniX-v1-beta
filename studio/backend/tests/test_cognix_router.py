@@ -6912,6 +6912,142 @@ def test_codex_preview_contract_endpoint_logs_sanitized_dry_run(monkeypatch):
     assert "secret codex idea" not in log["metadataJson"]
 
 
+def test_codex_approval_gate_blocks_merge_without_branch_scoped_approval():
+    preview = cognix_codex_pipeline.build_codex_preview_contract(
+        username = "alice",
+        feature_request = {"title": "CogniX Chemistry"},
+        branch_name = "feature/cognix-chemistry",
+        test_results = {"status": "passed", "passed": True, "failed": 0},
+        build_result = {"status": "passed", "failed": 0},
+        security_scan = {"status": "passed", "critical": 0, "high": 0},
+    )
+    gate = cognix_codex_pipeline.build_codex_approval_gate_contract(
+        username = "alice",
+        preview_contract = preview,
+        approval_request = {
+            "id": "apr_1",
+            "username": "alice",
+            "request_type": "codex:run",
+            "status": "approved",
+            "risk_level": "critical",
+            "metadata": {"branchName": "feature/other"},
+        },
+        approval_decisions = [{"status": "approved", "decided_by": "admin"}],
+        branch_name = "feature/cognix-chemistry",
+    )
+
+    assert gate["contractVersion"] == "cognix_codex_approval_gate_v1"
+    assert gate["status"] == "blocked_missing_approval_gate"
+    assert gate["readyForMergeReview"] is False
+    assert gate["readyForMerge"] is False
+    assert "approval_branch_matches_preview" in gate["blockedGateIds"]
+    assert gate["mergePolicy"]["automaticMergeAllowed"] is False
+    assert gate["sideEffects"]["approvalWrite"] is False
+    assert gate["sideEffects"]["merge"] is False
+
+
+def test_codex_approval_gate_prepares_human_merge_review_without_merging():
+    preview = cognix_codex_pipeline.build_codex_preview_contract(
+        username = "alice",
+        feature_request = {"title": "CogniX Chemistry"},
+        branch_name = "feature/cognix-chemistry",
+        test_results = {"status": "passed", "passed": True, "failed": 0},
+        build_result = {"status": "passed", "failed": 0},
+        security_scan = {"status": "passed", "critical": 0, "high": 0},
+    )
+    gate = cognix_codex_pipeline.build_codex_approval_gate_contract(
+        username = "alice",
+        preview_contract = preview,
+        approval_request = {
+            "id": "apr_1",
+            "username": "alice",
+            "request_type": "codex:run",
+            "status": "approved",
+            "risk_level": "critical",
+            "metadata": {"branchName": "feature/cognix-chemistry"},
+        },
+        approval_decisions = [{"status": "approved", "decided_by": "admin"}],
+        branch_name = "feature/cognix-chemistry",
+    )
+
+    assert gate["status"] == "ready_for_human_merge_review"
+    assert gate["readyForMergeReview"] is True
+    assert gate["readyForMerge"] is False
+    assert gate["mergeAllowedHere"] is False
+    assert gate["mergePolicy"]["readyForHumanMergeReview"] is True
+    assert gate["mergePolicy"]["mainBranchWriteAllowed"] is False
+    assert gate["blockedGateIds"] == []
+    assert all(value is False for value in gate["sideEffects"].values())
+
+
+def test_codex_approval_gate_endpoint_logs_sanitized_dry_run(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+    request = cognix_db.create_approval_request(
+        "alice",
+        "codex:run",
+        "Approve Codex branch",
+        title = "Codex branch approval",
+        risk_level = "critical",
+        resource_type = "codex",
+        resource_id = "feature/cognix-chemistry",
+        metadata = {
+            "branchName": "feature/cognix-chemistry",
+            "secretNote": "branch secret should never be logged",
+        },
+    )
+    request = cognix_db.set_approval_status(
+        str(request["id"]),
+        "approved",
+        decided_by = storage.DEFAULT_ADMIN_USERNAME,
+        admin_note = "Approved",
+    )
+
+    body = run_async(
+        cognix_routes.codex_approval_gate(
+            cognix_routes.CodexApprovalGateRequest(
+                objective = "Ajoute un module CogniX Chemistry dans mon backend",
+                project_type = "code",
+                project_id = "project-code",
+                approval_request_id = str(request["id"]),
+                branch_name = "feature/cognix-chemistry",
+                feature_request = {"title": "CogniX Chemistry"},
+                test_results = {"status": "passed", "passed": True, "failed": 0, "errors": 0},
+                build_result = {"status": "passed", "failed": 0, "errors": 0},
+                security_scan = {"status": "passed", "critical": 0, "high": 0, "errors": 0},
+                preview_target = "local_preview",
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    gate = body["codexApprovalGate"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["contractVersion"] == "cognix_codex_approval_gate_v1"
+    assert gate["readyForMergeReview"] is True
+    assert gate["readyForMerge"] is False
+    assert gate["sideEffects"]["decisionWrite"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "codex_approval_gate_built"
+    assert log["metadata"]["approvalGateVersion"] == "cognix_codex_approval_gate_v1"
+    assert log["metadata"]["readyForMergeReview"] is True
+    assert log["metadata"]["readyForMerge"] is False
+    assert log["metadata"]["sideEffects"]["merge"] is False
+    assert "branch secret should never be logged" not in log["metadataJson"]
+
+
 def test_worker_queue_plans_long_running_jobs_without_enqueueing():
     plan = cognix_worker_queue.build_worker_queue_plan(
         objective = "Corrige ce bug Python et prepare mes PDF pour RAG",
@@ -8428,8 +8564,11 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "codex_run_contract" in modules["cognix-codex-secure-agent"]["capabilities"]
     assert "codex_preview_contract" in modules["cognix-codex-secure-agent"]["capabilities"]
     assert "branch_test_build_preview_gate" in modules["cognix-codex-secure-agent"]["capabilities"]
+    assert "codex_human_approval_gate" in modules["cognix-codex-secure-agent"]["capabilities"]
+    assert "codex_merge_gate_contract" in modules["cognix-codex-secure-agent"]["capabilities"]
     assert "/api/cognix/codex/pipeline-plan" in modules["cognix-codex-secure-agent"]["routes"]
     assert "/api/cognix/codex/preview-contract" in modules["cognix-codex-secure-agent"]["routes"]
+    assert "/api/cognix/codex/approval-gate" in modules["cognix-codex-secure-agent"]["routes"]
     assert modules["cognix-deployment-manager"]["dependencyState"]["ready"] is True
     assert "gpu_scheduler_contract" in modules["cognix-deployment-manager"]["capabilities"]
     assert "gpu_pool_admission_control" in modules["cognix-deployment-manager"]["capabilities"]
