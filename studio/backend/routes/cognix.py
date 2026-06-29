@@ -53,6 +53,7 @@ from core.cognix import hardware as cognix_hardware
 from core.cognix import images as cognix_images
 from core.cognix import integration_manager as cognix_integration_manager
 from core.cognix import intent_prediction as cognix_intent_prediction
+from core.cognix import kv_cache as cognix_kv_cache
 from core.cognix import library as cognix_library
 from core.cognix import memory_manager as cognix_memory_manager
 from core.cognix import memory_editor as cognix_memory_editor
@@ -1056,6 +1057,18 @@ class SpeculativeDecodingPlanRequest(BaseModel):
     target_model: dict[str, Any] | None = Field(None, alias = "targetModel")
     draft_model: dict[str, Any] | None = Field(None, alias = "draftModel")
     max_quality_delta: float = Field(0.02, alias = "maxQualityDelta", ge = 0.0, le = 0.2)
+
+
+class KvCacheEvictionPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    runtime_adapter: dict[str, Any] | None = Field(None, alias = "runtimeAdapter")
+    model: dict[str, Any] | None = None
+    context_plan: dict[str, Any] | None = Field(None, alias = "contextPlan")
+    context_blocks: list[dict[str, Any]] | None = Field(None, alias = "contextBlocks", max_length = 120)
+    target_token_budget: int | None = Field(None, alias = "targetTokenBudget", ge = 256, le = 262144)
 
 
 class QuantizationPlanRequest(BaseModel):
@@ -5980,6 +5993,62 @@ async def speculative_decoding_plan(
         "speculativeDecodingPlan": plan,
         "auditLogId": audit.get("id"),
         "plannerVersion": cognix_speculative_decoding.COGNIX_SPECULATIVE_DECODING_CONTRACT_VERSION,
+        "sideEffects": audit_side_effects,
+    }
+
+
+@router.post("/optimizations/kv-cache-plan")
+async def kv_cache_eviction_plan(
+    payload: KvCacheEvictionPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_kv_cache.build_kv_cache_eviction_plan(
+        username = current_subject,
+        objective = payload.objective,
+        project_id = payload.project_id,
+        context_blocks = payload.context_blocks,
+        context_plan = payload.context_plan,
+        runtime_adapter = payload.runtime_adapter,
+        model = payload.model,
+        latest_benchmark_run = cognix_db.get_latest_benchmark_run(current_subject),
+        target_token_budget = payload.target_token_budget,
+    )
+    audit_side_effects = {
+        **plan.get("sideEffects", {}),
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "kv_cache_eviction_plan_built",
+        resource_type = "cognix_kv_cache_eviction_plan",
+        resource_id = str(payload.project_id or plan.get("runtime", {}).get("runtimeType") or "general"),
+        severity = "notice" if plan.get("readyForPolicyReview") else "warning",
+        metadata = {
+            "kvCacheEvictionPlanVersion": plan.get("kvCacheEvictionPlanVersion"),
+            "policyContractVersion": plan.get("policyContractVersion"),
+            "contextRetentionPolicyVersion": plan.get("contextRetentionPolicyVersion"),
+            "status": plan.get("status"),
+            "readyForPolicyReview": plan.get("readyForPolicyReview"),
+            "readyForActivation": plan.get("readyForActivation"),
+            "policyMode": plan.get("policyMode"),
+            "runtimeType": plan.get("runtime", {}).get("runtimeType"),
+            "directKvControlSupported": plan.get("runtime", {}).get("directKvControlSupported"),
+            "blockCount": plan.get("retentionPlan", {}).get("summary", {}).get("blockCount"),
+            "estimatedTokenReduction": plan.get("summary", {}).get("estimatedTokenReduction"),
+            "blockedGateIds": plan.get("summary", {}).get("blockedGateIds", []),
+            "warningGateIds": plan.get("summary", {}).get("warningGateIds", []),
+            "benchmarkStatus": plan.get("benchmarkEvidence", {}).get("status"),
+            "sideEffects": audit_side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "kvCacheEvictionPlan": plan,
+        "auditLogId": audit.get("id"),
+        "plannerVersion": cognix_kv_cache.COGNIX_KV_CACHE_EVICTION_PLAN_VERSION,
         "sideEffects": audit_side_effects,
     }
 

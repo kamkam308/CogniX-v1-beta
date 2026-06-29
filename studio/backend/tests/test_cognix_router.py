@@ -46,6 +46,7 @@ from core.cognix import gpts as cognix_gpts
 from core.cognix import images as cognix_images
 from core.cognix import integration_manager as cognix_integration_manager
 from core.cognix import intent_prediction as cognix_intent_prediction
+from core.cognix import kv_cache as cognix_kv_cache
 from core.cognix import library as cognix_library
 from core.cognix import memory_editor as cognix_memory_editor
 from core.cognix import memory_manager as cognix_memory_manager
@@ -2224,6 +2225,133 @@ def test_speculative_decoding_plan_endpoint_logs_sanitized_contract(monkeypatch)
     assert log["metadata"]["blockedGateIds"] == []
     assert log["metadata"]["sideEffects"]["runtimeFlagWrite"] is False
     assert "reduire la latence sans degradation" not in log["metadataJson"]
+
+
+def test_kv_cache_eviction_plan_prepares_direct_runtime_policy_without_mutation():
+    plan = cognix_kv_cache.build_kv_cache_eviction_plan(
+        username = "alice",
+        objective = "Garder le contexte utile et supprimer le bruit KV",
+        runtime_adapter = {"selectedAdapter": {"runtimeType": "llama.cpp"}},
+        model = {"modelId": "cognix-code-7b-q4", "contextLength": 4096},
+        target_token_budget = 4096,
+        latest_benchmark_run = {
+            "id": "bench-ready",
+            "benchmark": {
+                "benchmarkVersion": "cognix_benchmark_v1",
+                "overallScore": 72.0,
+                "estimatedTokensPerSecond": 22.4,
+            },
+        },
+        context_blocks = [
+            {"id": "sys", "type": "system", "tokenCount": 300, "content": "hidden system text"},
+            {"id": "project", "type": "project_summary", "tokenCount": 800, "importance": 0.9},
+            {"id": "recent", "type": "user_message", "tokenCount": 700, "importance": 0.8},
+            {"id": "trace", "type": "terminal_output", "tokenCount": 2400, "importance": 0.2, "content": "secret terminal trace"},
+            {"id": "rag", "type": "rag_chunk", "tokenCount": 900, "hasCitation": True},
+        ],
+    )
+
+    actions = {item["blockId"]: item["action"] for item in plan["retentionPlan"]["decisions"]}
+    assert plan["kvCacheEvictionPlanVersion"] == "cognix_kv_cache_eviction_plan_v1"
+    assert plan["policyContractVersion"] == "cognix_kv_cache_policy_contract_v1"
+    assert plan["contextRetentionPolicyVersion"] == "cognix_context_retention_policy_v1"
+    assert plan["status"] == "ready_for_activation"
+    assert plan["readyForPolicyReview"] is True
+    assert plan["readyForActivation"] is True
+    assert plan["runtime"]["directKvControlSupported"] is True
+    assert plan["policyMode"] == "direct_kv_eviction_contract"
+    assert actions["sys"] == "pin"
+    assert actions["trace"] == "evict_from_kv"
+    assert plan["retentionPlan"]["summary"]["evictCount"] >= 1
+    assert plan["summary"]["estimatedTokenReduction"] > 0
+    assert "secret terminal trace" not in str(plan)
+    assert "hidden system text" not in str(plan)
+    assert plan["policyContract"]["runtimeFlagWriteAllowed"] is False
+    assert plan["policyContract"]["frontendDirectKvMutationAllowed"] is False
+    assert plan["sideEffects"]["kvCacheEviction"] is False
+    assert plan["sideEffects"]["runtimeFlagWrite"] is False
+    assert plan["sideEffects"]["contextSummarization"] is False
+    assert plan["sideEffects"]["generation"] is False
+
+
+def test_kv_cache_eviction_plan_falls_back_for_ollama_and_requires_benchmark():
+    plan = cognix_kv_cache.build_kv_cache_eviction_plan(
+        username = "alice",
+        objective = "Optimiser long chat sur Ollama",
+        runtime_adapter = {"selectedAdapter": {"runtimeType": "ollama"}},
+        model = {"modelId": "qwen-local", "contextLength": 2048},
+        latest_benchmark_run = None,
+        context_blocks = [
+            {"id": "recent", "type": "user_message", "tokenCount": 500},
+            {"id": "logs", "type": "debug_log", "tokenCount": 1200},
+        ],
+    )
+
+    assert plan["status"] == "ready_for_policy_review"
+    assert plan["readyForPolicyReview"] is True
+    assert plan["readyForActivation"] is False
+    assert plan["runtime"]["directKvControlSupported"] is False
+    assert plan["runtime"]["fallbackToContextRetention"] is True
+    assert plan["policyMode"] == "context_level_retention_contract"
+    assert "benchmark_baseline_ready" in plan["summary"]["blockedGateIds"]
+    assert "runtime_direct_kv_supported" in plan["summary"]["warningGateIds"]
+    assert plan["benchmarkEvidence"]["status"] == "missing"
+    assert plan["sideEffects"]["kvCacheRead"] is False
+    assert plan["sideEffects"]["kvCacheWrite"] is False
+
+
+def test_kv_cache_eviction_endpoint_logs_sanitized_contract(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_routes.cognix_db,
+        "get_latest_benchmark_run",
+        lambda username: {
+            "id": f"bench-{username}",
+            "benchmark": {
+                "benchmarkVersion": "cognix_benchmark_v1",
+                "overallScore": 70.0,
+                "estimatedTokensPerSecond": 18.5,
+            },
+        },
+    )
+
+    body = run_async(
+        cognix_routes.kv_cache_eviction_plan(
+            cognix_routes.KvCacheEvictionPlanRequest(
+                objective = "Planifier eviction KV sans exposer le contexte brut",
+                runtimeAdapter = {"selectedAdapter": {"runtimeType": "vllm"}},
+                model = {"modelId": "cognix-general-4b", "contextLength": 4096},
+                contextBlocks = [
+                    {"id": "sys", "type": "system", "tokenCount": 240, "content": "raw system secret"},
+                    {"id": "old", "type": "raw_history", "tokenCount": 1800, "content": "private chat sentence"},
+                    {"id": "recent", "type": "user_message", "tokenCount": 600, "importance": 0.8},
+                ],
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    plan = body["kvCacheEvictionPlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_kv_cache_eviction_plan_v1"
+    assert body["sideEffects"]["auditWrite"] is True
+    assert body["sideEffects"]["kvCacheEviction"] is False
+    assert body["sideEffects"]["runtimeConfigWrite"] is False
+    assert plan["readyForPolicyReview"] is True
+    assert plan["runtime"]["runtimeType"] == "vllm"
+    assert "raw system secret" not in str(plan)
+    assert "private chat sentence" not in str(plan)
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "kv_cache_eviction_plan_built"
+    assert log["metadata"]["kvCacheEvictionPlanVersion"] == "cognix_kv_cache_eviction_plan_v1"
+    assert log["metadata"]["policyContractVersion"] == "cognix_kv_cache_policy_contract_v1"
+    assert log["metadata"]["runtimeType"] == "vllm"
+    assert log["metadata"]["sideEffects"]["kvCacheEviction"] is False
+    assert "raw system secret" not in log["metadataJson"]
+    assert "private chat sentence" not in log["metadataJson"]
 
 
 def test_performance_monitor_collects_snapshot_without_execution_side_effects():
@@ -6821,11 +6949,15 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "semantic_cache_planning" in modules["cognix-optimization-engine"]["capabilities"]
     assert "semantic_reuse_contract" in modules["cognix-optimization-engine"]["capabilities"]
     assert "privacy_safe_cache_keys" in modules["cognix-optimization-engine"]["capabilities"]
+    assert "kv_cache_eviction_planning" in modules["cognix-optimization-engine"]["capabilities"]
+    assert "kv_cache_policy_contract" in modules["cognix-optimization-engine"]["capabilities"]
+    assert "context_retention_policy" in modules["cognix-optimization-engine"]["capabilities"]
     assert "speculative_decoding_contract" in modules["cognix-optimization-engine"]["capabilities"]
     assert "/api/cognix/semantic-cache/plan" in modules["cognix-optimization-engine"]["routes"]
     assert "/api/cognix/optimizations/capabilities" in modules["cognix-optimization-engine"]["routes"]
     assert "/api/cognix/optimizations/experiment-plan" in modules["cognix-optimization-engine"]["routes"]
     assert "/api/cognix/optimizations/speculative-decoding-plan" in modules["cognix-optimization-engine"]["routes"]
+    assert "/api/cognix/optimizations/kv-cache-plan" in modules["cognix-optimization-engine"]["routes"]
     assert modules["cognix-performance-monitor"]["dependencyState"]["ready"] is True
     assert "runtime_metrics" in modules["cognix-performance-monitor"]["capabilities"]
     assert "metrics_streaming" in modules["cognix-performance-monitor"]["capabilities"]
