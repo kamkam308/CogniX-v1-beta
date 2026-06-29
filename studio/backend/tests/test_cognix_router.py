@@ -59,6 +59,7 @@ from core.cognix import persona_manager as cognix_persona_manager
 from core.cognix import personal_twin as cognix_personal_twin
 from core.cognix import performance_monitor as cognix_performance_monitor
 from core.cognix import plugin_marketplace as cognix_plugin_marketplace
+from core.cognix import preload_planner as cognix_preload_planner
 from core.cognix import project_dna as cognix_project_dna
 from core.cognix import project_experts as cognix_project_experts
 from core.cognix import pulse as cognix_pulse
@@ -359,6 +360,113 @@ def test_orchestrator_builds_dry_run_plan_without_loading(monkeypatch):
     assert any(step["id"] == "apply_execution_policy" for step in plan["steps"])
     assert any(step["id"] == "dry_run_guard" for step in plan["steps"])
     assert any(step["id"] == "choose_task_strategy" for step in plan["steps"])
+
+
+def test_preload_planner_builds_auditable_lru_contract_without_loading():
+    hardware = stub_hardware_profile()
+    cache = cognix_cache_manager.build_cache_state(
+        hardware,
+        active_model = "cognix-maths-3b-q4",
+        loaded_models = ["cognix-general-3b-q4", "cognix-maths-3b-q4"],
+        loading_models = [],
+        runtime_type = "ollama",
+        project_id = "project-code",
+        now = 1000,
+    )
+    classification = classify_objective("Corrige ce bug Python dans mon backend API", project_type = "code")
+    task_strategy = cognix_decision_engine.build_task_strategy(
+        "Corrige ce bug Python dans mon backend API",
+        classification = classification,
+        project_type = "code",
+    )
+
+    plan = cognix_preload_planner.build_preload_plan(
+        objective = "Corrige ce bug Python dans mon backend API",
+        project_type = "code",
+        project_id = "project-code",
+        classification = classification,
+        task_strategy = task_strategy,
+        recommendation = stub_recommendation(hardware)["recommendation"],
+        cache = cache,
+    )
+
+    signal_ids = {item["id"] for item in plan["triggerSignals"]}
+    assert plan["plannerVersion"] == "cognix_preload_planner_v1"
+    assert plan["target"]["domain"] == "code"
+    assert plan["target"]["decisionScore"] > 0.5
+    assert plan["actions"][0]["type"] == "would_preload_after_lru"
+    assert plan["actions"][0]["requiresExecutor"] is True
+    assert plan["cachePreflight"]["requiredEvictionCount"] == 1
+    assert plan["cachePreflight"]["proposedEvictions"][0]["modelId"] == "cognix-general-3b-q4"
+    assert plan["schedule"]["earliestAfter"] == "project_open_idle"
+    assert plan["executionContract"]["contractVersion"] == "cognix_preload_execution_contract_v1"
+    assert plan["executionContract"]["observeOnly"] is True
+    assert plan["executionContract"]["automaticExecutionAllowed"] is False
+    assert plan["executionContract"]["requiresHumanConfirmation"] is True
+    assert "model_load" in plan["executionContract"]["blockedActions"]
+    assert "project_scope" in signal_ids
+    assert "cache_capacity" in signal_ids
+    assert plan["sideEffects"]["modelLoad"] is False
+    assert plan["sideEffects"]["modelUnload"] is False
+    assert plan["sideEffects"]["cacheMutation"] is False
+
+
+def test_model_preload_plan_endpoint_logs_execution_contract_without_loading(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_routes,
+        "_current_model_cache_runtime",
+        lambda: {
+            "runtimeType": "ollama",
+            "activeModel": None,
+            "loadedModels": [],
+            "loadingModels": [],
+        },
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+
+    body = run_async(
+        cognix_routes.model_preload_plan(
+            cognix_routes.PreloadPlanRequest(
+                objective = "Corrige ce bug Python dans mon backend API",
+                project_type = "code",
+                project_id = "project-code",
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    plan = body["preloadPlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert plan["executionContract"]["contractVersion"] == "cognix_preload_execution_contract_v1"
+    assert plan["executionContract"]["observeOnly"] is True
+    assert plan["executionContract"]["automaticExecutionAllowed"] is False
+    assert plan["actions"][0]["type"] == "would_preload"
+    assert plan["actions"][0]["requiresExecutor"] is True
+    assert plan["cachePreflight"]["requiredEvictionCount"] == 0
+    assert plan["schedule"]["runOnlyWhenIdle"] is True
+    assert body["sideEffects"]["modelLoad"] is False
+    assert body["sideEffects"]["cacheMutation"] is False
+    assert body["sideEffects"]["preloadEventWrite"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "preload_plan_built"
+    assert log["metadata"]["executionContractVersion"] == "cognix_preload_execution_contract_v1"
+    assert log["metadata"]["decisionScore"] == plan["target"]["decisionScore"]
+    assert log["metadata"]["recommendedWindowSeconds"] == plan["schedule"]["recommendedWindowSeconds"]
+    assert log["metadata"]["requiredEvictionCount"] == 0
+    assert log["metadata"]["sideEffects"]["modelLoad"] is False
 
 
 def test_orchestrator_policy_blocks_tool_execution(monkeypatch):
@@ -5882,8 +5990,10 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert modules["cognix-model-lifecycle"]["activationState"] == "ready"
     assert "load_unload_planning" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "cache_load_planning" in modules["cognix-model-lifecycle"]["capabilities"]
+    assert "preload_execution_contract" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "/api/cognix/models/lifecycle-plan" in modules["cognix-model-lifecycle"]["routes"]
     assert "/api/cognix/models/cache/load-plan" in modules["cognix-model-lifecycle"]["routes"]
+    assert "/api/cognix/models/preload-plan" in modules["cognix-model-lifecycle"]["routes"]
     assert modules["cognix-live-model-comparison"]["dependencyState"]["ready"] is True
     assert "side_by_side_model_comparison" in modules["cognix-live-model-comparison"]["capabilities"]
     assert "parallel_inference_planning" in modules["cognix-live-model-comparison"]["capabilities"]

@@ -51,6 +51,23 @@ def _as_float(value: Any) -> float:
     return parsed if parsed >= 0 else 0.0
 
 
+def _as_int(value: Any, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 0 else default
+
+
+def _confidence(value: Any, default: float = 0.0) -> float:
+    parsed = _as_float(value)
+    if parsed <= 0:
+        parsed = default
+    return round(min(parsed, 1.0), 3)
+
+
 def _benchmark_best_model(latest_benchmark_run: dict[str, Any] | None) -> dict[str, Any] | None:
     benchmark = _as_dict(_as_dict(latest_benchmark_run).get("benchmark"))
     candidates = [
@@ -115,6 +132,229 @@ def _priority(
     if not classification.get("needsClarification"):
         value += 5
     return min(value, 95)
+
+
+def _trigger_signals(
+    *,
+    project_id: str | None,
+    project_type: str | None,
+    classification: dict[str, Any],
+    task_strategy: dict[str, Any],
+    recommendation: dict[str, Any],
+    cache: dict[str, Any],
+    target: dict[str, Any],
+) -> list[dict[str, Any]]:
+    cache_policy = _as_dict(cache.get("policy"))
+    cache_runtime = _as_dict(cache.get("runtime"))
+    max_resident = _as_int(cache_policy.get("maxResidentModels"), 1)
+    resident_count = _as_int(cache_runtime.get("residentCount"), 0)
+    model_id = _clean_model_id(target.get("modelId"))
+    loaded_models = set(_as_list(cache_runtime.get("loadedModels")))
+    signals = [
+        {
+            "id": "classification_confidence",
+            "status": "ready" if not classification.get("needsClarification") else "blocked",
+            "strength": _confidence(classification.get("confidence"), 0.35),
+        },
+        {
+            "id": "runtime_readiness",
+            "status": "ready" if recommendation.get("readiness") in {"ready", "ready_with_caution", "model_missing"} else "blocked",
+            "strength": _confidence(recommendation.get("confidence"), 0.45),
+        },
+        {
+            "id": "cache_capacity",
+            "status": "ready" if resident_count < max_resident else "requires_lru",
+            "strength": round(max(0.1, 1 - (resident_count / max(1, max_resident + 1))), 3),
+        },
+        {
+            "id": "target_not_loaded",
+            "status": "ready" if model_id and model_id not in loaded_models else "already_loaded",
+            "strength": 0.8 if model_id and model_id not in loaded_models else 0.2,
+        },
+    ]
+    if project_id or project_type:
+        signals.append(
+            {
+                "id": "project_scope",
+                "status": "ready",
+                "strength": 0.85,
+                "detail": project_type or project_id,
+            }
+        )
+    if task_strategy.get("path"):
+        signals.append(
+            {
+                "id": "task_strategy",
+                "status": "ready",
+                "strength": _confidence(task_strategy.get("confidence"), 0.5),
+                "detail": task_strategy.get("path"),
+            }
+        )
+    if target.get("source") == "benchmark":
+        signals.append(
+            {
+                "id": "benchmark_candidate",
+                "status": "ready",
+                "strength": 0.9,
+            }
+        )
+    return signals
+
+
+def _preload_score(signals: list[dict[str, Any]], priority: int) -> float:
+    if not signals:
+        return round(priority / 100, 3)
+    signal_score = sum(_confidence(item.get("strength")) for item in signals) / len(signals)
+    return round(min(1.0, (signal_score * 0.68) + ((priority / 100) * 0.32)), 3)
+
+
+def _proposed_evictions(cache: dict[str, Any], target_model_id: str | None, required_count: int) -> list[dict[str, Any]]:
+    if required_count <= 0:
+        return []
+    target = _clean_model_id(target_model_id)
+    actions = [
+        item
+        for item in _as_list(cache.get("actions"))
+        if isinstance(item, dict)
+        and str(item.get("type") or "").startswith("would_unload")
+        and _clean_model_id(item.get("modelId")) != target
+    ]
+    if actions:
+        return [
+            {
+                "modelId": item.get("modelId"),
+                "reason": item.get("reason"),
+                "source": "cache_action",
+            }
+            for item in actions[:required_count]
+        ]
+
+    resident = [
+        item
+        for item in _as_list(cache.get("residentModels"))
+        if isinstance(item, dict) and _clean_model_id(item.get("modelId")) != target
+    ]
+    resident.sort(
+        key = lambda item: (
+            bool(item.get("active")),
+            _as_float(item.get("lastUsedAt")),
+            str(item.get("modelId") or ""),
+        )
+    )
+    return [
+        {
+            "modelId": item.get("modelId"),
+            "reason": "Modele resident le moins recemment utilise.",
+            "source": "resident_lru",
+        }
+        for item in resident[:required_count]
+    ]
+
+
+def _cache_preflight(
+    *,
+    cache: dict[str, Any],
+    target: dict[str, Any],
+    action: dict[str, Any],
+) -> dict[str, Any]:
+    policy = _as_dict(cache.get("policy"))
+    runtime = _as_dict(cache.get("runtime"))
+    loaded_models = set(_as_list(runtime.get("loadedModels")))
+    model_id = _clean_model_id(target.get("modelId"))
+    max_resident = max(1, _as_int(policy.get("maxResidentModels"), 1))
+    resident_count = _as_int(runtime.get("residentCount"), len(loaded_models))
+    already_resident = bool(model_id and model_id in loaded_models)
+    projected_resident_count = resident_count + (0 if already_resident or not model_id else 1)
+    required_eviction_count = max(0, projected_resident_count - max_resident)
+    if action.get("type") == "would_preload_after_lru" and required_eviction_count == 0:
+        required_eviction_count = 1
+    return {
+        "policyTier": policy.get("tier"),
+        "preloadEnabled": bool(policy.get("preloadEnabled")),
+        "evictionStrategy": policy.get("evictionStrategy") or "lru",
+        "maxResidentModels": max_resident,
+        "residentCount": resident_count,
+        "projectedResidentCount": projected_resident_count,
+        "alreadyResident": already_resident,
+        "requiredEvictionCount": required_eviction_count,
+        "proposedEvictions": _proposed_evictions(cache, model_id, required_eviction_count),
+    }
+
+
+def _schedule_window(
+    *,
+    action: dict[str, Any],
+    priority: int,
+    project_id: str | None,
+    project_type: str | None,
+) -> dict[str, Any]:
+    action_type = str(action.get("type") or "")
+    if action_type in {"keep_loaded", "defer_preload"}:
+        earliest_after = "none"
+        window_seconds = 0
+    elif project_id or project_type:
+        earliest_after = "project_open_idle"
+        window_seconds = 30 if priority >= 80 else 60
+    else:
+        earliest_after = "after_current_response"
+        window_seconds = 90 if priority >= 75 else 180
+    return {
+        "earliestAfter": earliest_after,
+        "recommendedWindowSeconds": window_seconds,
+        "expiresInSeconds": 900 if project_id or project_type else 420,
+        "cancelIfUserSwitchesDomain": True,
+        "runOnlyWhenIdle": True,
+    }
+
+
+def _execution_contract(
+    *,
+    action: dict[str, Any],
+    target: dict[str, Any],
+    recommendation: dict[str, Any],
+    cache_preflight: dict[str, Any],
+) -> dict[str, Any]:
+    action_type = str(action.get("type") or "")
+    can_prepare = action_type in {"would_preload", "would_preload_after_lru"}
+    blocked_when: list[str] = []
+    if not target.get("modelId"):
+        blocked_when.append("missing_model_id")
+    if recommendation.get("readiness") not in {"ready", "ready_with_caution", "model_missing"}:
+        blocked_when.append("runtime_not_ready")
+    if not cache_preflight.get("preloadEnabled") and action_type != "keep_loaded":
+        blocked_when.append("preload_disabled_by_cache_policy")
+    if cache_preflight.get("requiredEvictionCount") and not cache_preflight.get("proposedEvictions"):
+        blocked_when.append("missing_lru_eviction_candidate")
+    return {
+        "contractVersion": "cognix_preload_execution_contract_v1",
+        "observeOnly": True,
+        "executorRequired": can_prepare,
+        "automaticExecutionAllowed": False,
+        "requiresHumanConfirmation": action_type == "would_preload_after_lru",
+        "plannedExecutor": "cognix_worker_queue:model_preload" if can_prepare else None,
+        "allowedActions": [
+            "record_preload_intent",
+            "build_cache_load_plan",
+            "queue_preload_after_policy",
+        ]
+        if can_prepare
+        else ["record_preload_intent"],
+        "blockedActions": [
+            "model_load",
+            "model_unload",
+            "runtime_mutation",
+            "generation",
+            "network_model_call",
+        ],
+        "preconditions": {
+            "modelIdResolved": bool(target.get("modelId")),
+            "runtimeReady": recommendation.get("readiness") in {"ready", "ready_with_caution", "model_missing"},
+            "cachePolicyAllowsPreload": bool(cache_preflight.get("preloadEnabled")),
+            "alreadyResident": bool(cache_preflight.get("alreadyResident")),
+            "evictionsPlanned": len(cache_preflight.get("proposedEvictions") or []),
+        },
+        "blockedWhen": blocked_when,
+    }
 
 
 def _action_for_target(
@@ -203,9 +443,36 @@ def build_preload_plan(
         task_strategy = task_strategy,
         classification = classification,
     )
+    signals = _trigger_signals(
+        project_id = project_id,
+        project_type = project_type,
+        classification = classification,
+        task_strategy = task_strategy,
+        recommendation = recommendation,
+        cache = cache,
+        target = target,
+    )
     target["priority"] = priority
     target["state"] = action["type"]
     target["reason"] = action["reason"]
+    target["decisionScore"] = _preload_score(signals, priority)
+    cache_preflight = _cache_preflight(
+        cache = cache,
+        target = target,
+        action = action,
+    )
+    schedule = _schedule_window(
+        action = action,
+        priority = priority,
+        project_id = project_id,
+        project_type = project_type,
+    )
+    execution_contract = _execution_contract(
+        action = action,
+        target = target,
+        recommendation = recommendation,
+        cache_preflight = cache_preflight,
+    )
 
     warnings: list[str] = []
     if action["type"].startswith("defer"):
@@ -229,8 +496,16 @@ def build_preload_plan(
                 "modelId": target.get("modelId"),
                 "modelRole": target.get("modelRole"),
                 "priority": priority,
+                "decisionScore": target["decisionScore"],
+                "schedule": schedule,
+                "requiresExecutor": bool(execution_contract.get("executorRequired")),
+                "blockedBy": execution_contract.get("blockedWhen", []),
             }
         ],
+        "triggerSignals": signals,
+        "cachePreflight": cache_preflight,
+        "schedule": schedule,
+        "executionContract": execution_contract,
         "limits": {
             "maxResidentModels": _as_dict(cache.get("policy")).get("maxResidentModels"),
             "residentCount": _as_dict(cache.get("runtime")).get("residentCount"),
@@ -244,6 +519,9 @@ def build_preload_plan(
             "generation": False,
             "networkModelCall": False,
             "toolExecution": False,
+            "modelUnload": False,
             "cacheMutation": False,
+            "runtimeMutation": False,
+            "preloadEventWrite": False,
         },
     }

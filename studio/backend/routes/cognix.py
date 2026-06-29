@@ -4805,6 +4805,10 @@ async def model_preload_plan(
             "plannerVersion": preload_plan.get("plannerVersion"),
             "domain": preload_plan.get("target", {}).get("domain"),
             "modelRole": preload_plan.get("target", {}).get("modelRole"),
+            "decisionScore": preload_plan.get("target", {}).get("decisionScore"),
+            "executionContractVersion": preload_plan.get("executionContract", {}).get("contractVersion"),
+            "recommendedWindowSeconds": preload_plan.get("schedule", {}).get("recommendedWindowSeconds"),
+            "requiredEvictionCount": preload_plan.get("cachePreflight", {}).get("requiredEvictionCount"),
             "actionTypes": [
                 item.get("type")
                 for item in preload_plan.get("actions", [])
