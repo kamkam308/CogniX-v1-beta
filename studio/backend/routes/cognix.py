@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from auth import storage as auth_storage
 from auth.authentication import get_current_jwt_subject
+from core.cognix import admin_security as cognix_admin_security
 from core.cognix import benchmark as cognix_benchmark
 from core.cognix import background_agents as cognix_background_agents
 from core.cognix import cache_manager as cognix_cache_manager
@@ -924,6 +925,40 @@ def _effective_training_plan(current_subject: str, profile: dict[str, Any] | Non
     if auth_storage.has_ceo_training_entitlement(current_subject, profile):
         return "CEO"
     return str(profile.get("plan") or "")
+
+
+def _build_admin_security_bundle() -> dict[str, Any]:
+    security_events = cognix_db.list_security_events(limit = 500)
+    audit_logs = cognix_db.list_audit_logs(limit = 500)
+    bans = cognix_db.list_bans()
+    reports = cognix_db.list_reports()
+    threat_report = cognix_admin_security.build_security_threat_report(
+        security_events = security_events,
+        audit_logs = audit_logs,
+        bans = bans,
+        reports = reports,
+    )
+    risk_scoring = cognix_admin_security.build_risk_scoring(
+        security_events = security_events,
+        audit_logs = audit_logs,
+        bans = bans,
+        reports = reports,
+    )
+    system_health = cognix_admin_security.build_system_health(
+        hardware = cognix_hardware.get_hardware_profile(),
+        security_report = threat_report,
+        risk_scoring = risk_scoring,
+        audit_logs = audit_logs,
+    )
+    return {
+        "securityEvents": security_events,
+        "auditLogs": audit_logs,
+        "bans": bans,
+        "reports": reports,
+        "threatReport": threat_report,
+        "riskScoring": risk_scoring,
+        "systemHealth": system_health,
+    }
 
 
 def _row(row: dict[str, Any]) -> dict[str, Any]:
@@ -8784,6 +8819,25 @@ async def admin_dashboard(current_subject: str = Depends(get_current_jwt_subject
     threats = cognix_db.list_security_events(limit = 200)
     reports = cognix_db.list_reports()
     collaborators = cognix_db.list_project_collaborators()
+    audit_logs = cognix_db.list_audit_logs(limit = 500)
+    threat_report = cognix_admin_security.build_security_threat_report(
+        security_events = threats,
+        audit_logs = audit_logs,
+        bans = bans,
+        reports = reports,
+    )
+    risk_scoring = cognix_admin_security.build_risk_scoring(
+        security_events = threats,
+        audit_logs = audit_logs,
+        bans = bans,
+        reports = reports,
+    )
+    system_health = cognix_admin_security.build_system_health(
+        hardware = cognix_hardware.get_hardware_profile(),
+        security_report = threat_report,
+        risk_scoring = risk_scoring,
+        audit_logs = audit_logs,
+    )
     user_details = _build_dashboard_user_details(
         users = users,
         threads = threads,
@@ -8806,6 +8860,9 @@ async def admin_dashboard(current_subject: str = Depends(get_current_jwt_subject
                 if item.get("status") in {"pending_admin_review", "active", "permanent"}
             ),
             "securityThreats": len(threats),
+            "riskEntities": risk_scoring["summary"]["entities"],
+            "maxRiskScore": risk_scoring["summary"]["maxScore"],
+            "systemHealth": system_health["overallStatus"],
             "reportsOpen": sum(1 for item in reports if item.get("status") in {"open", "in_review"}),
         },
         "users": [dict(user, dashboard = user_details.get(str(user.get("username") or ""), {})) for user in users],
@@ -8817,6 +8874,9 @@ async def admin_dashboard(current_subject: str = Depends(get_current_jwt_subject
         "approvals": _rows(approvals),
         "bans": _rows(bans),
         "securityThreats": _rows(threats),
+        "threatReport": threat_report,
+        "riskScoring": risk_scoring,
+        "systemHealth": system_health,
         "reports": _rows(reports),
         "knownAttacks": [
             {
@@ -8961,8 +9021,11 @@ async def admin_update_ban(
 @router.get("/admin/security-threats")
 async def admin_security_threats(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
     _require_admin(current_subject)
+    bundle = _build_admin_security_bundle()
     return {
-        "threats": _rows(cognix_db.list_security_events(limit = 500)),
+        "threats": _rows(bundle["securityEvents"]),
+        "threatReport": bundle["threatReport"],
+        "riskScoring": bundle["riskScoring"],
         "knownAttacks": [
             {
                 "id": item["id"],
@@ -8971,6 +9034,30 @@ async def admin_security_threats(current_subject: str = Depends(get_current_jwt_
             }
             for item in cognix_db.KNOWN_ATTACK_SIGNATURES
         ],
+        "sideEffects": bundle["threatReport"]["sideEffects"],
+    }
+
+
+@router.get("/admin/risk-scores")
+async def admin_risk_scores(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_security_bundle()
+    return {
+        "riskScoring": bundle["riskScoring"],
+        "threatSummary": bundle["threatReport"]["summary"],
+        "sideEffects": bundle["riskScoring"]["sideEffects"],
+    }
+
+
+@router.get("/admin/system-health")
+async def admin_system_health(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_security_bundle()
+    return {
+        "systemHealth": bundle["systemHealth"],
+        "threatSummary": bundle["threatReport"]["summary"],
+        "riskSummary": bundle["riskScoring"]["summary"],
+        "sideEffects": bundle["systemHealth"]["sideEffects"],
     }
 
 

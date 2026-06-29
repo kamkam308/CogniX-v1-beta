@@ -5480,6 +5480,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-plugin-marketplace",
         "cognix-codex-secure-agent",
         "cognix-enterprise-foundation",
+        "cognix-admin-security-center",
         "cognix-deployment-manager",
     }.issubset(modules)
     assert modules["cognix-local-core"]["activationState"] == "ready"
@@ -5715,6 +5716,10 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/plugins/install-plan" in modules["cognix-plugin-marketplace"]["routes"]
     assert "sso_planning" in modules["cognix-enterprise-foundation"]["capabilities"]
     assert "/api/cognix/governance/plan" in modules["cognix-enterprise-foundation"]["routes"]
+    assert "ai_risk_scoring" in modules["cognix-admin-security-center"]["capabilities"]
+    assert "live_system_health" in modules["cognix-admin-security-center"]["capabilities"]
+    assert "/api/cognix/admin/risk-scores" in modules["cognix-admin-security-center"]["routes"]
+    assert "/api/cognix/admin/system-health" in modules["cognix-admin-security-center"]["routes"]
     assert modules["cognix-deployment-manager"]["dependencyState"]["ready"] is True
     assert "cognix-integrations" in modules["cognix-codex-secure-agent"]["dependencyState"]["dependencies"]
 
@@ -6173,6 +6178,71 @@ def test_admin_permission_grant_and_revoke_affect_tool_planning():
     actions = [log["action"] for log in admin_read["logs"]]
     assert "permission_granted" in actions
     assert "permission_revoked" in actions
+
+
+def test_admin_security_center_builds_threat_risk_and_health(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(cognix_routes.cognix_hardware, "get_hardware_profile", stub_hardware_profile)
+
+    event = cognix_db.record_security_event(
+        username = "alice",
+        client_key = "client-a",
+        category = "sql_injection",
+        severity = "critical",
+        pattern_label = "SQL injection",
+        method = "POST",
+        path = "/api/auth/login",
+        excerpt = "admin' OR 1=1 --",
+        create_temporary_ban = True,
+    )
+    cognix_db.create_report(
+        "alice",
+        "security",
+        "Cloud risk",
+        "Project uses cloud with sensitive data.",
+    )
+    cognix_db.create_audit_log(
+        username = "alice",
+        actor_username = storage.DEFAULT_ADMIN_USERNAME,
+        action = "permission_granted",
+        resource_type = "permission",
+        resource_id = "developer_mode",
+        severity = "warning",
+        metadata = {"permissionKey": "developer_mode"},
+    )
+
+    with pytest.raises(HTTPException) as user_read:
+        run_async(cognix_routes.admin_security_threats(current_subject = "alice"))
+    assert user_read.value.status_code == 403
+
+    security = run_async(
+        cognix_routes.admin_security_threats(current_subject = storage.DEFAULT_ADMIN_USERNAME)
+    )
+
+    assert security["threatReport"]["reportVersion"] == "cognix_admin_security_v1"
+    assert security["threatReport"]["summary"]["critical"] >= 1
+    assert security["threatReport"]["summary"]["activeBans"] == 1
+    assert security["sideEffects"]["databaseWrite"] is False
+    threat = next(item for item in security["threatReport"]["threats"] if item["sourceEventId"] == event["id"])
+    assert threat["title"] == "SQL injection"
+    assert threat["severity"] == "critical"
+    assert "POST /api/auth/login" in threat["evidence"]
+    assert threat["recommendedSolution"]
+
+    risk = run_async(cognix_routes.admin_risk_scores(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    assert risk["riskScoring"]["scoringVersion"] == "cognix_risk_scoring_v1"
+    assert risk["riskScoring"]["summary"]["maxLevel"] == "critical"
+    alice_score = next(item for item in risk["riskScoring"]["scores"] if item["entityId"] == "alice")
+    assert alice_score["features"]["criticalEvents"] == 1
+    assert alice_score["features"]["activeBans"] == 1
+    assert alice_score["recommendedAction"]
+    assert risk["sideEffects"]["permissionMutation"] is False
+
+    health = run_async(cognix_routes.admin_system_health(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    assert health["systemHealth"]["healthVersion"] == "cognix_system_health_v1"
+    assert health["systemHealth"]["overallStatus"] == "red"
+    assert any(item["id"] == "security-monitor" for item in health["systemHealth"]["services"])
+    assert health["sideEffects"]["workerMutation"] is False
 
 
 def test_router_endpoint_declares_jwt_dependency():
