@@ -71,6 +71,7 @@ from core.cognix import project_experts as cognix_project_experts
 from core.cognix import pulse as cognix_pulse
 from core.cognix import prompt_compression as cognix_prompt_compression
 from core.cognix import quantization_advisor as cognix_quantization_advisor
+from core.cognix import rag_compression as cognix_rag_compression
 from core.cognix import rag_planner as cognix_rag_planner
 from core.cognix import registry as cognix_registry
 from core.cognix import recommender as cognix_recommender
@@ -997,6 +998,18 @@ class RagRetrievalPacketRequest(BaseModel):
     project_id: str | None = Field(None, alias = "projectId", max_length = 160)
     sources: list[dict[str, Any]] | None = None
     top_k: int = Field(6, alias = "topK", ge = 1, le = 12)
+
+
+class RagCompressionPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    project_type: str | None = Field(None, alias = "projectType", max_length = 80)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    chunks: list[dict[str, Any]] = Field(..., min_length = 1, max_length = 80)
+    target_tokens: int = Field(900, alias = "targetTokens", ge = 64, le = 12000)
+    max_chunks: int = Field(6, alias = "maxChunks", ge = 1, le = 20)
+    require_citations: bool = Field(True, alias = "requireCitations")
 
 
 class RagIndexingPlanRequest(BaseModel):
@@ -5592,6 +5605,57 @@ async def rag_plan(
         "executionPolicy": plan["executionPolicy"],
         "auditLogId": audit.get("id"),
         "sideEffects": rag.get("sideEffects", {}),
+    }
+
+
+@router.post("/rag/compression-plan")
+async def rag_compression_plan(
+    payload: RagCompressionPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_rag_compression.build_rag_compression_plan(
+        username = current_subject,
+        objective = payload.objective,
+        project_id = payload.project_id,
+        chunks = payload.chunks,
+        target_tokens = payload.target_tokens,
+        max_chunks = payload.max_chunks,
+        require_citations = payload.require_citations,
+    )
+    audit_side_effects = {
+        **plan.get("sideEffects", {}),
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "rag_compression_plan_built",
+        resource_type = "cognix_rag_compression_plan",
+        resource_id = str(payload.project_id or plan.get("summary", {}).get("status") or "general"),
+        severity = "notice" if plan.get("readyForInjection") else "warning",
+        metadata = {
+            "ragCompressionVersion": plan.get("ragCompressionVersion"),
+            "citationRetentionVersion": plan.get("citationRetentionVersion"),
+            "extractiveRankerVersion": plan.get("extractiveRankerVersion"),
+            "status": plan.get("status"),
+            "readyForInjection": plan.get("readyForInjection"),
+            "inputChunkCount": plan.get("summary", {}).get("inputChunkCount"),
+            "selectedChunkCount": plan.get("summary", {}).get("selectedChunkCount"),
+            "citationCount": plan.get("summary", {}).get("citationCount"),
+            "missingCitationCount": plan.get("citationContract", {}).get("missingCitationCount"),
+            "reductionRatio": plan.get("summary", {}).get("reductionRatio"),
+            "selectedChunkIds": plan.get("selectedChunkIds"),
+            "sideEffects": audit_side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "ragCompressionPlan": plan,
+        "auditLogId": audit.get("id"),
+        "plannerVersion": cognix_rag_compression.COGNIX_RAG_COMPRESSION_VERSION,
+        "sideEffects": audit_side_effects,
     }
 
 

@@ -132,6 +132,29 @@ const checks: Check[] = [
     ],
   },
   {
+    file: "../backend/core/cognix/rag_compression.py",
+    includes: [
+      "COGNIX_RAG_COMPRESSION_VERSION",
+      '"cognix_rag_compression_v1"',
+      "COGNIX_RAG_CITATION_RETENTION_VERSION",
+      "def build_rag_compression_plan",
+      '"citationRetentionRequired": True',
+      '"noUncitedClaims": True',
+      '"ragRetrieval": False',
+      '"generation": False',
+    ],
+  },
+  {
+    file: "../backend/routes/cognix.py",
+    includes: [
+      "RagCompressionPlanRequest",
+      '@router.post("/rag/compression-plan")',
+      "cognix_rag_compression.build_rag_compression_plan",
+      "rag_compression_plan_built",
+      '"cognix_rag_compression_plan"',
+    ],
+  },
+  {
     file: "../backend/core/cognix/personal_twin.py",
     includes: [
       "COGNIX_PERSONAL_TWIN_SERVICE_VERSION",

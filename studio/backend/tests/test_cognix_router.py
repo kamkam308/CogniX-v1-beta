@@ -65,6 +65,7 @@ from core.cognix import project_experts as cognix_project_experts
 from core.cognix import pulse as cognix_pulse
 from core.cognix import prompt_compression as cognix_prompt_compression
 from core.cognix import quantization_advisor as cognix_quantization_advisor
+from core.cognix import rag_compression as cognix_rag_compression
 from core.cognix import rag_planner as cognix_rag_planner
 from core.cognix import research_watch as cognix_research_watch
 from core.cognix import response_reflection as cognix_response_reflection
@@ -1349,6 +1350,113 @@ def test_rag_retrieval_packet_endpoint_ranks_chunks_with_citations_without_model
     assert log["metadata"]["selectedChunkCount"] == 1
     assert log["metadata"]["citationCount"] == 1
     assert "reduire les hallucinations" not in str(log["metadata"])
+
+
+def test_rag_compression_plan_preserves_citations_without_generation():
+    plan = cognix_rag_compression.build_rag_compression_plan(
+        username = "alice",
+        objective = "RAG PDF QCM citations securite",
+        project_id = "project-rag",
+        chunks = [
+            {
+                "chunkId": "c-noise",
+                "sourceId": "doc-noise",
+                "sourceName": "notes.txt",
+                "text": "Theme sombre et couleur du bouton principal.",
+                "score": 0.1,
+            },
+            {
+                "chunkId": "c-rag",
+                "sourceId": "cours-rag",
+                "sourceName": "Cours RAG.pdf",
+                "page": 7,
+                "text": (
+                    "Le RAG PDF doit garder les citations pour repondre aux QCM. "
+                    "Chaque reponse sourcee doit conserver le chunk et la page."
+                ),
+                "score": 0.8,
+            },
+        ],
+        target_tokens = 70,
+        max_chunks = 2,
+        require_citations = True,
+    )
+
+    assert plan["ragCompressionVersion"] == "cognix_rag_compression_v1"
+    assert plan["citationRetentionVersion"] == "cognix_rag_citation_retention_v1"
+    assert plan["readyForInjection"] is True
+    assert plan["compressedChunks"][0]["chunkId"] == "c-rag"
+    assert plan["compressedChunks"][0]["citation"]["sourceId"] == "cours-rag"
+    assert plan["compressedChunks"][0]["citation"]["page"] == 7
+    assert "[S1]" in plan["contextBlock"]
+    assert plan["citationContract"]["citationRetentionRequired"] is True
+    assert plan["citationContract"]["noUncitedClaims"] is True
+    assert plan["sideEffects"]["generation"] is False
+    assert plan["sideEffects"]["modelLoad"] is False
+    assert plan["sideEffects"]["ragRetrieval"] is False
+    assert plan["sideEffects"]["ragIndexing"] is False
+
+
+def test_rag_compression_plan_blocks_strict_mode_when_citations_are_missing():
+    plan = cognix_rag_compression.build_rag_compression_plan(
+        username = "alice",
+        objective = "RAG citations",
+        chunks = [
+            {
+                "chunkId": "c-missing",
+                "text": "Le RAG avec citations est important mais cette ligne n'a pas de source.",
+            }
+        ],
+        require_citations = True,
+    )
+
+    assert plan["status"] == "blocked_missing_citations"
+    assert plan["readyForInjection"] is False
+    assert plan["compressedChunks"] == []
+    assert plan["citationContract"]["missingCitationCount"] == 1
+    assert plan["sideEffects"]["generation"] is False
+
+
+def test_rag_compression_plan_endpoint_logs_sanitized_metadata():
+    seed_accounts()
+
+    body = run_async(
+        cognix_routes.rag_compression_plan(
+            cognix_routes.RagCompressionPlanRequest(
+                objective = "RAG PDF citations QCM",
+                chunks = [
+                    {
+                        "chunkId": "c-private",
+                        "sourceId": "cours-rag",
+                        "sourceName": "Cours RAG.pdf",
+                        "page": 2,
+                        "text": "Phrase privee de source RAG qui ne doit pas entrer dans audit.",
+                    }
+                ],
+                target_tokens = 80,
+                max_chunks = 1,
+                require_citations = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    plan = body["ragCompressionPlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert plan["readyForInjection"] is True
+    assert plan["compressedChunks"][0]["chunkId"] == "c-private"
+    assert body["sideEffects"]["auditWrite"] is True
+    assert body["sideEffects"]["generation"] is False
+    assert body["sideEffects"]["ragRetrieval"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "rag_compression_plan_built"
+    assert log["metadata"]["ragCompressionVersion"] == "cognix_rag_compression_v1"
+    assert log["metadata"]["selectedChunkIds"] == ["c-private"]
+    assert log["metadata"]["sideEffects"]["generation"] is False
+    assert "Phrase privee de source RAG" not in log["metadataJson"]
 
 
 def test_rag_plan_blocks_retrieval_when_sources_are_missing(monkeypatch):
@@ -6569,8 +6677,11 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "rag_source_registry" in modules["cognix-rag"]["capabilities"]
     assert "rag_indexing_planning" in modules["cognix-rag"]["capabilities"]
     assert "rag_retrieval_packet" in modules["cognix-rag"]["capabilities"]
+    assert "rag_compression_contract" in modules["cognix-rag"]["capabilities"]
+    assert "citation_retention_contract" in modules["cognix-rag"]["capabilities"]
     assert "/api/cognix/rag/sources" in modules["cognix-rag"]["routes"]
     assert "/api/cognix/rag/indexing-plan" in modules["cognix-rag"]["routes"]
+    assert "/api/cognix/rag/compression-plan" in modules["cognix-rag"]["routes"]
     assert "/api/cognix/rag/retrieval-packet" in modules["cognix-rag"]["routes"]
     assert "cloud_training_targets" in modules["cognix-fine-tuning"]["capabilities"]
     assert "cloud_training_handoff" in modules["cognix-fine-tuning"]["capabilities"]
