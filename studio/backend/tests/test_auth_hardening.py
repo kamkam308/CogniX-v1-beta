@@ -91,6 +91,34 @@ def test_ceo_plan_is_training_operator_without_admin_role():
     assert storage.is_training_operator("ceo_user") is True
 
 
+def test_ceo_role_and_account_alias_are_training_operators_without_admin_role():
+    storage.create_user(
+        username = "cloud_lead",
+        email = "cloud-lead@example.com",
+        password = "human-password-123",
+        role = "ceo",
+    )
+    storage.create_user(
+        username = "CEO",
+        email = "ceo-account@example.com",
+        password = "human-password-123",
+    )
+
+    role_profile = storage.get_user_profile("cloud_lead")
+    alias_profile = storage.get_user_profile("CEO")
+
+    assert role_profile is not None
+    assert role_profile["role"] == "ceo"
+    assert storage.is_admin("cloud_lead") is False
+    assert storage.is_training_operator("cloud_lead") is True
+
+    assert alias_profile is not None
+    assert alias_profile["role"] == "user"
+    assert storage.is_admin("CEO") is False
+    assert storage.has_ceo_training_entitlement("CEO", alias_profile) is True
+    assert storage.is_training_operator("CEO") is True
+
+
 def test_free_user_is_not_training_operator():
     seed_user("freeuser")
 

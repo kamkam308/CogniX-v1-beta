@@ -21,6 +21,7 @@ DEFAULT_ADMIN_USERNAME = "kamil"
 LEGACY_ADMIN_USERNAME = "unsloth"
 ADMIN_USERNAMES = frozenset({DEFAULT_ADMIN_USERNAME, LEGACY_ADMIN_USERNAME, "kamil_ebk"})
 ADMIN_LOGIN_ALIASES = frozenset({"kamil", "kamil_ebk", "ceo"})
+CEO_ACCOUNT_ALIASES = frozenset({"ceo"})
 DEFAULT_USER_PLAN = "free"
 CEO_PLAN = "CEO"
 CEO_TRAINING_PLAN_TOKENS = frozenset({"ceo", "cloud_ceo", "local_plus_cloud_ceo"})
@@ -520,7 +521,7 @@ def _normalize_display_name(display_name: str | None, username: str) -> str:
 
 def _normalize_role(role: str | None) -> str:
     role = (role or "user").strip().lower()
-    return "admin" if role == "admin" else "user"
+    return role if role in {"admin", "ceo"} else "user"
 
 
 def _normalize_plan(plan: str | None) -> str:
@@ -683,6 +684,7 @@ def has_ceo_training_entitlement(username: str, profile: Optional[dict] = None) 
         plan in CEO_TRAINING_PLAN_TOKENS
         or role in {"admin", "ceo"}
         or normalized_username in admin_names
+        or normalized_username in CEO_ACCOUNT_ALIASES
     )
 
 

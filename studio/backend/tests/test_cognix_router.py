@@ -7618,7 +7618,7 @@ def test_ceo_cloud_training_access_does_not_require_local_amd_or_nvidia_gpu():
     profile = {"username": "ceo_user", "role": "user", "plan": "CEO"}
     assert storage.has_ceo_training_entitlement("ceo_user", profile) is True
 
-    plan = cognix_fine_tuning_planner.build_fine_tuning_plan(
+    base_kwargs = dict(
         objective = "Fine tune a Qwen model in the cloud",
         classification = {"selectedDomain": "general"},
         task_strategy = {"path": "guided_fine_tuning"},
@@ -7636,13 +7636,22 @@ def test_ceo_cloud_training_access_does_not_require_local_amd_or_nvidia_gpu():
             "license": "mit",
             "containsSensitiveData": False,
         },
+    )
+    plan = cognix_fine_tuning_planner.build_fine_tuning_plan(
+        **base_kwargs,
         user_plan = "CEO",
+    )
+    cloud_alias_plan = cognix_fine_tuning_planner.build_fine_tuning_plan(
+        **base_kwargs,
+        user_plan = "cloud_ceo",
     )
 
     assert plan["method"]["type"] == "cloud_qlora"
     assert plan["method"]["requiresLocalGpu"] is False
     assert plan["resourceTargetPlan"]["cloudTrainingAllowed"] is True
     assert plan["resourceTargetPlan"]["localGpuBypassAllowed"] is True
+    assert cloud_alias_plan["method"]["type"] == "cloud_qlora"
+    assert cloud_alias_plan["resourceTargetPlan"]["localGpuBypassAllowed"] is True
 
 
 def test_admin_limits_routes_manage_user_role_usage_overrides_and_reset():

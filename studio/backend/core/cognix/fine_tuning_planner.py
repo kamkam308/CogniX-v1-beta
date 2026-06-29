@@ -16,6 +16,7 @@ COGNIX_FINE_TUNING_PLANNER_VERSION = "cognix_fine_tuning_planner_v1"
 
 SUPPORTED_DATASET_FORMATS = {"jsonl", "csv", "parquet", "hf_dataset", "folder"}
 LICENSE_WARNING_VALUES = {"unknown", "unverified", "restricted", "proprietary"}
+CEO_CLOUD_TRAINING_TOKENS = {"ceo", "cloud_ceo", "local_plus_cloud_ceo"}
 CLOUD_TRAINING_TARGETS: list[dict[str, Any]] = [
     {
         "id": "google_colab",
@@ -98,7 +99,7 @@ def _gpu_summary(hardware: dict[str, Any]) -> dict[str, Any]:
 
 
 def _is_ceo_plan(user_plan: str | None) -> bool:
-    return str(user_plan or "").strip().casefold() == "ceo"
+    return str(user_plan or "").strip().casefold() in CEO_CLOUD_TRAINING_TOKENS
 
 
 def _hardware_tier(hardware: dict[str, Any], *, user_plan: str | None = None) -> dict[str, Any]:
