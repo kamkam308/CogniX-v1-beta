@@ -3641,6 +3641,54 @@ def test_model_install_contract_prepares_huggingface_download_without_network_or
     assert contract["sideEffects"]["jobEnqueue"] is False
 
 
+def test_model_residency_contract_blocks_load_until_install_without_mutation():
+    hardware = stub_hardware_profile()
+    cache = cognix_cache_manager.build_cache_state(
+        hardware,
+        active_model = None,
+        loaded_models = [],
+        loading_models = [],
+        runtime_type = "llama-cpp",
+    )
+    lifecycle = cognix_model_lifecycle.build_model_lifecycle_plan(
+        objective = "Prepare code model residency",
+        hardware = hardware,
+        recommendation = stub_recommendation(hardware)["recommendation"],
+        cache = cache,
+        classification = {"selectedDomain": "code", "scores": {"code": 0.91}},
+        model_registry = {"models": []},
+        requested_model_id = "cognix-code-4b-q4",
+        project_type = "code",
+    )
+
+    contract = cognix_model_lifecycle.build_model_residency_contract(
+        objective = "Prepare code model residency",
+        lifecycle_plan = lifecycle,
+        cache = cache,
+        runtime_snapshot = {"runtimeType": "llama-cpp", "activeModel": None, "loadedModels": [], "loadingModels": []},
+        confirmation_id = "conf_load_code",
+        request_id = "req_load_code",
+        project_id = "project-code",
+    )
+
+    assert contract["residencyContractVersion"] == "cognix_model_residency_contract_v1"
+    assert contract["status"] == "blocked_missing_gate"
+    assert contract["readyForRuntimeMutation"] is False
+    assert contract["loadAllowedHere"] is False
+    assert contract["unloadAllowedHere"] is False
+    assert "installed_before_load" in contract["blockedWhen"]
+    assert contract["targetModel"]["modelId"] == "cognix-code-4b-q4"
+    assert contract["transition"]["loadRequired"] is False
+    assert contract["transition"]["willLoad"] is False
+    assert contract["transition"]["willUnload"] is False
+    assert contract["policies"]["backendExecutorRequired"] is True
+    assert contract["policies"]["runtimeMutationAllowedHere"] is False
+    assert contract["sideEffects"]["modelLoad"] is False
+    assert contract["sideEffects"]["modelUnload"] is False
+    assert contract["sideEffects"]["runtimeMutation"] is False
+    assert contract["sideEffects"]["jobEnqueue"] is False
+
+
 def test_model_lifecycle_endpoint_logs_audited_dry_run(monkeypatch):
     seed_accounts()
     monkeypatch.setattr(
@@ -3787,6 +3835,97 @@ def test_model_install_contract_endpoint_logs_sanitized_hf_plan_without_download
     assert "access_token" not in log["metadataJson"].lower()
     assert "hf_token" not in log["metadataJson"].lower()
     assert "secret_value" not in log["metadataJson"].lower()
+
+
+def test_model_residency_contract_endpoint_logs_review_without_runtime_mutation(monkeypatch):
+    seed_accounts()
+    qwen_model_id = "huihui_ai/qwen3-vl-abliterated:4b-instruct"
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+    monkeypatch.setattr(
+        cognix_routes,
+        "_current_model_cache_runtime",
+        lambda: {
+            "runtimeType": "ollama",
+            "activeModel": "cognix-general-3b-q4",
+            "loadedModels": ["cognix-general-3b-q4"],
+            "loadingModels": [],
+        },
+    )
+    monkeypatch.setattr(
+        cognix_routes.cognix_registry,
+        "build_model_registry",
+        lambda: {
+            "registryVersion": "local_model_registry_v1",
+            "providers": [],
+            "models": [
+                {
+                    "id": qwen_model_id,
+                    "providerId": "ollama-local",
+                    "providerType": "ollama",
+                    "source": "ollama",
+                    "available": True,
+                }
+            ],
+            "defaultModelId": qwen_model_id,
+            "recommendedModelId": qwen_model_id,
+            "ollama": {
+                "configured": True,
+                "reachable": True,
+                "hasDefaultModel": True,
+                "recommendedModel": qwen_model_id,
+            },
+        },
+    )
+
+    body = run_async(
+        cognix_routes.model_residency_contract(
+            cognix_routes.ModelResidencyContractRequest(
+                objective = "Prepare Qwen native residency without loading it",
+                modelId = qwen_model_id,
+                projectType = "code",
+                confirmationId = "conf_qwen_residency",
+                requestId = "req_qwen_residency",
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    contract = body["modelResidencyContract"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_model_residency_contract_v1"
+    assert contract["status"] == "ready_for_residency_review"
+    assert contract["targetModel"]["modelId"] == qwen_model_id
+    assert contract["targetModel"]["installed"] is True
+    assert contract["transition"]["fromActiveModel"] == "cognix-general-3b-q4"
+    assert contract["transition"]["toModel"] == qwen_model_id
+    assert contract["transition"]["loadRequired"] is True
+    assert contract["transition"]["willLoad"] is False
+    assert contract["transition"]["willUnload"] is False
+    assert contract["readyForRuntimeMutation"] is False
+    assert contract["sideEffects"]["modelLoad"] is False
+    assert contract["sideEffects"]["modelUnload"] is False
+    assert contract["sideEffects"]["runtimeMutation"] is False
+    assert contract["sideEffects"]["jobEnqueue"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "model_residency_contract_built"
+    assert log["resourceType"] == "cognix_model_residency_contract"
+    assert log["metadata"]["residencyContractVersion"] == "cognix_model_residency_contract_v1"
+    assert log["metadata"]["targetModelId"] == qwen_model_id
+    assert log["metadata"]["readyForRuntimeMutation"] is False
+    assert log["metadata"]["loadRequired"] is True
+    assert log["metadata"]["sideEffects"]["modelLoad"] is False
 
 
 def test_model_comparison_plan_compares_outputs_without_generation():
@@ -7442,6 +7581,9 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert modules["cognix-model-lifecycle"]["activationState"] == "ready"
     assert "load_unload_planning" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "cache_load_planning" in modules["cognix-model-lifecycle"]["capabilities"]
+    assert "model_residency_contract" in modules["cognix-model-lifecycle"]["capabilities"]
+    assert "resident_model_inventory" in modules["cognix-model-lifecycle"]["capabilities"]
+    assert "load_unload_execution_contract" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "preload_execution_contract" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "load_prediction" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "model_warmup_contract" in modules["cognix-model-lifecycle"]["capabilities"]
@@ -7450,6 +7592,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "download_worker_handoff" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "/api/cognix/models/lifecycle-plan" in modules["cognix-model-lifecycle"]["routes"]
     assert "/api/cognix/models/install-contract" in modules["cognix-model-lifecycle"]["routes"]
+    assert "/api/cognix/models/residency-contract" in modules["cognix-model-lifecycle"]["routes"]
     assert "/api/cognix/models/cache/load-plan" in modules["cognix-model-lifecycle"]["routes"]
     assert "/api/cognix/models/preload-plan" in modules["cognix-model-lifecycle"]["routes"]
     assert modules["cognix-live-model-comparison"]["dependencyState"]["ready"] is True

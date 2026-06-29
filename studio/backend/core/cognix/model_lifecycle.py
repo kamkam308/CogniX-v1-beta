@@ -19,6 +19,7 @@ from core.cognix import registry as cognix_registry
 
 COGNIX_MODEL_LIFECYCLE_VERSION = "cognix_model_lifecycle_v1"
 COGNIX_MODEL_INSTALL_CONTRACT_VERSION = "cognix_model_install_contract_v1"
+COGNIX_MODEL_RESIDENCY_CONTRACT_VERSION = "cognix_model_residency_contract_v1"
 
 
 MODEL_PACKS: list[dict[str, Any]] = [
@@ -419,6 +420,8 @@ def build_model_pack_registry(
             "installRequiresBackendAudit": True,
             "installContractRequired": True,
             "installContractVersion": COGNIX_MODEL_INSTALL_CONTRACT_VERSION,
+            "residencyContractRequired": True,
+            "residencyContractVersion": COGNIX_MODEL_RESIDENCY_CONTRACT_VERSION,
             "huggingFaceDownloadsRequireRevisionPin": True,
             "downloadsMustUseWorkerQueue": True,
             "loadRequiresLifecyclePlan": True,
@@ -693,6 +696,257 @@ def build_model_install_contract(
             "fileWrite": False,
             "settingsWrite": False,
             "secretRead": False,
+            "jobEnqueue": False,
+            "workerStart": False,
+        },
+    }
+
+
+def _unique_runtime_models(values: list[Any]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        model_id = str(value or "").strip()
+        if model_id and model_id not in seen:
+            seen.add(model_id)
+            out.append(model_id)
+    return out
+
+
+def _runtime_inventory(
+    *,
+    cache: dict[str, Any],
+    runtime_snapshot: dict[str, Any] | None,
+) -> dict[str, Any]:
+    cache_runtime = _as_dict(cache.get("runtime"))
+    runtime = _as_dict(runtime_snapshot)
+    active_model = str(runtime.get("activeModel") or cache_runtime.get("activeModel") or "").strip()
+    loaded_models = _unique_runtime_models(
+        [
+            *_as_list(runtime.get("loadedModels")),
+            *_as_list(cache_runtime.get("loadedModels")),
+            active_model,
+        ]
+    )
+    loading_models = _unique_runtime_models(
+        [
+            *_as_list(runtime.get("loadingModels")),
+            *_as_list(cache_runtime.get("loadingModels")),
+        ]
+    )
+    return {
+        "activeModel": active_model or None,
+        "loadedModels": loaded_models,
+        "loadingModels": loading_models,
+        "residentCount": len(loaded_models),
+        "runtimeType": runtime.get("runtimeType") or cache_runtime.get("runtimeType") or "unknown",
+        "runtimeError": runtime.get("error") or cache_runtime.get("error"),
+    }
+
+
+def _unload_candidates_for_residency(
+    *,
+    lifecycle_plan: dict[str, Any],
+    cache: dict[str, Any],
+    target_model_id: str,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    source_actions = [
+        *_as_list(_as_dict(lifecycle_plan.get("unloadPlan")).get("actions")),
+        *_as_list(cache.get("actions")),
+        *_as_list(lifecycle_plan.get("selectedEvictions")),
+        *_as_list(cache.get("selectedEvictions")),
+    ]
+    seen: set[str] = set()
+    for item in source_actions:
+        if not isinstance(item, dict):
+            continue
+        action_type = str(item.get("type") or "")
+        model_id = str(item.get("modelId") or "").strip()
+        if not model_id or model_id == target_model_id or model_id in seen:
+            continue
+        if not (action_type.startswith("would_unload") or action_type in {"evict", "unload"}):
+            continue
+        seen.add(model_id)
+        candidates.append(
+            {
+                "modelId": model_id,
+                "type": action_type,
+                "reason": item.get("reason"),
+                "reasonCode": item.get("reasonCode"),
+                "willUnload": False,
+                "automatic": False,
+            }
+        )
+    return candidates
+
+
+def build_model_residency_contract(
+    *,
+    objective: str,
+    lifecycle_plan: dict[str, Any],
+    cache: dict[str, Any],
+    runtime_snapshot: dict[str, Any] | None = None,
+    confirmation_id: str | None = None,
+    request_id: str | None = None,
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    target = deepcopy(_as_dict(lifecycle_plan.get("selectedPack")))
+    runtime_plan = _as_dict(lifecycle_plan.get("runtimePlan"))
+    load_plan = _as_dict(lifecycle_plan.get("loadPlan"))
+    compatibility = _as_dict(lifecycle_plan.get("compatibility"))
+    cache_policy = _as_dict(cache.get("policy")) or _as_dict(_as_dict(lifecycle_plan.get("unloadPlan")).get("policy"))
+    inventory = _runtime_inventory(cache = cache, runtime_snapshot = runtime_snapshot)
+
+    model_id = str(target.get("modelId") or load_plan.get("modelId") or "").strip()
+    runtime_adapter_id = str(
+        target.get("runtimeAdapterId")
+        or load_plan.get("runtimeAdapterId")
+        or runtime_plan.get("adapterId")
+        or ""
+    ).strip()
+    installed = bool(_as_dict(target.get("availability")).get("installed"))
+    fit = _as_dict(target.get("fit")) or _as_dict(compatibility.get("fit"))
+    fit_status = str(fit.get("status") or "unknown")
+    loaded_models = set(str(item) for item in _as_list(inventory.get("loadedModels")))
+    loading_models = set(str(item) for item in _as_list(inventory.get("loadingModels")))
+    already_loaded = bool(model_id and model_id in loaded_models)
+    currently_loading = bool(model_id and model_id in loading_models)
+    load_required = bool(model_id and not already_loaded and not currently_loading and installed and fit_status != "blocked")
+    unload_candidates = _unload_candidates_for_residency(
+        lifecycle_plan = lifecycle_plan,
+        cache = cache,
+        target_model_id = model_id,
+    )
+    confirmation_required = load_required or bool(unload_candidates)
+    gates = [
+        _contract_gate(
+            "target_model_selected",
+            required = True,
+            passed = bool(model_id),
+            reason = "A target model must be selected before residency can be reviewed.",
+        ),
+        _contract_gate(
+            "installed_before_load",
+            required = not already_loaded,
+            passed = already_loaded or installed,
+            reason = "A model must be installed before it can become resident.",
+        ),
+        _contract_gate(
+            "hardware_fit_allows_load",
+            required = True,
+            passed = fit_status != "blocked",
+            reason = "Hardware fit cannot be blocked before runtime residency.",
+        ),
+        _contract_gate(
+            "runtime_adapter_selected",
+            required = True,
+            passed = bool(runtime_adapter_id),
+            reason = "Runtime adapter selection is required before load handoff.",
+        ),
+        _contract_gate(
+            "cache_policy_available",
+            required = True,
+            passed = bool(cache_policy),
+            reason = "Cache policy must be observed before load or unload planning.",
+        ),
+        _contract_gate(
+            "human_confirmation",
+            required = confirmation_required,
+            passed = (not confirmation_required) or bool(str(confirmation_id or "").strip()),
+            reason = "Human confirmation is required before any model residency mutation.",
+        ),
+        _contract_gate(
+            "backend_executor_required",
+            required = True,
+            passed = True,
+            reason = "Only a guarded backend executor may load or unload runtime models.",
+        ),
+    ]
+    blocked_gates = [gate["id"] for gate in gates if gate["required"] and not gate["passed"]]
+    if blocked_gates:
+        status = "blocked_missing_gate"
+    elif already_loaded:
+        status = "already_resident"
+    else:
+        status = "ready_for_residency_review"
+
+    idempotency_key = f"cognix:{project_id or 'global'}:model_residency:{_stable_key(model_id, request_id)}"
+    return {
+        "residencyContractVersion": COGNIX_MODEL_RESIDENCY_CONTRACT_VERSION,
+        "modelLifecycleVersion": lifecycle_plan.get("modelLifecycleVersion") or COGNIX_MODEL_LIFECYCLE_VERSION,
+        "mode": "model_residency_contract_dry_run",
+        "contractId": f"model_residency_{_stable_key(model_id, request_id)}",
+        "requestId": request_id,
+        "objectiveExcerpt": _objective_excerpt(objective),
+        "projectId": project_id,
+        "targetModel": {
+            "packId": target.get("packId"),
+            "modelId": model_id,
+            "label": target.get("label"),
+            "providerType": target.get("providerType"),
+            "format": target.get("format"),
+            "runtimeAdapterId": runtime_adapter_id,
+            "estimatedRamGb": _as_float(target.get("estimatedRamGb")),
+            "installed": installed,
+            "fitStatus": fit_status,
+        },
+        "status": status,
+        "readyForResidencyReview": not blocked_gates,
+        "readyForRuntimeMutation": False,
+        "loadAllowedHere": False,
+        "unloadAllowedHere": False,
+        "gates": gates,
+        "blockedWhen": sorted(set(blocked_gates)),
+        "nextRequiredGate": "runtime_executor_handoff",
+        "inventory": {
+            "activeModel": inventory.get("activeModel"),
+            "loadedModels": inventory.get("loadedModels", []),
+            "loadingModels": inventory.get("loadingModels", []),
+            "residentCount": inventory.get("residentCount", 0),
+            "runtimeType": inventory.get("runtimeType"),
+            "runtimeError": inventory.get("runtimeError"),
+            "selectedModelInstalled": installed,
+        },
+        "transition": {
+            "fromActiveModel": inventory.get("activeModel"),
+            "toModel": model_id,
+            "alreadyLoaded": already_loaded,
+            "currentlyLoading": currently_loading,
+            "loadRequired": load_required,
+            "willLoad": False,
+            "willUnload": False,
+            "unloadCandidates": unload_candidates,
+            "idempotencyKey": idempotency_key,
+        },
+        "executorHandoff": {
+            "jobType": "model_residency_transition",
+            "queueId": "local_runtime",
+            "idempotencyKey": idempotency_key,
+            "requiresExecutorContract": True,
+            "willEnqueue": False,
+            "willStartWorker": False,
+        },
+        "policies": {
+            "frontendCannotLoadModelsDirectly": True,
+            "backendExecutorRequired": True,
+            "loadRequiresLifecyclePlan": True,
+            "unloadRequiresCachePlan": True,
+            "humanApprovalRequiredBeforeRuntimeMutation": True,
+            "runtimeMutationAllowedHere": False,
+            "auditRequiredBeforeExecution": True,
+        },
+        "sideEffects": {
+            "modelDownload": False,
+            "modelInstall": False,
+            "modelLoad": False,
+            "modelUnload": False,
+            "runtimeMutation": False,
+            "cacheMutation": False,
+            "networkCall": False,
+            "generation": False,
+            "settingsWrite": False,
+            "fileWrite": False,
             "jobEnqueue": False,
             "workerStart": False,
         },

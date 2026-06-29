@@ -667,6 +667,20 @@ class ModelInstallContractRequest(BaseModel):
     estimated_ram_gb: float | None = Field(None, alias = "estimatedRamGb", ge = 0)
 
 
+class ModelResidencyContractRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    model_id: str | None = Field(None, alias = "modelId", max_length = 240)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    project_type: str | None = Field(None, alias = "projectType", max_length = 80)
+    execution_target: str | None = Field(None, alias = "executionTarget", max_length = 120)
+    quality_priority: str | None = Field(None, alias = "qualityPriority", max_length = 80)
+    offline_required: bool = Field(False, alias = "offlineRequired")
+    confirmation_id: str | None = Field(None, alias = "confirmationId", max_length = 180)
+    request_id: str | None = Field(None, alias = "requestId", max_length = 180)
+
+
 class ModelComparisonPlanRequest(BaseModel):
     model_config = ConfigDict(populate_by_name = True)
 
@@ -3486,6 +3500,106 @@ async def model_install_contract(
         "auditLogId": audit.get("id"),
         "sideEffects": install_contract.get("sideEffects", {}),
         "plannerVersion": cognix_model_lifecycle.COGNIX_MODEL_INSTALL_CONTRACT_VERSION,
+    }
+
+
+@router.post("/models/residency-contract")
+async def model_residency_contract(
+    payload: ModelResidencyContractRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    runtime = _current_model_cache_runtime()
+    latest_benchmark = cognix_db.get_latest_benchmark_run(current_subject)
+    model_registry_payload = cognix_registry.build_model_registry()
+    plan = cognix_orchestrator.build_execution_plan(
+        payload.objective,
+        current_subject = current_subject,
+        project_type = payload.project_type,
+        project_id = payload.project_id,
+        runtime_snapshot = runtime,
+        latest_benchmark_run = latest_benchmark,
+        rag_available = _rag_available(),
+    )
+    default_model = (
+        cognix_db.get_project_model_default(payload.project_id, current_subject)
+        if payload.project_id
+        else None
+    )
+    project_expert_plan = plan["projectExpertPlan"]
+    if default_model:
+        project_expert_plan = cognix_project_experts.build_project_expert_plan(
+            objective = payload.objective,
+            project_id = payload.project_id,
+            project_type = payload.project_type,
+            project_default_model = default_model,
+            classification = plan["classification"],
+            recommendation = plan["recommendation"],
+            preload_plan = plan["preloadPlan"],
+            rag_plan = plan["ragPlan"],
+            context_plan = plan["contextPlan"],
+        )
+    lifecycle = cognix_model_lifecycle.build_model_lifecycle_plan(
+        objective = payload.objective,
+        hardware = plan["hardware"],
+        recommendation = plan["recommendation"],
+        cache = plan["cache"],
+        classification = plan["classification"],
+        project_expert_plan = project_expert_plan,
+        runtime_adapter_plan = plan["runtimeAdapterPlan"],
+        model_registry = model_registry_payload,
+        latest_benchmark_run = latest_benchmark,
+        project_id = payload.project_id,
+        project_type = payload.project_type,
+        requested_model_id = payload.model_id,
+        execution_target = payload.execution_target or "local",
+        quality_priority = payload.quality_priority,
+        offline_required = payload.offline_required,
+    )
+    residency_contract = cognix_model_lifecycle.build_model_residency_contract(
+        objective = payload.objective,
+        lifecycle_plan = lifecycle,
+        cache = plan["cache"],
+        runtime_snapshot = runtime,
+        confirmation_id = payload.confirmation_id,
+        request_id = payload.request_id,
+        project_id = payload.project_id,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "model_residency_contract_built",
+        resource_type = "cognix_model_residency_contract",
+        resource_id = str(residency_contract.get("targetModel", {}).get("modelId") or "none"),
+        severity = "warning" if residency_contract.get("blockedWhen") else "notice",
+        metadata = {
+            "modelLifecycleVersion": residency_contract.get("modelLifecycleVersion"),
+            "residencyContractVersion": residency_contract.get("residencyContractVersion"),
+            "contractId": residency_contract.get("contractId"),
+            "targetModelId": residency_contract.get("targetModel", {}).get("modelId"),
+            "status": residency_contract.get("status"),
+            "readyForRuntimeMutation": residency_contract.get("readyForRuntimeMutation"),
+            "loadRequired": residency_contract.get("transition", {}).get("loadRequired"),
+            "unloadCandidateCount": len(residency_contract.get("transition", {}).get("unloadCandidates", [])),
+            "blockedWhen": residency_contract.get("blockedWhen", []),
+            "sideEffects": residency_contract.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "runtimeError": runtime.get("error"),
+        "latestBenchmark": latest_benchmark,
+        "modelRegistry": model_registry_payload,
+        "classification": plan["classification"],
+        "taskStrategy": plan["taskStrategy"],
+        "projectExpertPlan": project_expert_plan,
+        "modelLifecyclePlan": lifecycle,
+        "modelResidencyContract": residency_contract,
+        "executionPolicy": plan["executionPolicy"],
+        "auditLogId": audit.get("id"),
+        "sideEffects": residency_contract.get("sideEffects", {}),
+        "plannerVersion": cognix_model_lifecycle.COGNIX_MODEL_RESIDENCY_CONTRACT_VERSION,
     }
 
 
