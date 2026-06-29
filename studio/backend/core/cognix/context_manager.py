@@ -136,6 +136,54 @@ def _render_project_dna(project_dna: dict[str, Any] | None) -> str:
     return _clip_text("\n".join(lines), MAX_SECTION_CHARS)[0]
 
 
+def _rag_packet_context(rag_retrieval_packet: dict[str, Any] | None) -> tuple[str, dict[str, Any]]:
+    packet = _as_dict(rag_retrieval_packet)
+    context_block = _normalize_text(packet.get("contextBlock"))
+    chunks = [item for item in _as_list(packet.get("chunks")) if isinstance(item, dict)]
+    citations = [item for item in _as_list(packet.get("citations")) if isinstance(item, dict)]
+    ready = bool(packet.get("readyForInjection")) and bool(context_block)
+    if not context_block and chunks:
+        lines: list[str] = []
+        for index, chunk in enumerate(chunks, start = 1):
+            citation_id = str(chunk.get("citationId") or f"S{index}")
+            content = _normalize_text(chunk.get("content"))
+            if content:
+                lines.append(f"[{citation_id}] {content}")
+        context_block = "\n\n".join(lines)
+        ready = bool(context_block)
+    return context_block, {
+        "retrievalPacketVersion": packet.get("retrievalPacketVersion"),
+        "plannerVersion": packet.get("plannerVersion"),
+        "readyForInjection": ready,
+        "selectedChunkCount": len(chunks),
+        "citationCount": len(citations),
+        "sourceCount": _as_dict(packet.get("summary")).get("sourceCount"),
+    }
+
+
+def _rag_plan_from_packet(rag_retrieval_packet: dict[str, Any] | None) -> dict[str, Any]:
+    packet = _as_dict(rag_retrieval_packet)
+    context_block, meta = _rag_packet_context(packet)
+    ready = bool(meta.get("readyForInjection")) and bool(context_block)
+    if not packet:
+        return {}
+    return {
+        "recommendedPath": "rag_first" if ready else "no_rag_needed",
+        "readyForRetrieval": ready,
+        "sourceReadiness": packet.get("sourceReadiness", {}),
+        "retrieval": packet.get("retrieval", {}),
+        "contextBudget": {
+            "maxContextTokens": 3200 if ready else 0,
+            "maxChunks": _as_non_negative_int(_as_dict(packet.get("retrieval")).get("topK"), 0),
+        },
+        "sideEffects": {
+            "ragRetrieval": False,
+            "embeddingGeneration": False,
+            "networkModelCall": False,
+        },
+    }
+
+
 def _channel(
     *,
     channel_id: str,
@@ -372,6 +420,7 @@ def build_context_packet(
     project: dict[str, Any] | None = None,
     project_dna: dict[str, Any] | None = None,
     compressed_context: dict[str, Any] | None = None,
+    rag_retrieval_packet: dict[str, Any] | None = None,
     conversation_summary: str | None = None,
     project_id: str | None = None,
     objective: str | None = None,
@@ -388,6 +437,7 @@ def build_context_packet(
         or compressed_context.get("compressed_context")
     )
     objective_excerpt = _clip_text(_normalize_text(objective)[:500], 500)[0]
+    rag_context, rag_packet_meta = _rag_packet_context(rag_retrieval_packet)
 
     sections: list[dict[str, Any]] = []
     if memory_content:
@@ -431,6 +481,16 @@ def build_context_packet(
                 priority = 30,
             )
         )
+    if rag_context:
+        sections.append(
+            _section(
+                section_id = "rag_chunks",
+                label = "RAG cited chunks",
+                source = "cognix_rag_retrieval_packet",
+                content = rag_context,
+                priority = 35,
+            )
+        )
 
     context_plan = build_context_plan(
         current_subject = current_subject,
@@ -438,6 +498,7 @@ def build_context_packet(
         project = project,
         project_dna = project_dna,
         conversation_summary = summary_content,
+        rag_plan = _rag_plan_from_packet(rag_retrieval_packet),
         project_id = project_id,
         objective = objective,
         warnings = warnings,
@@ -462,6 +523,7 @@ def build_context_packet(
         "projectId": project_id,
         "objectiveExcerpt": objective_excerpt,
         "compressedContext": compressed_context_meta,
+        "ragPacket": rag_packet_meta if rag_retrieval_packet else None,
         "sections": sections,
         "systemInstruction": _render_instruction(sections),
         "contextPlan": context_plan,

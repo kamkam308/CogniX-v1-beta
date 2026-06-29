@@ -282,6 +282,7 @@ class ContextPackRequest(BaseModel):
 
     objective: str | None = Field(None, max_length = 4000)
     project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    rag_retrieval_packet: dict[str, Any] | None = Field(None, alias = "ragRetrievalPacket")
 
 
 class ContextGraphBuildRequest(BaseModel):
@@ -8982,6 +8983,7 @@ async def build_context_pack(
         project = project,
         project_dna = project_dna,
         compressed_context = compressed_context,
+        rag_retrieval_packet = payload.rag_retrieval_packet,
         project_id = payload.project_id,
         objective = payload.objective,
         warnings = warnings,
@@ -9003,6 +9005,11 @@ async def build_context_pack(
             "channelIds": packet.get("contextPlan", {}).get("includedChannelIds", []),
             "compressedContextId": (packet.get("compressedContext") or {}).get("id"),
             "hasConversationSummary": "conversation_summary" in packet.get("includedSectionIds", []),
+            "hasRagPacket": bool(packet.get("ragPacket", {}).get("readyForInjection"))
+            if packet.get("ragPacket")
+            else False,
+            "ragCitationCount": (packet.get("ragPacket") or {}).get("citationCount"),
+            "ragSelectedChunkCount": (packet.get("ragPacket") or {}).get("selectedChunkCount"),
             "warnings": warnings,
             "sideEffects": packet.get("sideEffects", {}),
         },

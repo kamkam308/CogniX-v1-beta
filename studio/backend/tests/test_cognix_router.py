@@ -5725,6 +5725,49 @@ def test_context_manager_builds_bounded_context_packet():
     assert packet["sideEffects"]["memoryWrite"] is False
 
 
+def test_context_manager_injects_rag_retrieval_packet_with_citations_without_retrieval():
+    rag_packet = cognix_rag_planner.build_rag_retrieval_packet(
+        username = "alice",
+        objective = "Explique le RAG avec citations fiables",
+        project_id = "project-rag",
+        sources = [
+            {
+                "id": "cours-rag",
+                "type": "pdf",
+                "indexed": True,
+                "title": "Cours RAG",
+                "chunks": [
+                    {
+                        "id": "chunk-rag",
+                        "page": 4,
+                        "content": "Le RAG injecte des passages cites pour ancrer la reponse.",
+                    }
+                ],
+            }
+        ],
+        top_k = 1,
+    )
+
+    packet = cognix_context_manager.build_context_packet(
+        current_subject = "alice",
+        rag_retrieval_packet = rag_packet,
+        project_id = "project-rag",
+        objective = "Explique le RAG",
+    )
+
+    assert packet["ragPacket"]["retrievalPacketVersion"] == "cognix_rag_retrieval_packet_v1"
+    assert packet["ragPacket"]["readyForInjection"] is True
+    assert packet["ragPacket"]["citationCount"] == 1
+    assert "rag_chunks" in packet["includedSectionIds"]
+    assert "rag_chunks" in packet["contextPlan"]["includedChannelIds"]
+    assert packet["contextPlan"]["assemblyStrategy"] == "rag_augmented_context"
+    assert "[S1]" in packet["systemInstruction"]
+    assert "<rag_chunks>" in packet["systemInstruction"]
+    assert packet["contextPlan"]["sideEffects"]["ragRetrieval"] is False
+    assert packet["sideEffects"]["ragRetrieval"] is False
+    assert packet["sideEffects"]["networkModelCall"] is False
+
+
 def test_context_pack_endpoint_combines_user_memory_and_project_instructions():
     seed_accounts()
     now_ms = int(time.time() * 1000)
@@ -5763,6 +5806,55 @@ def test_context_pack_endpoint_combines_user_memory_and_project_instructions():
     assert "Reponds en francais" in body["systemInstruction"]
     assert "Priorite a la securite" in body["systemInstruction"]
     assert body["sideEffects"]["networkModelCall"] is False
+
+
+def test_context_pack_endpoint_injects_rag_packet_without_audit_leak():
+    seed_accounts()
+    rag_packet = cognix_rag_planner.build_rag_retrieval_packet(
+        username = "alice",
+        objective = "Explique le RAG avec citations fiables",
+        project_id = "project-rag",
+        sources = [
+            {
+                "id": "cours-rag",
+                "type": "pdf",
+                "indexed": True,
+                "title": "Cours RAG",
+                "chunks": [
+                    {
+                        "id": "chunk-rag",
+                        "page": 4,
+                        "content": "Le RAG injecte des passages cites pour ancrer la reponse.",
+                    }
+                ],
+            }
+        ],
+        top_k = 1,
+    )
+
+    body = run_async(
+        cognix_routes.build_context_pack(
+            cognix_routes.ContextPackRequest(
+                objective = "Explique le RAG",
+                project_id = "project-rag",
+                rag_retrieval_packet = rag_packet,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    assert body["ragPacket"]["readyForInjection"] is True
+    assert "rag_chunks" in body["includedSectionIds"]
+    assert "[S1]" in body["systemInstruction"]
+    assert body["contextPlan"]["assemblyStrategy"] == "rag_augmented_context"
+    assert body["sideEffects"]["ragRetrieval"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = next(item for item in admin_read["logs"] if item["id"] == body["auditLogId"])
+    assert log["metadata"]["hasRagPacket"] is True
+    assert log["metadata"]["ragCitationCount"] == 1
+    assert log["metadata"]["ragSelectedChunkCount"] == 1
+    assert "passages cites" not in log["metadataJson"]
 
 
 def test_context_pack_endpoint_injects_project_compressed_context_without_audit_leak():
