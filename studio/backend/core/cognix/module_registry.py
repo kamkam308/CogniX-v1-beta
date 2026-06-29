@@ -1171,6 +1171,8 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
             "permissions_audit",
             "tool_permission_matrix",
             "tool_execution_contract",
+            "tool_execution_handoff",
+            "tool_executor_queue_gate",
             "tool_secret_policy",
             "integration_activation_contract",
             "enterprise_connector_manifests",
@@ -1184,6 +1186,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
             "/api/cognix/tools/registry",
             "/api/cognix/tools/permission-matrix",
             "/api/cognix/tools/plan",
+            "/api/cognix/tools/execution-handoff",
         ],
         "permissions": ["authenticated"],
         "tools": [

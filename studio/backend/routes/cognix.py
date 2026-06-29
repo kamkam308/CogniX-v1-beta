@@ -1189,6 +1189,16 @@ class ToolActionPlanRequest(BaseModel):
     action_id: str = Field(..., min_length = 1, max_length = 120)
 
 
+class ToolExecutionHandoffRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    tool_id: str = Field(..., alias = "toolId", min_length = 1, max_length = 120)
+    action_id: str = Field(..., alias = "actionId", min_length = 1, max_length = 120)
+    confirmation_id: str | None = Field(None, alias = "confirmationId", max_length = 180)
+    sandbox_run_id: str | None = Field(None, alias = "sandboxRunId", max_length = 180)
+    request_id: str | None = Field(None, alias = "requestId", max_length = 180)
+
+
 class IntegrationPlanRequest(BaseModel):
     tool_id: str = Field(..., min_length = 1, max_length = 120)
 
@@ -4942,6 +4952,92 @@ async def plan_tool_action(
     )
     plan["auditLogId"] = audit.get("id")
     return plan
+
+
+@router.post("/tools/execution-handoff")
+async def tool_execution_handoff(
+    payload: ToolExecutionHandoffRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    is_admin = auth_storage.is_admin(current_subject)
+    has_developer_mode = cognix_db.user_has_permission(
+        current_subject,
+        cognix_db.DEVELOPER_MODE_PERMISSION,
+    )
+    plan = cognix_tool_registry.plan_tool_action(
+        tool_id = payload.tool_id,
+        action_id = payload.action_id,
+        username = current_subject,
+        is_admin = is_admin,
+        has_developer_mode = has_developer_mode,
+        granted_permissions = _granted_permission_keys(current_subject),
+    )
+    rate_limit = None
+    rate_limit_policy = plan.get("rateLimitPolicy")
+    rate_limit_key = plan.get("rateLimitKey")
+    if isinstance(rate_limit_policy, dict) and rate_limit_key:
+        try:
+            rate_limit = cognix_db.check_rate_limit(
+                username = current_subject,
+                rate_limit_key = str(rate_limit_key),
+                action = "tool_execution_handoff_built",
+                window_seconds = int(rate_limit_policy.get("windowSeconds") or 60),
+                max_events = int(rate_limit_policy.get("maxEvents") or 60),
+                consume = True,
+            )
+        except ValueError:
+            rate_limit = {
+                "allowed": False,
+                "rateLimitKey": rate_limit_key,
+                "reason": "Invalid rate limit key",
+            }
+        plan = cognix_tool_registry.apply_rate_limit_result(plan, rate_limit)
+    handoff = cognix_tool_registry.build_tool_execution_handoff(
+        plan = plan,
+        confirmation_id = payload.confirmation_id,
+        sandbox_run_id = payload.sandbox_run_id,
+        request_id = payload.request_id,
+    )
+    audit_side_effects = {
+        **handoff.get("sideEffects", {}),
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "tool_execution_handoff_built",
+        resource_type = "cognix_tool_execution_handoff",
+        resource_id = str(handoff.get("handoffId") or f"{payload.tool_id}:{payload.action_id}"),
+        severity = "notice" if handoff.get("readyForExecutorReview") else "warning",
+        metadata = {
+            "toolRegistryVersion": plan.get("registryVersion"),
+            "executionContractVersion": handoff.get("executionContractVersion"),
+            "handoffVersion": handoff.get("handoffVersion"),
+            "handoffId": handoff.get("handoffId"),
+            "toolId": handoff.get("toolId"),
+            "actionId": handoff.get("actionId"),
+            "connector": handoff.get("connector"),
+            "status": handoff.get("status"),
+            "readyForExecutorReview": handoff.get("readyForExecutorReview"),
+            "readyForJobEnqueue": handoff.get("readyForJobEnqueue"),
+            "blockedWhen": handoff.get("blockedWhen", []),
+            "gateIds": [
+                item.get("id") for item in handoff.get("gates", []) if isinstance(item, dict)
+            ],
+            "secretValuesIncluded": handoff.get("executorInput", {}).get("secretValuesIncluded"),
+            "rawPayloadIncluded": handoff.get("dataBoundary", {}).get("rawPayloadIncluded"),
+            "rateLimit": rate_limit,
+            "sideEffects": audit_side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "toolPlan": plan,
+        "executionHandoff": handoff,
+        "auditLogId": audit.get("id"),
+        "sideEffects": audit_side_effects,
+        "plannerVersion": cognix_tool_registry.TOOL_EXECUTION_HANDOFF_VERSION,
+    }
 
 
 @router.get("/models/cache")

@@ -11,11 +11,13 @@ place before a later executor can run them.
 from __future__ import annotations
 
 from copy import deepcopy
+from hashlib import sha256
 from typing import Any
 
 
 TOOL_REGISTRY_VERSION = "cognix_tool_registry_v1"
 TOOL_EXECUTION_CONTRACT_VERSION = "cognix_tool_execution_contract_v1"
+TOOL_EXECUTION_HANDOFF_VERSION = "cognix_tool_execution_handoff_v1"
 TOOL_SECRET_POLICY_VERSION = "cognix_tool_secret_policy_v1"
 
 RISK_ORDER = {
@@ -1409,3 +1411,177 @@ def apply_rate_limit_result(
     updated["status"] = "rate_limited"
     updated["reason"] = "Tool action rate limit reached."
     return updated
+
+
+def _handoff_gate(
+    gate_id: str,
+    *,
+    required: bool,
+    passed: bool,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "id": gate_id,
+        "required": required,
+        "status": "pass" if passed else ("blocked" if required else "not_required"),
+        "passed": passed,
+        "reason": reason,
+    }
+
+
+def _handoff_id(
+    *,
+    username: str,
+    tool_id: str,
+    action_id: str,
+    request_id: str | None,
+) -> str:
+    seed = "|".join([username, tool_id, action_id, str(request_id or "no_request_id")])
+    return f"handoff_{sha256(seed.encode('utf-8')).hexdigest()[:18]}"
+
+
+def build_tool_execution_handoff(
+    *,
+    plan: dict[str, Any],
+    confirmation_id: str | None = None,
+    sandbox_run_id: str | None = None,
+    request_id: str | None = None,
+    executor_queue: str = "cognix_worker_queue",
+) -> dict[str, Any]:
+    contract = plan.get("executionContract")
+    if not isinstance(contract, dict):
+        contract = {}
+    secret_policy = plan.get("secretPolicy")
+    if not isinstance(secret_policy, dict):
+        secret_policy = {}
+    preconditions = contract.get("preconditions")
+    if not isinstance(preconditions, dict):
+        preconditions = {}
+    tool_id = str(plan.get("toolId") or contract.get("toolId") or "")
+    action_id = str(plan.get("actionId") or contract.get("actionId") or "")
+    username = str(plan.get("username") or contract.get("permissionContext", {}).get("username") or "")
+    rate_limit_checked = bool(preconditions.get("rateLimitChecked")) or not bool(preconditions.get("rateLimitRequired"))
+    rate_limit_allowed = preconditions.get("rateLimitAllowed")
+    rate_limit_passed = rate_limit_checked and rate_limit_allowed is not False
+    confirmation_required = bool(preconditions.get("humanConfirmationRequired"))
+    sandbox_required = bool(preconditions.get("sandboxRequired"))
+    secrets_required = bool(preconditions.get("secretsRequired"))
+    server_secret_policy_present = (
+        not secrets_required
+        or secret_policy.get("policyVersion") == TOOL_SECRET_POLICY_VERSION
+        and bool(secret_policy.get("serverSideResolutionRequired"))
+        and not bool(secret_policy.get("rawSecretExposureAllowed"))
+    )
+    gates = [
+        _handoff_gate(
+            "connector_enabled",
+            required = True,
+            passed = bool(preconditions.get("connectorEnabled")),
+            reason = "Connector must be enabled before any executor can run.",
+        ),
+        _handoff_gate(
+            "permissions_resolved",
+            required = True,
+            passed = bool(preconditions.get("permissionsResolved")),
+            reason = "Effective CogniX permissions must satisfy the tool manifest.",
+        ),
+        _handoff_gate(
+            "rate_limit_checked",
+            required = bool(preconditions.get("rateLimitRequired")),
+            passed = rate_limit_passed,
+            reason = "Rate limit must be checked and allowed before executor handoff.",
+        ),
+        _handoff_gate(
+            "human_confirmation",
+            required = confirmation_required,
+            passed = (not confirmation_required) or bool(str(confirmation_id or "").strip()),
+            reason = "Human confirmation is required for medium and higher risk actions.",
+        ),
+        _handoff_gate(
+            "sandbox_ready",
+            required = sandbox_required,
+            passed = (not sandbox_required) or bool(str(sandbox_run_id or "").strip()),
+            reason = "Sandbox run reference is required for isolated or risky tool actions.",
+        ),
+        _handoff_gate(
+            "server_side_secret_resolution",
+            required = secrets_required,
+            passed = server_secret_policy_present,
+            reason = "Secrets must be resolved later by a server-side executor, never in this handoff.",
+        ),
+    ]
+    blocked_gates = [gate["id"] for gate in gates if gate["required"] and not gate["passed"]]
+    blocked_when = sorted(
+        {
+            str(item)
+            for item in contract.get("blockedWhen", [])
+            if str(item or "").strip()
+        }
+        | set(blocked_gates)
+        | {"executor_approval_required"}
+    )
+    allowed_to_prepare = bool(contract.get("allowedToPrepare"))
+    ready_for_executor_review = allowed_to_prepare and not blocked_gates
+    handoff_id = _handoff_id(
+        username = username,
+        tool_id = tool_id,
+        action_id = action_id,
+        request_id = request_id,
+    )
+    return {
+        "handoffVersion": TOOL_EXECUTION_HANDOFF_VERSION,
+        "executionContractVersion": contract.get("contractVersion") or TOOL_EXECUTION_CONTRACT_VERSION,
+        "mode": "executor_handoff_dry_run",
+        "handoffId": handoff_id,
+        "idempotencyKey": handoff_id,
+        "requestId": request_id,
+        "username": username,
+        "toolId": tool_id,
+        "actionId": action_id,
+        "connector": contract.get("connector"),
+        "plannedExecutor": contract.get("plannedExecutor"),
+        "executorQueue": executor_queue,
+        "status": "ready_for_executor_review" if ready_for_executor_review else "blocked_missing_gate",
+        "readyForExecutorReview": ready_for_executor_review,
+        "readyForJobEnqueue": False,
+        "executionAllowedHere": False,
+        "automaticExecutionAllowed": False,
+        "frontendDirectExecutionAllowed": False,
+        "gates": gates,
+        "blockedWhen": blocked_when,
+        "executorInput": {
+            "toolRef": tool_id,
+            "actionRef": action_id,
+            "payloadRef": "client_payload_not_stored_in_handoff",
+            "confirmationId": confirmation_id,
+            "sandboxRunId": sandbox_run_id,
+            "secretRefs": secret_policy.get("allowedSecretSources", []),
+            "secretValuesIncluded": False,
+            "rateLimit": contract.get("rateLimit"),
+        },
+        "policies": {
+            "jobEnqueueAllowedHere": False,
+            "executorMustRecheckPermissions": True,
+            "executorMustRecheckRateLimit": True,
+            "executorMustResolveSecretsServerSide": True,
+            "humanApprovalRequiredBeforeExecution": True,
+            "rawPayloadStorageAllowed": False,
+            "auditRawPayloadAllowed": False,
+        },
+        "dataBoundary": {
+            "dataIsolation": contract.get("dataBoundary", {}).get("dataIsolation"),
+            "secretsStayServerSide": True,
+            "rawSecretExposureAllowed": False,
+            "clientSecretTransmitAllowed": False,
+            "secretValuesIncluded": False,
+            "rawPayloadIncluded": False,
+        },
+        "sideEffects": {
+            "toolExecution": False,
+            "networkToolCall": False,
+            "externalWrite": False,
+            "secretRead": False,
+            "permissionWrite": False,
+            "jobEnqueue": False,
+        },
+    }

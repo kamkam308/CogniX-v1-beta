@@ -7430,6 +7430,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/evolution/proposals" in modules["cognix-ai-evolution-engine"]["routes"]
     assert "tool_permission_matrix" in modules["cognix-integrations"]["capabilities"]
     assert "tool_execution_contract" in modules["cognix-integrations"]["capabilities"]
+    assert "tool_execution_handoff" in modules["cognix-integrations"]["capabilities"]
+    assert "tool_executor_queue_gate" in modules["cognix-integrations"]["capabilities"]
     assert "tool_secret_policy" in modules["cognix-integrations"]["capabilities"]
     assert "integration_activation_contract" in modules["cognix-integrations"]["capabilities"]
     assert "enterprise_connector_manifests" in modules["cognix-integrations"]["capabilities"]
@@ -7442,6 +7444,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/integrations/activation-contract" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/tools/permission-matrix" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/tools/plan" in modules["cognix-integrations"]["routes"]
+    assert "/api/cognix/tools/execution-handoff" in modules["cognix-integrations"]["routes"]
     assert modules["cognix-plugin-marketplace"]["dependencyState"]["ready"] is True
     assert "plugin_manifest_validation" in modules["cognix-plugin-marketplace"]["capabilities"]
     assert "plugin_permission_scanning" in modules["cognix-plugin-marketplace"]["capabilities"]
@@ -8154,6 +8157,48 @@ def test_tool_action_plan_builds_execution_contract_without_execution():
     assert plan["sideEffects"]["toolExecution"] is False
 
 
+def test_tool_execution_handoff_prepares_executor_packet_without_enqueuing():
+    plan = cognix_tool_registry.plan_tool_action(
+        tool_id = "codex-secure-agent",
+        action_id = "modify_code",
+        username = "alice",
+        has_developer_mode = True,
+        granted_permissions = set(),
+    )
+    plan = cognix_tool_registry.apply_rate_limit_result(
+        plan,
+        {
+            "allowed": True,
+            "remaining": 19,
+            "resetAt": "2026-06-29T00:00:00Z",
+        },
+    )
+
+    handoff = cognix_tool_registry.build_tool_execution_handoff(
+        plan = plan,
+        confirmation_id = "conf_123",
+        sandbox_run_id = "sbx_123",
+        request_id = "req_123",
+    )
+
+    assert handoff["handoffVersion"] == "cognix_tool_execution_handoff_v1"
+    assert handoff["executionContractVersion"] == "cognix_tool_execution_contract_v1"
+    assert handoff["status"] == "ready_for_executor_review"
+    assert handoff["readyForExecutorReview"] is True
+    assert handoff["readyForJobEnqueue"] is False
+    assert handoff["executionAllowedHere"] is False
+    assert handoff["executorInput"]["confirmationId"] == "conf_123"
+    assert handoff["executorInput"]["sandboxRunId"] == "sbx_123"
+    assert handoff["executorInput"]["secretValuesIncluded"] is False
+    assert handoff["dataBoundary"]["rawPayloadIncluded"] is False
+    assert handoff["policies"]["jobEnqueueAllowedHere"] is False
+    assert "executor_approval_required" in handoff["blockedWhen"]
+    assert all(gate["passed"] for gate in handoff["gates"])
+    assert handoff["sideEffects"]["jobEnqueue"] is False
+    assert handoff["sideEffects"]["toolExecution"] is False
+    assert handoff["sideEffects"]["secretRead"] is False
+
+
 def test_tool_permission_matrix_summarizes_effective_permissions_without_execution():
     matrix = cognix_tool_registry.build_tool_permission_matrix(
         username = "alice",
@@ -8373,6 +8418,46 @@ def test_tool_plan_endpoint_allows_safe_declared_action_and_logs_audit():
     assert log["metadata"]["actionId"] == "plan_feature"
     assert log["metadata"]["rateLimit"]["allowed"] is True
     assert log["metadata"]["sideEffects"]["toolExecution"] is False
+
+
+def test_tool_execution_handoff_endpoint_logs_sanitized_packet_without_job_enqueue():
+    seed_accounts()
+
+    body = run_async(
+        cognix_routes.tool_execution_handoff(
+            cognix_routes.ToolExecutionHandoffRequest(
+                tool_id = "codex-secure-agent",
+                action_id = "plan_feature",
+                request_id = "req_safe_plan",
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    handoff = body["executionHandoff"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_tool_execution_handoff_v1"
+    assert body["toolPlan"]["executionContract"]["preconditions"]["rateLimitChecked"] is True
+    assert handoff["status"] == "ready_for_executor_review"
+    assert handoff["readyForExecutorReview"] is True
+    assert handoff["readyForJobEnqueue"] is False
+    assert handoff["executorInput"]["secretValuesIncluded"] is False
+    assert handoff["sideEffects"]["jobEnqueue"] is False
+    assert body["sideEffects"]["auditWrite"] is True
+    assert body["sideEffects"]["toolExecution"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "tool_execution_handoff_built"
+    assert log["resourceType"] == "cognix_tool_execution_handoff"
+    assert log["metadata"]["handoffVersion"] == "cognix_tool_execution_handoff_v1"
+    assert log["metadata"]["readyForJobEnqueue"] is False
+    assert log["metadata"]["secretValuesIncluded"] is False
+    assert log["metadata"]["rawPayloadIncluded"] is False
+    assert log["metadata"]["sideEffects"]["jobEnqueue"] is False
+    assert "access_token" not in log["metadataJson"].lower()
+    assert "secret_value" not in log["metadataJson"].lower()
 
 
 def test_tool_rate_limit_storage_blocks_after_capacity():
