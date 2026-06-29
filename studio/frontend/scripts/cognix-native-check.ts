@@ -136,6 +136,16 @@ const checks: Check[] = [
       "def has_ceo_training_entitlement",
       "plan in CEO_TRAINING_PLAN_TOKENS",
       'role in {"admin", "ceo"}',
+      "def update_password",
+      "DELETE FROM refresh_tokens WHERE username = ?",
+    ],
+  },
+  {
+    file: "../backend/tests/test_desktop_auth.py",
+    includes: [
+      "test_update_password_revokes_existing_refresh_tokens",
+      "storage.verify_refresh_token(raw_refresh) is None",
+      "storage.consume_refresh_token(raw_refresh) is None",
     ],
   },
   {

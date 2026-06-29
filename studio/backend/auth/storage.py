@@ -1046,6 +1046,8 @@ def update_password(username: str, new_password: str) -> bool:
             """,
             (salt, pwd_hash, jwt_secret, username),
         )
+        if cursor.rowcount > 0:
+            conn.execute("DELETE FROM refresh_tokens WHERE username = ?", (username,))
         conn.commit()
         if cursor.rowcount > 0:
             clear_bootstrap_password()
