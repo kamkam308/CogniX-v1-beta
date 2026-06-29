@@ -32,6 +32,7 @@ from core.cognix import evolution_engine as cognix_evolution_engine
 from core.cognix import governance_manager as cognix_governance_manager
 from core.cognix import integration_manager as cognix_integration_manager
 from core.cognix import intent_prediction as cognix_intent_prediction
+from core.cognix import library as cognix_library
 from core.cognix import memory_editor as cognix_memory_editor
 from core.cognix import memory_manager as cognix_memory_manager
 from core.cognix import model_lifecycle as cognix_model_lifecycle
@@ -5448,6 +5449,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert {
         "cognix-local-core",
         "cognix-pulse",
+        "cognix-library",
         "cognix-model-lifecycle",
         "cognix-live-model-comparison",
         "cognix-model-translator",
@@ -5490,6 +5492,10 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "local_privacy_preserving_summary" in modules["cognix-pulse"]["capabilities"]
     assert "/api/cognix/pulse/preview" in modules["cognix-pulse"]["routes"]
     assert "/api/cognix/pulse/generate" in modules["cognix-pulse"]["routes"]
+    assert modules["cognix-library"]["status"] == "enabled"
+    assert "library_search" in modules["cognix-library"]["capabilities"]
+    assert "asset_permission_scope" in modules["cognix-library"]["capabilities"]
+    assert "/api/cognix/library/search" in modules["cognix-library"]["routes"]
     assert modules["cognix-local-core"]["activationState"] == "ready"
     assert "module_manifest_registry" in modules["cognix-local-core"]["capabilities"]
     assert "/api/cognix/modules/manifests" in modules["cognix-local-core"]["routes"]
@@ -5927,6 +5933,63 @@ def test_pulse_preview_and_generate_use_native_isolated_activity_feed():
     admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
     assert admin_read["logs"][0]["action"] == "pulse_report_generated"
     assert admin_read["logs"][0]["metadata"]["sideEffects"]["pulseReportWrite"] is True
+
+
+def test_library_native_blueprint_search_and_audited_asset_creation():
+    seed_accounts()
+    cognix_db.create_library_item(
+        "bob",
+        kind = "document",
+        name = "Document prive Bob",
+        source = "manual",
+        metadata = {"tags": ["private"]},
+    )
+
+    blueprint = run_async(cognix_routes.library_blueprint(current_subject = "alice"))
+    assert blueprint["blueprint"]["libraryVersion"] == cognix_library.COGNIX_LIBRARY_VERSION
+    assert "directive" in blueprint["blueprint"]["assetTypes"]
+    assert blueprint["blueprint"]["searchContract"]["crossUserSearchAllowed"] is False
+    assert blueprint["sideEffects"]["assetWrite"] is False
+
+    created = run_async(
+        cognix_routes.create_library_item(
+            cognix_routes.LibraryItemRequest(
+                kind = "directive",
+                name = "Directive securite projet",
+                source = "manual",
+                metadata = {"tags": ["securite", "projet"], "projectId": "project-sec"},
+            ),
+            current_subject = "alice",
+        )
+    )
+    assert created["item"]["kind"] == "directive"
+    assert created["assetPlan"]["classification"]["assetFamily"] == "behavior"
+    assert created["assetPlan"]["classification"]["ragCandidate"] is True
+    assert created["sideEffects"]["assetWrite"] is True
+    assert created["sideEffects"]["auditWrite"] is True
+    assert created["sideEffects"]["ragIndexWrite"] is False
+    assert created["sideEffects"]["modelLoad"] is False
+
+    search = run_async(cognix_routes.search_library(query = "securite", current_subject = "alice"))
+    results = search["librarySearch"]
+    assert results["libraryVersion"] == cognix_library.COGNIX_LIBRARY_VERSION
+    assert results["totalMatches"] == 1
+    assert results["matches"][0]["name"] == "Directive securite projet"
+    assert results["matches"][0]["projectId"] == "project-sec"
+    assert results["matches"][0]["classification"]["ragCandidate"] is True
+    assert "Document prive Bob" not in {item["name"] for item in results["matches"]}
+    assert search["sideEffects"]["crossUserRead"] is False
+
+    library = run_async(cognix_routes.my_library(current_subject = "alice"))
+    assert library["summary"]["assetCount"] == 1
+    assert library["summary"]["byKind"]["directive"] == 1
+    assert library["summary"]["ragCandidateCount"] == 1
+    assert library["blueprint"]["libraryVersion"] == "cognix_library_v1"
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    assert admin_read["logs"][0]["action"] == "library_item_created"
+    assert admin_read["logs"][0]["metadata"]["classification"]["assetFamily"] == "behavior"
+    assert admin_read["logs"][0]["metadata"]["sideEffects"]["assetWrite"] is True
 
 
 def test_tool_registry_declares_permissions_and_guardrails():

@@ -40,6 +40,7 @@ from core.cognix import governance_manager as cognix_governance_manager
 from core.cognix import hardware as cognix_hardware
 from core.cognix import integration_manager as cognix_integration_manager
 from core.cognix import intent_prediction as cognix_intent_prediction
+from core.cognix import library as cognix_library
 from core.cognix import memory_manager as cognix_memory_manager
 from core.cognix import memory_editor as cognix_memory_editor
 from core.cognix import model_comparison as cognix_model_comparison
@@ -398,7 +399,24 @@ class EvolutionExperimentPlanRequest(BaseModel):
 
 
 class LibraryItemRequest(BaseModel):
-    kind: Literal["file", "image", "video", "document", "dataset", "other"] = "other"
+    kind: Literal[
+        "document",
+        "dataset",
+        "model",
+        "lora_adapter",
+        "image",
+        "prompt",
+        "persona",
+        "workflow",
+        "report",
+        "app",
+        "plugin",
+        "skill",
+        "directive",
+        "file",
+        "video",
+        "other",
+    ] = "other"
     name: str = Field(..., min_length = 1, max_length = 240)
     source: str = Field("manual", max_length = 80)
     size_bytes: int | None = Field(None, ge = 0)
@@ -8065,7 +8083,44 @@ async def context_graph_snapshots(
 
 @router.get("/library")
 async def my_library(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
-    return {"items": _rows(cognix_db.list_library_items(current_subject))}
+    items = _rows(cognix_db.list_library_items(current_subject))
+    return {
+        "items": items,
+        "summary": cognix_library.summarize_library(items),
+        "blueprint": cognix_library.build_library_blueprint(),
+    }
+
+
+@router.get("/library/blueprint")
+async def library_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_library.build_library_blueprint()
+    return {
+        "username": current_subject,
+        "blueprint": blueprint,
+        "sideEffects": blueprint["sideEffects"],
+    }
+
+
+@router.get("/library/search")
+async def search_library(
+    query: str | None = None,
+    kind: str | None = None,
+    source: str | None = None,
+    limit: int = 80,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    result = cognix_library.search_library_assets(
+        items = _rows(cognix_db.list_library_items(current_subject)),
+        query = query,
+        kind = kind,
+        source = source,
+        limit = limit,
+    )
+    return {
+        "username": current_subject,
+        "librarySearch": result,
+        "sideEffects": result["sideEffects"],
+    }
 
 
 @router.post("/library")
@@ -8073,8 +8128,8 @@ async def create_library_item(
     payload: LibraryItemRequest,
     current_subject: str = Depends(get_current_jwt_subject),
 ) -> dict[str, Any]:
-    item = cognix_db.create_library_item(
-        current_subject,
+    asset_plan = cognix_library.build_library_asset_plan(
+        username = current_subject,
         kind = payload.kind,
         name = payload.name,
         source = payload.source,
@@ -8082,7 +8137,45 @@ async def create_library_item(
         uri = payload.uri,
         metadata = payload.metadata,
     )
-    return {"item": _row(item)}
+    planned_asset = asset_plan["asset"]
+    item = cognix_db.create_library_item(
+        current_subject,
+        kind = planned_asset["kind"],
+        name = planned_asset["name"],
+        source = planned_asset["source"],
+        size_bytes = planned_asset["sizeBytes"],
+        uri = planned_asset["uri"],
+        metadata = planned_asset["metadata"],
+    )
+    side_effects = {
+        **asset_plan["sideEffects"],
+        "assetWrite": True,
+        "metadataWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "library_item_created",
+        resource_type = "cognix_library_item",
+        resource_id = str(item.get("id") or ""),
+        severity = "notice",
+        metadata = {
+            "libraryVersion": asset_plan.get("libraryVersion"),
+            "kind": planned_asset["kind"],
+            "source": planned_asset["source"],
+            "classification": asset_plan["classification"],
+            "indexingPlan": asset_plan["indexingPlan"],
+            "permissionScope": asset_plan["permissionPlan"]["scope"],
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "item": _row(item),
+        "assetPlan": asset_plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+    }
 
 
 @router.get("/scheduled-tasks")
