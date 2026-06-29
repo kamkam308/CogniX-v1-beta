@@ -897,6 +897,14 @@ class FineTuningPlanRequest(BaseModel):
     dataset: dict[str, Any] | None = None
 
 
+class FineTuningDatasetValidationRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str | None = Field(None, max_length = 4000)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    dataset: dict[str, Any] | None = None
+
+
 class FineTuningCloudHandoffPlanRequest(BaseModel):
     model_config = ConfigDict(populate_by_name = True)
 
@@ -4882,6 +4890,45 @@ async def fine_tuning_plan(
         "executionPolicy": plan["executionPolicy"],
         "auditLogId": audit.get("id"),
         "sideEffects": tuning_plan.get("sideEffects", {}),
+    }
+
+
+@router.post("/fine-tuning/dataset/validate")
+async def fine_tuning_dataset_validation(
+    payload: FineTuningDatasetValidationRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    validation = cognix_fine_tuning_planner.build_dataset_validation_plan(
+        username = current_subject,
+        dataset = payload.dataset,
+        objective = payload.objective,
+        project_id = payload.project_id,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "fine_tuning_dataset_validated",
+        resource_type = "cognix_dataset_validation_plan",
+        resource_id = str(validation.get("dataset", {}).get("sourceRef") or payload.project_id or current_subject),
+        severity = "warning" if validation.get("status") != "ready" else "notice",
+        metadata = {
+            "plannerVersion": validation.get("plannerVersion"),
+            "validationPlanVersion": validation.get("validationPlanVersion"),
+            "status": validation.get("status"),
+            "qualityScore": validation.get("quality", {}).get("score"),
+            "qualityLabel": validation.get("quality", {}).get("label"),
+            "blockedGateIds": validation.get("summary", {}).get("blockedGateIds", []),
+            "warningGateIds": validation.get("summary", {}).get("warningGateIds", []),
+            "readyForFineTuning": validation.get("summary", {}).get("readyForFineTuning"),
+            "requiresHumanReview": validation.get("summary", {}).get("requiresHumanReview"),
+            "sideEffects": validation.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "datasetValidationPlan": validation,
+        "auditLogId": audit.get("id"),
+        "sideEffects": validation.get("sideEffects", {}),
     }
 
 

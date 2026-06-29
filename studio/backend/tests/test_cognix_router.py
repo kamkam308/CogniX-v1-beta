@@ -560,6 +560,85 @@ def test_fine_tuning_plan_endpoint_prepares_qlora_without_training(monkeypatch):
     assert log["metadata"]["sideEffects"]["fineTuningJob"] is False
 
 
+def test_fine_tuning_dataset_validation_plan_blocks_bad_metadata_without_reading():
+    plan = cognix_fine_tuning_planner.build_dataset_validation_plan(
+        username = "alice",
+        objective = "Specialiser CogniX sur mon style",
+        project_id = "project-training",
+        dataset = {
+            "format": "txt",
+            "sampleCount": 42,
+            "estimatedTokens": 9000,
+            "duplicateRatio": 0.31,
+            "invalidRows": 4,
+            "averageResponseTokens": 8,
+            "license": "proprietary",
+            "containsSensitiveData": True,
+            "sourceRef": "dataset-v1",
+            "rawPreview": "secret training sample should never be logged",
+        },
+    )
+
+    blocked = set(plan["summary"]["blockedGateIds"])
+    warnings = set(plan["summary"]["warningGateIds"])
+    assert plan["validationPlanVersion"] == "cognix_dataset_validation_plan_v1"
+    assert plan["status"] == "blocked"
+    assert {"format_supported", "duplicates", "invalid_rows", "license"}.issubset(blocked)
+    assert {"sample_count", "token_budget", "response_length", "sensitive_data"}.issubset(warnings)
+    assert plan["quality"]["readyForFineTuning"] is False
+    assert plan["summary"]["requiresHumanReview"] is True
+    assert plan["policies"]["rawDatasetLoggingAllowed"] is False
+    assert plan["policies"]["datasetContentReadAllowed"] is False
+    assert any(item["id"] == "fine_tuning_job" for item in plan["blockedActions"])
+    assert plan["sideEffects"]["datasetRead"] is False
+    assert plan["sideEffects"]["datasetImport"] is False
+    assert plan["sideEffects"]["fineTuningJob"] is False
+
+
+def test_fine_tuning_dataset_validation_endpoint_audits_without_raw_dataset_leak():
+    seed_accounts()
+
+    body = run_async(
+        cognix_routes.fine_tuning_dataset_validation(
+            cognix_routes.FineTuningDatasetValidationRequest(
+                objective = "Specialiser CogniX sur mon style",
+                project_id = "project-training",
+                dataset = {
+                    "format": "jsonl",
+                    "sampleCount": 900,
+                    "estimatedTokens": 180000,
+                    "duplicateRatio": 0.02,
+                    "invalidRows": 0,
+                    "averageResponseTokens": 44,
+                    "license": "mit",
+                    "containsSensitiveData": False,
+                    "sourceRef": "style-dataset-v1",
+                    "rawPreview": "private training sentence should stay out of audit",
+                },
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    validation = body["datasetValidationPlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert validation["status"] == "ready"
+    assert validation["summary"]["readyForFineTuning"] is True
+    assert validation["summary"]["blockedGateIds"] == []
+    assert validation["sideEffects"]["datasetRead"] is False
+    assert validation["sideEffects"]["datasetUpload"] is False
+    assert validation["sideEffects"]["fineTuningJob"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "fine_tuning_dataset_validated"
+    assert log["metadata"]["validationPlanVersion"] == "cognix_dataset_validation_plan_v1"
+    assert log["metadata"]["readyForFineTuning"] is True
+    assert log["metadata"]["sideEffects"]["datasetRead"] is False
+    assert "private training sentence" not in log["metadataJson"]
+
+
 def test_fine_tuning_plan_allows_ceo_cloud_training_without_local_gpu(monkeypatch):
     seed_accounts()
     monkeypatch.setattr(
@@ -6256,6 +6335,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/rag/retrieval-packet" in modules["cognix-rag"]["routes"]
     assert "cloud_training_targets" in modules["cognix-fine-tuning"]["capabilities"]
     assert "cloud_training_handoff" in modules["cognix-fine-tuning"]["capabilities"]
+    assert "dataset_validation_plan" in modules["cognix-fine-tuning"]["capabilities"]
+    assert "/api/cognix/fine-tuning/dataset/validate" in modules["cognix-fine-tuning"]["routes"]
     assert "/api/cognix/fine-tuning/cloud-handoff-plan" in modules["cognix-fine-tuning"]["routes"]
     assert modules["cognix-dataset-builder"]["dependencyState"]["ready"] is True
     assert "dataset_builder" in modules["cognix-dataset-builder"]["capabilities"]

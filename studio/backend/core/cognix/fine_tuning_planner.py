@@ -13,6 +13,7 @@ from typing import Any
 
 
 COGNIX_FINE_TUNING_PLANNER_VERSION = "cognix_fine_tuning_planner_v1"
+COGNIX_DATASET_VALIDATION_PLAN_VERSION = "cognix_dataset_validation_plan_v1"
 
 SUPPORTED_DATASET_FORMATS = {"jsonl", "csv", "parquet", "hf_dataset", "folder"}
 LICENSE_WARNING_VALUES = {"unknown", "unverified", "restricted", "proprietary"}
@@ -239,6 +240,188 @@ def _dataset_descriptor(dataset: dict[str, Any] | None, dataset_checks: dict[str
         "containsSensitiveData": bool(data.get("containsSensitiveData")),
         "sourceRef": str(data.get("sourceRef") or data.get("datasetId") or data.get("name") or "provided_metadata")[:160],
         "rawPreviewStored": False,
+    }
+
+
+def _validation_gate(
+    *,
+    gate_id: str,
+    status: str,
+    severity: str,
+    reason: str,
+    detail: Any = None,
+) -> dict[str, Any]:
+    return {
+        "id": gate_id,
+        "status": status,
+        "severity": severity,
+        "reason": reason,
+        "detail": detail,
+    }
+
+
+def _dataset_quality_score(dataset_checks: dict[str, Any], gates: list[dict[str, Any]]) -> dict[str, Any]:
+    total = max(1, len(gates))
+    pass_count = sum(1 for item in gates if item.get("status") == "pass")
+    warning_count = sum(1 for item in gates if item.get("severity") == "warning")
+    blocked_count = sum(1 for item in gates if item.get("severity") == "error")
+    score = round(max(0.0, min(1.0, (pass_count / total) - (warning_count * 0.045) - (blocked_count * 0.18))), 3)
+    if blocked_count:
+        label = "blocked"
+    elif score >= 0.82:
+        label = "ready"
+    elif score >= 0.58:
+        label = "review_required"
+    else:
+        label = "weak"
+    return {
+        "score": score,
+        "label": label,
+        "readyForFineTuning": blocked_count == 0 and bool(dataset_checks.get("ready")),
+        "blockedGateCount": blocked_count,
+        "warningGateCount": warning_count,
+    }
+
+
+def build_dataset_validation_plan(
+    *,
+    username: str,
+    dataset: dict[str, Any] | None,
+    objective: str | None = None,
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    dataset_checks = _dataset_checks(dataset)
+    data = _as_dict(dataset)
+    fmt = str(dataset_checks.get("format") or data.get("format") or "unknown").strip().lower()
+    sample_count = _as_int(data.get("sampleCount")) or 0
+    estimated_tokens = _as_int(data.get("estimatedTokens")) or 0
+    duplicate_ratio = _as_float(data.get("duplicateRatio")) or 0.0
+    invalid_rows = _as_int(data.get("invalidRows")) or 0
+    average_response_tokens = _as_float(data.get("averageResponseTokens"))
+    license_value = str(data.get("license") or "unknown").strip().lower()
+    contains_sensitive = bool(data.get("containsSensitiveData"))
+
+    gates = [
+        _validation_gate(
+            gate_id = "dataset_present",
+            status = "pass" if data else "blocked",
+            severity = "info" if data else "error",
+            reason = "Dataset metadata supplied." if data else "Dataset metadata is required before training.",
+        ),
+        _validation_gate(
+            gate_id = "format_supported",
+            status = "pass" if fmt in SUPPORTED_DATASET_FORMATS else "blocked",
+            severity = "info" if fmt in SUPPORTED_DATASET_FORMATS else "error",
+            reason = "Dataset format supported." if fmt in SUPPORTED_DATASET_FORMATS else "Unsupported dataset format.",
+            detail = fmt,
+        ),
+        _validation_gate(
+            gate_id = "sample_count",
+            status = "pass" if sample_count >= 100 else "warning",
+            severity = "info" if sample_count >= 100 else "warning",
+            reason = "Enough examples for a guided LoRA run." if sample_count >= 100 else "Small dataset: prefer RAG or collect more examples.",
+            detail = sample_count,
+        ),
+        _validation_gate(
+            gate_id = "token_budget",
+            status = "pass" if estimated_tokens >= 50_000 else "warning",
+            severity = "info" if estimated_tokens >= 50_000 else "warning",
+            reason = "Token volume is usable for training." if estimated_tokens >= 50_000 else "Token volume is low for stable fine-tuning.",
+            detail = estimated_tokens,
+        ),
+        _validation_gate(
+            gate_id = "duplicates",
+            status = "pass" if duplicate_ratio <= 0.05 else "blocked" if duplicate_ratio > 0.2 else "warning",
+            severity = "info" if duplicate_ratio <= 0.05 else "error" if duplicate_ratio > 0.2 else "warning",
+            reason = "Duplicate ratio acceptable." if duplicate_ratio <= 0.05 else "Duplicate ratio must be reduced before training.",
+            detail = duplicate_ratio,
+        ),
+        _validation_gate(
+            gate_id = "invalid_rows",
+            status = "pass" if invalid_rows == 0 else "blocked",
+            severity = "info" if invalid_rows == 0 else "error",
+            reason = "No invalid rows declared." if invalid_rows == 0 else "Invalid rows must be fixed before import.",
+            detail = invalid_rows,
+        ),
+        _validation_gate(
+            gate_id = "response_length",
+            status = "pass" if average_response_tokens is None or average_response_tokens >= 12 else "warning",
+            severity = "info" if average_response_tokens is None or average_response_tokens >= 12 else "warning",
+            reason = "Response lengths look usable." if average_response_tokens is None or average_response_tokens >= 12 else "Responses are very short for behavior fine-tuning.",
+            detail = average_response_tokens,
+        ),
+        _validation_gate(
+            gate_id = "license",
+            status = "pass" if license_value not in LICENSE_WARNING_VALUES else "blocked" if license_value in {"restricted", "proprietary"} else "warning",
+            severity = "info" if license_value not in LICENSE_WARNING_VALUES else "error" if license_value in {"restricted", "proprietary"} else "warning",
+            reason = "License is usable for this plan." if license_value not in LICENSE_WARNING_VALUES else "Dataset license requires review before training.",
+            detail = license_value,
+        ),
+        _validation_gate(
+            gate_id = "sensitive_data",
+            status = "warning" if contains_sensitive else "pass",
+            severity = "warning" if contains_sensitive else "info",
+            reason = "Sensitive data requires redaction and approval before training." if contains_sensitive else "No sensitive data declared.",
+            detail = contains_sensitive,
+        ),
+    ]
+    quality = _dataset_quality_score(dataset_checks, gates)
+    blocked_gate_ids = [str(item["id"]) for item in gates if item.get("severity") == "error"]
+    warning_gate_ids = [str(item["id"]) for item in gates if item.get("severity") == "warning"]
+    status = "blocked" if blocked_gate_ids else "review_required" if warning_gate_ids else "ready"
+    return {
+        "plannerVersion": COGNIX_FINE_TUNING_PLANNER_VERSION,
+        "validationPlanVersion": COGNIX_DATASET_VALIDATION_PLAN_VERSION,
+        "mode": "dataset_validation_dry_run",
+        "username": username,
+        "projectId": project_id,
+        "objectiveExcerpt": " ".join((objective or "").split())[:500],
+        "status": status,
+        "dataset": {
+            **_dataset_descriptor(dataset, dataset_checks),
+            "status": dataset_checks.get("status"),
+        },
+        "quality": quality,
+        "gates": gates,
+        "summary": {
+            "gateCount": len(gates),
+            "blockedGateIds": blocked_gate_ids,
+            "warningGateIds": warning_gate_ids,
+            "readyForFineTuning": quality["readyForFineTuning"] and not warning_gate_ids,
+            "requiresHumanReview": bool(blocked_gate_ids or warning_gate_ids),
+        },
+        "policies": {
+            "rawDatasetLoggingAllowed": False,
+            "datasetContentReadAllowed": False,
+            "datasetUploadAllowedHere": False,
+            "humanReviewRequiredBeforeTraining": True,
+            "ragPreferredWhenDocumentAnswering": True,
+        },
+        "blockedActions": [
+            {
+                "id": "dataset_read",
+                "reason": "Validation uses metadata only; raw dataset content is not read here.",
+            },
+            {
+                "id": "dataset_import",
+                "reason": "Dataset import remains blocked until validation gates and approval pass.",
+            },
+            {
+                "id": "fine_tuning_job",
+                "reason": "No training job is started by dataset validation.",
+            },
+        ],
+        "sideEffects": {
+            "datasetRead": False,
+            "datasetImport": False,
+            "datasetUpload": False,
+            "fileWrite": False,
+            "fineTuningJob": False,
+            "cloudTrainingJob": False,
+            "modelLoad": False,
+            "generation": False,
+            "networkModelCall": False,
+        },
     }
 
 
