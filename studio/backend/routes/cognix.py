@@ -83,6 +83,7 @@ from core.cognix import scheduled as cognix_scheduled
 from core.cognix import semantic_cache as cognix_semantic_cache
 from core.cognix import skill_memory as cognix_skill_memory
 from core.cognix import simulation as cognix_simulation
+from core.cognix import speculative_decoding as cognix_speculative_decoding
 from core.cognix import thinking_status as cognix_thinking_status
 from core.cognix import timeline as cognix_timeline
 from core.cognix import tool_discovery as cognix_tool_discovery
@@ -1031,6 +1032,17 @@ class OptimizationExperimentPlanRequest(BaseModel):
     project_type: str | None = Field(None, max_length = 80)
     project_id: str | None = Field(None, max_length = 160)
     requested_optimizations: list[str] | None = Field(None, alias = "requestedOptimizations")
+
+
+class SpeculativeDecodingPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    runtime_adapter: dict[str, Any] | None = Field(None, alias = "runtimeAdapter")
+    target_model: dict[str, Any] | None = Field(None, alias = "targetModel")
+    draft_model: dict[str, Any] | None = Field(None, alias = "draftModel")
+    max_quality_delta: float = Field(0.02, alias = "maxQualityDelta", ge = 0.0, le = 0.2)
 
 
 class QuantizationPlanRequest(BaseModel):
@@ -5849,6 +5861,57 @@ async def optimization_experiment_plan(
         "auditLogId": audit.get("id"),
         "sideEffects": plan.get("sideEffects", {}),
         "plannerVersion": cognix_optimization_planner.COGNIX_OPTIMIZATION_PLANNER_VERSION,
+    }
+
+
+@router.post("/optimizations/speculative-decoding-plan")
+async def speculative_decoding_plan(
+    payload: SpeculativeDecodingPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_speculative_decoding.build_speculative_decoding_plan(
+        username = current_subject,
+        objective = payload.objective,
+        project_id = payload.project_id,
+        runtime_adapter = payload.runtime_adapter,
+        target_model = payload.target_model,
+        draft_model = payload.draft_model,
+        latest_benchmark_run = cognix_db.get_latest_benchmark_run(current_subject),
+        max_quality_delta = payload.max_quality_delta,
+    )
+    audit_side_effects = {
+        **plan.get("sideEffects", {}),
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "speculative_decoding_plan_built",
+        resource_type = "cognix_speculative_decoding_plan",
+        resource_id = str(plan.get("modelPair", {}).get("targetModelId") or payload.project_id or "general"),
+        severity = "notice" if plan.get("readyForExperiment") else "warning",
+        metadata = {
+            "contractVersion": plan.get("contractVersion"),
+            "preflightVersion": plan.get("preflightVersion"),
+            "status": plan.get("status"),
+            "readyForExperiment": plan.get("readyForExperiment"),
+            "readyForActivation": plan.get("readyForActivation"),
+            "runtimeType": plan.get("runtime", {}).get("runtimeType"),
+            "targetModelId": plan.get("modelPair", {}).get("targetModelId"),
+            "draftModelId": plan.get("modelPair", {}).get("draftModelId"),
+            "blockedGateIds": plan.get("summary", {}).get("blockedGateIds"),
+            "benchmarkStatus": plan.get("benchmarkEvidence", {}).get("status"),
+            "sideEffects": audit_side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "speculativeDecodingPlan": plan,
+        "auditLogId": audit.get("id"),
+        "plannerVersion": cognix_speculative_decoding.COGNIX_SPECULATIVE_DECODING_CONTRACT_VERSION,
+        "sideEffects": audit_side_effects,
     }
 
 

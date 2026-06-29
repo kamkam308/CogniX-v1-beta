@@ -75,6 +75,7 @@ from core.cognix import scheduled as cognix_scheduled
 from core.cognix import semantic_cache as cognix_semantic_cache
 from core.cognix import skill_memory as cognix_skill_memory
 from core.cognix import simulation as cognix_simulation
+from core.cognix import speculative_decoding as cognix_speculative_decoding
 from core.cognix import thinking_status as cognix_thinking_status
 from core.cognix import timeline as cognix_timeline
 from core.cognix import tool_discovery as cognix_tool_discovery
@@ -1932,6 +1933,136 @@ def test_optimization_experiment_plan_endpoint_blocks_enablement_until_benchmark
     assert log["metadata"]["experimentPlanVersion"] == "cognix_optimization_experiment_plan_v1"
     assert log["metadata"]["benchmarkEvidenceStatus"] == "missing"
     assert "benchmark_baseline" in log["metadata"]["blockedGateIds"]
+
+
+def test_speculative_decoding_plan_allows_llama_cpp_experiment_without_activation():
+    plan = cognix_speculative_decoding.build_speculative_decoding_plan(
+        username = "alice",
+        objective = "Evaluer speculative decoding pour accelerer CogniX Code",
+        runtime_adapter = {"selectedAdapter": {"runtimeType": "llama.cpp"}},
+        target_model = {
+            "modelId": "cognix-code-7b-q4",
+            "parameterCountB": 7.0,
+            "family": "qwen",
+            "tokenizerHash": "tok-qwen",
+        },
+        draft_model = {
+            "modelId": "cognix-code-1b-draft",
+            "parameterCountB": 1.5,
+            "family": "qwen",
+            "tokenizerHash": "tok-qwen",
+        },
+        latest_benchmark_run = {
+            "id": "bench-ready",
+            "benchmark": {
+                "benchmarkVersion": "cognix_benchmark_v1",
+                "overallScore": 72.0,
+                "estimatedTokensPerSecond": 22.4,
+            },
+        },
+    )
+
+    assert plan["contractVersion"] == "cognix_speculative_decoding_contract_v1"
+    assert plan["preflightVersion"] == "cognix_speculative_decoding_preflight_v1"
+    assert plan["status"] == "ready_for_experiment"
+    assert plan["readyForExperiment"] is True
+    assert plan["readyForActivation"] is False
+    assert plan["runtime"]["runtimeType"] == "llama.cpp"
+    assert plan["modelPair"]["draftToTargetSizeRatio"] < 0.6
+    assert plan["benchmarkEvidence"]["status"] == "ready"
+    assert plan["activationContract"]["runtimeFlagWriteAllowed"] is False
+    assert plan["activationContract"]["benchmarkBeforeAfterRequired"] is True
+    assert plan["sideEffects"]["runtimeConfigWrite"] is False
+    assert plan["sideEffects"]["draftModelLoad"] is False
+    assert plan["sideEffects"]["generation"] is False
+
+
+def test_speculative_decoding_plan_blocks_ollama_and_bad_draft_without_mutation():
+    plan = cognix_speculative_decoding.build_speculative_decoding_plan(
+        username = "alice",
+        objective = "Tester speculative decoding",
+        runtime_adapter = {"selectedAdapter": {"runtimeType": "ollama"}},
+        target_model = {
+            "modelId": "cognix-general-4b",
+            "parameterCountB": 4.0,
+            "family": "qwen",
+        },
+        draft_model = {
+            "modelId": "cognix-general-4b-copy",
+            "parameterCountB": 4.0,
+            "family": "mistral",
+        },
+        latest_benchmark_run = None,
+    )
+
+    assert plan["status"] == "blocked_by_gates"
+    assert plan["readyForExperiment"] is False
+    assert {
+        "runtime_supports_speculative_decoding",
+        "draft_model_smaller",
+        "tokenizer_or_family_compatible",
+        "benchmark_baseline_ready",
+    }.issubset(set(plan["summary"]["blockedGateIds"]))
+    assert plan["activationContract"]["runtimeMutationAllowed"] is False
+    assert plan["sideEffects"]["runtimeFlagWrite"] is False
+    assert plan["sideEffects"]["modelLoad"] is False
+
+
+def test_speculative_decoding_plan_endpoint_logs_sanitized_contract(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_routes.cognix_db,
+        "get_latest_benchmark_run",
+        lambda username: {
+            "id": f"bench-{username}",
+            "benchmark": {
+                "benchmarkVersion": "cognix_benchmark_v1",
+                "overallScore": 72.0,
+                "estimatedTokensPerSecond": 22.4,
+            },
+        },
+    )
+
+    body = run_async(
+        cognix_routes.speculative_decoding_plan(
+            cognix_routes.SpeculativeDecodingPlanRequest(
+                objective = "Evaluer speculative decoding pour reduire la latence sans degradation.",
+                runtimeAdapter = {"selectedAdapter": {"runtimeType": "vllm"}},
+                targetModel = {
+                    "modelId": "target-secret-safe",
+                    "parameterCountB": 14.0,
+                    "family": "qwen",
+                    "tokenizerHash": "tok-qwen",
+                },
+                draftModel = {
+                    "modelId": "draft-safe",
+                    "parameterCountB": 3.0,
+                    "family": "qwen",
+                    "tokenizerHash": "tok-qwen",
+                },
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    plan = body["speculativeDecodingPlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert plan["status"] == "ready_for_experiment"
+    assert body["sideEffects"]["auditWrite"] is True
+    assert body["sideEffects"]["runtimeConfigWrite"] is False
+    assert body["sideEffects"]["generation"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "speculative_decoding_plan_built"
+    assert log["metadata"]["contractVersion"] == "cognix_speculative_decoding_contract_v1"
+    assert log["metadata"]["runtimeType"] == "vllm"
+    assert log["metadata"]["targetModelId"] == "target-secret-safe"
+    assert log["metadata"]["draftModelId"] == "draft-safe"
+    assert log["metadata"]["blockedGateIds"] == []
+    assert log["metadata"]["sideEffects"]["runtimeFlagWrite"] is False
+    assert "reduire la latence sans degradation" not in log["metadataJson"]
 
 
 def test_performance_monitor_collects_snapshot_without_execution_side_effects():
@@ -6527,9 +6658,11 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "semantic_cache_planning" in modules["cognix-optimization-engine"]["capabilities"]
     assert "semantic_reuse_contract" in modules["cognix-optimization-engine"]["capabilities"]
     assert "privacy_safe_cache_keys" in modules["cognix-optimization-engine"]["capabilities"]
+    assert "speculative_decoding_contract" in modules["cognix-optimization-engine"]["capabilities"]
     assert "/api/cognix/semantic-cache/plan" in modules["cognix-optimization-engine"]["routes"]
     assert "/api/cognix/optimizations/capabilities" in modules["cognix-optimization-engine"]["routes"]
     assert "/api/cognix/optimizations/experiment-plan" in modules["cognix-optimization-engine"]["routes"]
+    assert "/api/cognix/optimizations/speculative-decoding-plan" in modules["cognix-optimization-engine"]["routes"]
     assert modules["cognix-performance-monitor"]["dependencyState"]["ready"] is True
     assert "runtime_metrics" in modules["cognix-performance-monitor"]["capabilities"]
     assert "metrics_streaming" in modules["cognix-performance-monitor"]["capabilities"]

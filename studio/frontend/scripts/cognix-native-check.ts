@@ -145,6 +145,20 @@ const checks: Check[] = [
     ],
   },
   {
+    file: "../backend/core/cognix/speculative_decoding.py",
+    includes: [
+      "COGNIX_SPECULATIVE_DECODING_CONTRACT_VERSION",
+      '"cognix_speculative_decoding_contract_v1"',
+      "def build_speculative_decoding_plan",
+      "SUPPORTED_RUNTIME_TYPES",
+      '"runtimeFlagWriteAllowed": False',
+      '"readyForActivation": False',
+      '"benchmarkBeforeAfterRequired": True',
+      '"draftModelLoad": False',
+      '"generation": False',
+    ],
+  },
+  {
     file: "../backend/routes/cognix.py",
     includes: [
       "RagCompressionPlanRequest",
@@ -152,6 +166,16 @@ const checks: Check[] = [
       "cognix_rag_compression.build_rag_compression_plan",
       "rag_compression_plan_built",
       '"cognix_rag_compression_plan"',
+    ],
+  },
+  {
+    file: "../backend/routes/cognix.py",
+    includes: [
+      "SpeculativeDecodingPlanRequest",
+      '@router.post("/optimizations/speculative-decoding-plan")',
+      "cognix_speculative_decoding.build_speculative_decoding_plan",
+      "speculative_decoding_plan_built",
+      '"cognix_speculative_decoding_plan"',
     ],
   },
   {
@@ -619,6 +643,7 @@ const checks: Check[] = [
       '@router.get("/optimizations/capabilities")',
       '@router.post("/optimizations/plan")',
       '@router.post("/optimizations/experiment-plan")',
+      '@router.post("/optimizations/speculative-decoding-plan")',
       '@router.get("/quantization/variants")',
       '@router.post("/quantization/plan")',
       '@router.get("/quantization/profiles")',
@@ -1307,6 +1332,7 @@ const checks: Check[] = [
       '"cloud_training_job_specs"',
       '"optimization_capability_registry"',
       '"benchmark_gated_experiments"',
+      '"speculative_decoding_contract"',
       '"ceo_cloud_training_bypass"',
       '"rag_source_registry"',
       '"rag_indexing_planning"',
@@ -1457,6 +1483,7 @@ const checks: Check[] = [
       '"/api/cognix/models/conversions"',
       '"/api/cognix/optimizations/capabilities"',
       '"/api/cognix/optimizations/experiment-plan"',
+      '"/api/cognix/optimizations/speculative-decoding-plan"',
       '"/api/cognix/quantization/plan"',
       '"/api/cognix/quantization/variants"',
       '"/api/cognix/costs/providers"',

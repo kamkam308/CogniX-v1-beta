@@ -358,11 +358,13 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
             "prompt_compression_planning",
             "rag_compression_planning",
             "speculative_decoding_planning",
+            "speculative_decoding_contract",
         ],
         "routes": [
             "/api/cognix/optimizations/capabilities",
             "/api/cognix/optimizations/plan",
             "/api/cognix/optimizations/experiment-plan",
+            "/api/cognix/optimizations/speculative-decoding-plan",
             "/api/cognix/semantic-cache/plan",
             "/api/cognix/quantization/variants",
             "/api/cognix/quantization/plan",
