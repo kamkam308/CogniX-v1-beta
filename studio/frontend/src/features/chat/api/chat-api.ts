@@ -379,6 +379,80 @@ export interface ProjectDefaultModel {
   updatedAt: number;
 }
 
+export interface ProjectSkillRecord {
+  id: string;
+  skillId?: string | null;
+  projectId?: string | null;
+  modelId?: string | null;
+  displayName?: string | null;
+  objective?: string | null;
+  effectiveAllowedTools?: string[];
+}
+
+export interface ProjectDirectiveRecord {
+  id: string;
+  directiveId?: string | null;
+  projectId?: string | null;
+  modelId?: string | null;
+  directiveType?: string | null;
+  content?: string | null;
+  priority?: number | null;
+}
+
+export async function createProjectSkill(payload: {
+  projectId: string;
+  displayName: string;
+  objective?: string | null;
+  instructions?: string | null;
+  modelId?: string | null;
+  allowedTools?: string[];
+}): Promise<ProjectSkillRecord | null> {
+  const response = await authFetch(
+    `/api/cognix/projects/${encodeURIComponent(payload.projectId)}/skills`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        displayName: payload.displayName,
+        objective: payload.objective ?? null,
+        instructions: payload.instructions ?? null,
+        modelId: payload.modelId ?? null,
+        allowedTools: payload.allowedTools ?? [],
+      }),
+    },
+  );
+  const body = await parseJsonOrThrow<{
+    projectSkill: ProjectSkillRecord | null;
+  }>(response);
+  return body.projectSkill;
+}
+
+export async function createProjectDirective(payload: {
+  projectId: string;
+  content: string;
+  directiveType?: string | null;
+  priority?: number;
+  modelId?: string | null;
+}): Promise<ProjectDirectiveRecord | null> {
+  const response = await authFetch(
+    `/api/cognix/projects/${encodeURIComponent(payload.projectId)}/directives`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: payload.content,
+        directiveType: payload.directiveType ?? "style",
+        priority: payload.priority ?? 50,
+        modelId: payload.modelId ?? null,
+      }),
+    },
+  );
+  const body = await parseJsonOrThrow<{
+    projectDirective: ProjectDirectiveRecord | null;
+  }>(response);
+  return body.projectDirective;
+}
+
 export async function getProjectDefaultModel(
   projectId: string,
 ): Promise<ProjectDefaultModel | null> {

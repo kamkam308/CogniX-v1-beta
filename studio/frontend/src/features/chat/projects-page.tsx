@@ -50,11 +50,19 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useNavigate } from "@tanstack/react-router";
-import { Link2Icon, ListChecksIcon, MoreHorizontalIcon } from "lucide-react";
+import {
+  BrainCircuitIcon,
+  Link2Icon,
+  ListChecksIcon,
+  MoreHorizontalIcon,
+  ScrollTextIcon,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type ChatProjectBridgeResponse,
   createChatProjectBridgeLink,
+  createProjectDirective,
+  createProjectSkill,
   createMessageTask,
   getChatProjectBridge,
 } from "./api/chat-api";
@@ -117,6 +125,18 @@ export function ProjectsPage() {
   >("medium");
   const [taskRequiresApproval, setTaskRequiresApproval] = useState(false);
   const [bridgeBusy, setBridgeBusy] = useState<string | null>(null);
+  const [skillProject, setSkillProject] = useState<ProjectRecord | null>(null);
+  const [skillNameDraft, setSkillNameDraft] = useState("");
+  const [skillObjectiveDraft, setSkillObjectiveDraft] = useState("");
+  const [skillInstructionsDraft, setSkillInstructionsDraft] = useState("");
+  const [skillModelDraft, setSkillModelDraft] = useState("");
+  const [skillToolsDraft, setSkillToolsDraft] = useState("");
+  const [directiveProject, setDirectiveProject] =
+    useState<ProjectRecord | null>(null);
+  const [directiveContentDraft, setDirectiveContentDraft] = useState("");
+  const [directiveType, setDirectiveType] = useState("style");
+  const [directivePriority, setDirectivePriority] = useState("60");
+  const [directiveModelDraft, setDirectiveModelDraft] = useState("");
 
   const globalImportRef = useRef<HTMLInputElement>(null);
   const projectImportRefs = useRef<Map<string, HTMLInputElement>>(new Map());
@@ -249,6 +269,78 @@ export function ProjectsPage() {
     } catch {
       setTaskThreads([]);
       setTaskThreadId("");
+    }
+  }
+
+  function openSkillDialog(project: ProjectRecord) {
+    setSkillProject(project);
+    setSkillNameDraft("");
+    setSkillObjectiveDraft("");
+    setSkillInstructionsDraft("");
+    setSkillModelDraft("");
+    setSkillToolsDraft("project_context, rag_retrieval");
+  }
+
+  function openDirectiveDialog(project: ProjectRecord) {
+    setDirectiveProject(project);
+    setDirectiveContentDraft("");
+    setDirectiveType("style");
+    setDirectivePriority("60");
+    setDirectiveModelDraft("");
+  }
+
+  async function commitProjectSkill() {
+    const project = skillProject;
+    const displayName = skillNameDraft.trim();
+    const objective = skillObjectiveDraft.trim();
+    if (!project || !displayName || !objective) return;
+    setBridgeBusy(`skill:${project.id}`);
+    try {
+      const allowedTools = skillToolsDraft
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean);
+      await createProjectSkill({
+        projectId: project.id,
+        displayName,
+        objective,
+        instructions: skillInstructionsDraft.trim() || null,
+        modelId: skillModelDraft.trim() || null,
+        allowedTools,
+      });
+      setSkillProject(null);
+      toast.success("Project skill added.");
+    } catch (err) {
+      toast.error("Skill creation failed", {
+        description: err instanceof Error ? err.message : undefined,
+      });
+    } finally {
+      setBridgeBusy(null);
+    }
+  }
+
+  async function commitProjectDirective() {
+    const project = directiveProject;
+    const content = directiveContentDraft.trim();
+    if (!project || !content) return;
+    setBridgeBusy(`directive:${project.id}`);
+    try {
+      const parsedPriority = Number.parseInt(directivePriority, 10);
+      await createProjectDirective({
+        projectId: project.id,
+        content,
+        directiveType,
+        priority: Number.isFinite(parsedPriority) ? parsedPriority : 60,
+        modelId: directiveModelDraft.trim() || null,
+      });
+      setDirectiveProject(null);
+      toast.success("Project directive added.");
+    } catch (err) {
+      toast.error("Directive creation failed", {
+        description: err instanceof Error ? err.message : undefined,
+      });
+    } finally {
+      setBridgeBusy(null);
     }
   }
 
@@ -732,6 +824,30 @@ export function ProjectsPage() {
                             />
                             <span>New task</span>
                           </DropdownMenuItem>
+                          <DropdownMenuItem
+                            onSelect={(e) => {
+                              e.stopPropagation();
+                              openSkillDialog(project);
+                            }}
+                          >
+                            <BrainCircuitIcon
+                              strokeWidth={1.75}
+                              className="size-icon"
+                            />
+                            <span>Add skill</span>
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            onSelect={(e) => {
+                              e.stopPropagation();
+                              openDirectiveDialog(project);
+                            }}
+                          >
+                            <ScrollTextIcon
+                              strokeWidth={1.75}
+                              className="size-icon"
+                            />
+                            <span>Add directive</span>
+                          </DropdownMenuItem>
                           <DropdownMenuSub>
                             <DropdownMenuSubTrigger>
                               <HugeiconsIcon
@@ -1001,6 +1117,163 @@ export function ProjectsPage() {
               }
             >
               Create
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Project skill */}
+      <Dialog
+        open={skillProject !== null}
+        onOpenChange={(open) => {
+          if (!open) setSkillProject(null);
+        }}
+      >
+        <DialogContent className="corner-squircle dialog-soft-surface sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Add skill</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <Input
+              value={skillNameDraft}
+              onChange={(e) => setSkillNameDraft(e.target.value)}
+              maxLength={180}
+              placeholder="Skill name"
+              aria-label="Skill name"
+              className="focus-visible:border-input focus-visible:ring-0"
+            />
+            <Textarea
+              value={skillObjectiveDraft}
+              onChange={(e) => setSkillObjectiveDraft(e.target.value)}
+              className="min-h-20 resize-none focus-visible:border-input focus-visible:ring-0"
+              placeholder="Objective"
+              aria-label="Skill objective"
+              fieldSizing="fixed"
+            />
+            <Textarea
+              value={skillInstructionsDraft}
+              onChange={(e) => setSkillInstructionsDraft(e.target.value)}
+              className="min-h-24 resize-none focus-visible:border-input focus-visible:ring-0"
+              placeholder="Instructions"
+              aria-label="Skill instructions"
+              fieldSizing="fixed"
+            />
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Input
+                value={skillModelDraft}
+                onChange={(e) => setSkillModelDraft(e.target.value)}
+                maxLength={240}
+                placeholder="Model ID"
+                aria-label="Skill model ID"
+                className="focus-visible:border-input focus-visible:ring-0"
+              />
+              <Input
+                value={skillToolsDraft}
+                onChange={(e) => setSkillToolsDraft(e.target.value)}
+                maxLength={500}
+                placeholder="Allowed tools"
+                aria-label="Allowed tools"
+                className="focus-visible:border-input focus-visible:ring-0"
+              />
+            </div>
+          </div>
+          <DialogFooter className="flex-wrap gap-2 sm:justify-end">
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => setSkillProject(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void commitProjectSkill()}
+              disabled={
+                !skillNameDraft.trim() ||
+                !skillObjectiveDraft.trim() ||
+                bridgeBusy === `skill:${skillProject?.id ?? ""}`
+              }
+            >
+              Add
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Project directive */}
+      <Dialog
+        open={directiveProject !== null}
+        onOpenChange={(open) => {
+          if (!open) setDirectiveProject(null);
+        }}
+      >
+        <DialogContent className="corner-squircle dialog-soft-surface sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Add directive</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <Textarea
+              value={directiveContentDraft}
+              onChange={(e) => setDirectiveContentDraft(e.target.value)}
+              className="min-h-28 resize-none focus-visible:border-input focus-visible:ring-0"
+              placeholder="Directive"
+              aria-label="Directive content"
+              fieldSizing="fixed"
+            />
+            <div className="grid gap-3 sm:grid-cols-3">
+              <Select value={directiveType} onValueChange={setDirectiveType}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Type" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="style">Style</SelectItem>
+                  <SelectItem value="security">Security</SelectItem>
+                  <SelectItem value="privacy">Privacy</SelectItem>
+                  <SelectItem value="format">Format</SelectItem>
+                  <SelectItem value="tools">Tools</SelectItem>
+                  <SelectItem value="model">Model</SelectItem>
+                  <SelectItem value="rag">RAG</SelectItem>
+                  <SelectItem value="code">Code</SelectItem>
+                  <SelectItem value="pedagogy">Pedagogy</SelectItem>
+                </SelectContent>
+              </Select>
+              <Input
+                value={directivePriority}
+                onChange={(e) => setDirectivePriority(e.target.value)}
+                type="number"
+                min={0}
+                max={100}
+                placeholder="Priority"
+                aria-label="Directive priority"
+                className="focus-visible:border-input focus-visible:ring-0"
+              />
+              <Input
+                value={directiveModelDraft}
+                onChange={(e) => setDirectiveModelDraft(e.target.value)}
+                maxLength={240}
+                placeholder="Model ID"
+                aria-label="Directive model ID"
+                className="focus-visible:border-input focus-visible:ring-0"
+              />
+            </div>
+          </div>
+          <DialogFooter className="flex-wrap gap-2 sm:justify-end">
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => setDirectiveProject(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void commitProjectDirective()}
+              disabled={
+                !directiveContentDraft.trim() ||
+                bridgeBusy === `directive:${directiveProject?.id ?? ""}`
+              }
+            >
+              Add
             </Button>
           </DialogFooter>
         </DialogContent>

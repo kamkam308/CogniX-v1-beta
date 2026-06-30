@@ -144,6 +144,17 @@ GLOBAL_ROADMAP_TABLE_NAMES = (
     "audit_logs",
     "notifications",
 )
+PROJECT_SKILL_DIRECTIVE_TABLE_NAMES = (
+    "skills",
+    "skill_versions",
+    "skill_examples",
+    "project_skills",
+    "model_skills",
+    "directives",
+    "project_directives",
+    "model_directives",
+    "directive_priorities",
+)
 
 KNOWN_ATTACK_SIGNATURES: list[dict[str, str]] = [
     {
@@ -2658,6 +2669,7 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
     _ensure_approval_request_columns(conn)
     _ensure_token_usage_columns(conn)
     _ensure_global_roadmap_tables(conn)
+    _ensure_project_skill_directive_columns(conn)
 
 
 def _ensure_approval_request_columns(conn: sqlite3.Connection) -> None:
@@ -2755,6 +2767,135 @@ def _ensure_global_roadmap_tables(conn: sqlite3.Connection) -> None:
             f"""
             CREATE INDEX IF NOT EXISTS idx_{table_name}_scope
                 ON {quoted_table}(scope_type, scope_id, updated_at DESC)
+            """
+        )
+
+
+def _ensure_columns(conn: sqlite3.Connection, table_name: str, additions: dict[str, str]) -> None:
+    quoted_table = _quote_roadmap_table_name(table_name)
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({quoted_table})").fetchall()}
+    for column_name, definition in additions.items():
+        if column_name not in columns:
+            conn.execute(f"ALTER TABLE {quoted_table} ADD COLUMN {column_name} {definition}")
+
+
+def _ensure_project_skill_directive_columns(conn: sqlite3.Connection) -> None:
+    for table_name in PROJECT_SKILL_DIRECTIVE_TABLE_NAMES:
+        if table_name not in GLOBAL_ROADMAP_TABLE_NAMES:
+            quoted_table = _quote_roadmap_table_name(table_name)
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {quoted_table} (
+                    id TEXT PRIMARY KEY,
+                    organization_id TEXT NOT NULL DEFAULT 'default',
+                    username TEXT,
+                    project_id TEXT,
+                    scope_type TEXT NOT NULL DEFAULT 'global',
+                    scope_id TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'active',
+                    payload_json TEXT NOT NULL DEFAULT '{{}}',
+                    metadata_json TEXT NOT NULL DEFAULT '{{}}',
+                    created_at TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+
+    _ensure_columns(
+        conn,
+        "skills",
+        {
+            "skill_key": "TEXT NOT NULL DEFAULT ''",
+            "display_name": "TEXT NOT NULL DEFAULT ''",
+            "description": "TEXT NOT NULL DEFAULT ''",
+            "objective": "TEXT NOT NULL DEFAULT ''",
+            "instructions": "TEXT NOT NULL DEFAULT ''",
+            "allowed_tools_json": "TEXT NOT NULL DEFAULT '[]'",
+            "limits_json": "TEXT NOT NULL DEFAULT '{}'",
+            "examples_json": "TEXT NOT NULL DEFAULT '[]'",
+            "created_by": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "skill_versions",
+        {
+            "skill_id": "TEXT NOT NULL DEFAULT ''",
+            "version_number": "INTEGER NOT NULL DEFAULT 1",
+            "manifest_json": "TEXT NOT NULL DEFAULT '{}'",
+            "created_by": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "skill_examples",
+        {
+            "skill_id": "TEXT NOT NULL DEFAULT ''",
+            "example_input": "TEXT NOT NULL DEFAULT ''",
+            "example_output": "TEXT NOT NULL DEFAULT ''",
+            "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+        },
+    )
+    for table_name in ("project_skills", "model_skills"):
+        _ensure_columns(
+            conn,
+            table_name,
+            {
+                "skill_id": "TEXT NOT NULL DEFAULT ''",
+                "model_id": "TEXT",
+                "binding_json": "TEXT NOT NULL DEFAULT '{}'",
+                "tool_permissions_json": "TEXT NOT NULL DEFAULT '[]'",
+                "compiled_prompt": "TEXT NOT NULL DEFAULT ''",
+            },
+        )
+    _ensure_columns(
+        conn,
+        "directives",
+        {
+            "directive_key": "TEXT NOT NULL DEFAULT ''",
+            "directive_type": "TEXT NOT NULL DEFAULT 'style'",
+            "content": "TEXT NOT NULL DEFAULT ''",
+            "priority": "INTEGER NOT NULL DEFAULT 50",
+            "scope": "TEXT NOT NULL DEFAULT 'project'",
+            "model_id": "TEXT",
+            "source_level": "TEXT NOT NULL DEFAULT 'project'",
+            "created_by": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    for table_name in ("project_directives", "model_directives"):
+        _ensure_columns(
+            conn,
+            table_name,
+            {
+                "directive_id": "TEXT NOT NULL DEFAULT ''",
+                "model_id": "TEXT",
+                "priority": "INTEGER NOT NULL DEFAULT 50",
+                "scope": "TEXT NOT NULL DEFAULT 'project'",
+                "directive_json": "TEXT NOT NULL DEFAULT '{}'",
+            },
+        )
+    _ensure_columns(
+        conn,
+        "directive_priorities",
+        {
+            "directive_id": "TEXT NOT NULL DEFAULT ''",
+            "source_level": "TEXT NOT NULL DEFAULT 'project'",
+            "priority": "INTEGER NOT NULL DEFAULT 50",
+            "conflict_rank": "INTEGER NOT NULL DEFAULT 30",
+        },
+    )
+    for table_name in PROJECT_SKILL_DIRECTIVE_TABLE_NAMES:
+        quoted_table = _quote_roadmap_table_name(table_name)
+        conn.execute(
+            f"""
+            CREATE INDEX IF NOT EXISTS idx_{table_name}_project_status
+                ON {quoted_table}(project_id, status, updated_at DESC)
+            """
+        )
+        conn.execute(
+            f"""
+            CREATE INDEX IF NOT EXISTS idx_{table_name}_username_status
+                ON {quoted_table}(username, status, updated_at DESC)
             """
         )
 
@@ -7442,6 +7583,430 @@ def list_skill_memories(
                 (username, safe_limit),
             ).fetchall()
         return [_hydrate_skill_memory(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_project_skill(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["id"] = item.get("binding_id") or item.get("id")
+    item["skillId"] = item.get("skill_id")
+    item["projectId"] = item.get("project_id")
+    item["modelId"] = item.get("model_id")
+    item["skillKey"] = item.get("skill_key")
+    item["displayName"] = item.get("display_name")
+    item["allowedTools"] = _json_or_default(item.get("allowed_tools_json"), [])
+    item["effectiveAllowedTools"] = _json_or_default(item.get("tool_permissions_json"), [])
+    item["limits"] = _json_or_default(item.get("limits_json"), {})
+    item["examples"] = _json_or_default(item.get("examples_json"), [])
+    item["binding"] = _json_or_default(item.get("binding_json"), {})
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    item["compiledPrompt"] = item.get("compiled_prompt") or ""
+    item["createdBy"] = item.get("created_by")
+    return item
+
+
+def create_project_skill(
+    username: str,
+    *,
+    project_id: str,
+    plan: dict[str, Any],
+    model_id: str | None = None,
+) -> dict[str, Any]:
+    now = _now()
+    skill = plan.get("skill") if isinstance(plan.get("skill"), dict) else {}
+    binding = plan.get("binding") if isinstance(plan.get("binding"), dict) else {}
+    skill_id = _new_id("skill")
+    project_binding_id = _new_id("pskill")
+    effective_tools = binding.get("effectiveAllowedTools") or []
+    examples = skill.get("examples") if isinstance(skill.get("examples"), list) else []
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO skills
+                (
+                    id, organization_id, username, project_id, scope_type, scope_id,
+                    status, payload_json, metadata_json, created_at, updated_at,
+                    skill_key, display_name, description, objective, instructions,
+                    allowed_tools_json, limits_json, examples_json, created_by
+                )
+            VALUES (?, 'default', ?, ?, 'project', ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                skill_id,
+                username,
+                project_id,
+                project_id,
+                json.dumps(skill, ensure_ascii = False),
+                json.dumps({"plannerVersion": plan.get("skillManagerVersion")}, ensure_ascii = False),
+                now,
+                now,
+                str(skill.get("skillKey") or "")[:160],
+                str(skill.get("displayName") or "")[:200],
+                str(skill.get("description") or "")[:1000],
+                str(skill.get("objective") or "")[:1200],
+                str(skill.get("instructions") or "")[:6000],
+                json.dumps(skill.get("allowedTools") or [], ensure_ascii = False),
+                json.dumps(skill.get("limits") or {}, ensure_ascii = False),
+                json.dumps(examples, ensure_ascii = False),
+                username,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO skill_versions
+                (
+                    id, organization_id, username, project_id, scope_type, scope_id,
+                    status, payload_json, metadata_json, created_at, updated_at,
+                    skill_id, version_number, manifest_json, created_by
+                )
+            VALUES (?, 'default', ?, ?, 'project', ?, 'active', ?, '{}', ?, ?, ?, 1, ?, ?)
+            """,
+            (
+                _new_id("skver"),
+                username,
+                project_id,
+                project_id,
+                json.dumps(plan, ensure_ascii = False),
+                now,
+                now,
+                skill_id,
+                json.dumps(skill, ensure_ascii = False),
+                username,
+            ),
+        )
+        for example in examples[:20]:
+            example_input = str(example.get("input") if isinstance(example, dict) else example)[:2000]
+            example_output = str(example.get("output") if isinstance(example, dict) else "")[:2000]
+            conn.execute(
+                """
+                INSERT INTO skill_examples
+                    (
+                        id, organization_id, username, project_id, scope_type, scope_id,
+                        status, payload_json, metadata_json, created_at, updated_at,
+                        skill_id, example_input, example_output
+                    )
+                VALUES (?, 'default', ?, ?, 'skill', ?, 'active', ?, '{}', ?, ?, ?, ?, ?)
+                """,
+                (
+                    _new_id("skex"),
+                    username,
+                    project_id,
+                    skill_id,
+                    json.dumps(example, ensure_ascii = False),
+                    now,
+                    now,
+                    skill_id,
+                    example_input,
+                    example_output,
+                ),
+            )
+        conn.execute(
+            """
+            INSERT INTO project_skills
+                (
+                    id, organization_id, username, project_id, scope_type, scope_id,
+                    status, payload_json, metadata_json, created_at, updated_at,
+                    skill_id, model_id, binding_json, tool_permissions_json, compiled_prompt
+                )
+            VALUES (?, 'default', ?, ?, 'project', ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                project_binding_id,
+                username,
+                project_id,
+                project_id,
+                json.dumps(plan, ensure_ascii = False),
+                json.dumps({"source": "project_skill_manager"}, ensure_ascii = False),
+                now,
+                now,
+                skill_id,
+                model_id or skill.get("modelId"),
+                json.dumps(binding, ensure_ascii = False),
+                json.dumps(effective_tools, ensure_ascii = False),
+                str(binding.get("compiledPrompt") or "")[:8000],
+            ),
+        )
+        if model_id or skill.get("modelId"):
+            conn.execute(
+                """
+                INSERT INTO model_skills
+                    (
+                        id, organization_id, username, project_id, scope_type, scope_id,
+                        status, payload_json, metadata_json, created_at, updated_at,
+                        skill_id, model_id, binding_json, tool_permissions_json, compiled_prompt
+                    )
+                VALUES (?, 'default', ?, ?, 'model', ?, 'active', ?, '{}', ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _new_id("mskill"),
+                    username,
+                    project_id,
+                    str(model_id or skill.get("modelId")),
+                    json.dumps(plan, ensure_ascii = False),
+                    now,
+                    now,
+                    skill_id,
+                    str(model_id or skill.get("modelId")),
+                    json.dumps(binding, ensure_ascii = False),
+                    json.dumps(effective_tools, ensure_ascii = False),
+                    str(binding.get("compiledPrompt") or "")[:8000],
+                ),
+            )
+        conn.commit()
+        return (list_project_skills(username, project_id = project_id, include_disabled = True, binding_id = project_binding_id) or [{}])[0]
+    finally:
+        conn.close()
+
+
+def list_project_skills(
+    username: str,
+    *,
+    project_id: str,
+    include_disabled: bool = False,
+    binding_id: str | None = None,
+    limit: int = 120,
+) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 120), 1), 300)
+    conn = get_connection()
+    try:
+        clauses = ["ps.username = ?", "ps.project_id = ?"]
+        params: list[Any] = [username, project_id]
+        if not include_disabled:
+            clauses.append("ps.status != 'disabled'")
+            clauses.append("s.status != 'disabled'")
+        if binding_id:
+            clauses.append("ps.id = ?")
+            params.append(binding_id)
+        params.append(safe_limit)
+        rows = conn.execute(
+            f"""
+            SELECT
+                ps.id AS binding_id,
+                ps.project_id,
+                ps.model_id,
+                ps.status,
+                ps.binding_json,
+                ps.tool_permissions_json,
+                ps.compiled_prompt,
+                ps.metadata_json,
+                ps.created_at,
+                ps.updated_at,
+                s.id AS skill_id,
+                s.skill_key,
+                s.display_name,
+                s.description,
+                s.objective,
+                s.instructions,
+                s.allowed_tools_json,
+                s.limits_json,
+                s.examples_json,
+                s.created_by
+            FROM project_skills ps
+            JOIN skills s ON s.id = ps.skill_id
+            WHERE {' AND '.join(clauses)}
+            ORDER BY ps.updated_at DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_project_skill(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_project_directive(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["id"] = item.get("binding_id") or item.get("id")
+    item["directiveId"] = item.get("directive_id")
+    item["projectId"] = item.get("project_id")
+    item["modelId"] = item.get("model_id")
+    item["directiveKey"] = item.get("directive_key")
+    item["directiveType"] = item.get("directive_type")
+    item["sourceLevel"] = item.get("source_level")
+    item["directive"] = _json_or_default(item.get("directive_json"), {})
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    item["createdBy"] = item.get("created_by")
+    return item
+
+
+def create_project_directive(
+    username: str,
+    *,
+    project_id: str,
+    plan: dict[str, Any],
+    model_id: str | None = None,
+) -> dict[str, Any]:
+    now = _now()
+    directive = plan.get("directive") if isinstance(plan.get("directive"), dict) else {}
+    directive_id = _new_id("dir")
+    project_binding_id = _new_id("pdir")
+    priority = int(directive.get("priority") or 50)
+    scope = str(directive.get("scope") or "project")[:80]
+    source_level = str(directive.get("sourceLevel") or "project")[:80]
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO directives
+                (
+                    id, organization_id, username, project_id, scope_type, scope_id,
+                    status, payload_json, metadata_json, created_at, updated_at,
+                    directive_key, directive_type, content, priority, scope,
+                    model_id, source_level, created_by
+                )
+            VALUES (?, 'default', ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                directive_id,
+                username,
+                project_id,
+                scope,
+                project_id,
+                json.dumps(directive, ensure_ascii = False),
+                json.dumps({"plannerVersion": plan.get("directiveManagerVersion")}, ensure_ascii = False),
+                now,
+                now,
+                str(directive.get("directiveKey") or "")[:160],
+                str(directive.get("directiveType") or "style")[:80],
+                str(directive.get("content") or "")[:3000],
+                priority,
+                scope,
+                model_id or directive.get("modelId"),
+                source_level,
+                username,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO project_directives
+                (
+                    id, organization_id, username, project_id, scope_type, scope_id,
+                    status, payload_json, metadata_json, created_at, updated_at,
+                    directive_id, model_id, priority, scope, directive_json
+                )
+            VALUES (?, 'default', ?, ?, 'project', ?, 'active', ?, '{}', ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                project_binding_id,
+                username,
+                project_id,
+                project_id,
+                json.dumps(plan, ensure_ascii = False),
+                now,
+                now,
+                directive_id,
+                model_id or directive.get("modelId"),
+                priority,
+                scope,
+                json.dumps(directive, ensure_ascii = False),
+            ),
+        )
+        if model_id or directive.get("modelId"):
+            conn.execute(
+                """
+                INSERT INTO model_directives
+                    (
+                        id, organization_id, username, project_id, scope_type, scope_id,
+                        status, payload_json, metadata_json, created_at, updated_at,
+                        directive_id, model_id, priority, scope, directive_json
+                    )
+                VALUES (?, 'default', ?, ?, 'model', ?, 'active', ?, '{}', ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _new_id("mdir"),
+                    username,
+                    project_id,
+                    str(model_id or directive.get("modelId")),
+                    json.dumps(plan, ensure_ascii = False),
+                    now,
+                    now,
+                    directive_id,
+                    str(model_id or directive.get("modelId")),
+                    priority,
+                    scope,
+                    json.dumps(directive, ensure_ascii = False),
+                ),
+            )
+        conn.execute(
+            """
+            INSERT INTO directive_priorities
+                (
+                    id, organization_id, username, project_id, scope_type, scope_id,
+                    status, payload_json, metadata_json, created_at, updated_at,
+                    directive_id, source_level, priority, conflict_rank
+                )
+            VALUES (?, 'default', ?, ?, 'directive', ?, 'active', ?, '{}', ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _new_id("dprio"),
+                username,
+                project_id,
+                directive_id,
+                json.dumps(plan.get("conflictPolicy") or {}, ensure_ascii = False),
+                now,
+                now,
+                directive_id,
+                source_level,
+                priority,
+                int((plan.get("conflictPolicy") or {}).get("conflictRank") or 30),
+            ),
+        )
+        conn.commit()
+        return (list_project_directives(username, project_id = project_id, include_disabled = True, binding_id = project_binding_id) or [{}])[0]
+    finally:
+        conn.close()
+
+
+def list_project_directives(
+    username: str,
+    *,
+    project_id: str,
+    include_disabled: bool = False,
+    binding_id: str | None = None,
+    limit: int = 120,
+) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 120), 1), 300)
+    conn = get_connection()
+    try:
+        clauses = ["pd.username = ?", "pd.project_id = ?"]
+        params: list[Any] = [username, project_id]
+        if not include_disabled:
+            clauses.append("pd.status != 'disabled'")
+            clauses.append("d.status != 'disabled'")
+        if binding_id:
+            clauses.append("pd.id = ?")
+            params.append(binding_id)
+        params.append(safe_limit)
+        rows = conn.execute(
+            f"""
+            SELECT
+                pd.id AS binding_id,
+                pd.project_id,
+                pd.model_id,
+                pd.status,
+                pd.priority,
+                pd.scope,
+                pd.directive_json,
+                pd.metadata_json,
+                pd.created_at,
+                pd.updated_at,
+                d.id AS directive_id,
+                d.directive_key,
+                d.directive_type,
+                d.content,
+                d.source_level,
+                d.created_by
+            FROM project_directives pd
+            JOIN directives d ON d.id = pd.directive_id
+            WHERE {' AND '.join(clauses)}
+            ORDER BY pd.priority DESC, pd.updated_at DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_project_directive(row) for row in _rows_to_dicts(rows)]
     finally:
         conn.close()
 

@@ -74,6 +74,7 @@ from core.cognix import persona_manager as cognix_persona_manager
 from core.cognix import personal_twin as cognix_personal_twin
 from core.cognix import performance_monitor as cognix_performance_monitor
 from core.cognix import plugin_marketplace as cognix_plugin_marketplace
+from core.cognix import project_skills_directives as cognix_project_skills_directives
 from core.cognix import project_dna as cognix_project_dna
 from core.cognix import project_experts as cognix_project_experts
 from core.cognix import prompt_cache as cognix_prompt_cache
@@ -915,6 +916,46 @@ class SkillMarketplaceUsageRequest(BaseModel):
     action: Literal["view", "use", "share", "version", "disable"] = "use"
     project_id: str | None = Field(None, alias = "projectId", max_length = 160)
     metadata: dict[str, Any] | None = None
+
+
+class ProjectSkillRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    skill_config: dict[str, Any] | None = Field(None, alias = "skillConfig")
+    display_name: str | None = Field(None, alias = "displayName", max_length = 180)
+    description: str | None = Field(None, max_length = 1000)
+    objective: str | None = Field(None, max_length = 1200)
+    instructions: str | None = Field(None, max_length = 6000)
+    model_id: str | None = Field(None, alias = "modelId", max_length = 240)
+    allowed_tools: list[str] | None = Field(None, alias = "allowedTools")
+    limits: dict[str, Any] | None = None
+    examples: list[Any] | None = None
+    store_skill: bool = Field(True, alias = "storeSkill")
+
+
+class ProjectSkillInjectionRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    model_id: str | None = Field(None, alias = "modelId", max_length = 240)
+
+
+class ProjectDirectiveRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    directive_config: dict[str, Any] | None = Field(None, alias = "directiveConfig")
+    content: str | None = Field(None, max_length = 3000)
+    directive_type: str | None = Field(None, alias = "directiveType", max_length = 80)
+    priority: int = Field(50, ge = 0, le = 100)
+    scope: str = Field("project", max_length = 80)
+    model_id: str | None = Field(None, alias = "modelId", max_length = 240)
+    source_level: str | None = Field(None, alias = "sourceLevel", max_length = 80)
+    store_directive: bool = Field(True, alias = "storeDirective")
+
+
+class ProjectDirectiveCompileRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    model_id: str | None = Field(None, alias = "modelId", max_length = 240)
 
 
 class ProjectDefaultModelRequest(BaseModel):
@@ -6340,6 +6381,315 @@ async def record_shared_skill_usage(
         "auditLogId": audit.get("id"),
         "sideEffects": {**usage_plan.get("sideEffects", {}), "usageLogWrite": True, "auditWrite": True},
         "plannerVersion": cognix_skill_marketplace.COGNIX_SKILL_MARKETPLACE_SERVICE_VERSION,
+    }
+
+
+def _project_skill_config_from_payload(payload: ProjectSkillRequest) -> dict[str, Any]:
+    config = dict(payload.skill_config or {})
+    if payload.display_name is not None:
+        config["displayName"] = payload.display_name
+    if payload.description is not None:
+        config["description"] = payload.description
+    if payload.objective is not None:
+        config["objective"] = payload.objective
+    if payload.instructions is not None:
+        config["instructions"] = payload.instructions
+    if payload.model_id is not None:
+        config["modelId"] = payload.model_id
+    if payload.allowed_tools is not None:
+        config["allowedTools"] = payload.allowed_tools
+    if payload.limits is not None:
+        config["limits"] = payload.limits
+    if payload.examples is not None:
+        config["examples"] = payload.examples
+    return config
+
+
+def _project_directive_config_from_payload(payload: ProjectDirectiveRequest) -> dict[str, Any]:
+    config = dict(payload.directive_config or {})
+    if payload.content is not None:
+        config["content"] = payload.content
+    if payload.directive_type is not None:
+        config["directiveType"] = payload.directive_type
+    config["priority"] = payload.priority
+    config["scope"] = payload.scope
+    if payload.model_id is not None:
+        config["modelId"] = payload.model_id
+    if payload.source_level is not None:
+        config["sourceLevel"] = payload.source_level
+    return config
+
+
+@router.get("/projects/{project_id}/skills/blueprint")
+async def project_skills_blueprint(
+    project_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_owned_project(project_id, current_subject)
+    blueprint = cognix_project_skills_directives.build_project_skill_blueprint()
+    return {
+        "username": current_subject,
+        "projectId": project_id,
+        "projectSkillBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_project_skills_directives.COGNIX_SKILL_MANAGER_VERSION,
+    }
+
+
+@router.get("/projects/{project_id}/skills")
+async def list_project_skills(
+    project_id: str,
+    include_disabled: bool = False,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_owned_project(project_id, current_subject)
+    skills = cognix_db.list_project_skills(
+        current_subject,
+        project_id = project_id,
+        include_disabled = include_disabled,
+    )
+    return {
+        "username": current_subject,
+        "projectId": project_id,
+        "skills": [_row(item) for item in skills],
+        "count": len(skills),
+    }
+
+
+@router.post("/projects/{project_id}/skills")
+async def create_project_skill(
+    project_id: str,
+    payload: ProjectSkillRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_owned_project(project_id, current_subject)
+    plan = cognix_project_skills_directives.build_project_skill_plan(
+        username = current_subject,
+        project_id = project_id,
+        skill_config = _project_skill_config_from_payload(payload),
+        granted_permissions = _granted_permission_keys(current_subject),
+        model_id = payload.model_id,
+    )
+    if not plan.get("validation", {}).get("valid"):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            {"message": "Invalid project skill.", "missingFields": plan.get("validation", {}).get("missingFields", [])},
+        )
+    stored_skill = (
+        cognix_db.create_project_skill(
+            current_subject,
+            project_id = project_id,
+            plan = plan,
+            model_id = payload.model_id,
+        )
+        if payload.store_skill
+        else None
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "skillWrite": stored_skill is not None,
+        "versionWrite": stored_skill is not None,
+        "projectBindingWrite": stored_skill is not None,
+        "modelBindingWrite": stored_skill is not None and bool((plan.get("skill") or {}).get("modelId")),
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "project_skill_binding_planned",
+        resource_type = "project_skill",
+        resource_id = project_id,
+        severity = "warning" if plan.get("binding", {}).get("blockedTools") else "notice",
+        metadata = {
+            "skillManagerVersion": plan.get("skillManagerVersion"),
+            "projectId": project_id,
+            "skillKey": plan.get("skill", {}).get("skillKey"),
+            "blockedTools": plan.get("binding", {}).get("blockedTools"),
+            "permissionEscalationAllowed": False,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "projectId": project_id,
+        "projectSkillPlan": plan,
+        "projectSkill": _row(stored_skill) if stored_skill else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_project_skills_directives.COGNIX_SKILL_MANAGER_VERSION,
+    }
+
+
+@router.post("/projects/{project_id}/skills/injection-plan")
+async def project_skill_injection_plan(
+    project_id: str,
+    payload: ProjectSkillInjectionRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_owned_project(project_id, current_subject)
+    skills = cognix_db.list_project_skills(current_subject, project_id = project_id)
+    plan = cognix_project_skills_directives.build_skill_injection_plan(
+        username = current_subject,
+        project_id = project_id,
+        skills = [_row(item) for item in skills],
+        model_id = payload.model_id,
+        granted_permissions = _granted_permission_keys(current_subject),
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "project_skill_injection_plan_built",
+        resource_type = "project_skill",
+        resource_id = project_id,
+        severity = "notice",
+        metadata = {
+            "runtimeBinderVersion": plan.get("runtimeBinderVersion"),
+            "selectedSkillCount": plan.get("summary", {}).get("selectedSkillCount"),
+            "permissionEscalationAllowed": False,
+            "sideEffects": {**plan.get("sideEffects", {}), "auditWrite": True},
+        },
+    )
+    return {
+        "username": current_subject,
+        "projectId": project_id,
+        "skillInjectionPlan": plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": {**plan.get("sideEffects", {}), "auditWrite": True},
+        "plannerVersion": cognix_project_skills_directives.COGNIX_SKILL_RUNTIME_BINDER_VERSION,
+    }
+
+
+@router.get("/projects/{project_id}/directives/blueprint")
+async def project_directives_blueprint(
+    project_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_owned_project(project_id, current_subject)
+    blueprint = cognix_project_skills_directives.build_project_directive_blueprint()
+    return {
+        "username": current_subject,
+        "projectId": project_id,
+        "projectDirectiveBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_project_skills_directives.COGNIX_DIRECTIVE_MANAGER_VERSION,
+    }
+
+
+@router.get("/projects/{project_id}/directives")
+async def list_project_directives(
+    project_id: str,
+    include_disabled: bool = False,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_owned_project(project_id, current_subject)
+    directives = cognix_db.list_project_directives(
+        current_subject,
+        project_id = project_id,
+        include_disabled = include_disabled,
+    )
+    return {
+        "username": current_subject,
+        "projectId": project_id,
+        "directives": [_row(item) for item in directives],
+        "count": len(directives),
+    }
+
+
+@router.post("/projects/{project_id}/directives")
+async def create_project_directive(
+    project_id: str,
+    payload: ProjectDirectiveRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_owned_project(project_id, current_subject)
+    plan = cognix_project_skills_directives.build_project_directive_plan(
+        username = current_subject,
+        project_id = project_id,
+        directive_config = _project_directive_config_from_payload(payload),
+        model_id = payload.model_id,
+    )
+    if not plan.get("validation", {}).get("valid"):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            {"message": "Invalid project directive.", "missingFields": plan.get("validation", {}).get("missingFields", [])},
+        )
+    stored_directive = (
+        cognix_db.create_project_directive(
+            current_subject,
+            project_id = project_id,
+            plan = plan,
+            model_id = payload.model_id,
+        )
+        if payload.store_directive
+        else None
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "directiveWrite": stored_directive is not None,
+        "projectBindingWrite": stored_directive is not None,
+        "modelBindingWrite": stored_directive is not None and bool((plan.get("directive") or {}).get("modelId")),
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "project_directive_planned",
+        resource_type = "project_directive",
+        resource_id = project_id,
+        severity = "notice",
+        metadata = {
+            "directiveManagerVersion": plan.get("directiveManagerVersion"),
+            "projectId": project_id,
+            "directiveType": plan.get("directive", {}).get("directiveType"),
+            "sourceLevel": plan.get("directive", {}).get("sourceLevel"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "projectId": project_id,
+        "projectDirectivePlan": plan,
+        "projectDirective": _row(stored_directive) if stored_directive else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_project_skills_directives.COGNIX_DIRECTIVE_MANAGER_VERSION,
+    }
+
+
+@router.post("/projects/{project_id}/directives/compile")
+async def compile_project_directives(
+    project_id: str,
+    payload: ProjectDirectiveCompileRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_owned_project(project_id, current_subject)
+    directives = cognix_db.list_project_directives(current_subject, project_id = project_id)
+    plan = cognix_project_skills_directives.compile_project_directives(
+        username = current_subject,
+        project_id = project_id,
+        directives = [_row(item) for item in directives],
+        model_id = payload.model_id,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "project_directives_compiled",
+        resource_type = "project_directive",
+        resource_id = project_id,
+        severity = "notice",
+        metadata = {
+            "directiveCompilerVersion": plan.get("directiveCompilerVersion"),
+            "compiledDirectiveCount": plan.get("summary", {}).get("compiledDirectiveCount"),
+            "sideEffects": {**plan.get("sideEffects", {}), "auditWrite": True},
+        },
+    )
+    return {
+        "username": current_subject,
+        "projectId": project_id,
+        "directiveCompilePlan": plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": {**plan.get("sideEffects", {}), "auditWrite": True},
+        "plannerVersion": cognix_project_skills_directives.COGNIX_DIRECTIVE_COMPILER_VERSION,
     }
 
 

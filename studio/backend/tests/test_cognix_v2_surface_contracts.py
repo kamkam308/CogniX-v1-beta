@@ -71,6 +71,8 @@ def test_api_surface_reports_v2_product_navigation_routes():
         {"path": "/api/cognix/admin/usage", "methods": ["GET"]},
         {"path": "/api/inference/chat/completions", "methods": ["POST"]},
         {"path": "/api/cognix/chat-project-bridge/links", "methods": ["POST"]},
+        {"path": "/api/cognix/projects/{project_id}/skills", "methods": ["GET", "POST"]},
+        {"path": "/api/cognix/projects/{project_id}/directives", "methods": ["GET", "POST"]},
         {"path": "/api/cognix/skills/marketplace", "methods": ["GET"]},
         {"path": "/api/cognix/admin/approvals", "methods": ["GET"]},
     ]
@@ -84,7 +86,8 @@ def test_api_surface_reports_v2_product_navigation_routes():
     assert routes["/pulse"]["matchedRoute"] == "/api/cognix/pulse"
     assert routes["/chat"]["matchedRoute"] == "/api/inference/chat/completions"
     assert routes["/projects/:id/skills"]["status"] == "equivalent"
-    assert routes["/projects/:id/directives"]["status"] == "planned"
+    assert routes["/projects/:id/directives"]["status"] == "equivalent"
+    assert routes["/projects/:id/directives"]["matchedRoute"] == "/api/cognix/projects/{project_id}/directives"
     assert routes["/projects/:id/directives"]["frontendDirectModelCallAllowed"] is False
     assert contract["productNavigationContract"]["coverage"]["readyForV2Navigation"] is False
     assert contract["sideEffects"]["routeRegistration"] is False
