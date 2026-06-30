@@ -446,6 +446,17 @@ class PromptCompressionRequest(BaseModel):
     store_context: bool = Field(True, alias = "storeContext")
 
 
+class ConversationSummaryPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    messages: list[dict[str, Any]] = Field(default_factory = list, max_length = 500)
+    objective: str | None = Field(None, max_length = 4000)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    target_tokens: int = Field(420, alias = "targetTokens", ge = 64, le = 8000)
+    recent_message_limit: int = Field(6, alias = "recentMessageLimit", ge = 1, le = 20)
+    store_context: bool = Field(True, alias = "storeContext")
+
+
 class SemanticCachePlanRequest(BaseModel):
     model_config = ConfigDict(populate_by_name = True)
 
@@ -9715,6 +9726,66 @@ async def prompt_compression_plan(
         "auditLogId": audit.get("id"),
         "sideEffects": side_effects,
         "plannerVersion": cognix_prompt_compression.COGNIX_PROMPT_COMPRESSION_VERSION,
+    }
+
+
+@router.post("/prompt-compression/conversation-summary-plan")
+async def conversation_summary_plan(
+    payload: ConversationSummaryPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_prompt_compression.build_conversation_summary_plan(
+        username = current_subject,
+        messages = payload.messages,
+        objective = payload.objective,
+        target_tokens = payload.target_tokens,
+        recent_message_limit = payload.recent_message_limit,
+        project_id = payload.project_id,
+    )
+    stored_context = (
+        cognix_db.create_compressed_context(
+            current_subject,
+            plan = plan,
+            project_id = payload.project_id,
+        )
+        if payload.store_context and plan.get("compressedContext")
+        else None
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "compressionWrite": stored_context is not None,
+        "logWrite": stored_context is not None,
+        "modelLoad": False,
+        "generation": False,
+        "networkCall": False,
+        "promptMutation": False,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "conversation_summary_plan_built",
+        resource_type = "cognix_conversation_summary_plan",
+        resource_id = str((stored_context or {}).get("id") or payload.project_id or current_subject),
+        severity = "warning" if plan.get("summary", {}).get("redactionCount") else "notice",
+        metadata = {
+            "conversationSummaryContractVersion": plan.get("conversationSummaryContractVersion"),
+            "messageCount": plan.get("summary", {}).get("messageCount"),
+            "summarizedMessageCount": plan.get("summary", {}).get("summarizedMessageCount"),
+            "retainedRecentMessageCount": plan.get("summary", {}).get("retainedRecentMessageCount"),
+            "rawHistoryIncluded": plan.get("summary", {}).get("rawHistoryIncluded"),
+            "redactionCount": plan.get("summary", {}).get("redactionCount"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "conversationSummaryPlan": plan,
+        "compressedContext": _row(stored_context) if stored_context else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_prompt_compression.COGNIX_CONVERSATION_SUMMARY_CONTRACT_VERSION,
     }
 
 

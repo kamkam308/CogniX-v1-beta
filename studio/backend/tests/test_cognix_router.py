@@ -6274,6 +6274,44 @@ def test_prompt_compression_plan_reduces_tokens_and_preserves_objective_terms():
     assert plan["sideEffects"]["promptMutation"] is False
 
 
+def test_conversation_summary_plan_caps_recent_messages_and_redacts_secrets_without_generation():
+    messages = [
+        {"role": "user", "content": "Objectif important: construire un RAG PDF cite avec QCM."},
+        {"role": "assistant", "content": "Decision: garder les citations et ne jamais inventer de source."},
+        {"role": "user", "content": "token=sk-1234567890abcdef ne doit jamais etre reutilise."},
+        {"role": "assistant", "content": "Todo: ajouter des tests backend pour le Context Manager."},
+        {"role": "user", "content": "Detail secondaire sur la couleur sans importance."},
+        {"role": "assistant", "content": "Le contexte projet doit rester concis."},
+        {"role": "user", "content": "Derniere question: comment lancer le plan ?"},
+        {"role": "assistant", "content": "Reponse recente a garder comme extrait seulement."},
+    ]
+    plan = cognix_prompt_compression.build_conversation_summary_plan(
+        username = "alice",
+        messages = messages,
+        objective = "RAG PDF citations QCM tests",
+        target_tokens = 90,
+        recent_message_limit = 2,
+        project_id = "project-rag",
+    )
+
+    assert plan["conversationSummaryContractVersion"] == "cognix_conversation_summary_contract_v1"
+    assert plan["mode"] == "conversation_summary_plan"
+    assert plan["summary"]["messageCount"] == 8
+    assert plan["summary"]["summarizedMessageCount"] == 6
+    assert plan["summary"]["retainedRecentMessageCount"] == 2
+    assert plan["summary"]["rawHistoryIncluded"] is False
+    assert plan["conversationSummary"]["readyForContextInjection"] is True
+    assert plan["boundaryContract"]["rawHistoryAllowed"] is False
+    assert plan["boundaryContract"]["fullConversationHistoryAllowed"] is False
+    assert plan["boundaryContract"]["recentMessagesCapped"] is True
+    assert "secret_value" in plan["conversationSummary"]["redactionMarkers"]
+    assert "sk-1234567890abcdef" not in plan["compressedContext"]
+    assert all(item["rawContentIncluded"] is False for item in plan["recentMessages"])
+    assert plan["sideEffects"]["generation"] is False
+    assert plan["sideEffects"]["promptMutation"] is False
+    assert plan["sideEffects"]["networkCall"] is False
+
+
 def test_prompt_compression_endpoint_stores_lists_deletes_and_audits():
     seed_accounts()
     context = " ".join(
@@ -6316,6 +6354,48 @@ def test_prompt_compression_endpoint_stores_lists_deletes_and_audits():
     logs = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))["logs"]
     actions = {item["action"] for item in logs}
     assert {"prompt_compression_plan_built", "prompt_compression_context_deleted"}.issubset(actions)
+
+
+def test_conversation_summary_endpoint_stores_redacted_summary_and_audits():
+    seed_accounts()
+    messages = [
+        {"role": "user", "content": "Objectif: indexer mes PDF et garder les citations."},
+        {"role": "assistant", "content": "Decision: RAG avant fine-tuning."},
+        {"role": "user", "content": "api_key=sk-1234567890abcdef doit rester secret."},
+        {"role": "assistant", "content": "Todo: ajouter evaluation avant bibliotheque."},
+        {"role": "user", "content": "Message recent 1."},
+        {"role": "assistant", "content": "Message recent 2."},
+    ]
+
+    body = run_async(
+        cognix_routes.conversation_summary_plan(
+            cognix_routes.ConversationSummaryPlanRequest(
+                messages = messages,
+                objective = "PDF citations RAG evaluation",
+                targetTokens = 80,
+                recentMessageLimit = 2,
+                storeContext = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    plan = body["conversationSummaryPlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_conversation_summary_contract_v1"
+    assert body["compressedContext"]["id"].startswith("cctx_")
+    assert body["compressedContext"]["compressed_context"] == plan["compressedContext"]
+    assert "sk-1234567890abcdef" not in body["compressedContext"]["compressed_context"]
+    assert plan["summary"]["rawHistoryIncluded"] is False
+    assert body["sideEffects"]["compressionWrite"] is True
+    assert body["sideEffects"]["generation"] is False
+    assert body["sideEffects"]["promptMutation"] is False
+
+    logs = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))["logs"]
+    log = logs[0]
+    assert log["action"] == "conversation_summary_plan_built"
+    assert log["metadata"]["rawHistoryIncluded"] is False
+    assert log["metadata"]["redactionCount"] >= 1
 
 
 def test_semantic_cache_plan_builds_privacy_safe_lookup_contract_without_cache_io():
@@ -9225,7 +9305,10 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "importance_ranking" in modules["cognix-prompt-compression"]["capabilities"]
     assert "compression_evaluation" in modules["cognix-prompt-compression"]["capabilities"]
     assert "compressed_context_injection" in modules["cognix-prompt-compression"]["capabilities"]
+    assert "conversation_summary_contract" in modules["cognix-prompt-compression"]["capabilities"]
+    assert "secret_redacted_summary" in modules["cognix-prompt-compression"]["capabilities"]
     assert "/api/cognix/prompt-compression/plan" in modules["cognix-prompt-compression"]["routes"]
+    assert "/api/cognix/prompt-compression/conversation-summary-plan" in modules["cognix-prompt-compression"]["routes"]
     assert "/api/cognix/prompt-compression/contexts" in modules["cognix-prompt-compression"]["routes"]
     assert modules["cognix-context-heatmap"]["dependencyState"]["ready"] is True
     assert "context_usage_tracking" in modules["cognix-context-heatmap"]["capabilities"]
