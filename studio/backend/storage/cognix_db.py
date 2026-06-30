@@ -164,6 +164,10 @@ ADMIN_ORGANIZATION_SETTINGS_TABLE_NAMES = (
     "organization_settings",
     "policy_change_logs",
 )
+ADMIN_LOCAL_ONLY_TABLE_NAMES = (
+    "local_only_policies",
+    "blocked_external_calls",
+)
 ADMIN_COMPLIANCE_EXPORT_TABLE_NAMES = (
     "compliance_exports",
     "export_jobs",
@@ -2695,6 +2699,7 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
     _ensure_project_skill_directive_columns(conn)
     _ensure_admin_project_oversight_columns(conn)
     _ensure_admin_organization_settings_columns(conn)
+    _ensure_admin_local_only_columns(conn)
     _ensure_admin_compliance_export_columns(conn)
     _ensure_admin_risk_scoring_columns(conn)
     _ensure_admin_data_retention_columns(conn)
@@ -3075,6 +3080,71 @@ def _ensure_admin_organization_settings_columns(conn: sqlite3.Connection) -> Non
         """
         CREATE INDEX IF NOT EXISTS idx_policy_change_logs_org_created
             ON policy_change_logs(organization_id, created_at DESC)
+        """
+    )
+
+
+def _ensure_admin_local_only_columns(conn: sqlite3.Connection) -> None:
+    for table_name in ADMIN_LOCAL_ONLY_TABLE_NAMES:
+        quoted_table = _quote_roadmap_table_name(table_name)
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {quoted_table} (
+                id TEXT PRIMARY KEY,
+                organization_id TEXT NOT NULL DEFAULT 'default',
+                username TEXT,
+                project_id TEXT,
+                scope_type TEXT NOT NULL DEFAULT 'organization',
+                scope_id TEXT NOT NULL DEFAULT 'default',
+                status TEXT NOT NULL DEFAULT 'active',
+                payload_json TEXT NOT NULL DEFAULT '{{}}',
+                metadata_json TEXT NOT NULL DEFAULT '{{}}',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+    _ensure_columns(
+        conn,
+        "local_only_policies",
+        {
+            "policy_key": "TEXT NOT NULL DEFAULT 'default'",
+            "enabled": "INTEGER NOT NULL DEFAULT 0",
+            "allowed_hosts_json": "TEXT NOT NULL DEFAULT '[]'",
+            "allowed_providers_json": "TEXT NOT NULL DEFAULT '[]'",
+            "block_cloud_providers": "INTEGER NOT NULL DEFAULT 1",
+            "block_external_models": "INTEGER NOT NULL DEFAULT 1",
+            "block_telemetry": "INTEGER NOT NULL DEFAULT 1",
+            "block_document_egress": "INTEGER NOT NULL DEFAULT 1",
+            "internal_logs_only": "INTEGER NOT NULL DEFAULT 1",
+            "policy_json": "TEXT NOT NULL DEFAULT '{}'",
+            "updated_by": "TEXT NOT NULL DEFAULT ''",
+            "reason": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "blocked_external_calls",
+        {
+            "actor_username": "TEXT NOT NULL DEFAULT ''",
+            "provider": "TEXT NOT NULL DEFAULT ''",
+            "model_id": "TEXT NOT NULL DEFAULT ''",
+            "url": "TEXT NOT NULL DEFAULT ''",
+            "action_type": "TEXT NOT NULL DEFAULT 'network'",
+            "reason": "TEXT NOT NULL DEFAULT ''",
+            "decision_json": "TEXT NOT NULL DEFAULT '{}'",
+        },
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_local_only_policies_org_key
+            ON local_only_policies(organization_id, policy_key)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_blocked_external_calls_actor_created
+            ON blocked_external_calls(actor_username, created_at DESC)
         """
     )
 
@@ -8808,6 +8878,219 @@ def list_organization_settings(
             ((organization_id or "default").strip() or "default",),
         ).fetchall()
         return [_hydrate_organization_setting(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_local_only_policy(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    policy = _json_or_default(item.get("policy_json"), {})
+    item["organizationId"] = item.get("organization_id")
+    item["policyKey"] = item.get("policy_key")
+    item["enabled"] = bool(item.get("enabled"))
+    item["allowedHosts"] = _json_or_default(item.get("allowed_hosts_json"), [])
+    item["allowedProviders"] = _json_or_default(item.get("allowed_providers_json"), [])
+    item["blockCloudProviders"] = bool(item.get("block_cloud_providers"))
+    item["blockExternalModels"] = bool(item.get("block_external_models"))
+    item["blockTelemetry"] = bool(item.get("block_telemetry"))
+    item["blockDocumentEgress"] = bool(item.get("block_document_egress"))
+    item["internalLogsOnly"] = bool(item.get("internal_logs_only"))
+    item["policy"] = policy
+    item["updatedBy"] = item.get("updated_by")
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def upsert_local_only_policy(
+    *,
+    policy: dict[str, Any],
+    policy_key: str = "default",
+    organization_id: str = "default",
+    updated_by: str = "",
+    reason: str = "",
+) -> dict[str, Any]:
+    now = _now()
+    normalized_org = (organization_id or "default").strip()[:160] or "default"
+    normalized_key = (policy_key or "default").strip()[:160] or "default"
+    allowed_hosts = policy.get("allowedHosts") if isinstance(policy.get("allowedHosts"), list) else []
+    allowed_providers = policy.get("allowedProviders") if isinstance(policy.get("allowedProviders"), list) else []
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO local_only_policies
+                (
+                    id, organization_id, username, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    policy_key, enabled, allowed_hosts_json, allowed_providers_json,
+                    block_cloud_providers, block_external_models, block_telemetry,
+                    block_document_egress, internal_logs_only, policy_json,
+                    updated_by, reason
+                )
+            VALUES (?, ?, ?, 'organization', ?, 'active', ?, '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(organization_id, policy_key) DO UPDATE SET
+                username = excluded.username,
+                status = excluded.status,
+                payload_json = excluded.payload_json,
+                updated_at = excluded.updated_at,
+                enabled = excluded.enabled,
+                allowed_hosts_json = excluded.allowed_hosts_json,
+                allowed_providers_json = excluded.allowed_providers_json,
+                block_cloud_providers = excluded.block_cloud_providers,
+                block_external_models = excluded.block_external_models,
+                block_telemetry = excluded.block_telemetry,
+                block_document_egress = excluded.block_document_egress,
+                internal_logs_only = excluded.internal_logs_only,
+                policy_json = excluded.policy_json,
+                updated_by = excluded.updated_by,
+                reason = excluded.reason
+            """,
+            (
+                _new_id("lopol"),
+                normalized_org,
+                updated_by,
+                normalized_org,
+                json.dumps(policy, ensure_ascii = False),
+                now,
+                now,
+                normalized_key,
+                1 if policy.get("enabled") else 0,
+                json.dumps(allowed_hosts, ensure_ascii = False),
+                json.dumps(allowed_providers, ensure_ascii = False),
+                1 if policy.get("blockCloudProviders") else 0,
+                1 if policy.get("blockExternalModels") else 0,
+                1 if policy.get("blockTelemetry") else 0,
+                1 if policy.get("blockDocumentEgress") else 0,
+                1 if policy.get("internalLogsOnly") else 0,
+                json.dumps(policy, ensure_ascii = False),
+                updated_by[:160],
+                reason[:1000],
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            """
+            SELECT * FROM local_only_policies
+            WHERE organization_id = ? AND policy_key = ?
+            """,
+            (normalized_org, normalized_key),
+        ).fetchone()
+        return _hydrate_local_only_policy(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def get_local_only_policy(*, policy_key: str = "default", organization_id: str = "default") -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT * FROM local_only_policies
+            WHERE organization_id = ? AND policy_key = ?
+            """,
+            ((organization_id or "default").strip() or "default", (policy_key or "default").strip() or "default"),
+        ).fetchone()
+        return _hydrate_local_only_policy(row_to_dict(row) or {}) if row else None
+    finally:
+        conn.close()
+
+
+def list_local_only_policies(*, organization_id: str = "default") -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM local_only_policies
+            WHERE organization_id = ?
+            ORDER BY updated_at DESC
+            """,
+            ((organization_id or "default").strip() or "default",),
+        ).fetchall()
+        return [_hydrate_local_only_policy(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_blocked_external_call(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["actorUsername"] = item.get("actor_username")
+    item["modelId"] = item.get("model_id")
+    item["actionType"] = item.get("action_type")
+    item["decision"] = _json_or_default(item.get("decision_json"), {})
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def create_blocked_external_call(
+    *,
+    actor_username: str,
+    provider: str,
+    model_id: str = "",
+    url: str = "",
+    action_type: str = "network",
+    reason: str = "",
+    decision: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    now = _now()
+    call_id = _new_id("blockcall")
+    payload = decision or {}
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO blocked_external_calls
+                (
+                    id, organization_id, username, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    actor_username, provider, model_id, url, action_type,
+                    reason, decision_json
+                )
+            VALUES (?, 'default', ?, 'local_only', ?, 'blocked', ?, '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                call_id,
+                actor_username,
+                f"{provider}:{model_id or url}",
+                json.dumps(payload, ensure_ascii = False),
+                now,
+                now,
+                actor_username[:160],
+                provider[:120],
+                model_id[:240],
+                url[:1000],
+                action_type[:120],
+                reason[:1000],
+                json.dumps(payload, ensure_ascii = False),
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM blocked_external_calls WHERE id = ?", (call_id,)).fetchone()
+        return _hydrate_blocked_external_call(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_blocked_external_calls(*, actor_username: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 200), 1), 1000)
+    clauses: list[str] = []
+    params: list[Any] = []
+    if actor_username:
+        clauses.append("actor_username = ?")
+        params.append(actor_username)
+    params.append(safe_limit)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM blocked_external_calls
+            {where}
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_blocked_external_call(row) for row in _rows_to_dicts(rows)]
     finally:
         conn.close()
 

@@ -148,6 +148,7 @@ PRODUCT_NAVIGATION_ROUTES: list[dict[str, Any]] = [
         "path": "/admin/settings",
         "equivalentRoutes": [
             "/api/cognix/admin/settings",
+            "/api/cognix/admin/local-only",
             "/api/cognix/admin/data-retention",
             "/api/cognix/admin/api-surface-contract",
         ],

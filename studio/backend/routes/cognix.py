@@ -25,6 +25,7 @@ from core.cognix import admin_approvals as cognix_admin_approvals
 from core.cognix import admin_banned as cognix_admin_banned
 from core.cognix import admin_chat as cognix_admin_chat
 from core.cognix import admin_limits as cognix_admin_limits
+from core.cognix import admin_local_only as cognix_admin_local_only
 from core.cognix import admin_organization_settings as cognix_admin_organization_settings
 from core.cognix import admin_permissions as cognix_admin_permissions
 from core.cognix import admin_project_oversight as cognix_admin_project_oversight
@@ -232,6 +233,34 @@ class AdminOrganizationSettingsRequest(BaseModel):
     default_permissions: list[str] | None = Field(None, alias = "defaultPermissions")
     approval_required: bool | None = Field(None, alias = "approvalRequired")
     reason: str | None = Field("", max_length = 1000)
+
+
+class AdminLocalOnlyPolicyRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    enabled: bool | None = None
+    allowed_hosts: list[str] | None = Field(None, alias = "allowedHosts")
+    allowed_providers: list[str] | None = Field(None, alias = "allowedProviders")
+    block_cloud_providers: bool | None = Field(None, alias = "blockCloudProviders")
+    block_external_models: bool | None = Field(None, alias = "blockExternalModels")
+    block_telemetry: bool | None = Field(None, alias = "blockTelemetry")
+    block_document_egress: bool | None = Field(None, alias = "blockDocumentEgress")
+    internal_logs_only: bool | None = Field(None, alias = "internalLogsOnly")
+    reason: str | None = Field("", max_length = 1000)
+
+
+class AdminLocalOnlyDecisionRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    provider: str | None = Field(None, max_length = 120)
+    model_id: str | None = Field(None, alias = "modelId", max_length = 240)
+    url: str | None = Field(None, max_length = 1000)
+    action_type: Literal["model", "provider", "generation", "tool", "telemetry", "document", "document_egress", "network"] = Field(
+        "network",
+        alias = "actionType",
+    )
+    document_transfer: bool = Field(False, alias = "documentTransfer")
+    metadata: dict[str, Any] = Field(default_factory = dict)
 
 
 class AdminPolicyEnforcementRequest(BaseModel):
@@ -2192,6 +2221,68 @@ def _build_admin_organization_settings_bundle() -> dict[str, Any]:
         "policies": policies,
         "changeLogs": change_logs,
         "bundle": bundle,
+    }
+
+
+def _local_only_policy_from_record(record: dict[str, Any] | None) -> dict[str, Any]:
+    if not record:
+        return cognix_admin_local_only.normalize_local_only_policy(
+            cognix_admin_local_only.DEFAULT_LOCAL_ONLY_POLICY
+        )
+    stored_policy = record.get("policy") if isinstance(record.get("policy"), dict) else {}
+    if not stored_policy:
+        stored_policy = {
+            "enabled": record.get("enabled"),
+            "allowedHosts": record.get("allowedHosts") or record.get("allowed_hosts"),
+            "allowedProviders": record.get("allowedProviders") or record.get("allowed_providers"),
+            "blockCloudProviders": record.get("blockCloudProviders") or record.get("block_cloud_providers"),
+            "blockExternalModels": record.get("blockExternalModels") or record.get("block_external_models"),
+            "blockTelemetry": record.get("blockTelemetry") or record.get("block_telemetry"),
+            "blockDocumentEgress": record.get("blockDocumentEgress") or record.get("block_document_egress"),
+            "internalLogsOnly": record.get("internalLogsOnly") or record.get("internal_logs_only"),
+        }
+    return cognix_admin_local_only.normalize_local_only_policy(stored_policy)
+
+
+def _local_only_payload_to_dict(payload: AdminLocalOnlyPolicyRequest) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    mapping = {
+        "enabled": payload.enabled,
+        "allowedHosts": payload.allowed_hosts,
+        "allowedProviders": payload.allowed_providers,
+        "blockCloudProviders": payload.block_cloud_providers,
+        "blockExternalModels": payload.block_external_models,
+        "blockTelemetry": payload.block_telemetry,
+        "blockDocumentEgress": payload.block_document_egress,
+        "internalLogsOnly": payload.internal_logs_only,
+    }
+    for key, value in mapping.items():
+        if value is not None:
+            values[key] = value
+    return values
+
+
+def _current_local_only_policy_record() -> dict[str, Any] | None:
+    return cognix_db.get_local_only_policy()
+
+
+def _current_local_only_policy() -> dict[str, Any]:
+    return _local_only_policy_from_record(_current_local_only_policy_record())
+
+
+def _build_admin_local_only_bundle() -> dict[str, Any]:
+    policy_record = _current_local_only_policy_record()
+    policy = _local_only_policy_from_record(policy_record)
+    blocked_calls = cognix_db.list_blocked_external_calls(limit = 500)
+    enforcement_plan = cognix_admin_local_only.build_enforcement_plan(
+        policy = policy,
+        blocked_calls = blocked_calls,
+    )
+    return {
+        "policyRecord": policy_record,
+        "policy": policy,
+        "blockedCalls": blocked_calls,
+        "enforcementPlan": enforcement_plan,
     }
 
 
@@ -15233,6 +15324,231 @@ async def admin_settings_change_logs(current_subject: str = Depends(get_current_
             "networkCall": False,
         },
         "plannerVersion": cognix_admin_organization_settings.COGNIX_POLICY_CHANGE_LOG_VERSION,
+    }
+
+
+@router.get("/admin/local-only/blueprint")
+async def admin_local_only_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    blueprint = cognix_admin_local_only.build_local_only_blueprint()
+    return {
+        "username": current_subject,
+        "localOnlyBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_admin_local_only.COGNIX_LOCAL_ONLY_POLICY_ENGINE_VERSION,
+    }
+
+
+@router.get("/admin/local-only")
+async def admin_local_only(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_local_only_bundle()
+    return {
+        "username": current_subject,
+        "policy": bundle["policy"],
+        "policyRecord": _row(bundle["policyRecord"]) if bundle["policyRecord"] else None,
+        "badge": bundle["enforcementPlan"]["badge"],
+        "enforcementPlan": bundle["enforcementPlan"],
+        "blockedExternalCalls": _rows(bundle["blockedCalls"]),
+        "sideEffects": bundle["enforcementPlan"].get("sideEffects", {}),
+        "plannerVersion": cognix_admin_local_only.COGNIX_LOCAL_ONLY_POLICY_ENGINE_VERSION,
+    }
+
+
+@router.put("/admin/local-only/policy")
+async def admin_update_local_only_policy(
+    payload: AdminLocalOnlyPolicyRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    before_policy = _current_local_only_policy()
+    after_policy = dict(before_policy)
+    after_policy.update(_local_only_payload_to_dict(payload))
+    normalized_policy = cognix_admin_local_only.normalize_local_only_policy(after_policy)
+    policy_record = cognix_db.upsert_local_only_policy(
+        policy = normalized_policy,
+        updated_by = current_subject,
+        reason = payload.reason or "",
+    )
+    setting_records: list[dict[str, Any]] = []
+    policy_records: list[dict[str, Any]] = []
+    change_log = None
+    if normalized_policy["enabled"]:
+        before_settings = _build_admin_organization_settings_bundle()["settings"]
+        setting_records = [
+            cognix_db.upsert_organization_setting(
+                setting_key = "cloudAllowed",
+                setting_value = False,
+                setting_type = "local_only_policy",
+                updated_by = current_subject,
+            ),
+            cognix_db.upsert_organization_setting(
+                setting_key = "externalModelsAllowed",
+                setting_value = False,
+                setting_type = "local_only_policy",
+                updated_by = current_subject,
+            ),
+        ]
+        policy_records = [
+            cognix_db.upsert_organization_policy(
+                policy_key = "cloud:allowed",
+                policy_value = False,
+                policy_type = "permission",
+                permission_key = "cloud:allowed",
+                allowed = False,
+                enforced = True,
+                updated_by = current_subject,
+                reason = payload.reason or "Enterprise local-only mode",
+            ),
+            cognix_db.upsert_organization_policy(
+                policy_key = "models:external",
+                policy_value = False,
+                policy_type = "permission",
+                permission_key = "models:external",
+                allowed = False,
+                enforced = True,
+                updated_by = current_subject,
+                reason = payload.reason or "Enterprise local-only mode",
+            ),
+        ]
+        after_settings = dict(before_settings)
+        after_settings.update({"cloudAllowed": False, "externalModelsAllowed": False})
+        change_log = cognix_db.create_policy_change_log(
+            changed_by = current_subject,
+            change_type = "local_only_policy_update",
+            changed_keys = ["localOnlyMode", "cloudAllowed", "externalModelsAllowed"],
+            before = before_settings,
+            after = after_settings,
+            reason = payload.reason or "",
+        )
+    enforcement_plan = cognix_admin_local_only.build_enforcement_plan(
+        policy = normalized_policy,
+        blocked_calls = cognix_db.list_blocked_external_calls(limit = 500),
+    )
+    side_effects = {
+        **enforcement_plan.get("sideEffects", {}),
+        "databaseWrite": True,
+        "policyWrite": True,
+        "organizationSettingsWrite": bool(setting_records),
+        "changeLogWrite": change_log is not None,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = None,
+        actor_username = current_subject,
+        action = "admin_local_only_policy_updated",
+        resource_type = "local_only_policy",
+        resource_id = str(policy_record.get("id") or "default"),
+        severity = "warning" if normalized_policy["enabled"] else "notice",
+        metadata = {
+            "enabled": normalized_policy["enabled"],
+            "policyRecordId": policy_record.get("id"),
+            "changeLogId": change_log.get("id") if change_log else None,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "policy": normalized_policy,
+        "policyRecord": _row(policy_record),
+        "settingRecords": _rows(setting_records),
+        "policies": _rows(policy_records),
+        "policyChangeLog": _row(change_log) if change_log else None,
+        "enforcementPlan": enforcement_plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_admin_local_only.COGNIX_LOCAL_ONLY_POLICY_ENGINE_VERSION,
+    }
+
+
+@router.post("/admin/local-only/enforcement-plan")
+async def admin_local_only_enforcement_plan(
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_local_only_bundle()
+    return {
+        "username": current_subject,
+        "enforcementPlan": bundle["enforcementPlan"],
+        "policy": bundle["policy"],
+        "sideEffects": bundle["enforcementPlan"].get("sideEffects", {}),
+        "plannerVersion": cognix_admin_local_only.COGNIX_LOCAL_ONLY_POLICY_ENGINE_VERSION,
+    }
+
+
+@router.post("/admin/local-only/egress-decision")
+async def admin_local_only_egress_decision(
+    payload: AdminLocalOnlyDecisionRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    policy = _current_local_only_policy()
+    decision = cognix_admin_local_only.build_egress_decision(
+        policy = policy,
+        provider = payload.provider,
+        url = payload.url,
+        action_type = payload.action_type,
+        model_id = payload.model_id,
+        document_transfer = payload.document_transfer,
+    )
+    blocked_call = None
+    audit = None
+    side_effects = dict(decision.get("sideEffects", {}))
+    if not decision["allowed"]:
+        blocked_call = cognix_db.create_blocked_external_call(
+            actor_username = current_subject,
+            provider = str(decision.get("provider") or ""),
+            model_id = str(decision.get("modelId") or ""),
+            url = str(decision.get("url") or ""),
+            action_type = str(decision.get("actionType") or "network"),
+            reason = ", ".join(decision.get("reasons") or []),
+            decision = {
+                "decision": decision,
+                "metadata": payload.metadata,
+            },
+        )
+        side_effects.update(
+            {
+                "databaseWrite": True,
+                "blockedCallWrite": True,
+                "auditWrite": True,
+                "networkCall": False,
+            }
+        )
+        audit = cognix_db.create_audit_log(
+            username = None,
+            actor_username = current_subject,
+            action = "admin_local_only_external_call_blocked",
+            resource_type = "blocked_external_call",
+            resource_id = str(blocked_call.get("id") or ""),
+            severity = "warning",
+            metadata = {
+                "provider": decision.get("provider"),
+                "modelId": decision.get("modelId"),
+                "url": decision.get("url"),
+                "reasons": decision.get("reasons"),
+                "sideEffects": side_effects,
+            },
+        )
+    return {
+        "username": current_subject,
+        "decision": decision,
+        "blockedExternalCall": _row(blocked_call) if blocked_call else None,
+        "auditLogId": audit.get("id") if audit else None,
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_admin_local_only.COGNIX_NETWORK_EGRESS_GUARD_VERSION,
+    }
+
+
+@router.get("/admin/local-only/blocked-calls")
+async def admin_local_only_blocked_calls(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    blocked_calls = cognix_db.list_blocked_external_calls(limit = 500)
+    return {
+        "username": current_subject,
+        "blockedExternalCalls": _rows(blocked_calls),
+        "sideEffects": cognix_admin_local_only.build_local_only_blueprint()["sideEffects"],
+        "plannerVersion": cognix_admin_local_only.COGNIX_PROVIDER_BLOCKER_VERSION,
     }
 
 
