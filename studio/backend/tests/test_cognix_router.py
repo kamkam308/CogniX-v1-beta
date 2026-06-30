@@ -71,6 +71,7 @@ from core.cognix import preload_planner as cognix_preload_planner
 from core.cognix import project_dna as cognix_project_dna
 from core.cognix import project_experts as cognix_project_experts
 from core.cognix import pulse as cognix_pulse
+from core.cognix import prompt_cache as cognix_prompt_cache
 from core.cognix import prompt_compression as cognix_prompt_compression
 from core.cognix import quantization_advisor as cognix_quantization_advisor
 from core.cognix import rag_compression as cognix_rag_compression
@@ -6554,6 +6555,138 @@ def test_semantic_cache_plan_endpoint_logs_sanitized_audit_without_cache_io():
     assert "citations et QCM" not in log["metadataJson"]
 
 
+def test_prompt_cache_plan_prepares_stable_prefix_without_runtime_mutation():
+    plan = cognix_prompt_cache.build_prompt_cache_plan(
+        username = "alice",
+        objective = "Repondre avec le contexte projet deja stable.",
+        runtime_adapter = {
+            "runtimeType": "llama.cpp",
+            "capabilities": {"promptCaching": True},
+        },
+        model = {"modelId": "cognix-code-4b"},
+        prompt_segments = [
+            {
+                "id": "system",
+                "type": "system",
+                "content": "Regles CogniX stables et consignes projet. " * 50,
+            },
+            {
+                "id": "project",
+                "type": "project_summary",
+                "content": "Resume projet stable avec decisions techniques. " * 45,
+            },
+            {
+                "id": "request",
+                "type": "user_message",
+                "content": "Question actuelle qui ne doit pas etre mise en cache prefixe.",
+            },
+        ],
+        expected_reuse_count = 4,
+    )
+
+    assert plan["promptCachePlanVersion"] == "cognix_prompt_cache_plan_v1"
+    assert plan["policyVersion"] == "cognix_prompt_cache_policy_v1"
+    assert plan["runtimeContract"]["contractVersion"] == "cognix_prompt_cache_runtime_contract_v1"
+    assert plan["readyForExperiment"] is True
+    assert plan["readyForActivation"] is False
+    assert plan["runtime"]["promptCachingSupported"] is True
+    assert plan["prefixPlan"]["stablePrefixTokens"] >= plan["policy"]["minStablePrefixTokens"]
+    assert plan["prefixPlan"]["rawPrefixStoredInKey"] is False
+    assert plan["policy"]["rawContentStored"] is False
+    assert all(item["containsRawContent"] is False for item in plan["segments"])
+    assert plan["segments"][0]["cacheAction"] == "cache_prefix"
+    assert plan["segments"][-1]["cacheAction"] == "exclude_from_prompt_cache"
+    assert plan["runtimeContract"]["runtimeFlagWriteAllowed"] is False
+    assert plan["runtimeContract"]["cacheWriteAllowedHere"] is False
+    assert plan["sideEffects"]["promptCacheWrite"] is False
+    assert plan["sideEffects"]["runtimeConfigWrite"] is False
+    assert plan["sideEffects"]["rawPromptStorage"] is False
+
+
+def test_prompt_cache_plan_blocks_sensitive_prefix_without_raw_prompt_storage():
+    plan = cognix_prompt_cache.build_prompt_cache_plan(
+        username = "alice",
+        objective = "Optimiser un prompt contenant un secret.",
+        runtime_adapter = {
+            "runtimeType": "vllm",
+            "capabilities": {"promptCaching": True},
+        },
+        prompt_segments = [
+            {
+                "id": "system",
+                "type": "system",
+                "content": "api_key secret token " * 120,
+            },
+            {
+                "id": "request",
+                "type": "user_message",
+                "content": "Question actuelle.",
+            },
+        ],
+    )
+
+    assert plan["sensitivity"]["level"] == "restricted"
+    assert "secret" in plan["sensitivity"]["matchedSensitiveTermIds"]
+    assert plan["readyForExperiment"] is False
+    assert "privacy_scope_allows_prompt_cache" in plan["summary"]["blockedGateIds"]
+    assert plan["runtimeContract"]["nextRequiredGate"] == "privacy_scope_allows_prompt_cache"
+    assert "raw_prompt_storage" in plan["runtimeContract"]["blockedActions"]
+    assert plan["policy"]["rawPromptStorageAllowed"] is False
+    assert plan["sideEffects"]["rawPromptStorage"] is False
+
+
+def test_prompt_cache_plan_endpoint_logs_sanitized_contract_without_cache_io():
+    seed_accounts()
+
+    body = run_async(
+        cognix_routes.prompt_cache_plan(
+            cognix_routes.PromptCachePlanRequest(
+                objective = "Preparer un prefixe cacheable pour un projet Code.",
+                runtimeAdapter = {
+                    "runtimeType": "llama.cpp",
+                    "capabilities": {"promptCaching": True},
+                },
+                promptSegments = [
+                    {
+                        "id": "system",
+                        "type": "system",
+                        "content": "Instructions stables CogniX pour le projet Code. " * 50,
+                    },
+                    {
+                        "id": "project",
+                        "type": "project_summary",
+                        "content": "Decisions projet persistantes et contexte architecture. " * 45,
+                    },
+                    {
+                        "id": "request",
+                        "type": "user_message",
+                        "content": "Nouvelle question non stockee dans le cache.",
+                    },
+                ],
+                expectedReuseCount = 3,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    plan = body["promptCachePlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_prompt_cache_plan_v1"
+    assert plan["readyForExperiment"] is True
+    assert body["sideEffects"]["promptCacheLookup"] is False
+    assert body["sideEffects"]["promptCacheWrite"] is False
+    assert body["sideEffects"]["runtimeConfigWrite"] is False
+
+    log = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "prompt_cache_plan_built"
+    assert log["metadata"]["promptCachePlanVersion"] == "cognix_prompt_cache_plan_v1"
+    assert log["metadata"]["stablePrefixTokens"] == plan["prefixPlan"]["stablePrefixTokens"]
+    assert log["metadata"]["sideEffects"]["promptCacheWrite"] is False
+    assert "Instructions stables CogniX" not in log["metadataJson"]
+    assert "Nouvelle question" not in log["metadataJson"]
+
+
 def test_context_heatmap_scores_used_and_archive_candidates_without_generation():
     plan = cognix_context_heatmap.build_context_heatmap_plan(
         username = "alice",
@@ -9346,6 +9479,9 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "benchmark_evidence_contract" in modules["cognix-optimization-engine"]["capabilities"]
     assert "optimization_application_contract" in modules["cognix-optimization-engine"]["capabilities"]
     assert "runtime_optimization_executor_gate" in modules["cognix-optimization-engine"]["capabilities"]
+    assert "prompt_cache_planning" in modules["cognix-optimization-engine"]["capabilities"]
+    assert "prompt_cache_runtime_contract" in modules["cognix-optimization-engine"]["capabilities"]
+    assert "stable_prefix_cache_policy" in modules["cognix-optimization-engine"]["capabilities"]
     assert "semantic_cache_planning" in modules["cognix-optimization-engine"]["capabilities"]
     assert "semantic_reuse_contract" in modules["cognix-optimization-engine"]["capabilities"]
     assert "privacy_safe_cache_keys" in modules["cognix-optimization-engine"]["capabilities"]
@@ -9362,6 +9498,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/optimizations/application-contract" in modules["cognix-optimization-engine"]["routes"]
     assert "/api/cognix/optimizations/speculative-decoding-plan" in modules["cognix-optimization-engine"]["routes"]
     assert "/api/cognix/optimizations/kv-cache-plan" in modules["cognix-optimization-engine"]["routes"]
+    assert "/api/cognix/optimizations/prompt-cache-plan" in modules["cognix-optimization-engine"]["routes"]
     assert "/api/cognix/optimizations/batching-plan" in modules["cognix-optimization-engine"]["routes"]
     assert modules["cognix-performance-monitor"]["dependencyState"]["ready"] is True
     assert "runtime_metrics" in modules["cognix-performance-monitor"]["capabilities"]

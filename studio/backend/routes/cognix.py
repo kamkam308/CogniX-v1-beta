@@ -75,6 +75,7 @@ from core.cognix import performance_monitor as cognix_performance_monitor
 from core.cognix import plugin_marketplace as cognix_plugin_marketplace
 from core.cognix import project_dna as cognix_project_dna
 from core.cognix import project_experts as cognix_project_experts
+from core.cognix import prompt_cache as cognix_prompt_cache
 from core.cognix import pulse as cognix_pulse
 from core.cognix import prompt_compression as cognix_prompt_compression
 from core.cognix import quantization_advisor as cognix_quantization_advisor
@@ -1167,6 +1168,19 @@ class KvCacheEvictionPlanRequest(BaseModel):
     context_plan: dict[str, Any] | None = Field(None, alias = "contextPlan")
     context_blocks: list[dict[str, Any]] | None = Field(None, alias = "contextBlocks", max_length = 120)
     target_token_budget: int | None = Field(None, alias = "targetTokenBudget", ge = 256, le = 262144)
+
+
+class PromptCachePlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    objective: str = Field(..., min_length = 1, max_length = 4000)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    runtime_adapter: dict[str, Any] | None = Field(None, alias = "runtimeAdapter")
+    model: dict[str, Any] | None = None
+    context_plan: dict[str, Any] | None = Field(None, alias = "contextPlan")
+    prompt_segments: list[dict[str, Any]] | None = Field(None, alias = "promptSegments", max_length = 120)
+    sensitivity_level: str | None = Field(None, alias = "sensitivityLevel", max_length = 80)
+    expected_reuse_count: int | None = Field(None, alias = "expectedReuseCount", ge = 1, le = 100000)
 
 
 class BatchingPlanRequest(BaseModel):
@@ -7796,6 +7810,62 @@ async def kv_cache_eviction_plan(
         "kvCacheEvictionPlan": plan,
         "auditLogId": audit.get("id"),
         "plannerVersion": cognix_kv_cache.COGNIX_KV_CACHE_EVICTION_PLAN_VERSION,
+        "sideEffects": audit_side_effects,
+    }
+
+
+@router.post("/optimizations/prompt-cache-plan")
+async def prompt_cache_plan(
+    payload: PromptCachePlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_prompt_cache.build_prompt_cache_plan(
+        username = current_subject,
+        objective = payload.objective,
+        project_id = payload.project_id,
+        runtime_adapter = payload.runtime_adapter,
+        model = payload.model,
+        context_plan = payload.context_plan,
+        prompt_segments = payload.prompt_segments,
+        latest_benchmark_run = cognix_db.get_latest_benchmark_run(current_subject),
+        sensitivity_level = payload.sensitivity_level,
+        expected_reuse_count = payload.expected_reuse_count,
+    )
+    audit_side_effects = {
+        **plan.get("sideEffects", {}),
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "prompt_cache_plan_built",
+        resource_type = "cognix_prompt_cache_plan",
+        resource_id = str(plan.get("prefixPlan", {}).get("cacheKeyHash") or payload.project_id or "general"),
+        severity = "notice" if plan.get("readyForExperiment") else "warning",
+        metadata = {
+            "promptCachePlanVersion": plan.get("promptCachePlanVersion"),
+            "policyVersion": plan.get("policyVersion"),
+            "runtimeContractVersion": plan.get("runtimeContractVersion"),
+            "status": plan.get("status"),
+            "readyForExperiment": plan.get("readyForExperiment"),
+            "readyForActivation": plan.get("readyForActivation"),
+            "runtimeType": plan.get("runtime", {}).get("runtimeType"),
+            "promptCachingSupported": plan.get("runtime", {}).get("promptCachingSupported"),
+            "stablePrefixTokens": plan.get("prefixPlan", {}).get("stablePrefixTokens"),
+            "sensitivityLevel": plan.get("sensitivity", {}).get("level"),
+            "blockedGateIds": plan.get("summary", {}).get("blockedGateIds", []),
+            "warningGateIds": plan.get("summary", {}).get("warningGateIds", []),
+            "benchmarkStatus": plan.get("benchmarkEvidence", {}).get("status"),
+            "sideEffects": audit_side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "promptCachePlan": plan,
+        "auditLogId": audit.get("id"),
+        "plannerVersion": cognix_prompt_cache.COGNIX_PROMPT_CACHE_PLAN_VERSION,
         "sideEffects": audit_side_effects,
     }
 
