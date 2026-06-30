@@ -112,6 +112,9 @@ def _architecture_decision(
     project_session_contract = _as_dict(project_expert_plan.get("projectSessionContract"))
     project_session_routing = _as_dict(project_session_contract.get("routingPolicy"))
     external_moe_plan = _as_dict(classification.get("externalMoePlan"))
+    router_fallback_chain = _as_dict(classification.get("routerFallbackChain"))
+    router_fallback_summary = _as_dict(router_fallback_chain.get("summary"))
+    router_fallback_boundary = _as_dict(router_fallback_chain.get("executionBoundary"))
     cache_next_action = _as_dict(cache.get("nextAction"))
     context_budget = _as_dict(context_plan.get("tokenBudget"))
     context_boundary = _as_dict(context_plan.get("contextBoundaryContract"))
@@ -169,6 +172,10 @@ def _architecture_decision(
             "scores": classification.get("scores", {}),
             "externalMoeRouterVersion": external_moe_plan.get("routerVersion"),
             "externalMoeStrategy": external_moe_plan.get("strategy"),
+            "routerFallbackChainVersion": router_fallback_chain.get("fallbackChainVersion"),
+            "routerFallbackStatus": router_fallback_chain.get("status"),
+            "routerFallbackStepCount": router_fallback_summary.get("stepCount"),
+            "hasGeneralistFallback": bool(router_fallback_summary.get("hasGeneralistFallback")),
             "primaryExpertId": _as_dict(external_moe_plan.get("primaryExpert")).get("expertId"),
             "secondaryExpertIds": [
                 item.get("expertId")
@@ -177,6 +184,9 @@ def _architecture_decision(
             ],
             "backendOrchestratorRequired": bool(
                 _as_dict(external_moe_plan.get("executionBoundary")).get("backendOrchestratorRequired", True)
+            ),
+            "automaticFallbackExecutionAllowed": bool(
+                router_fallback_boundary.get("automaticFallbackExecutionAllowed", False)
             ),
             "frontendDirectModelCallAllowed": False,
         },

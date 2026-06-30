@@ -9283,6 +9283,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "external_moe_model_router" in modules["cognix-local-core"]["capabilities"]
     assert "multi_expert_routing_contract" in modules["cognix-local-core"]["capabilities"]
     assert "secondary_expert_planning" in modules["cognix-local-core"]["capabilities"]
+    assert "router_fallback_chain" in modules["cognix-local-core"]["capabilities"]
     assert "architecture_decision_contract" in modules["cognix-local-core"]["capabilities"]
     assert "orchestrator_runtime_plan" in modules["cognix-local-core"]["capabilities"]
     assert "runtime_optimization_contract" in modules["cognix-local-core"]["capabilities"]
@@ -13006,6 +13007,29 @@ def test_router_endpoint_uses_project_hint():
     assert classification["externalMoePlan"]["executionBoundary"]["backendOrchestratorRequired"] is True
 
 
+def test_router_fallback_chain_handles_ambiguous_experts_without_loading_models():
+    classification = classify_objective(
+        "Calcul equation force vitesse.",
+    )
+
+    chain = classification["routerFallbackChain"]
+    assert classification["needsClarification"] is True
+    assert chain["fallbackChainVersion"] == "cognix_router_fallback_chain_v1"
+    assert chain["status"] == "clarification_required"
+    assert "ambiguous_domain" in chain["triggerConditions"]
+    assert any(step["id"] == "clarify_ambiguous_domain" for step in chain["steps"])
+    assert any(step["id"].startswith("secondary_") for step in chain["steps"])
+    assert any(step["id"] == "generalist_fallback" for step in chain["steps"])
+    assert chain["summary"]["hasSecondaryExpert"] is True
+    assert chain["summary"]["hasGeneralistFallback"] is True
+    assert chain["executionBoundary"]["backendOrchestratorRequired"] is True
+    assert chain["executionBoundary"]["frontendDirectModelCallAllowed"] is False
+    assert chain["executionBoundary"]["automaticFallbackExecutionAllowed"] is False
+    assert chain["sideEffects"]["modelLoad"] is False
+    assert chain["sideEffects"]["generation"] is False
+    assert chain["sideEffects"]["fallbackExecution"] is False
+
+
 def test_orchestrator_plan_endpoint_logs_dry_run_decision(monkeypatch):
     seed_accounts()
     monkeypatch.setattr(
@@ -13036,7 +13060,10 @@ def test_orchestrator_plan_endpoint_logs_dry_run_decision(monkeypatch):
     assert body["architectureDecision"]["architectureDecisionVersion"] == "cognix_architecture_decision_v1"
     assert body["architectureDecision"]["runtime"]["adapterId"] == "ollama"
     assert body["architectureDecision"]["routing"]["externalMoeRouterVersion"] == "cognix_external_moe_router_v1"
+    assert body["architectureDecision"]["routing"]["routerFallbackChainVersion"] == "cognix_router_fallback_chain_v1"
     assert body["architectureDecision"]["routing"]["primaryExpertId"] == "cognix-code"
+    assert body["architectureDecision"]["routing"]["hasGeneralistFallback"] is True
+    assert body["architectureDecision"]["routing"]["automaticFallbackExecutionAllowed"] is False
     assert body["architectureDecision"]["security"]["automaticExecutionAllowed"] is False
     assert body["architectureDecision"]["sideEffects"]["codeModification"] is False
     assert body["classification"]["selectedDomain"] == "code"

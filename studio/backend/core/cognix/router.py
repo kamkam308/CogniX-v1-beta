@@ -17,6 +17,7 @@ from typing import Any
 
 COGNIX_MODEL_ROUTER_VERSION = "cognix_model_router_v2"
 COGNIX_EXTERNAL_MOE_ROUTER_VERSION = "cognix_external_moe_router_v1"
+COGNIX_ROUTER_FALLBACK_CHAIN_VERSION = "cognix_router_fallback_chain_v1"
 SECONDARY_EXPERT_SCORE_THRESHOLD = 0.38
 AMBIGUOUS_DOMAIN_MARGIN = 0.55
 
@@ -222,6 +223,120 @@ def _expert_packet(profile: DomainProfile, score: float, *, rank: int, primary: 
     }
 
 
+def _fallback_step(
+    step_id: str,
+    action: str,
+    reason: str,
+    *,
+    expert: dict[str, Any] | None = None,
+    gate: str = "backend_orchestrator",
+    terminal: bool = False,
+) -> dict[str, Any]:
+    payload = {
+        "id": step_id,
+        "action": action,
+        "reason": reason,
+        "gate": gate,
+        "willLoad": False,
+        "willGenerate": False,
+        "terminal": terminal,
+    }
+    if expert:
+        payload["expert"] = {
+            "expertId": expert.get("expertId"),
+            "domain": expert.get("domain"),
+            "modelId": expert.get("modelId"),
+            "score": expert.get("score"),
+        }
+    return payload
+
+
+def _router_fallback_chain(
+    *,
+    primary: dict[str, Any],
+    secondary: list[dict[str, Any]],
+    needs_clarification: bool,
+    selected_profile: DomainProfile,
+    confidence: float,
+) -> dict[str, Any]:
+    triggers = ["primary_expert_unavailable", "runtime_model_missing", "quality_gate_requests_review"]
+    steps: list[dict[str, Any]] = []
+    if needs_clarification:
+        triggers.append("ambiguous_domain")
+        steps.append(
+            _fallback_step(
+                "clarify_ambiguous_domain",
+                "request_clarification_before_model_load",
+                "Deux domaines sont proches; CogniX doit clarifier avant de charger un expert.",
+                gate = "user_or_orchestrator_clarification",
+            )
+        )
+    if confidence < 0.62:
+        triggers.append("low_router_confidence")
+    steps.append(
+        _fallback_step(
+            "primary_expert_attempt",
+            "try_primary_expert_when_available",
+            "Utiliser l'expert principal seulement si le backend confirme que le modele est disponible.",
+            expert = primary,
+        )
+    )
+    for item in secondary:
+        if item.get("expertId") == GENERAL_PROFILE.expert_id:
+            continue
+        steps.append(
+            _fallback_step(
+                f"secondary_{item.get('domain') or item.get('expertId')}",
+                "try_secondary_expert_if_primary_blocked",
+                "Expert secondaire autorise si le primaire est indisponible ou si le domaine reste mixte.",
+                expert = item,
+            )
+        )
+    if selected_profile.domain != GENERAL_PROFILE.domain:
+        generalist = _expert_packet(
+            GENERAL_PROFILE,
+            0.42,
+            rank = len(steps) + 1,
+            primary = False,
+        )
+        steps.append(
+            _fallback_step(
+                "generalist_fallback",
+                "fallback_to_generalist_model",
+                "Revenir au generaliste CogniX pour eviter un blocage utilisateur si aucun expert n'est disponible.",
+                expert = generalist,
+                terminal = True,
+            )
+        )
+    return {
+        "fallbackChainVersion": COGNIX_ROUTER_FALLBACK_CHAIN_VERSION,
+        "mode": "router_fallback_chain_dry_run",
+        "status": "clarification_required" if needs_clarification else "fallback_ready",
+        "triggerConditions": sorted(set(triggers)),
+        "steps": steps,
+        "summary": {
+            "stepCount": len(steps),
+            "hasSecondaryExpert": any(step.get("id", "").startswith("secondary_") for step in steps),
+            "hasGeneralistFallback": any(step.get("id") == "generalist_fallback" for step in steps),
+            "confidence": confidence,
+        },
+        "executionBoundary": {
+            "backendOrchestratorRequired": True,
+            "frontendDirectModelCallAllowed": False,
+            "automaticExpertLoadAllowed": False,
+            "automaticFallbackExecutionAllowed": False,
+            "requiresRuntimeAvailabilityCheck": True,
+        },
+        "sideEffects": {
+            "modelLoad": False,
+            "generation": False,
+            "networkModelCall": False,
+            "cacheMutation": False,
+            "fallbackExecution": False,
+        },
+    }
+
+
 def _external_moe_plan(
     *,
     selected_profile: DomainProfile,
@@ -229,6 +344,7 @@ def _external_moe_plan(
     normalized_scores: dict[str, float],
     needs_clarification: bool,
     project_hint: str,
+    confidence: float,
 ) -> dict[str, Any]:
     primary_score = normalized_scores.get(selected_profile.domain, 0.42)
     primary = _expert_packet(
@@ -265,6 +381,13 @@ def _external_moe_plan(
                 primary = False,
             )
         )
+    fallback_chain = _router_fallback_chain(
+        primary = primary,
+        secondary = secondary,
+        needs_clarification = needs_clarification,
+        selected_profile = selected_profile,
+        confidence = confidence,
+    )
     return {
         "routerVersion": COGNIX_EXTERNAL_MOE_ROUTER_VERSION,
         "mode": "external_moe_dry_run",
@@ -281,6 +404,7 @@ def _external_moe_plan(
             "enabled": selected_profile.domain != GENERAL_PROFILE.domain,
             "willLoad": False,
         },
+        "fallbackChain": fallback_chain,
         "cacheIntent": {
             "preferredCachePolicy": "project_lru" if project_hint else "chat_lru",
             "keepPrimaryWarmSeconds": 15 * 60 if project_hint else 10 * 60,
@@ -342,12 +466,14 @@ def classify_objective(objective: str, *, project_type: str | None = None) -> di
         and second_score > 0
         and (top_score - second_score) < AMBIGUOUS_DOMAIN_MARGIN
     )
+    confidence = _confidence(top_score, second_score)
     external_moe_plan = _external_moe_plan(
         selected_profile = selected_profile,
         ranked_scores = ranked_with_general,
         normalized_scores = scores,
         needs_clarification = needs_clarification,
         project_hint = project_hint,
+        confidence = confidence,
     )
 
     return {
@@ -357,11 +483,12 @@ def classify_objective(objective: str, *, project_type: str | None = None) -> di
         "recommendedModelLabel": selected_profile.model_label,
         "recommendedModelId": selected_profile.model_id,
         "recommendedExpertId": selected_profile.expert_id,
-        "confidence": _confidence(top_score, second_score),
+        "confidence": confidence,
         "needsClarification": needs_clarification,
         "scores": scores,
         "routingMode": "local_keyword_router_v1",
         "externalMoePlan": external_moe_plan,
+        "routerFallbackChain": external_moe_plan["fallbackChain"],
         "reason": (
             "Domaine ambigu: CogniX demandera une precision avant routage automatique."
             if needs_clarification

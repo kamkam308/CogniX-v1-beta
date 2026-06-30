@@ -115,6 +115,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
             "external_moe_model_router",
             "multi_expert_routing_contract",
             "secondary_expert_planning",
+            "router_fallback_chain",
             "architecture_decision_contract",
             "orchestrator_runtime_plan",
             "runtime_optimization_contract",
