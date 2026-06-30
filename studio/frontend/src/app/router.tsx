@@ -14,6 +14,13 @@ import { Route as indexRoute } from "./routes/index";
 import { Route as loginRoute } from "./routes/login";
 import { Route as signupRoute } from "./routes/signup";
 import { Route as hubRoute } from "./routes/hub";
+import { Route as pulseRoute } from "./routes/pulse";
+import { Route as libraryRoute } from "./routes/library";
+import { Route as scheduledRoute } from "./routes/scheduled";
+import { Route as appsRoute } from "./routes/apps";
+import { Route as gptsRoute } from "./routes/gpts";
+import { Route as imagesRoute } from "./routes/images";
+import { Route as codexRoute } from "./routes/codex";
 import { Route as onboardingRoute } from "./routes/onboarding";
 import { Route as projectsRoute } from "./routes/projects";
 import { Route as changePasswordRoute } from "./routes/change-password";
@@ -30,6 +37,13 @@ const routeTree = rootRoute.addChildren([
   changePasswordRoute,
   gridTestRoute,
   hubRoute,
+  pulseRoute,
+  libraryRoute,
+  scheduledRoute,
+  appsRoute,
+  gptsRoute,
+  imagesRoute,
+  codexRoute,
   settingsRoute,
   studioRoute,
   chatRoute,

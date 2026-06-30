@@ -50,6 +50,13 @@ import { useWebUpdateCheck } from "@/hooks/use-web-update-check";
 import {
   Archive03Icon,
   ArrowRight02Icon,
+  ActivitySparkIcon,
+  AiBookIcon,
+  AiGenerativeIcon,
+  AiImageIcon,
+  AiProgrammingIcon,
+  AiSchedulingIcon,
+  AppStoreIcon,
   BadgeInfoIcon,
   ChefHatIcon,
   CursorInfo02Icon,
@@ -346,9 +353,18 @@ export function AppSidebar() {
 
   const isChatRoute = pathname.startsWith("/chat");
   const isStudioRoute = pathname === "/studio" || pathname.startsWith("/studio/");
+  const isCognixModuleRoute =
+    pathname === "/pulse" ||
+    pathname === "/library" ||
+    pathname === "/scheduled" ||
+    pathname === "/apps" ||
+    pathname === "/gpts" ||
+    pathname === "/images" ||
+    pathname === "/codex";
   const [chatOpen, setChatOpen] = useState(true);
 
   const [trainOpen, setTrainOpen] = useState(true);
+  const [cognixOpen, setCognixOpen] = useState(true);
   const [runsOpen, setRunsOpen] = useState(true);
 
   useEffect(() => {
@@ -359,6 +375,10 @@ export function AppSidebar() {
     if (!isStudioRoute) return;
     queueMicrotask(() => setRunsOpen(true));
   }, [isStudioRoute]);
+  useEffect(() => {
+    if (!isCognixModuleRoute) return;
+    queueMicrotask(() => setCognixOpen(true));
+  }, [isCognixModuleRoute]);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [scrolled, setScrolled] = useState(false);
@@ -474,6 +494,7 @@ export function AppSidebar() {
     projects.length,
     chatOpen,
     trainOpen,
+    cognixOpen,
     runsOpen,
     pinnedOpen,
     isStudioRoute,
@@ -1266,6 +1287,86 @@ export function AppSidebar() {
           </SidebarGroup>
         </Collapsible>
         )}
+
+        <Collapsible open={cognixOpen} onOpenChange={setCognixOpen} asChild>
+          <SidebarGroup className="group-data-[collapsible=icon]:hidden px-0 py-0">
+            <SidebarGroupLabel className={cn("sidebar-sticky-label sidebar-sticky-label-following", scrolled && "is-scrolled")} asChild>
+              <CollapsibleTrigger className="cursor-pointer flex w-full items-center gap-1 group/sb-collap">
+                CogniX
+                <ChevronDown className="size-3.5 opacity-0 transition-[transform,opacity] duration-200 group-hover/sb-collap:opacity-100 group-focus-visible/sb-collap:opacity-100 data-[state=open]:rotate-0 [[data-state=closed]_&]:rotate-[-90deg] [[data-state=closed]_&]:opacity-100" />
+              </CollapsibleTrigger>
+            </SidebarGroupLabel>
+            <CollapsibleContent>
+              <SidebarGroupContent className="pl-1.5 pr-2">
+                <SidebarMenu>
+                  <NavItem
+                    icon={ActivitySparkIcon}
+                    label="Pulse"
+                    active={pathname === "/pulse"}
+                    onClick={() => {
+                      navigate({ to: "/pulse" });
+                      closeMobileIfOpen();
+                    }}
+                  />
+                  <NavItem
+                    icon={AiBookIcon}
+                    label="Library"
+                    active={pathname === "/library"}
+                    onClick={() => {
+                      navigate({ to: "/library" });
+                      closeMobileIfOpen();
+                    }}
+                  />
+                  <NavItem
+                    icon={AiSchedulingIcon}
+                    label="Scheduled"
+                    active={pathname === "/scheduled"}
+                    onClick={() => {
+                      navigate({ to: "/scheduled" });
+                      closeMobileIfOpen();
+                    }}
+                  />
+                  <NavItem
+                    icon={AppStoreIcon}
+                    label="Apps"
+                    active={pathname === "/apps"}
+                    onClick={() => {
+                      navigate({ to: "/apps" });
+                      closeMobileIfOpen();
+                    }}
+                  />
+                  <NavItem
+                    icon={AiGenerativeIcon}
+                    label="GPTs"
+                    active={pathname === "/gpts"}
+                    onClick={() => {
+                      navigate({ to: "/gpts" });
+                      closeMobileIfOpen();
+                    }}
+                  />
+                  <NavItem
+                    icon={AiImageIcon}
+                    label="Images"
+                    active={pathname === "/images"}
+                    onClick={() => {
+                      navigate({ to: "/images" });
+                      closeMobileIfOpen();
+                    }}
+                  />
+                  <NavItem
+                    icon={AiProgrammingIcon}
+                    label="Codex"
+                    active={pathname === "/codex"}
+                    onClick={() => {
+                      navigate({ to: "/codex" });
+                      closeMobileIfOpen();
+                    }}
+                  />
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </CollapsibleContent>
+          </SidebarGroup>
+        </Collapsible>
 
         {/* Pinned chats: own section above Recents */}
         {!isStudioRoute && !showTrainingRecents && pinnedChatItems.length > 0 && (
