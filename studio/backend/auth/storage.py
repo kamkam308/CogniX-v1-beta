@@ -42,6 +42,53 @@ _BOOTSTRAP_PW_PATH = DB_PATH.parent / ".bootstrap_password"
 _bootstrap_password: Optional[str] = None
 
 
+def _migrate_legacy_admin_identity(conn: sqlite3.Connection, now: str) -> None:
+    """Promote a restored legacy admin row to the native CogniX CEO identity."""
+
+    default_row = conn.execute(
+        "SELECT id FROM auth_user WHERE username = ?",
+        (DEFAULT_ADMIN_USERNAME,),
+    ).fetchone()
+    legacy_row = conn.execute(
+        "SELECT id FROM auth_user WHERE username = ?",
+        (LEGACY_ADMIN_USERNAME,),
+    ).fetchone()
+    if legacy_row is None or default_row is not None:
+        return
+
+    conn.execute(
+        """
+        UPDATE auth_user
+        SET username = ?,
+            display_name = ?,
+            role = 'admin',
+            plan = ?,
+            updated_at = ?
+        WHERE username = ?
+        """,
+        (DEFAULT_ADMIN_USERNAME, "Kamil", CEO_PLAN, now, LEGACY_ADMIN_USERNAME),
+    )
+    conn.execute(
+        "UPDATE refresh_tokens SET username = ? WHERE username = ?",
+        (DEFAULT_ADMIN_USERNAME, LEGACY_ADMIN_USERNAME),
+    )
+    conn.execute(
+        "UPDATE api_keys SET username = ? WHERE username = ?",
+        (DEFAULT_ADMIN_USERNAME, LEGACY_ADMIN_USERNAME),
+    )
+
+
+def _canonical_username_for_lookup(conn: sqlite3.Connection, username: str) -> str:
+    normalized = (username or "").strip()
+    if normalized.casefold() != LEGACY_ADMIN_USERNAME.casefold():
+        return normalized
+    row = conn.execute(
+        "SELECT id FROM auth_user WHERE username = ?",
+        (DEFAULT_ADMIN_USERNAME,),
+    ).fetchone()
+    return DEFAULT_ADMIN_USERNAME if row is not None else normalized
+
+
 def generate_bootstrap_password() -> str:
     """Generate a 4-word diceware passphrase and persist it to disk.
 
@@ -211,6 +258,7 @@ def get_connection() -> sqlite3.Connection:
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_user_email ON auth_user(email) WHERE email IS NOT NULL AND email != ''"
     )
     now = datetime.now(timezone.utc).isoformat()
+    _migrate_legacy_admin_identity(conn, now)
     conn.execute(
         """
         UPDATE auth_user
@@ -598,6 +646,7 @@ def get_user_login_record(identifier: str) -> Optional[dict]:
     email = _normalize_email(identifier)
     conn = get_connection()
     try:
+        canonical_identifier = _canonical_username_for_lookup(conn, identifier)
         cur = conn.execute(
             """
             SELECT id, username, email, display_name, role, plan,
@@ -611,7 +660,13 @@ def get_user_login_record(identifier: str) -> Optional[dict]:
             ORDER BY CASE WHEN username = ? THEN 0 WHEN lower(username) = lower(?) THEN 1 ELSE 2 END
             LIMIT 1
             """,
-            (identifier, identifier, email, identifier, identifier),
+            (
+                canonical_identifier,
+                canonical_identifier,
+                email,
+                canonical_identifier,
+                canonical_identifier,
+            ),
         )
         row = cur.fetchone()
         if row is None and identifier.casefold() in ADMIN_LOGIN_ALIASES:
@@ -634,6 +689,7 @@ def get_user_login_record(identifier: str) -> Optional[dict]:
 def get_user_profile(username: str) -> Optional[dict]:
     conn = get_connection()
     try:
+        username = _canonical_username_for_lookup(conn, username)
         row = conn.execute(
             """
             SELECT id, username, email, display_name, role, plan, must_change_password,
@@ -919,6 +975,7 @@ def get_user_and_secret(username: str) -> Optional[Tuple[str, str, str, bool]]:
     """
     conn = get_connection()
     try:
+        username = _canonical_username_for_lookup(conn, username)
         cur = conn.execute(
             """
             SELECT password_salt, password_hash, jwt_secret, must_change_password
@@ -953,6 +1010,7 @@ def get_jwt_secret(username: str) -> Optional[str]:
     """Return the current JWT signing secret for a user."""
     conn = get_connection()
     try:
+        username = _canonical_username_for_lookup(conn, username)
         cur = conn.execute(
             "SELECT jwt_secret FROM auth_user WHERE username = ?",
             (username,),
@@ -967,12 +1025,23 @@ def requires_password_change(username: str) -> bool:
     """Return whether the user must change the seeded default password."""
     conn = get_connection()
     try:
+        username = _canonical_username_for_lookup(conn, username)
         cur = conn.execute(
             "SELECT must_change_password FROM auth_user WHERE username = ?",
             (username,),
         )
         row = cur.fetchone()
         return bool(row and row["must_change_password"])
+    finally:
+        conn.close()
+
+
+def canonicalize_subject(username: str) -> str:
+    """Return the active username for a possibly legacy JWT/login subject."""
+
+    conn = get_connection()
+    try:
+        return _canonical_username_for_lookup(conn, username)
     finally:
         conn.close()
 

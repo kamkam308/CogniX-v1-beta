@@ -38,7 +38,10 @@ const checks: Check[] = [
       "cloudTrainingUnlocked",
       "trainingModeUnlocked",
       "showTrainingTools",
+      "cloudOnlyTrainingAvailable",
       "developerOptions.trainingTools || trainingAccessible || trainingModeUnlocked",
+      "CEO cloud training is available in Train via Google Colab, Kaggle, or Cloud GPU.",
+      "Export remains local; use Train to prepare CEO cloud training.",
       'cloudTrainingUnlocked ? "CEO" : "free"',
       "Local training needs an NVIDIA or AMD GPU.",
     ],
@@ -141,6 +144,8 @@ const checks: Check[] = [
     file: "../backend/auth/storage.py",
     includes: [
       "CEO_TRAINING_PLAN_TOKENS",
+      "def _migrate_legacy_admin_identity",
+      "def canonicalize_subject",
       "def has_ceo_training_entitlement",
       "plan in CEO_TRAINING_PLAN_TOKENS",
       'role in {"admin", "ceo"}',
@@ -152,6 +157,8 @@ const checks: Check[] = [
     file: "../backend/tests/test_auth_hardening.py",
     includes: [
       "test_default_admin_keeps_ceo_cloud_training_without_seeded_profile",
+      "test_restored_legacy_admin_migrates_to_cognix_ceo_identity",
+      "test_legacy_admin_jwt_subject_resolves_to_cognix_ceo_identity",
       "storage.get_user_profile(storage.DEFAULT_ADMIN_USERNAME) is None",
       "storage.has_ceo_training_entitlement(storage.DEFAULT_ADMIN_USERNAME) is True",
       "storage.is_training_operator(storage.DEFAULT_ADMIN_USERNAME) is True",

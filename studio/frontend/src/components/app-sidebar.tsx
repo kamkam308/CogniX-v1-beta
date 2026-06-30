@@ -306,11 +306,15 @@ export function AppSidebar() {
   const [developerOptions] = useDeveloperOptions();
   const showTrainingTools =
     developerOptions.trainingTools || trainingAccessible || trainingModeUnlocked || cloudTrainingUnlocked || trainingCloudAvailable;
+  const cloudOnlyTrainingAvailable =
+    chatOnly && trainingAccessible && (cloudTrainingUnlocked || trainingCloudAvailable);
   // When Train/Export are greyed out (chat-only host), explain why on hover
   // instead of disabling them silently. mlx_unavailable is the common macOS case
   // after a reinstall/update dropped MLX and is recoverable via `unsloth studio update`.
   const trainExportDisabledHint: string | undefined = !chatOnly
     ? undefined
+    : cloudOnlyTrainingAvailable
+      ? "CEO cloud training is available in Train via Google Colab, Kaggle, or Cloud GPU."
     : chatOnlyReason === "mlx_unavailable"
       ? "Training needs MLX. Run `unsloth studio update` to enable Train and Export."
       : chatOnlyReason === "intel_mac"
@@ -320,6 +324,9 @@ export function AppSidebar() {
           : undefined;
   const trainingDisabledHint = trainingAccessible
     ? undefined
+    : trainExportDisabledHint;
+  const exportDisabledHint = cloudOnlyTrainingAvailable
+    ? "Export remains local; use Train to prepare CEO cloud training."
     : trainExportDisabledHint;
 
   // The backend MLX self-heal (utils/mlx_repair) can reinstall MLX in the
@@ -1245,7 +1252,7 @@ export function AppSidebar() {
                     label={t("shell.navigation.export")}
                     active={pathname === "/export" || pathname.startsWith("/export/")}
                     disabled={chatOnly}
-                    tooltip={trainExportDisabledHint}
+                    tooltip={exportDisabledHint}
                     spinner={exportInProgress}
                     onClick={() => {
                       if (chatOnly) return;

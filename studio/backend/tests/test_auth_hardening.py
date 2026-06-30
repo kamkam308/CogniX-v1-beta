@@ -1,6 +1,7 @@
 import secrets
 import sys
 import hashlib
+import asyncio
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -13,6 +14,7 @@ if str(_BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(_BACKEND_ROOT))
 
 from auth import hashing, storage
+from auth.authentication import create_access_token, get_current_jwt_subject
 from routes import auth as auth_routes
 
 
@@ -70,7 +72,60 @@ def test_default_admin_bootstrap_uses_cognix_username():
     assert created is True
     assert storage.DEFAULT_ADMIN_USERNAME == "kamil"
     assert storage.get_user_and_secret("kamil") is not None
-    assert storage.get_user_and_secret("unsloth") is None
+    conn = storage.get_connection()
+    try:
+        row = conn.execute(
+            "SELECT username FROM auth_user WHERE username = ?",
+            (storage.LEGACY_ADMIN_USERNAME,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is None
+
+
+def test_restored_legacy_admin_migrates_to_cognix_ceo_identity():
+    jwt_secret = secrets.token_urlsafe(64)
+    storage.create_initial_user(
+        username = storage.LEGACY_ADMIN_USERNAME,
+        password = "human-password-123",
+        jwt_secret = jwt_secret,
+        must_change_password = False,
+        display_name = "unsloth",
+        role = "admin",
+        plan = storage.CEO_PLAN,
+    )
+
+    profile = storage.get_user_profile(storage.DEFAULT_ADMIN_USERNAME)
+
+    assert profile is not None
+    assert profile["username"] == storage.DEFAULT_ADMIN_USERNAME
+    assert profile["displayName"] == "Kamil"
+    assert profile["role"] == "admin"
+    assert profile["plan"] == storage.CEO_PLAN
+    assert storage.get_user_profile(storage.LEGACY_ADMIN_USERNAME) == profile
+    assert storage.get_default_admin_username() == storage.DEFAULT_ADMIN_USERNAME
+    assert storage.get_user_and_secret(storage.DEFAULT_ADMIN_USERNAME)[2] == jwt_secret
+    assert storage.is_training_operator(storage.DEFAULT_ADMIN_USERNAME) is True
+
+
+def test_legacy_admin_jwt_subject_resolves_to_cognix_ceo_identity():
+    storage.create_initial_user(
+        username = storage.LEGACY_ADMIN_USERNAME,
+        password = "human-password-123",
+        jwt_secret = secrets.token_urlsafe(64),
+        must_change_password = False,
+        display_name = "unsloth",
+        role = "admin",
+        plan = storage.CEO_PLAN,
+    )
+
+    token = create_access_token(storage.LEGACY_ADMIN_USERNAME)
+    subject = asyncio.run(
+        get_current_jwt_subject(type("Creds", (), {"credentials": token})())
+    )
+
+    assert subject == storage.DEFAULT_ADMIN_USERNAME
+    assert storage.is_training_operator(subject) is True
 
 
 def test_ceo_plan_is_training_operator_without_admin_role():
