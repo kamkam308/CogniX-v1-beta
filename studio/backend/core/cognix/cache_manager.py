@@ -18,6 +18,7 @@ from typing import Any, Iterable
 CHAT_IDLE_TIMEOUT_SECONDS = 10 * 60
 PROJECT_IDLE_TIMEOUT_SECONDS = 15 * 60
 MODEL_CACHE_MANAGER_VERSION = "model_cache_manager_v1"
+MODEL_CACHE_PRESSURE_PLAN_VERSION = "model_cache_pressure_plan_v1"
 
 
 @dataclass
@@ -226,6 +227,35 @@ def _memory_guard(
     }
 
 
+def _cache_memory_pressure(hardware: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
+    memory = hardware.get("memory") if isinstance(hardware, dict) else {}
+    if not isinstance(memory, dict):
+        memory = {}
+    available_gb = _as_float(memory.get("availableGb"))
+    tier = str(policy.get("tier") or "balanced_local")
+    reserve_gb = 1.5 if tier == "small_local" else 2.0 if tier == "balanced_local" else 4.0
+    if available_gb is None:
+        return {
+            "status": "unknown_available_memory",
+            "availableGb": None,
+            "reserveGb": reserve_gb,
+            "requiresEvictionForMemory": False,
+            "reason": "Memoire disponible inconnue: appliquer les garde-fous LRU/idle uniquement.",
+        }
+    pressure = available_gb <= reserve_gb
+    return {
+        "status": "pressure" if pressure else "healthy",
+        "availableGb": available_gb,
+        "reserveGb": reserve_gb,
+        "requiresEvictionForMemory": pressure,
+        "reason": (
+            "Reserve RAM atteinte: proposer une eviction avant nouveau chargement."
+            if pressure
+            else "Reserve RAM suffisante: aucune eviction memoire immediate."
+        ),
+    }
+
+
 def _eviction_candidates(cache_state: dict[str, Any], *, target_model_id: str | None) -> list[dict[str, Any]]:
     policy = cache_state.get("policy") if isinstance(cache_state, dict) else {}
     if not isinstance(policy, dict):
@@ -272,6 +302,40 @@ def _eviction_candidates(cache_state: dict[str, Any], *, target_model_id: str | 
             }
         )
     return candidates
+
+
+def _select_pressure_evictions(
+    candidates: list[dict[str, Any]],
+    *,
+    required_count: int,
+) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(item: dict[str, Any]) -> None:
+        model_id = _clean_model_id(str(item.get("modelId") or ""))
+        if not model_id or model_id in seen:
+            return
+        selected.append(item)
+        seen.add(model_id)
+
+    for item in candidates:
+        if item.get("reasonCode") == "idle_timeout":
+            add(item)
+
+    for item in candidates:
+        if len(selected) >= required_count:
+            break
+        if item.get("reasonCode") == "least_recently_used":
+            add(item)
+
+    for item in candidates:
+        if len(selected) >= required_count:
+            break
+        if item.get("reasonCode") == "active_last_resort":
+            add(item)
+
+    return selected
 
 
 def _reconcile_runtime(
@@ -513,6 +577,109 @@ def build_cache_load_plan(
             if allowed_to_prepare
             else "Chargement differe par les garde-fous cache/memoire."
         ),
+        "sideEffects": {
+            "modelLoad": False,
+            "modelUnload": False,
+            "cacheMutation": False,
+            "runtimeMutation": False,
+            "networkModelCall": False,
+            "generation": False,
+        },
+    }
+
+
+def build_cache_pressure_plan(
+    hardware: dict[str, Any],
+    *,
+    cache_state: dict[str, Any],
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    policy = cache_state.get("policy") if isinstance(cache_state, dict) else {}
+    if not isinstance(policy, dict):
+        policy = {}
+    runtime = cache_state.get("runtime") if isinstance(cache_state, dict) else {}
+    if not isinstance(runtime, dict):
+        runtime = {}
+    resident = cache_state.get("residentModels") if isinstance(cache_state, dict) else []
+    resident_count = len(resident) if isinstance(resident, list) else 0
+    max_resident = max(1, int(_as_float(policy.get("maxResidentModels")) or 1))
+    over_capacity_count = max(0, resident_count - max_resident)
+    memory_pressure = _cache_memory_pressure(hardware, policy)
+    candidates = _eviction_candidates(cache_state, target_model_id = None)
+    idle_candidates = [
+        item for item in candidates if item.get("reasonCode") == "idle_timeout"
+    ]
+    required_count = max(
+        over_capacity_count,
+        1 if memory_pressure["requiresEvictionForMemory"] else 0,
+        len(idle_candidates),
+    )
+    proposed = _select_pressure_evictions(candidates, required_count = required_count)
+    actions: list[dict[str, Any]] = []
+    for item in proposed:
+        reason_code = str(item.get("reasonCode") or "")
+        if reason_code == "idle_timeout":
+            action_type = "would_unload_for_idle"
+        elif memory_pressure["requiresEvictionForMemory"]:
+            action_type = "would_unload_for_memory_pressure"
+        else:
+            action_type = "would_unload_for_lru"
+        actions.append(
+            {
+                "type": action_type,
+                "modelId": item.get("modelId"),
+                "reason": item.get("reason"),
+                "reasonCode": reason_code,
+                "automatic": False,
+            }
+        )
+
+    pressure_detected = bool(
+        proposed
+        or over_capacity_count > 0
+        or memory_pressure["requiresEvictionForMemory"]
+        or idle_candidates
+    )
+    return {
+        "managerVersion": MODEL_CACHE_MANAGER_VERSION,
+        "pressurePlanVersion": MODEL_CACHE_PRESSURE_PLAN_VERSION,
+        "mode": "cache_pressure_dry_run",
+        "status": "pressure_detected" if pressure_detected else "healthy",
+        "projectId": project_id,
+        "policy": {
+            "tier": policy.get("tier"),
+            "maxResidentModels": max_resident,
+            "idleTimeoutSeconds": policy.get("idleTimeoutSeconds"),
+            "evictionStrategy": policy.get("evictionStrategy") or "lru",
+            "automaticEvictionEnabled": bool(policy.get("automaticEvictionEnabled")),
+        },
+        "runtime": {
+            "activeModel": runtime.get("activeModel"),
+            "runtimeType": runtime.get("runtimeType") or "unknown",
+            "residentCount": resident_count,
+            "loadedModels": runtime.get("loadedModels") or [],
+            "loadingModels": runtime.get("loadingModels") or [],
+        },
+        "memoryPressure": memory_pressure,
+        "capacityPressure": {
+            "residentCount": resident_count,
+            "maxResidentModels": max_resident,
+            "overCapacityCount": over_capacity_count,
+            "requiresEvictionForCapacity": over_capacity_count > 0,
+        },
+        "idlePressure": {
+            "idleCandidateCount": len(idle_candidates),
+            "idleCandidateModelIds": [item.get("modelId") for item in idle_candidates],
+        },
+        "evictionCandidates": candidates,
+        "proposedEvictions": proposed,
+        "actions": actions,
+        "executionBoundary": {
+            "backendOrchestratorRequired": True,
+            "frontendDirectUnloadAllowed": False,
+            "automaticUnloadAllowed": False,
+            "requiresFreshRuntimeSnapshot": True,
+        },
         "sideEffects": {
             "modelLoad": False,
             "modelUnload": False,

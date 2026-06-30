@@ -957,6 +957,12 @@ class ModelCacheLoadPlanRequest(BaseModel):
     project_id: str | None = Field(None, alias = "projectId", max_length = 160)
 
 
+class ModelCachePressurePlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+
+
 class CommandPaletteSearchRequest(BaseModel):
     model_config = ConfigDict(populate_by_name = True)
 
@@ -6461,6 +6467,62 @@ async def model_cache_load_plan(
         "loadPlan": load_plan,
         "auditLogId": audit.get("id"),
         "sideEffects": load_plan.get("sideEffects", {}),
+    }
+
+
+@router.post("/models/cache/pressure-plan")
+async def model_cache_pressure_plan(
+    payload: ModelCachePressurePlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    hardware = cognix_hardware.get_hardware_profile()
+    runtime = _current_model_cache_runtime()
+    cache = cognix_cache_manager.build_cache_state(
+        hardware,
+        active_model = runtime.get("activeModel"),
+        loaded_models = runtime.get("loadedModels") or [],
+        loading_models = runtime.get("loadingModels") or [],
+        runtime_type = str(runtime.get("runtimeType") or "unknown"),
+        project_id = payload.project_id,
+    )
+    pressure_plan = cognix_cache_manager.build_cache_pressure_plan(
+        hardware,
+        cache_state = cache,
+        project_id = payload.project_id,
+    )
+    proposed_evictions = [
+        item.get("modelId")
+        for item in pressure_plan.get("proposedEvictions", [])
+        if isinstance(item, dict)
+    ]
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "cache_pressure_plan_built",
+        resource_type = "cognix_cache_pressure_plan",
+        resource_id = str(payload.project_id or current_subject),
+        severity = "warning" if pressure_plan.get("status") != "healthy" else "notice",
+        metadata = {
+            "managerVersion": pressure_plan.get("managerVersion"),
+            "pressurePlanVersion": pressure_plan.get("pressurePlanVersion"),
+            "status": pressure_plan.get("status"),
+            "proposedEvictionCount": len(proposed_evictions),
+            "proposedEvictions": proposed_evictions,
+            "memoryPressureStatus": pressure_plan.get("memoryPressure", {}).get("status"),
+            "overCapacityCount": pressure_plan.get("capacityPressure", {}).get("overCapacityCount"),
+            "idleCandidateCount": pressure_plan.get("idlePressure", {}).get("idleCandidateCount"),
+            "sideEffects": pressure_plan.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "hardware": hardware,
+        "runtimeError": runtime.get("error"),
+        "cache": cache,
+        "pressurePlan": pressure_plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": pressure_plan.get("sideEffects", {}),
+        "plannerVersion": pressure_plan.get("pressurePlanVersion"),
     }
 
 

@@ -259,6 +259,46 @@ def test_cache_load_plan_selects_lru_evictions_without_loading():
     assert plan["sideEffects"]["cacheMutation"] is False
 
 
+def test_cache_pressure_plan_prioritizes_idle_then_lru_without_unload():
+    cache_manager.mark_model_used("general:3b", runtime_type = "ollama", now = 1000.0)
+    cache_manager.mark_model_used("physics:3b", runtime_type = "ollama", now = 1100.0)
+    cache_manager.mark_model_used("code:4b", runtime_type = "ollama", now = 1200.0)
+    hardware = _cpu_hardware(available_gb = 1.0, total_gb = 8.0)
+    cache = cache_manager.build_cache_state(
+        hardware,
+        active_model = "code:4b",
+        loaded_models = ["general:3b", "physics:3b", "code:4b"],
+        runtime_type = "ollama",
+        now = 2300.0,
+    )
+
+    plan = cache_manager.build_cache_pressure_plan(
+        hardware,
+        cache_state = cache,
+        project_id = "project-code",
+    )
+
+    assert plan["managerVersion"] == "model_cache_manager_v1"
+    assert plan["pressurePlanVersion"] == "model_cache_pressure_plan_v1"
+    assert plan["mode"] == "cache_pressure_dry_run"
+    assert plan["status"] == "pressure_detected"
+    assert plan["memoryPressure"]["status"] == "pressure"
+    assert plan["memoryPressure"]["requiresEvictionForMemory"] is True
+    assert plan["capacityPressure"]["overCapacityCount"] == 2
+    assert plan["idlePressure"]["idleCandidateCount"] == 2
+    assert [item["modelId"] for item in plan["proposedEvictions"]] == [
+        "general:3b",
+        "physics:3b",
+    ]
+    assert all(action["automatic"] is False for action in plan["actions"])
+    assert all(action["type"] == "would_unload_for_idle" for action in plan["actions"])
+    assert plan["executionBoundary"]["automaticUnloadAllowed"] is False
+    assert plan["executionBoundary"]["frontendDirectUnloadAllowed"] is False
+    assert plan["sideEffects"]["modelUnload"] is False
+    assert plan["sideEffects"]["cacheMutation"] is False
+    assert "code:4b" not in [item["modelId"] for item in plan["proposedEvictions"]]
+
+
 def test_cache_load_plan_endpoint_returns_audited_dry_run_plan(client, monkeypatch):
     seed_accounts()
     headers = login_headers(client, "alice", "alice-password-123")
@@ -307,6 +347,58 @@ def test_cache_load_plan_endpoint_returns_audited_dry_run_plan(client, monkeypat
     assert log["metadata"]["managerVersion"] == "model_cache_manager_v1"
     assert log["metadata"]["selectedEvictions"] == ["general:3b"]
     assert log["metadata"]["sideEffects"]["modelLoad"] is False
+
+
+def test_cache_pressure_plan_endpoint_returns_audited_dry_run_plan(client, monkeypatch):
+    seed_accounts()
+    headers = login_headers(client, "alice", "alice-password-123")
+    cache_manager.mark_model_used("general:3b", runtime_type = "ollama", now = 1000.0)
+    cache_manager.mark_model_used("physics:3b", runtime_type = "ollama", now = 1100.0)
+    cache_manager.mark_model_used("code:4b", runtime_type = "ollama", now = 1200.0)
+    monkeypatch.setattr(cache_manager, "_now", lambda: 2300.0)
+    monkeypatch.setattr(cognix_hardware, "get_hardware_profile", lambda: _cpu_hardware(available_gb = 1.0, total_gb = 8.0))
+    monkeypatch.setattr(
+        cognix_routes,
+        "_current_model_cache_runtime",
+        lambda: {
+            "runtimeType": "ollama",
+            "activeModel": "code:4b",
+            "loadedModels": ["general:3b", "physics:3b", "code:4b"],
+            "loadingModels": [],
+        },
+    )
+
+    response = client.post(
+        "/api/cognix/models/cache/pressure-plan",
+        headers = headers,
+        json = {"projectId": "project-code"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["username"] == "alice"
+    assert body["plannerVersion"] == "model_cache_pressure_plan_v1"
+    assert body["auditLogId"].startswith("aud_")
+    plan = body["pressurePlan"]
+    assert plan["mode"] == "cache_pressure_dry_run"
+    assert plan["status"] == "pressure_detected"
+    assert [item["modelId"] for item in plan["proposedEvictions"]] == [
+        "general:3b",
+        "physics:3b",
+    ]
+    assert plan["sideEffects"]["modelUnload"] is False
+    assert body["sideEffects"]["runtimeMutation"] is False
+
+    admin_headers = login_headers(client, storage.DEFAULT_ADMIN_USERNAME, "admin-password-123")
+    audit = client.get("/api/cognix/admin/audit-logs", headers = admin_headers)
+    assert audit.status_code == 200
+    log = audit.json()["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "cache_pressure_plan_built"
+    assert log["metadata"]["pressurePlanVersion"] == "model_cache_pressure_plan_v1"
+    assert log["metadata"]["status"] == "pressure_detected"
+    assert log["metadata"]["proposedEvictions"] == ["general:3b", "physics:3b"]
+    assert log["metadata"]["sideEffects"]["modelUnload"] is False
 
 
 def test_preload_plan_endpoint_returns_audited_dry_run_plan(client, monkeypatch):

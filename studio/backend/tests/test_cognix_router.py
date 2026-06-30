@@ -9309,6 +9309,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert modules["cognix-model-lifecycle"]["activationState"] == "ready"
     assert "load_unload_planning" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "cache_load_planning" in modules["cognix-model-lifecycle"]["capabilities"]
+    assert "cache_pressure_planning" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "model_residency_contract" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "resident_model_inventory" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "load_unload_execution_contract" in modules["cognix-model-lifecycle"]["capabilities"]
@@ -9324,6 +9325,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/models/install-contract" in modules["cognix-model-lifecycle"]["routes"]
     assert "/api/cognix/models/residency-contract" in modules["cognix-model-lifecycle"]["routes"]
     assert "/api/cognix/models/cache/load-plan" in modules["cognix-model-lifecycle"]["routes"]
+    assert "/api/cognix/models/cache/pressure-plan" in modules["cognix-model-lifecycle"]["routes"]
     assert "/api/cognix/models/preload-plan" in modules["cognix-model-lifecycle"]["routes"]
     assert modules["cognix-live-model-comparison"]["dependencyState"]["ready"] is True
     assert "side_by_side_model_comparison" in modules["cognix-live-model-comparison"]["capabilities"]
