@@ -38,7 +38,7 @@ QUEUE_DEFINITIONS: list[dict[str, Any]] = [
     {
         "id": "io_bound",
         "label": "IO bound",
-        "acceptedJobTypes": ["rag_indexing", "document_ingest"],
+        "acceptedJobTypes": ["rag_connector_sync", "rag_indexing", "document_ingest"],
         "maxConcurrentJobs": 1,
         "requiresAudit": True,
         "requiresHumanConfirmation": True,
@@ -179,6 +179,10 @@ def build_worker_queue_registry() -> dict[str, Any]:
             "workerStart": False,
             "modelDownload": False,
             "modelLoad": False,
+            "connectorSync": False,
+            "documentDownload": False,
+            "networkToolCall": False,
+            "secretRead": False,
             "ragIndexing": False,
             "cloudTrainingJob": False,
             "fineTuningJob": False,
@@ -228,10 +232,20 @@ def _job_enqueue_contract(
     idempotency_key = str(spec.get("idempotencyKey") or "")
     requires_confirmation = bool(spec.get("requiresHumanConfirmation") or queue.get("requiresHumanConfirmation"))
     payload_summary = _as_dict(spec.get("payloadSummary"))
-    raw_payload_absent = not bool(payload_summary.get("rawPayloadIncluded")) and not bool(
-        payload_summary.get("rawSourceContentIncluded")
+    raw_payload_absent = not any(
+        bool(payload_summary.get(key))
+        for key in (
+            "rawPayloadIncluded",
+            "rawSourceContentIncluded",
+            "rawDocumentContentIncluded",
+            "rawFilterValuesIncluded",
+            "rawDatasetContentIncluded",
+        )
     )
-    secret_values_absent = not bool(payload_summary.get("rawSecretsIncluded"))
+    secret_values_absent = not any(
+        bool(payload_summary.get(key))
+        for key in ("rawSecretsIncluded", "secretValuesIncluded")
+    )
     queue_accepts_job = job_type in {
         str(item) for item in _as_list(queue.get("acceptedJobTypes")) if str(item or "").strip()
     }
@@ -388,6 +402,10 @@ def build_worker_enqueue_contract(
             "jobPersist": False,
             "modelDownload": False,
             "modelLoad": False,
+            "connectorSync": False,
+            "documentDownload": False,
+            "networkToolCall": False,
+            "secretRead": False,
             "ragIndexing": False,
             "embeddingGeneration": False,
             "cloudTrainingJob": False,
@@ -582,6 +600,10 @@ def build_worker_queue_plan(
             "modelLoad": False,
             "generation": False,
             "networkModelCall": False,
+            "connectorSync": False,
+            "documentDownload": False,
+            "networkToolCall": False,
+            "secretRead": False,
             "ragIndexing": False,
             "embeddingGeneration": False,
             "cloudTrainingJob": False,
@@ -599,11 +621,32 @@ def build_worker_queue_plan(
 def _payload_summary_for_job(
     *,
     job: dict[str, Any],
+    rag_connector_sync_plan: dict[str, Any],
     rag_indexing_plan: dict[str, Any],
     cloud_handoff_plan: dict[str, Any],
     preload_plan: dict[str, Any],
 ) -> dict[str, Any]:
     job_type = str(job.get("type") or "")
+    if job_type == "rag_connector_sync":
+        sync_scope = _as_dict(rag_connector_sync_plan.get("syncScope"))
+        permission_contract = _as_dict(rag_connector_sync_plan.get("permissionContract"))
+        worker_handoff = _as_dict(rag_connector_sync_plan.get("workerHandoff"))
+        return {
+            "sourcePlan": "ragConnectorSyncPlan",
+            "connectorId": rag_connector_sync_plan.get("connectorId"),
+            "status": rag_connector_sync_plan.get("status"),
+            "readyForSyncRequest": rag_connector_sync_plan.get("readyForSyncRequest"),
+            "readyForIndexing": rag_connector_sync_plan.get("readyForIndexing"),
+            "projectBound": sync_scope.get("projectBound"),
+            "sourceFilterKeys": sync_scope.get("sourceFilterKeys", []),
+            "maxDocuments": sync_scope.get("maxDocuments"),
+            "missingPermissionCount": len(_as_list(permission_contract.get("missingPermissions"))),
+            "requiresPostSyncIndexingPlan": worker_handoff.get("requiresPostSyncIndexingPlan"),
+            "rawFilterValuesIncluded": False,
+            "rawDocumentContentIncluded": False,
+            "rawSecretsIncluded": False,
+            "networkToolCallPlannedOnly": True,
+        }
     if job_type == "rag_indexing":
         return {
             "sourcePlan": "ragIndexingPlan",
@@ -641,6 +684,7 @@ def _spec_for_job(
     *,
     job: dict[str, Any],
     project_id: str | None,
+    rag_connector_sync_plan: dict[str, Any],
     rag_indexing_plan: dict[str, Any],
     cloud_handoff_plan: dict[str, Any],
     preload_plan: dict[str, Any],
@@ -651,7 +695,9 @@ def _spec_for_job(
     idempotency_key = f"cognix:{project_id or 'global'}:{job_type}:{_stable_key(job_id, project_id, job.get('sourcePlan'))}"
     required_gates = [str(item) for item in _as_list(job.get("requiredGates")) if item]
     source_plan_status = "planned"
-    if job_type == "rag_indexing":
+    if job_type == "rag_connector_sync":
+        source_plan_status = str(rag_connector_sync_plan.get("status") or "planned")
+    elif job_type == "rag_indexing":
         source_plan_status = str(rag_indexing_plan.get("status") or "planned")
     elif job_type == "cloud_training_job":
         source_plan_status = str(cloud_handoff_plan.get("status") or "planned")
@@ -673,6 +719,7 @@ def _spec_for_job(
         "requiresHumanConfirmation": bool(job.get("requiresHumanConfirmation") or queue.get("requiresHumanConfirmation")),
         "payloadSummary": _payload_summary_for_job(
             job = job,
+            rag_connector_sync_plan = rag_connector_sync_plan,
             rag_indexing_plan = rag_indexing_plan,
             cloud_handoff_plan = cloud_handoff_plan,
             preload_plan = preload_plan,
@@ -688,16 +735,41 @@ def build_worker_job_spec_plan(
     objective: str,
     project_id: str | None = None,
     worker_queue_plan: dict[str, Any] | None = None,
+    rag_connector_sync_plan: dict[str, Any] | None = None,
     rag_indexing_plan: dict[str, Any] | None = None,
     cloud_handoff_plan: dict[str, Any] | None = None,
     preload_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     worker_queue_plan = _as_dict(worker_queue_plan)
+    rag_connector_sync_plan = _as_dict(rag_connector_sync_plan)
     rag_indexing_plan = _as_dict(rag_indexing_plan)
     cloud_handoff_plan = _as_dict(cloud_handoff_plan)
     preload_plan = _as_dict(preload_plan)
     jobs = [item for item in _as_list(worker_queue_plan.get("jobs")) if isinstance(item, dict)]
     existing_job_ids = {str(job.get("id") or "") for job in jobs}
+
+    if rag_connector_sync_plan and rag_connector_sync_plan.get("readyForSyncRequest") and "rag_connector_sync" not in existing_job_ids:
+        worker_handoff = _as_dict(rag_connector_sync_plan.get("workerHandoff"))
+        jobs.append(
+            _job(
+                job_id = "rag_connector_sync",
+                job_type = "rag_connector_sync",
+                queue_id = str(worker_handoff.get("plannedQueue") or "io_bound"),
+                label = "Synchroniser un connecteur vers RAG",
+                reason = "Contrat RAG/connecteur pret pour handoff worker controle.",
+                priority = 88,
+                required_gates = [
+                    "connector_preflight",
+                    "connector_permissions",
+                    "secret_review",
+                    "source_scope_review",
+                    "human_approval",
+                    "post_sync_indexing_plan",
+                ],
+                source_plan = "ragConnectorSyncPlan",
+                requires_human_confirmation = True,
+            )
+        )
 
     if rag_indexing_plan and "rag_indexing" not in existing_job_ids:
         jobs.append(
@@ -733,6 +805,7 @@ def build_worker_job_spec_plan(
         _spec_for_job(
             job = job,
             project_id = project_id,
+            rag_connector_sync_plan = rag_connector_sync_plan,
             rag_indexing_plan = rag_indexing_plan,
             cloud_handoff_plan = cloud_handoff_plan,
             preload_plan = preload_plan,
@@ -781,6 +854,10 @@ def build_worker_job_spec_plan(
             "jobPersist": False,
             "modelDownload": False,
             "modelLoad": False,
+            "connectorSync": False,
+            "documentDownload": False,
+            "networkToolCall": False,
+            "secretRead": False,
             "ragIndexing": False,
             "embeddingGeneration": False,
             "cloudTrainingJob": False,

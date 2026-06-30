@@ -2115,7 +2115,8 @@ def test_rag_connector_sync_plan_prepares_drive_handoff_without_network_or_secre
     assert plan["syncScope"]["sourceFilterKeys"] == ["folderId", "mimeTypes"]
     assert plan["syncScope"]["rawFilterValuesIncluded"] is False
     assert plan["workerHandoff"]["plannedJobType"] == "rag_connector_sync"
-    assert plan["workerHandoff"]["plannedQueue"] == "rag_indexing"
+    assert plan["workerHandoff"]["plannedQueue"] == "io_bound"
+    assert plan["workerHandoff"]["plannedWorkload"] == "rag_indexing"
     assert plan["workerHandoff"]["jobEnqueueAllowedHere"] is False
     assert plan["integrationPreflight"][0]["actualSecretValuesIncluded"] is False
     assert "secret_read" in plan["blockedActions"]
@@ -8011,6 +8012,7 @@ def test_worker_queue_registry_declares_cloud_training_without_execution():
     queues = {item["id"]: item for item in registry["queues"]}
     assert "simulation_run" in queues["local_probe"]["acceptedJobTypes"]
     assert "sandbox_experiment" in queues["local_probe"]["acceptedJobTypes"]
+    assert "rag_connector_sync" in queues["io_bound"]["acceptedJobTypes"]
     assert "distillation_job" in queues["gpu_long_running"]["acceptedJobTypes"]
     assert "cloud_training" in queues
     assert "cloud_training_job" in queues["cloud_training"]["acceptedJobTypes"]
@@ -8075,6 +8077,63 @@ def test_worker_job_spec_plan_materializes_cloud_and_rag_jobs_without_enqueueing
     assert specs["cloud_training_job"]["payloadSummary"]["rawSecretsIncluded"] is False
     assert specs["rag_indexing"]["payloadSummary"]["rawSourceContentIncluded"] is False
     assert all(spec["idempotencyKey"].startswith("cognix:project-ai:") for spec in spec_plan["jobSpecs"])
+
+
+def test_worker_job_spec_plan_materializes_connector_sync_without_network_or_enqueueing():
+    connector_plan = cognix_rag_planner.build_rag_connector_sync_plan(
+        username = "alice",
+        connector_id = "google-drive",
+        project_id = "project-rag",
+        objective = "Synchroniser Drive vers RAG",
+        source_filters = {"folderId": "private-folder", "mimeTypes": ["pdf"]},
+        max_documents = 12,
+        has_developer_mode = True,
+        granted_permissions = {"drive:read", "rag:write"},
+    )
+
+    spec_plan = cognix_worker_queue.build_worker_job_spec_plan(
+        objective = "Synchroniser Drive vers RAG",
+        project_id = "project-rag",
+        worker_queue_plan = {},
+        rag_connector_sync_plan = connector_plan,
+    )
+
+    assert spec_plan["jobSpecVersion"] == "cognix_worker_job_spec_v1"
+    assert spec_plan["summary"]["safeToEnqueueAutomatically"] is False
+    assert spec_plan["sideEffects"]["jobEnqueue"] is False
+    assert spec_plan["sideEffects"]["connectorSync"] is False
+    assert spec_plan["sideEffects"]["documentDownload"] is False
+    assert spec_plan["sideEffects"]["networkToolCall"] is False
+    assert spec_plan["sideEffects"]["secretRead"] is False
+
+    specs = {item["jobType"]: item for item in spec_plan["jobSpecs"]}
+    assert "rag_connector_sync" in specs
+    sync = specs["rag_connector_sync"]
+    assert sync["queueId"] == "io_bound"
+    assert sync["sourcePlanStatus"] == "connector_activation_required"
+    assert sync["requiresHumanConfirmation"] is True
+    assert sync["willEnqueue"] is False
+    assert sync["willExecute"] is False
+    assert sync["payloadSummary"]["connectorId"] == "google-drive"
+    assert sync["payloadSummary"]["sourceFilterKeys"] == ["folderId", "mimeTypes"]
+    assert sync["payloadSummary"]["rawFilterValuesIncluded"] is False
+    assert sync["payloadSummary"]["rawDocumentContentIncluded"] is False
+    assert sync["payloadSummary"]["rawSecretsIncluded"] is False
+    assert "private-folder" not in str(sync["payloadSummary"])
+
+    enqueue_contract = cognix_worker_queue.build_worker_enqueue_contract(
+        job_spec_plan = spec_plan,
+        confirmation_id = "conf_rag_sync",
+        request_id = "req_rag_sync",
+    )
+    job_contracts = {item["jobType"]: item for item in enqueue_contract["jobContracts"]}
+    assert enqueue_contract["readyForQueueReview"] is True
+    assert enqueue_contract["readyForJobEnqueue"] is False
+    assert enqueue_contract["sideEffects"]["jobEnqueue"] is False
+    assert enqueue_contract["sideEffects"]["connectorSync"] is False
+    assert job_contracts["rag_connector_sync"]["readyForQueueReview"] is True
+    assert all(gate["passed"] for gate in job_contracts["rag_connector_sync"]["gates"])
+    assert job_contracts["rag_connector_sync"]["payloadBoundary"]["secretValuesIncluded"] is False
 
 
 def test_worker_enqueue_contract_adds_retry_dead_letter_and_idempotency_without_enqueueing():
@@ -8259,6 +8318,57 @@ def test_worker_job_spec_endpoint_builds_cloud_specs_without_enqueueing(monkeypa
     assert log["action"] == "worker_job_spec_plan_built"
     assert "cloud_training_job" in log["metadata"]["jobTypes"]
     assert log["metadata"]["sideEffects"]["jobEnqueue"] is False
+
+
+def test_worker_job_spec_endpoint_accepts_connector_sync_plan_without_raw_filters(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+    connector_plan = cognix_rag_planner.build_rag_connector_sync_plan(
+        username = "alice",
+        connector_id = "google-drive",
+        project_id = "project-rag",
+        objective = "Synchroniser Drive vers RAG",
+        source_filters = {"folderId": "private-folder", "mimeTypes": ["pdf"]},
+        max_documents = 12,
+        has_developer_mode = True,
+        granted_permissions = {"drive:read", "rag:write"},
+    )
+
+    body = run_async(
+        cognix_routes.worker_job_spec_plan(
+            cognix_routes.WorkerJobSpecPlanRequest(
+                objective = "Synchroniser Drive vers RAG",
+                project_id = "project-rag",
+                ragConnectorSyncPlan = connector_plan,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    specs = {item["jobType"]: item for item in body["workerJobSpecPlan"]["jobSpecs"]}
+    assert body["auditLogId"].startswith("aud_")
+    assert "rag_connector_sync" in specs
+    assert specs["rag_connector_sync"]["queueId"] == "io_bound"
+    assert specs["rag_connector_sync"]["payloadSummary"]["rawFilterValuesIncluded"] is False
+    assert "private-folder" not in str(specs["rag_connector_sync"]["payloadSummary"])
+    assert body["sideEffects"]["jobEnqueue"] is False
+    assert body["sideEffects"]["connectorSync"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "worker_job_spec_plan_built"
+    assert "rag_connector_sync" in log["metadata"]["jobTypes"]
+    assert "private-folder" not in log["metadataJson"]
 
 
 def test_worker_enqueue_contract_endpoint_logs_retry_policy_without_enqueueing(monkeypatch):
@@ -9803,6 +9913,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "worker_retry_policy" in modules["cognix-worker-queue"]["capabilities"]
     assert "worker_dead_letter_policy" in modules["cognix-worker-queue"]["capabilities"]
     assert "cloud_training_job_specs" in modules["cognix-worker-queue"]["capabilities"]
+    assert "rag_indexing_job_specs" in modules["cognix-worker-queue"]["capabilities"]
+    assert "connector_sync_job_specs" in modules["cognix-worker-queue"]["capabilities"]
     assert "batching_experiment_job_specs" in modules["cognix-worker-queue"]["capabilities"]
     assert "enterprise_throughput_queue" in modules["cognix-worker-queue"]["capabilities"]
     assert "/api/cognix/workers/registry" in modules["cognix-worker-queue"]["routes"]

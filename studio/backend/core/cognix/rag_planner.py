@@ -739,7 +739,8 @@ def build_rag_connector_sync_plan(
         },
         "workerHandoff": {
             "plannedJobType": "rag_connector_sync",
-            "plannedQueue": "rag_indexing",
+            "plannedQueue": "io_bound",
+            "plannedWorkload": "rag_indexing",
             "readyForWorkerHandoff": False,
             "readyForSyncExecutor": False,
             "requiresHumanConfirmation": bool(manifest.get("requiresNetwork") or manifest.get("requiresSecret")),

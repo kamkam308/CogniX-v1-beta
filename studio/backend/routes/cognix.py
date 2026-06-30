@@ -1335,6 +1335,7 @@ class WorkerJobSpecPlanRequest(BaseModel):
     project_type: str | None = Field(None, max_length = 80)
     project_id: str | None = Field(None, max_length = 160)
     sources: list[dict[str, Any]] | None = None
+    rag_connector_sync_plan: dict[str, Any] | None = Field(None, alias = "ragConnectorSyncPlan")
     dataset: dict[str, Any] | None = None
     target_id: str | None = Field(None, alias = "targetId", max_length = 120)
 
@@ -1346,6 +1347,7 @@ class WorkerEnqueueContractRequest(BaseModel):
     project_type: str | None = Field(None, max_length = 80)
     project_id: str | None = Field(None, max_length = 160)
     sources: list[dict[str, Any]] | None = None
+    rag_connector_sync_plan: dict[str, Any] | None = Field(None, alias = "ragConnectorSyncPlan")
     dataset: dict[str, Any] | None = None
     target_id: str | None = Field(None, alias = "targetId", max_length = 120)
     confirmation_id: str | None = Field(None, alias = "confirmationId", max_length = 180)
@@ -5093,6 +5095,7 @@ async def worker_job_spec_plan(
         objective = payload.objective,
         project_id = payload.project_id,
         worker_queue_plan = plan["workerQueuePlan"],
+        rag_connector_sync_plan = payload.rag_connector_sync_plan,
         rag_indexing_plan = rag_indexing_plan,
         cloud_handoff_plan = cloud_handoff_plan,
         preload_plan = plan["preloadPlan"],
@@ -5119,6 +5122,7 @@ async def worker_job_spec_plan(
         "classification": plan["classification"],
         "taskStrategy": plan["taskStrategy"],
         "workerQueuePlan": plan["workerQueuePlan"],
+        "ragConnectorSyncPlan": payload.rag_connector_sync_plan or {},
         "ragIndexingPlan": rag_indexing_plan,
         "cloudHandoffPlan": cloud_handoff_plan,
         "workerJobSpecPlan": spec_plan,
@@ -5182,6 +5186,7 @@ async def worker_enqueue_contract(
         objective = payload.objective,
         project_id = payload.project_id,
         worker_queue_plan = plan["workerQueuePlan"],
+        rag_connector_sync_plan = payload.rag_connector_sync_plan,
         rag_indexing_plan = rag_indexing_plan,
         cloud_handoff_plan = cloud_handoff_plan,
         preload_plan = plan["preloadPlan"],
@@ -5223,6 +5228,7 @@ async def worker_enqueue_contract(
         "classification": plan["classification"],
         "taskStrategy": plan["taskStrategy"],
         "workerQueuePlan": plan["workerQueuePlan"],
+        "ragConnectorSyncPlan": payload.rag_connector_sync_plan or {},
         "ragIndexingPlan": rag_indexing_plan,
         "cloudHandoffPlan": cloud_handoff_plan,
         "workerJobSpecPlan": spec_plan,
