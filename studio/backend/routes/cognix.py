@@ -16339,8 +16339,52 @@ async def admin_risk_scores(current_subject: str = Depends(get_current_jwt_subje
     bundle = _build_admin_security_bundle()
     return {
         "riskScoring": bundle["riskScoring"],
+        "persistedRiskScores": _rows(cognix_db.list_risk_scores(limit = 500)),
+        "riskEvents": _rows(cognix_db.list_risk_events(limit = 500)),
+        "riskRecommendations": _rows(cognix_db.list_risk_recommendations(limit = 500)),
         "threatSummary": bundle["threatReport"]["summary"],
         "sideEffects": bundle["riskScoring"]["sideEffects"],
+    }
+
+
+@router.post("/admin/risk-scores/aggregate")
+async def admin_risk_scores_aggregate(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_security_bundle()
+    persisted = cognix_db.persist_risk_scoring(
+        bundle["riskScoring"],
+        updated_by = current_subject,
+    )
+    side_effects = {
+        **bundle["riskScoring"].get("sideEffects", {}),
+        "databaseWrite": True,
+        "riskScoreWrite": True,
+        "riskEventWrite": True,
+        "riskRecommendationWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = None,
+        actor_username = current_subject,
+        action = "admin_risk_scores_aggregated",
+        resource_type = "risk_scores",
+        resource_id = "latest",
+        severity = "notice",
+        metadata = {
+            "riskScoringVersion": bundle["riskScoring"].get("scoringVersion"),
+            "scoreCount": len(persisted["scores"]),
+            "eventCount": len(persisted["events"]),
+            "recommendationCount": len(persisted["recommendations"]),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "riskScoring": bundle["riskScoring"],
+        "persistedRiskScores": _rows(persisted["scores"]),
+        "riskEvents": _rows(persisted["events"]),
+        "riskRecommendations": _rows(persisted["recommendations"]),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
     }
 
 

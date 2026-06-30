@@ -14,6 +14,8 @@ from typing import Any
 
 COGNIX_ADMIN_SECURITY_VERSION = "cognix_admin_security_v1"
 COGNIX_RISK_SCORING_VERSION = "cognix_risk_scoring_v1"
+COGNIX_RISK_FEATURE_EXTRACTOR_VERSION = "cognix_risk_feature_extractor_v1"
+COGNIX_RISK_RECOMMENDATION_SERVICE_VERSION = "cognix_risk_recommendation_service_v1"
 COGNIX_SYSTEM_HEALTH_VERSION = "cognix_system_health_v1"
 COGNIX_SECURITY_THREAT_CENTER_VERSION = "cognix_security_threat_center_v1"
 COGNIX_VULNERABILITY_SCANNER_ADAPTER_VERSION = "cognix_vulnerability_scanner_adapter_v1"
@@ -52,6 +54,18 @@ SECURITY_THREAT_TABLES = [
     "cognix_security_remediation_tasks",
     "cognix_security_events",
     "cognix_audit_logs",
+]
+
+RISK_SCORING_SERVICES = [
+    "RiskScoringService",
+    "RiskFeatureExtractor",
+    "RiskRecommendationService",
+]
+
+RISK_SCORING_TABLES = [
+    "risk_scores",
+    "risk_events",
+    "risk_recommendations",
 ]
 
 SECURITY_THREAT_CATEGORIES = [
@@ -866,7 +880,11 @@ def build_risk_scoring(
     max_score = scores[0]["score"] if scores else 0
     return {
         "scoringVersion": COGNIX_RISK_SCORING_VERSION,
+        "featureExtractorVersion": COGNIX_RISK_FEATURE_EXTRACTOR_VERSION,
+        "recommendationServiceVersion": COGNIX_RISK_RECOMMENDATION_SERVICE_VERSION,
         "mode": "native_read_only",
+        "services": RISK_SCORING_SERVICES,
+        "tables": RISK_SCORING_TABLES,
         "summary": {
             "entities": len(scores),
             "maxScore": max_score,

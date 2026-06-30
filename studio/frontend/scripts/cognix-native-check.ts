@@ -3974,6 +3974,65 @@ const checks: Check[] = [
     ],
   },
   {
+    file: "../backend/core/cognix/admin_security.py",
+    includes: [
+      'COGNIX_RISK_FEATURE_EXTRACTOR_VERSION = "cognix_risk_feature_extractor_v1"',
+      'COGNIX_RISK_RECOMMENDATION_SERVICE_VERSION = "cognix_risk_recommendation_service_v1"',
+      "RiskScoringService",
+      "RiskFeatureExtractor",
+      "RiskRecommendationService",
+      '"risk_scores"',
+      '"risk_events"',
+      '"risk_recommendations"',
+      "featureExtractorVersion",
+      "recommendationServiceVersion",
+    ],
+  },
+  {
+    file: "../backend/storage/cognix_db.py",
+    includes: [
+      "ADMIN_RISK_SCORING_TABLE_NAMES",
+      "def _ensure_admin_risk_scoring_columns",
+      "def upsert_risk_score",
+      "def list_risk_scores",
+      "def create_risk_event",
+      "def list_risk_events",
+      "def upsert_risk_recommendation",
+      "def list_risk_recommendations",
+      "def persist_risk_scoring",
+    ],
+  },
+  {
+    file: "../backend/routes/cognix.py",
+    includes: [
+      '"/admin/risk-scores"',
+      '"/admin/risk-scores/aggregate"',
+      "admin_risk_scores_aggregate",
+      "persist_risk_scoring",
+      "riskScoreWrite",
+      "riskRecommendationWrite",
+    ],
+  },
+  {
+    file: "../backend/core/cognix/module_registry.py",
+    includes: [
+      '"risk_feature_extractor"',
+      '"risk_recommendation_service"',
+      '"risk_score_persistence"',
+      '"/api/cognix/admin/risk-scores/aggregate"',
+    ],
+  },
+  {
+    file: "../backend/tests/test_cognix_admin_risk_scoring_persistence.py",
+    includes: [
+      "test_risk_scoring_schema_and_module_contract_declares_full_pipeline",
+      "test_risk_scoring_aggregate_persists_scores_events_and_recommendations",
+      "cognix_risk_feature_extractor_v1",
+      "risk_score_persistence",
+      "score_aggregated",
+    ],
+  },
+  {
     file: "../backend/tests/test_middleware.py",
     includes: [
       "test_ceo_health_unlocks_cloud_training_without_local_gpu",

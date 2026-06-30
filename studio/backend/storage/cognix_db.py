@@ -168,6 +168,11 @@ ADMIN_COMPLIANCE_EXPORT_TABLE_NAMES = (
     "compliance_exports",
     "export_jobs",
 )
+ADMIN_RISK_SCORING_TABLE_NAMES = (
+    "risk_scores",
+    "risk_events",
+    "risk_recommendations",
+)
 
 KNOWN_ATTACK_SIGNATURES: list[dict[str, str]] = [
     {
@@ -2686,6 +2691,7 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
     _ensure_admin_project_oversight_columns(conn)
     _ensure_admin_organization_settings_columns(conn)
     _ensure_admin_compliance_export_columns(conn)
+    _ensure_admin_risk_scoring_columns(conn)
 
 
 def _ensure_approval_request_columns(conn: sqlite3.Connection) -> None:
@@ -3121,6 +3127,85 @@ def _ensure_admin_compliance_export_columns(conn: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_export_jobs_export_status
             ON export_jobs(export_id, status, updated_at DESC)
+        """
+    )
+
+
+def _ensure_admin_risk_scoring_columns(conn: sqlite3.Connection) -> None:
+    for table_name in ADMIN_RISK_SCORING_TABLE_NAMES:
+        quoted_table = _quote_roadmap_table_name(table_name)
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {quoted_table} (
+                id TEXT PRIMARY KEY,
+                organization_id TEXT NOT NULL DEFAULT 'default',
+                username TEXT,
+                project_id TEXT,
+                scope_type TEXT NOT NULL DEFAULT 'risk',
+                scope_id TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'active',
+                payload_json TEXT NOT NULL DEFAULT '{{}}',
+                metadata_json TEXT NOT NULL DEFAULT '{{}}',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+    _ensure_columns(
+        conn,
+        "risk_scores",
+        {
+            "entity_type": "TEXT NOT NULL DEFAULT 'user'",
+            "entity_id": "TEXT NOT NULL DEFAULT ''",
+            "score": "INTEGER NOT NULL DEFAULT 0",
+            "level": "TEXT NOT NULL DEFAULT 'low'",
+            "features_json": "TEXT NOT NULL DEFAULT '{}'",
+            "explanation": "TEXT NOT NULL DEFAULT ''",
+            "recommended_action": "TEXT NOT NULL DEFAULT ''",
+            "scoring_version": "TEXT NOT NULL DEFAULT ''",
+            "updated_by": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "risk_events",
+        {
+            "entity_type": "TEXT NOT NULL DEFAULT 'user'",
+            "entity_id": "TEXT NOT NULL DEFAULT ''",
+            "event_type": "TEXT NOT NULL DEFAULT 'score_aggregated'",
+            "severity": "TEXT NOT NULL DEFAULT 'low'",
+            "feature_json": "TEXT NOT NULL DEFAULT '{}'",
+            "source_json": "TEXT NOT NULL DEFAULT '{}'",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "risk_recommendations",
+        {
+            "entity_type": "TEXT NOT NULL DEFAULT 'user'",
+            "entity_id": "TEXT NOT NULL DEFAULT ''",
+            "risk_level": "TEXT NOT NULL DEFAULT 'low'",
+            "recommendation": "TEXT NOT NULL DEFAULT ''",
+            "status": "TEXT NOT NULL DEFAULT 'open'",
+            "updated_by": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_risk_scores_entity
+            ON risk_scores(entity_type, entity_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_risk_events_entity_created
+            ON risk_events(entity_type, entity_id, created_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_risk_recommendations_entity
+            ON risk_recommendations(entity_type, entity_id)
         """
     )
 
@@ -8902,6 +8987,308 @@ def list_export_jobs(
         return [_hydrate_export_job(row) for row in _rows_to_dicts(rows)]
     finally:
         conn.close()
+
+
+def _hydrate_risk_score(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["organizationId"] = item.get("organization_id")
+    item["entityType"] = item.get("entity_type")
+    item["entityId"] = item.get("entity_id")
+    item["features"] = _json_or_default(item.get("features_json"), {})
+    item["recommendedAction"] = item.get("recommended_action")
+    item["scoringVersion"] = item.get("scoring_version")
+    item["updatedBy"] = item.get("updated_by")
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def upsert_risk_score(
+    *,
+    score: dict[str, Any],
+    updated_by: str = "",
+    organization_id: str = "default",
+) -> dict[str, Any]:
+    now = _now()
+    entity_type = str(score.get("entityType") or "user")[:80]
+    entity_id = str(score.get("entityId") or "").strip()[:240]
+    if not entity_id:
+        raise ValueError("Invalid risk entity id")
+    normalized_org = (organization_id or "default").strip()[:160] or "default"
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO risk_scores
+                (
+                    id, organization_id, username, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    entity_type, entity_id, score, level, features_json,
+                    explanation, recommended_action, scoring_version, updated_by
+                )
+            VALUES (?, ?, ?, 'risk', ?, 'active', ?, '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+                organization_id = excluded.organization_id,
+                username = excluded.username,
+                scope_id = excluded.scope_id,
+                status = excluded.status,
+                payload_json = excluded.payload_json,
+                updated_at = excluded.updated_at,
+                score = excluded.score,
+                level = excluded.level,
+                features_json = excluded.features_json,
+                explanation = excluded.explanation,
+                recommended_action = excluded.recommended_action,
+                scoring_version = excluded.scoring_version,
+                updated_by = excluded.updated_by
+            """,
+            (
+                _new_id("risk"),
+                normalized_org,
+                entity_id if entity_type == "user" else None,
+                f"{entity_type}:{entity_id}",
+                json.dumps(score, ensure_ascii = False),
+                now,
+                now,
+                entity_type,
+                entity_id,
+                max(0, min(int(score.get("score") or 0), 100)),
+                str(score.get("level") or "low")[:40],
+                json.dumps(score.get("features") or {}, ensure_ascii = False),
+                str(score.get("explanation") or "")[:3000],
+                str(score.get("recommendedAction") or "")[:3000],
+                str(score.get("scoringVersion") or "")[:120],
+                updated_by[:160],
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM risk_scores WHERE entity_type = ? AND entity_id = ?",
+            (entity_type, entity_id),
+        ).fetchone()
+        return _hydrate_risk_score(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_risk_scores(*, limit: int = 500) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 500), 1), 1000)
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM risk_scores
+            ORDER BY score DESC, updated_at DESC
+            LIMIT ?
+            """,
+            (safe_limit,),
+        ).fetchall()
+        return [_hydrate_risk_score(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_risk_event(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["entityType"] = item.get("entity_type")
+    item["entityId"] = item.get("entity_id")
+    item["eventType"] = item.get("event_type")
+    item["feature"] = _json_or_default(item.get("feature_json"), {})
+    item["source"] = _json_or_default(item.get("source_json"), {})
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def create_risk_event(
+    *,
+    entity_type: str,
+    entity_id: str,
+    event_type: str,
+    severity: str,
+    feature: dict[str, Any] | None = None,
+    source: dict[str, Any] | None = None,
+    organization_id: str = "default",
+) -> dict[str, Any]:
+    now = _now()
+    event_id = _new_id("riskev")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO risk_events
+                (
+                    id, organization_id, username, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    entity_type, entity_id, event_type, severity, feature_json, source_json
+                )
+            VALUES (?, ?, ?, 'risk', ?, 'active', ?, '{}', ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                (organization_id or "default").strip()[:160] or "default",
+                entity_id if entity_type == "user" else None,
+                f"{entity_type}:{entity_id}",
+                json.dumps({"feature": feature or {}, "source": source or {}}, ensure_ascii = False),
+                now,
+                now,
+                entity_type[:80],
+                entity_id[:240],
+                event_type[:120],
+                severity[:40],
+                json.dumps(feature or {}, ensure_ascii = False),
+                json.dumps(source or {}, ensure_ascii = False),
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM risk_events WHERE id = ?", (event_id,)).fetchone()
+        return _hydrate_risk_event(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_risk_events(*, limit: int = 500) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 500), 1), 1000)
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM risk_events
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (safe_limit,),
+        ).fetchall()
+        return [_hydrate_risk_event(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_risk_recommendation(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["entityType"] = item.get("entity_type")
+    item["entityId"] = item.get("entity_id")
+    item["riskLevel"] = item.get("risk_level")
+    item["updatedBy"] = item.get("updated_by")
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def upsert_risk_recommendation(
+    *,
+    entity_type: str,
+    entity_id: str,
+    risk_level: str,
+    recommendation: str,
+    status: str = "open",
+    updated_by: str = "",
+    organization_id: str = "default",
+) -> dict[str, Any]:
+    now = _now()
+    normalized_type = entity_type[:80]
+    normalized_id = entity_id.strip()[:240]
+    if not normalized_id:
+        raise ValueError("Invalid risk entity id")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO risk_recommendations
+                (
+                    id, organization_id, username, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    entity_type, entity_id, risk_level, recommendation, updated_by
+                )
+            VALUES (?, ?, ?, 'risk', ?, ?, ?, '{}', ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+                organization_id = excluded.organization_id,
+                username = excluded.username,
+                scope_id = excluded.scope_id,
+                status = excluded.status,
+                payload_json = excluded.payload_json,
+                updated_at = excluded.updated_at,
+                risk_level = excluded.risk_level,
+                recommendation = excluded.recommendation,
+                updated_by = excluded.updated_by
+            """,
+            (
+                _new_id("riskrec"),
+                (organization_id or "default").strip()[:160] or "default",
+                normalized_id if normalized_type == "user" else None,
+                f"{normalized_type}:{normalized_id}",
+                status[:80],
+                json.dumps({"recommendation": recommendation}, ensure_ascii = False),
+                now,
+                now,
+                normalized_type,
+                normalized_id,
+                risk_level[:40],
+                recommendation[:3000],
+                updated_by[:160],
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM risk_recommendations WHERE entity_type = ? AND entity_id = ?",
+            (normalized_type, normalized_id),
+        ).fetchone()
+        return _hydrate_risk_recommendation(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_risk_recommendations(*, limit: int = 500) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 500), 1), 1000)
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM risk_recommendations
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (safe_limit,),
+        ).fetchall()
+        return [_hydrate_risk_recommendation(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def persist_risk_scoring(
+    risk_scoring: dict[str, Any],
+    *,
+    updated_by: str,
+) -> dict[str, list[dict[str, Any]]]:
+    scoring_version = str(risk_scoring.get("scoringVersion") or "")
+    persisted_scores = []
+    persisted_events = []
+    persisted_recommendations = []
+    for score in risk_scoring.get("scores") or []:
+        score_record = dict(score)
+        score_record["scoringVersion"] = scoring_version
+        persisted_scores.append(upsert_risk_score(score = score_record, updated_by = updated_by))
+        persisted_events.append(
+            create_risk_event(
+                entity_type = str(score.get("entityType") or "user"),
+                entity_id = str(score.get("entityId") or ""),
+                event_type = "score_aggregated",
+                severity = str(score.get("level") or "low"),
+                feature = score.get("features") if isinstance(score.get("features"), dict) else {},
+                source = {"scoringVersion": scoring_version},
+            )
+        )
+        persisted_recommendations.append(
+            upsert_risk_recommendation(
+                entity_type = str(score.get("entityType") or "user"),
+                entity_id = str(score.get("entityId") or ""),
+                risk_level = str(score.get("level") or "low"),
+                recommendation = str(score.get("recommendedAction") or ""),
+                updated_by = updated_by,
+            )
+        )
+    return {
+        "scores": persisted_scores,
+        "events": persisted_events,
+        "recommendations": persisted_recommendations,
+    }
 
 
 def _hydrate_shared_skill(row: dict[str, Any]) -> dict[str, Any]:
