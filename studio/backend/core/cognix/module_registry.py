@@ -1046,6 +1046,8 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
             "document_memory",
             "rag_source_registry",
             "rag_indexing_planning",
+            "rag_connector_sync_contract",
+            "connector_source_sync_planning",
             "rag_retrieval_packet",
             "rag_compression_contract",
             "citation_retention_contract",
@@ -1055,6 +1057,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         ],
         "routes": [
             "/api/cognix/rag/sources",
+            "/api/cognix/rag/connector-sync-plan",
             "/api/cognix/rag/indexing-plan",
             "/api/cognix/rag/plan",
             "/api/cognix/rag/compression-plan",
@@ -1065,7 +1068,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "tools": ["google-drive"],
         "defaultModels": ["cognix-general-small"],
         "uiPanels": ["project-documents"],
-        "dependencies": ["cognix-local-core", "cognix-projects"],
+        "dependencies": ["cognix-local-core", "cognix-projects", "cognix-integrations"],
     },
     {
         "id": "cognix-fine-tuning",

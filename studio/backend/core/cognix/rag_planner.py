@@ -9,15 +9,18 @@ retrieval, embedding, indexing, or model call happens.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any
 
+from core.cognix import integration_manager as cognix_integration_manager
 from core.cognix import tool_registry as cognix_tool_registry
 
 
 COGNIX_RAG_PLANNER_VERSION = "cognix_rag_planner_v1"
 COGNIX_RAG_SOURCE_REGISTRY_VERSION = "cognix_rag_source_registry_v1"
 COGNIX_RAG_RETRIEVAL_PACKET_VERSION = "cognix_rag_retrieval_packet_v1"
+COGNIX_RAG_CONNECTOR_SYNC_CONTRACT_VERSION = "cognix_rag_connector_sync_contract_v1"
 
 SUPPORTED_SOURCE_TYPES = {"pdf", "docx", "txt", "md", "csv", "html", "url", "knowledge_base"}
 STOPWORDS = {
@@ -96,6 +99,45 @@ RAG_SOURCE_MANIFESTS: list[dict[str, Any]] = [
         "defaultChunking": {"maxChunkTokens": 800, "overlapTokens": 100},
     },
     {
+        "id": "sharepoint",
+        "displayName": "SharePoint / Microsoft 365",
+        "status": "planned",
+        "connector": "sharepoint",
+        "sourceTypes": ["pdf", "docx", "txt", "md", "csv", "html"],
+        "permissions": ["authenticated", "sharepoint:read", "rag:write"],
+        "tools": ["sharepoint", "microsoft-365"],
+        "requiresSecret": True,
+        "requiresNetwork": True,
+        "dataBoundary": "organization_connector",
+        "defaultChunking": {"maxChunkTokens": 850, "overlapTokens": 120},
+    },
+    {
+        "id": "moodle",
+        "displayName": "Moodle",
+        "status": "planned",
+        "connector": "moodle",
+        "sourceTypes": ["pdf", "docx", "txt", "md", "html", "knowledge_base"],
+        "permissions": ["authenticated", "moodle:read", "rag:write"],
+        "tools": ["moodle"],
+        "requiresSecret": True,
+        "requiresNetwork": True,
+        "dataBoundary": "organization_connector",
+        "defaultChunking": {"maxChunkTokens": 780, "overlapTokens": 100},
+    },
+    {
+        "id": "slack-teams",
+        "displayName": "Slack / Teams",
+        "status": "planned",
+        "connector": "slack-teams",
+        "sourceTypes": ["txt", "md", "html", "knowledge_base"],
+        "permissions": ["authenticated", "slack:read", "teams:read", "rag:write"],
+        "tools": ["slack", "microsoft-teams"],
+        "requiresSecret": True,
+        "requiresNetwork": True,
+        "dataBoundary": "organization_connector",
+        "defaultChunking": {"maxChunkTokens": 650, "overlapTokens": 80},
+    },
+    {
         "id": "web_url",
         "displayName": "Web URL",
         "status": "planned",
@@ -124,6 +166,15 @@ SOURCE_CONNECTOR_ALIASES = {
     "knowledge_base": "project_memory",
     "kb": "project_memory",
     "notion": "notion",
+    "microsoft365": "sharepoint",
+    "microsoft-365": "sharepoint",
+    "office365": "sharepoint",
+    "sharepoint": "sharepoint",
+    "moodle": "moodle",
+    "slack": "slack-teams",
+    "teams": "slack-teams",
+    "microsoft-teams": "slack-teams",
+    "slack-teams": "slack-teams",
     "url": "web_url",
     "web": "web_url",
     "html": "web_url",
@@ -190,6 +241,10 @@ def _permission_set(
 
 def _connector_by_id() -> dict[str, dict[str, Any]]:
     return {str(item.get("id")): item for item in RAG_SOURCE_MANIFESTS}
+
+
+def _stable_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _missing_permissions(required: list[str], permissions: set[str]) -> list[str]:
@@ -473,6 +528,246 @@ def build_rag_indexing_plan(
             "sourceMutation": False,
             "modelLoad": False,
         },
+    }
+
+
+def _tool_ids_for_connector(manifest: dict[str, Any]) -> list[str]:
+    return [
+        str(item).strip()
+        for item in manifest.get("tools") or []
+        if str(item or "").strip()
+    ]
+
+
+def _connector_sync_manifest(connector_id: str) -> dict[str, Any] | None:
+    connector_map = _connector_by_id()
+    normalized = SOURCE_CONNECTOR_ALIASES.get(_normalize_text(connector_id).replace(" ", "_"), connector_id)
+    return connector_map.get(normalized)
+
+
+def build_rag_connector_sync_plan(
+    *,
+    username: str,
+    connector_id: str,
+    project_id: str | None = None,
+    objective: str | None = None,
+    source_filters: dict[str, Any] | None = None,
+    max_documents: int | None = None,
+    is_admin: bool = False,
+    has_developer_mode: bool = False,
+    granted_permissions: set[str] | None = None,
+) -> dict[str, Any]:
+    permissions = _permission_set(
+        is_admin = is_admin,
+        has_developer_mode = has_developer_mode,
+        granted_permissions = granted_permissions,
+    )
+    manifest = _connector_sync_manifest(connector_id)
+    side_effects = {
+        "networkRead": False,
+        "secretRead": False,
+        "fileRead": False,
+        "documentDownload": False,
+        "ragIndexing": False,
+        "embeddingGeneration": False,
+        "vectorWrite": False,
+        "sourceMutation": False,
+        "toolExecution": False,
+        "jobEnqueue": False,
+        "modelLoad": False,
+    }
+    if manifest is None:
+        return {
+            "connectorSyncContractVersion": COGNIX_RAG_CONNECTOR_SYNC_CONTRACT_VERSION,
+            "plannerVersion": COGNIX_RAG_PLANNER_VERSION,
+            "sourceRegistryVersion": COGNIX_RAG_SOURCE_REGISTRY_VERSION,
+            "mode": "rag_connector_sync_contract_dry_run",
+            "username": username,
+            "projectId": project_id,
+            "connectorId": connector_id,
+            "status": "unknown_connector",
+            "readyForSyncRequest": False,
+            "readyForIndexing": False,
+            "nextRequiredGate": "source_manifest_missing",
+            "gates": [
+                {
+                    "id": "source_manifest_declared",
+                    "status": "blocked",
+                    "severity": "error",
+                    "reason": "RAG source connector manifest is missing.",
+                }
+            ],
+            "blockedActions": [
+                "network_read",
+                "secret_read",
+                "document_download",
+                "rag_indexing",
+                "embedding_generation",
+                "vector_write",
+                "job_enqueue",
+            ],
+            "sideEffects": side_effects,
+        }
+
+    required_permissions = [str(item) for item in manifest.get("permissions") or []]
+    missing_permissions = _missing_permissions(required_permissions, permissions)
+    safe_filters = _as_dict(source_filters)
+    requested_filter_keys = sorted(str(key)[:80] for key in safe_filters.keys())
+    limit = max(1, min(_as_int(max_documents, 50), 500))
+    tool_ids = _tool_ids_for_connector(manifest)
+    preflight_contracts = [
+        cognix_integration_manager.build_connector_preflight_contract(
+            tool_id = tool_id,
+            username = username,
+            is_admin = is_admin,
+            has_developer_mode = has_developer_mode,
+            granted_permissions = permissions,
+        )
+        for tool_id in tool_ids
+    ]
+    preflight_blocked = [
+        item
+        for item in preflight_contracts
+        if item.get("status") == "unknown_integration"
+        or bool(item.get("summary", {}).get("blockedGateIds"))
+    ]
+    source_type_candidates = list(manifest.get("sourceTypes") or [])
+    enabled = manifest.get("status") == "enabled"
+    connector_ready = enabled and not preflight_blocked and not missing_permissions
+    ready_for_sync_request = bool(tool_ids and not preflight_blocked and not missing_permissions)
+    ready_for_indexing = bool(connector_ready)
+    gates = [
+        {
+            "id": "source_manifest_declared",
+            "status": "pass",
+            "severity": "info",
+            "reason": "RAG source connector manifest is declared.",
+            "detail": manifest.get("id"),
+        },
+        {
+            "id": "integration_preflight_ready",
+            "status": "pass" if not preflight_blocked else "blocked",
+            "severity": "info" if not preflight_blocked else "error",
+            "reason": "Connector preflight must be available before sync.",
+            "detail": [item.get("toolId") for item in preflight_blocked],
+        },
+        {
+            "id": "permissions_resolved",
+            "status": "pass" if not missing_permissions else "blocked",
+            "severity": "info" if not missing_permissions else "error",
+            "reason": "RAG connector sync requires both connector read and rag write permissions.",
+            "detail": missing_permissions,
+        },
+        {
+            "id": "connector_enabled",
+            "status": "pass" if enabled else "planned",
+            "severity": "info" if enabled else "warning",
+            "reason": "Connector activation remains a separate guarded workflow.",
+        },
+        {
+            "id": "secret_server_side",
+            "status": "planned" if manifest.get("requiresSecret") else "pass",
+            "severity": "warning" if manifest.get("requiresSecret") else "info",
+            "reason": "Secret resolution is server-side only and not performed by this plan.",
+        },
+    ]
+    blocked_gate_ids = [str(item["id"]) for item in gates if item.get("severity") == "error"]
+    warning_gate_ids = [str(item["id"]) for item in gates if item.get("severity") == "warning"]
+    if blocked_gate_ids:
+        status = "blocked"
+    elif not enabled:
+        status = "connector_activation_required"
+    else:
+        status = "ready_for_sync_handoff"
+    sync_namespace = ":".join(
+        [
+            username,
+            project_id or "general",
+            str(manifest.get("id")),
+            ",".join(requested_filter_keys),
+        ]
+    )
+    return {
+        "connectorSyncContractVersion": COGNIX_RAG_CONNECTOR_SYNC_CONTRACT_VERSION,
+        "plannerVersion": COGNIX_RAG_PLANNER_VERSION,
+        "sourceRegistryVersion": COGNIX_RAG_SOURCE_REGISTRY_VERSION,
+        "mode": "rag_connector_sync_contract_dry_run",
+        "username": username,
+        "projectId": project_id,
+        "objectiveExcerpt": " ".join((objective or "").split())[:500],
+        "connectorId": manifest.get("id"),
+        "connector": manifest.get("connector"),
+        "status": status,
+        "readyForSyncRequest": ready_for_sync_request,
+        "readyForIndexing": ready_for_indexing,
+        "nextRequiredGate": blocked_gate_ids[0] if blocked_gate_ids else "connector_activation" if not enabled else "worker_handoff_review",
+        "syncScope": {
+            "scopeHash": _stable_hash(sync_namespace)[:24],
+            "projectBound": bool(project_id),
+            "dataBoundary": manifest.get("dataBoundary"),
+            "sourceFilterKeys": requested_filter_keys,
+            "maxDocuments": limit,
+            "rawFilterValuesIncluded": False,
+            "crossUserSyncAllowed": False,
+        },
+        "sourceContract": {
+            "supportedSourceTypes": source_type_candidates,
+            "defaultChunking": _as_dict(manifest.get("defaultChunking")),
+            "citationsRequired": True,
+            "deduplicateByExternalSourceId": True,
+            "rawDocumentContentLogged": False,
+            "sourceMetadataOnly": True,
+        },
+        "integrationPreflight": [
+            {
+                "toolId": item.get("toolId"),
+                "connector": item.get("connector"),
+                "status": item.get("status"),
+                "readyForActivationRequest": item.get("readyForActivationRequest"),
+                "secretRequired": item.get("secretContract", {}).get("required"),
+                "actualSecretValuesIncluded": item.get("secretContract", {}).get("actualSecretValuesIncluded"),
+                "blockedGateIds": item.get("summary", {}).get("blockedGateIds", []),
+                "warningGateIds": item.get("summary", {}).get("warningGateIds", []),
+            }
+            for item in preflight_contracts
+        ],
+        "permissionContract": {
+            "requiredPermissions": required_permissions,
+            "missingPermissions": missing_permissions,
+            "effectivePermissionCount": len(permissions),
+            "permissionWritePlanned": False,
+        },
+        "workerHandoff": {
+            "plannedJobType": "rag_connector_sync",
+            "plannedQueue": "rag_indexing",
+            "readyForWorkerHandoff": False,
+            "readyForSyncExecutor": False,
+            "requiresHumanConfirmation": bool(manifest.get("requiresNetwork") or manifest.get("requiresSecret")),
+            "requiresConnectorPreflight": True,
+            "requiresPostSyncIndexingPlan": True,
+            "jobEnqueueAllowedHere": False,
+        },
+        "gates": gates,
+        "summary": {
+            "toolCount": len(tool_ids),
+            "preflightBlockedCount": len(preflight_blocked),
+            "missingPermissionCount": len(missing_permissions),
+            "blockedGateIds": blocked_gate_ids,
+            "warningGateIds": warning_gate_ids,
+            "supportedSourceTypeCount": len(source_type_candidates),
+        },
+        "blockedActions": [
+            "network_read",
+            "secret_read",
+            "document_download",
+            "rag_indexing",
+            "embedding_generation",
+            "vector_write",
+            "job_enqueue",
+            "tool_execution",
+            "raw_document_logging",
+        ],
+        "sideEffects": side_effects,
     }
 
 

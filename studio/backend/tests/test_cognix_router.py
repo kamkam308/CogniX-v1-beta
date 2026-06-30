@@ -2095,6 +2095,109 @@ def test_rag_indexing_plan_blocks_sensitive_sources_without_explicit_permission(
     assert plan["sideEffects"]["ragIndexing"] is False
 
 
+def test_rag_connector_sync_plan_prepares_drive_handoff_without_network_or_secrets():
+    plan = cognix_rag_planner.build_rag_connector_sync_plan(
+        username = "alice",
+        connector_id = "google-drive",
+        project_id = "project-rag",
+        objective = "Synchroniser Drive vers le RAG CogniX",
+        source_filters = {"folderId": "private-folder", "mimeTypes": ["pdf"]},
+        max_documents = 25,
+        has_developer_mode = True,
+        granted_permissions = {"drive:read", "rag:write"},
+    )
+
+    assert plan["connectorSyncContractVersion"] == "cognix_rag_connector_sync_contract_v1"
+    assert plan["mode"] == "rag_connector_sync_contract_dry_run"
+    assert plan["connectorId"] == "google-drive"
+    assert plan["readyForSyncRequest"] is True
+    assert plan["readyForIndexing"] is False
+    assert plan["syncScope"]["sourceFilterKeys"] == ["folderId", "mimeTypes"]
+    assert plan["syncScope"]["rawFilterValuesIncluded"] is False
+    assert plan["workerHandoff"]["plannedJobType"] == "rag_connector_sync"
+    assert plan["workerHandoff"]["plannedQueue"] == "rag_indexing"
+    assert plan["workerHandoff"]["jobEnqueueAllowedHere"] is False
+    assert plan["integrationPreflight"][0]["actualSecretValuesIncluded"] is False
+    assert "secret_read" in plan["blockedActions"]
+    assert "document_download" in plan["blockedActions"]
+    assert plan["sideEffects"]["networkRead"] is False
+    assert plan["sideEffects"]["secretRead"] is False
+    assert plan["sideEffects"]["documentDownload"] is False
+    assert plan["sideEffects"]["ragIndexing"] is False
+    assert plan["sideEffects"]["vectorWrite"] is False
+    assert plan["sideEffects"]["jobEnqueue"] is False
+
+
+def test_rag_connector_sync_plan_blocks_unknown_connector_without_side_effects():
+    plan = cognix_rag_planner.build_rag_connector_sync_plan(
+        username = "alice",
+        connector_id = "unknown-drive",
+        project_id = "project-rag",
+        granted_permissions = {"rag:write"},
+    )
+
+    assert plan["status"] == "unknown_connector"
+    assert plan["readyForSyncRequest"] is False
+    assert plan["readyForIndexing"] is False
+    assert plan["gates"][0]["id"] == "source_manifest_declared"
+    assert plan["gates"][0]["status"] == "blocked"
+    assert "network_read" in plan["blockedActions"]
+    assert "secret_read" in plan["blockedActions"]
+    assert plan["sideEffects"]["networkRead"] is False
+    assert plan["sideEffects"]["secretRead"] is False
+    assert plan["sideEffects"]["jobEnqueue"] is False
+
+
+def test_rag_connector_sync_endpoint_logs_sanitized_contract():
+    seed_accounts()
+    cognix_db.grant_user_permission(
+        "alice",
+        "drive:read",
+        granted_by = storage.DEFAULT_ADMIN_USERNAME,
+    )
+    cognix_db.grant_user_permission(
+        "alice",
+        "rag:write",
+        granted_by = storage.DEFAULT_ADMIN_USERNAME,
+    )
+
+    body = run_async(
+        cognix_routes.rag_connector_sync_plan(
+            cognix_routes.RagConnectorSyncPlanRequest(
+                connectorId = "google-drive",
+                projectId = "project-rag",
+                objective = "Synchroniser Drive vers RAG",
+                sourceFilters = {"folderId": "private-folder", "mimeTypes": ["pdf"]},
+                maxDocuments = 25,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    plan = body["connectorSyncPlan"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_rag_planner_v1"
+    assert body["connectorSyncContractVersion"] == "cognix_rag_connector_sync_contract_v1"
+    assert plan["connectorId"] == "google-drive"
+    assert plan["syncScope"]["sourceFilterKeys"] == ["folderId", "mimeTypes"]
+    assert plan["syncScope"]["rawFilterValuesIncluded"] is False
+    assert body["sideEffects"]["auditWrite"] is True
+    assert body["sideEffects"]["networkRead"] is False
+    assert body["sideEffects"]["secretRead"] is False
+    assert body["sideEffects"]["jobEnqueue"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "rag_connector_sync_plan_built"
+    assert log["resourceType"] == "cognix_rag_connector_sync_plan"
+    assert log["metadata"]["sourceFilterKeys"] == ["folderId", "mimeTypes"]
+    assert "private-folder" not in str(log["metadata"])
+    assert log["metadata"]["sideEffects"]["networkRead"] is False
+    assert log["metadata"]["sideEffects"]["secretRead"] is False
+    assert log["metadata"]["sideEffects"]["auditWrite"] is True
+
+
 def test_fine_tuning_plan_defers_to_rag_for_document_objective(monkeypatch):
     monkeypatch.setattr(
         cognix_orchestrator.cognix_hardware,
@@ -9654,13 +9757,17 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert modules["cognix-rag"]["dependencyState"]["ready"] is True
     assert "rag_source_registry" in modules["cognix-rag"]["capabilities"]
     assert "rag_indexing_planning" in modules["cognix-rag"]["capabilities"]
+    assert "rag_connector_sync_contract" in modules["cognix-rag"]["capabilities"]
+    assert "connector_source_sync_planning" in modules["cognix-rag"]["capabilities"]
     assert "rag_retrieval_packet" in modules["cognix-rag"]["capabilities"]
     assert "rag_compression_contract" in modules["cognix-rag"]["capabilities"]
     assert "citation_retention_contract" in modules["cognix-rag"]["capabilities"]
     assert "/api/cognix/rag/sources" in modules["cognix-rag"]["routes"]
+    assert "/api/cognix/rag/connector-sync-plan" in modules["cognix-rag"]["routes"]
     assert "/api/cognix/rag/indexing-plan" in modules["cognix-rag"]["routes"]
     assert "/api/cognix/rag/compression-plan" in modules["cognix-rag"]["routes"]
     assert "/api/cognix/rag/retrieval-packet" in modules["cognix-rag"]["routes"]
+    assert "cognix-integrations" in modules["cognix-rag"]["dependencies"]
     assert "cloud_training_targets" in modules["cognix-fine-tuning"]["capabilities"]
     assert "cloud_training_handoff" in modules["cognix-fine-tuning"]["capabilities"]
     assert "dataset_validation_plan" in modules["cognix-fine-tuning"]["capabilities"]

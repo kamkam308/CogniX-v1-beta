@@ -1120,6 +1120,16 @@ class RagIndexingPlanRequest(BaseModel):
     sources: list[dict[str, Any]] | None = None
 
 
+class RagConnectorSyncPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    connector_id: str = Field(..., alias = "connectorId", min_length = 1, max_length = 120)
+    objective: str | None = Field(None, max_length = 4000)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    source_filters: dict[str, Any] | None = Field(None, alias = "sourceFilters")
+    max_documents: int | None = Field(None, alias = "maxDocuments", ge = 1, le = 500)
+
+
 class OptimizationPlanRequest(BaseModel):
     objective: str = Field(..., min_length = 1, max_length = 4000)
     project_type: str | None = Field(None, max_length = 80)
@@ -6919,6 +6929,64 @@ async def rag_source_registry(current_subject: str = Depends(get_current_jwt_sub
         "registry": registry,
         "auditLogId": audit.get("id"),
         "sideEffects": registry.get("sideEffects", {}),
+    }
+
+
+@router.post("/rag/connector-sync-plan")
+async def rag_connector_sync_plan(
+    payload: RagConnectorSyncPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    is_admin = auth_storage.is_admin(current_subject)
+    has_developer_mode = cognix_db.user_has_permission(
+        current_subject,
+        cognix_db.DEVELOPER_MODE_PERMISSION,
+    )
+    plan = cognix_rag_planner.build_rag_connector_sync_plan(
+        username = current_subject,
+        connector_id = payload.connector_id,
+        project_id = payload.project_id,
+        objective = payload.objective,
+        source_filters = payload.source_filters or {},
+        max_documents = payload.max_documents,
+        is_admin = is_admin,
+        has_developer_mode = has_developer_mode,
+        granted_permissions = _granted_permission_keys(current_subject),
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "rag_connector_sync_plan_built",
+        resource_type = "cognix_rag_connector_sync_plan",
+        resource_id = str(payload.project_id or plan.get("connectorId") or payload.connector_id),
+        severity = "notice" if plan.get("readyForSyncRequest") else "warning",
+        metadata = {
+            "connectorSyncContractVersion": plan.get("connectorSyncContractVersion"),
+            "plannerVersion": plan.get("plannerVersion"),
+            "sourceRegistryVersion": plan.get("sourceRegistryVersion"),
+            "connectorId": plan.get("connectorId"),
+            "status": plan.get("status"),
+            "readyForSyncRequest": plan.get("readyForSyncRequest"),
+            "readyForIndexing": plan.get("readyForIndexing"),
+            "sourceFilterKeys": plan.get("syncScope", {}).get("sourceFilterKeys", []),
+            "maxDocuments": plan.get("syncScope", {}).get("maxDocuments"),
+            "blockedGateIds": plan.get("summary", {}).get("blockedGateIds", []),
+            "warningGateIds": plan.get("summary", {}).get("warningGateIds", []),
+            "missingPermissionCount": plan.get("summary", {}).get("missingPermissionCount"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "connectorSyncPlan": plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": plan.get("plannerVersion"),
+        "connectorSyncContractVersion": plan.get("connectorSyncContractVersion"),
     }
 
 
