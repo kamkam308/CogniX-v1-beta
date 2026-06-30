@@ -17,6 +17,7 @@ import {
   type ChatSearch,
 } from "@/features/chat";
 import { RemoteCodeConsentDialog } from "@/features/security";
+import { CogniXCommandPalette } from "@/features/cognix-modules/command-palette";
 import { useTrainingUnloadGuard } from "@/features/training";
 import { useExportRuntimeLifecycle } from "@/features/export";
 import { hasAuthToken } from "@/features/auth";
@@ -237,6 +238,7 @@ function RootLayout() {
       <PersonalizationSyncMount />
       <SettingsDialog />
       <RemoteCodeConsentDialog />
+      <CogniXCommandPalette />
       {hideNavbar ? (
         <main className="flex-1 overflow-hidden">
           <AnimatePresence initial={false} mode="wait">

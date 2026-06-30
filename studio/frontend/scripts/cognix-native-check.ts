@@ -3469,6 +3469,26 @@ const checks: Check[] = [
     ],
   },
   {
+    file: "src/app/routes/__root.tsx",
+    includes: [
+      'import { CogniXCommandPalette } from "@/features/cognix-modules/command-palette";',
+      "<CogniXCommandPalette />",
+    ],
+  },
+  {
+    file: "src/features/cognix-modules/command-palette.tsx",
+    includes: [
+      '"/api/cognix/command-palette/search"',
+      '"/api/cognix/command-palette/plan"',
+      "includeDisabled: true",
+      "logUsage: true",
+      "metaKey",
+      "ctrlKey",
+      "ROUTE_MAP",
+      "CommandDialog",
+    ],
+  },
+  {
     file: "../backend/tests/test_middleware.py",
     includes: [
       "test_ceo_health_unlocks_cloud_training_without_local_gpu",
