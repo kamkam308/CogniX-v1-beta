@@ -155,6 +155,10 @@ PROJECT_SKILL_DIRECTIVE_TABLE_NAMES = (
     "model_directives",
     "directive_priorities",
 )
+ADMIN_PROJECT_OVERSIGHT_TABLE_NAMES = (
+    "admin_project_events",
+    "project_admin_reports",
+)
 
 KNOWN_ATTACK_SIGNATURES: list[dict[str, str]] = [
     {
@@ -2670,6 +2674,7 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
     _ensure_token_usage_columns(conn)
     _ensure_global_roadmap_tables(conn)
     _ensure_project_skill_directive_columns(conn)
+    _ensure_admin_project_oversight_columns(conn)
 
 
 def _ensure_approval_request_columns(conn: sqlite3.Connection) -> None:
@@ -2898,6 +2903,80 @@ def _ensure_project_skill_directive_columns(conn: sqlite3.Connection) -> None:
                 ON {quoted_table}(username, status, updated_at DESC)
             """
         )
+
+
+def _ensure_admin_project_oversight_columns(conn: sqlite3.Connection) -> None:
+    for table_name in ADMIN_PROJECT_OVERSIGHT_TABLE_NAMES:
+        quoted_table = _quote_roadmap_table_name(table_name)
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {quoted_table} (
+                id TEXT PRIMARY KEY,
+                organization_id TEXT NOT NULL DEFAULT 'default',
+                username TEXT,
+                project_id TEXT,
+                scope_type TEXT NOT NULL DEFAULT 'project',
+                scope_id TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'active',
+                payload_json TEXT NOT NULL DEFAULT '{{}}',
+                metadata_json TEXT NOT NULL DEFAULT '{{}}',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+
+    _ensure_columns(
+        conn,
+        "admin_project_events",
+        {
+            "actor_username": "TEXT NOT NULL DEFAULT ''",
+            "target_username": "TEXT NOT NULL DEFAULT ''",
+            "action": "TEXT NOT NULL DEFAULT ''",
+            "event_type": "TEXT NOT NULL DEFAULT 'action_plan'",
+            "reason": "TEXT NOT NULL DEFAULT ''",
+            "risk_level": "TEXT NOT NULL DEFAULT 'medium'",
+            "approval_required": "INTEGER NOT NULL DEFAULT 1",
+            "event_json": "TEXT NOT NULL DEFAULT '{}'",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "project_admin_reports",
+        {
+            "generated_by": "TEXT NOT NULL DEFAULT ''",
+            "report_type": "TEXT NOT NULL DEFAULT 'summary'",
+            "output_format": "TEXT NOT NULL DEFAULT 'json'",
+            "title": "TEXT NOT NULL DEFAULT ''",
+            "summary": "TEXT NOT NULL DEFAULT ''",
+            "risk_level": "TEXT NOT NULL DEFAULT 'low'",
+            "report_json": "TEXT NOT NULL DEFAULT '{}'",
+        },
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_admin_project_events_project_status
+            ON admin_project_events(project_id, status, updated_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_admin_project_events_actor_status
+            ON admin_project_events(actor_username, status, updated_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_project_admin_reports_project_status
+            ON project_admin_reports(project_id, status, updated_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_project_admin_reports_generated_status
+            ON project_admin_reports(generated_by, status, updated_at DESC)
+        """
+    )
 
 
 def ensure_schema() -> None:
@@ -8007,6 +8086,203 @@ def list_project_directives(
             tuple(params),
         ).fetchall()
         return [_hydrate_project_directive(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_admin_project_event(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["projectId"] = item.get("project_id")
+    item["actorUsername"] = item.get("actor_username")
+    item["targetUsername"] = item.get("target_username")
+    item["eventType"] = item.get("event_type")
+    item["riskLevel"] = item.get("risk_level")
+    item["approvalRequired"] = bool(item.get("approval_required"))
+    item["event"] = _json_or_default(item.get("event_json"), {})
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def create_admin_project_event(
+    *,
+    project_id: str,
+    owner_username: str,
+    actor_username: str,
+    action: str,
+    reason: str,
+    risk_level: str = "medium",
+    approval_required: bool = True,
+    target_username: str | None = None,
+    event_type: str = "action_plan",
+    event: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    now = _now()
+    event_id = _new_id("adproj")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO admin_project_events
+                (
+                    id, organization_id, username, project_id, scope_type, scope_id,
+                    status, payload_json, metadata_json, created_at, updated_at,
+                    actor_username, target_username, action, event_type, reason,
+                    risk_level, approval_required, event_json
+                )
+            VALUES (?, 'default', ?, ?, 'project', ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                owner_username,
+                project_id,
+                project_id,
+                json.dumps(event or {}, ensure_ascii = False),
+                json.dumps(metadata or {}, ensure_ascii = False),
+                now,
+                now,
+                actor_username[:160],
+                (target_username or "")[:160],
+                action[:160],
+                event_type[:120],
+                reason[:2000],
+                risk_level[:40],
+                1 if approval_required else 0,
+                json.dumps(event or {}, ensure_ascii = False),
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM admin_project_events WHERE id = ?", (event_id,)).fetchone()
+        return _hydrate_admin_project_event(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_admin_project_events(
+    *,
+    project_id: str | None = None,
+    actor_username: str | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 200), 1), 1000)
+    clauses: list[str] = []
+    params: list[Any] = []
+    if project_id:
+        clauses.append("project_id = ?")
+        params.append(project_id)
+    if actor_username:
+        clauses.append("actor_username = ?")
+        params.append(actor_username)
+    params.append(safe_limit)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM admin_project_events
+            {where}
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_admin_project_event(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_project_admin_report(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["projectId"] = item.get("project_id")
+    item["generatedBy"] = item.get("generated_by")
+    item["reportType"] = item.get("report_type")
+    item["outputFormat"] = item.get("output_format")
+    item["riskLevel"] = item.get("risk_level")
+    item["report"] = _json_or_default(item.get("report_json"), {})
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def create_project_admin_report(
+    *,
+    project_id: str,
+    owner_username: str,
+    generated_by: str,
+    report: dict[str, Any],
+    report_type: str = "summary",
+    output_format: str = "json",
+    status: str = "generated",
+) -> dict[str, Any]:
+    now = _now()
+    report_id = _new_id("preport")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO project_admin_reports
+                (
+                    id, organization_id, username, project_id, scope_type, scope_id,
+                    status, payload_json, metadata_json, created_at, updated_at,
+                    generated_by, report_type, output_format, title, summary,
+                    risk_level, report_json
+                )
+            VALUES (?, 'default', ?, ?, 'project', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                report_id,
+                owner_username,
+                project_id,
+                project_id,
+                status[:80],
+                json.dumps(report, ensure_ascii = False),
+                json.dumps({"reportVersion": report.get("projectReportVersion")}, ensure_ascii = False),
+                now,
+                now,
+                generated_by[:160],
+                report_type[:80],
+                output_format[:40],
+                str(report.get("title") or "")[:240],
+                str(report.get("summary") or "")[:3000],
+                str(report.get("riskLevel") or "low")[:40],
+                json.dumps(report, ensure_ascii = False),
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM project_admin_reports WHERE id = ?", (report_id,)).fetchone()
+        return _hydrate_project_admin_report(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_project_admin_reports(
+    *,
+    project_id: str | None = None,
+    generated_by: str | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 200), 1), 1000)
+    clauses: list[str] = []
+    params: list[Any] = []
+    if project_id:
+        clauses.append("project_id = ?")
+        params.append(project_id)
+    if generated_by:
+        clauses.append("generated_by = ?")
+        params.append(generated_by)
+    params.append(safe_limit)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM project_admin_reports
+            {where}
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_project_admin_report(row) for row in _rows_to_dicts(rows)]
     finally:
         conn.close()
 

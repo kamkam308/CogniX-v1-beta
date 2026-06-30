@@ -24,6 +24,7 @@ from core.cognix import admin_banned as cognix_admin_banned
 from core.cognix import admin_chat as cognix_admin_chat
 from core.cognix import admin_limits as cognix_admin_limits
 from core.cognix import admin_permissions as cognix_admin_permissions
+from core.cognix import admin_project_oversight as cognix_admin_project_oversight
 from core.cognix import admin_security as cognix_admin_security
 from core.cognix import admin_usage as cognix_admin_usage
 from core.cognix import admin_users as cognix_admin_users
@@ -185,6 +186,33 @@ class AdminProjectPermissionRequest(BaseModel):
     subject_id: str = Field(..., alias = "subjectId", min_length = 1, max_length = 160)
     permission_key: str = Field(..., alias = "permissionKey", min_length = 1, max_length = 160)
     allowed: bool = True
+
+
+class AdminProjectActionPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    action: Literal[
+        "archive",
+        "transfer_ownership",
+        "remove_member",
+        "add_member",
+        "restrict_models",
+        "disable_cloud",
+        "export_report",
+    ]
+    reason: str = Field(..., min_length = 3, max_length = 1000)
+    target_username: str | None = Field(None, alias = "targetUsername", max_length = 160)
+    target_role: str | None = Field(None, alias = "targetRole", max_length = 80)
+    model_ids: list[str] = Field(default_factory = list, alias = "modelIds")
+    cloud_allowed: bool | None = Field(None, alias = "cloudAllowed")
+
+
+class AdminProjectReportRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    report_type: Literal["summary", "security", "usage", "full"] = Field("summary", alias = "reportType")
+    output_format: Literal["json", "markdown"] = Field("json", alias = "outputFormat")
+    reason: str | None = Field("", max_length = 1000)
 
 
 class AdminPermissionDecisionRequest(BaseModel):
@@ -1982,6 +2010,52 @@ def _build_admin_activity_bundle(*, refresh_rollups: bool = False) -> dict[str, 
         "auditLogs": audit_logs,
         "rollups": rollups,
         "persisted": persisted,
+    }
+
+
+def _build_admin_project_oversight_bundle() -> dict[str, Any]:
+    projects = list_chat_projects(
+        include_archived = True,
+        owner_username = "",
+        include_all = True,
+    )
+    threads = list_chat_threads(
+        include_archived = True,
+        owner_username = "",
+        include_all = True,
+    )
+    messages = list_chat_messages_for_threads([str(thread.get("id")) for thread in threads if thread.get("id")])
+    token_events = cognix_db.list_token_usage_events(limit = 5000)
+    project_permissions = cognix_db.list_project_permissions()
+    security_events = cognix_db.list_security_events(limit = 1000)
+    audit_logs = cognix_db.list_audit_logs(limit = 1000)
+    reports = cognix_db.list_reports()
+    admin_project_events = cognix_db.list_admin_project_events(limit = 1000)
+    project_admin_reports = cognix_db.list_project_admin_reports(limit = 1000)
+    oversight = cognix_admin_project_oversight.build_admin_project_oversight(
+        projects = projects,
+        threads = threads,
+        messages = messages,
+        token_events = token_events,
+        project_permissions = project_permissions,
+        security_events = security_events,
+        audit_logs = audit_logs,
+        reports = reports,
+        admin_project_events = admin_project_events,
+        project_admin_reports = project_admin_reports,
+    )
+    return {
+        "projects": projects,
+        "threads": threads,
+        "messages": messages,
+        "tokenEvents": token_events,
+        "projectPermissions": project_permissions,
+        "securityEvents": security_events,
+        "auditLogs": audit_logs,
+        "reports": reports,
+        "adminProjectEvents": admin_project_events,
+        "projectAdminReports": project_admin_reports,
+        "oversight": oversight,
     }
 
 
@@ -14585,6 +14659,186 @@ async def admin_usage_aggregate(current_subject: str = Depends(get_current_jwt_s
         "auditLogId": audit.get("id"),
         "sideEffects": side_effects,
         "plannerVersion": cognix_admin_usage.COGNIX_USAGE_DASHBOARD_VERSION,
+    }
+
+
+@router.get("/admin/projects/blueprint")
+async def admin_projects_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    blueprint = cognix_admin_project_oversight.build_admin_project_blueprint()
+    return {
+        "username": current_subject,
+        "adminProjectsBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_admin_project_oversight.COGNIX_ADMIN_PROJECT_SERVICE_VERSION,
+    }
+
+
+@router.get("/admin/projects")
+async def admin_projects(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_project_oversight_bundle()
+    return {
+        "username": current_subject,
+        "adminProjectOversight": bundle["oversight"],
+        "projects": _rows(bundle["projects"]),
+        "adminProjectEvents": _rows(bundle["adminProjectEvents"]),
+        "projectAdminReports": _rows(bundle["projectAdminReports"]),
+        "sideEffects": bundle["oversight"].get("sideEffects", {}),
+        "plannerVersion": cognix_admin_project_oversight.COGNIX_ADMIN_PROJECT_SERVICE_VERSION,
+    }
+
+
+@router.get("/admin/projects/{project_id}")
+async def admin_project_detail(
+    project_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_project_oversight_bundle()
+    project_item = next(
+        (item for item in bundle["oversight"]["projects"] if str(item.get("projectId") or "") == project_id),
+        None,
+    )
+    if project_item is None:
+        raise HTTPException(status_code = 404, detail = "Project not found")
+    return {
+        "username": current_subject,
+        "project": project_item,
+        "sideEffects": bundle["oversight"].get("sideEffects", {}),
+        "plannerVersion": cognix_admin_project_oversight.COGNIX_ADMIN_PROJECT_SERVICE_VERSION,
+    }
+
+
+@router.post("/admin/projects/{project_id}/action-plan")
+async def admin_project_action_plan(
+    project_id: str,
+    payload: AdminProjectActionPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    project = get_chat_project(project_id, include_all = True)
+    if project is None:
+        raise HTTPException(status_code = 404, detail = "Project not found")
+    try:
+        action_plan = cognix_admin_project_oversight.build_project_action_plan(
+            project = project,
+            action = payload.action,
+            actor_username = current_subject,
+            reason = payload.reason,
+            target_username = payload.target_username,
+            target_role = payload.target_role,
+            model_ids = payload.model_ids,
+            cloud_allowed = payload.cloud_allowed,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from exc
+    event = cognix_db.create_admin_project_event(
+        project_id = project_id,
+        owner_username = str(project.get("ownerUsername") or ""),
+        actor_username = current_subject,
+        target_username = payload.target_username,
+        action = payload.action,
+        reason = payload.reason,
+        risk_level = str(action_plan.get("action", {}).get("riskLevel") or "medium"),
+        approval_required = bool(action_plan.get("approvalRequired")),
+        event = action_plan,
+        metadata = {
+            "projectActionPlannerVersion": cognix_admin_project_oversight.COGNIX_PROJECT_ACTION_PLANNER_VERSION,
+            "permissionRequired": action_plan.get("permissionRequired"),
+        },
+    )
+    side_effects = {
+        **action_plan.get("sideEffects", {}),
+        "databaseWrite": True,
+        "adminProjectEventWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = str(project.get("ownerUsername") or ""),
+        actor_username = current_subject,
+        action = "admin_project_action_planned",
+        resource_type = "chat_project",
+        resource_id = project_id,
+        severity = "warning" if action_plan.get("confirmationRequired") else "notice",
+        metadata = {
+            "projectId": project_id,
+            "action": payload.action,
+            "approvalRequired": action_plan.get("approvalRequired"),
+            "permissionRequired": action_plan.get("permissionRequired"),
+            "eventId": event.get("id"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "actionPlan": action_plan,
+        "adminProjectEvent": _row(event),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_admin_project_oversight.COGNIX_PROJECT_ACTION_PLANNER_VERSION,
+    }
+
+
+@router.post("/admin/projects/{project_id}/report")
+async def admin_project_report(
+    project_id: str,
+    payload: AdminProjectReportRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_project_oversight_bundle()
+    project = next((item for item in bundle["projects"] if str(item.get("id") or "") == project_id), None)
+    oversight_item = next(
+        (item for item in bundle["oversight"]["projects"] if str(item.get("projectId") or "") == project_id),
+        None,
+    )
+    if project is None or oversight_item is None:
+        raise HTTPException(status_code = 404, detail = "Project not found")
+    report_plan = cognix_admin_project_oversight.build_project_admin_report(
+        project = project,
+        oversight_item = oversight_item,
+        generated_by = current_subject,
+        report_type = payload.report_type,
+        output_format = payload.output_format,
+    )
+    report = cognix_db.create_project_admin_report(
+        project_id = project_id,
+        owner_username = str(project.get("ownerUsername") or ""),
+        generated_by = current_subject,
+        report = report_plan,
+        report_type = payload.report_type,
+        output_format = payload.output_format,
+    )
+    side_effects = {
+        **report_plan.get("sideEffects", {}),
+        "databaseWrite": True,
+        "reportWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = str(project.get("ownerUsername") or ""),
+        actor_username = current_subject,
+        action = "admin_project_report_generated",
+        resource_type = "project_admin_report",
+        resource_id = str(report.get("id") or ""),
+        severity = "notice",
+        metadata = {
+            "projectId": project_id,
+            "reportType": payload.report_type,
+            "outputFormat": payload.output_format,
+            "reason": payload.reason,
+            "riskLevel": report_plan.get("riskLevel"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "reportPlan": report_plan,
+        "projectAdminReport": _row(report),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_admin_project_oversight.COGNIX_PROJECT_REPORT_VERSION,
     }
 
 
