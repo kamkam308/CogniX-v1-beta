@@ -20,6 +20,7 @@ from auth import storage as auth_storage
 from auth.authentication import get_current_jwt_subject
 from core.cognix import admin_activity as cognix_admin_activity
 from core.cognix import admin_compliance_export as cognix_admin_compliance_export
+from core.cognix import admin_data_retention as cognix_admin_data_retention
 from core.cognix import admin_approvals as cognix_admin_approvals
 from core.cognix import admin_banned as cognix_admin_banned
 from core.cognix import admin_chat as cognix_admin_chat
@@ -263,6 +264,40 @@ class AdminComplianceExportRequest(BaseModel):
     ] = Field("full", alias = "reportType")
     output_format: Literal["json", "markdown", "csv", "pdf"] = Field("json", alias = "outputFormat")
     reason: str | None = Field("", max_length = 1000)
+
+
+class AdminDataRetentionPolicyRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    chat_retention_days: int | None = Field(None, alias = "chatRetentionDays", ge = 1, le = 3650)
+    project_archive_months: int | None = Field(None, alias = "projectArchiveMonths", ge = 1, le = 240)
+    sensitive_prompt_mode: Literal["store", "redact", "metadata_only", "disabled"] | None = Field(
+        None,
+        alias = "sensitivePromptMode",
+    )
+    content_logs_enabled: bool | None = Field(None, alias = "contentLogsEnabled")
+    metadata_only_mode: bool | None = Field(None, alias = "metadataOnlyMode")
+    user_export_enabled: bool | None = Field(None, alias = "userExportEnabled")
+    user_deletion_requires_approval: bool | None = Field(None, alias = "userDeletionRequiresApproval")
+    e2ee_strict: bool | None = Field(None, alias = "e2eeStrict")
+    reason: str | None = Field("", max_length = 1000)
+
+
+class AdminPrivacyDecisionRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    content: Any | None = None
+    target_username: str | None = Field(None, alias = "targetUsername", max_length = 160)
+    e2ee_strict: bool | None = Field(None, alias = "e2eeStrict")
+    metadata: dict[str, Any] = Field(default_factory = dict)
+
+
+class AdminUserDataRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    reason: str = Field(..., min_length = 3, max_length = 1000)
+    include_content: bool = Field(False, alias = "includeContent")
+    output_format: Literal["json", "markdown"] = Field("json", alias = "outputFormat")
 
 
 class AdminPermissionDecisionRequest(BaseModel):
@@ -2171,6 +2206,89 @@ def _build_admin_compliance_export_bundle() -> dict[str, Any]:
         "auditLogs": cognix_db.list_audit_logs(limit = 1000),
         "exports": cognix_db.list_compliance_exports(limit = 500),
         "exportJobs": cognix_db.list_export_jobs(limit = 500),
+    }
+
+
+def _retention_policy_from_record(record: dict[str, Any] | None) -> dict[str, Any]:
+    if not record:
+        return cognix_admin_data_retention.normalize_retention_policy(
+            cognix_admin_data_retention.DEFAULT_RETENTION_POLICY
+        )
+    stored_policy = record.get("policy") if isinstance(record.get("policy"), dict) else {}
+    if not stored_policy:
+        stored_policy = {
+            "chatRetentionDays": record.get("chatRetentionDays") or record.get("chat_retention_days"),
+            "projectArchiveMonths": record.get("projectArchiveMonths") or record.get("project_archive_months"),
+            "sensitivePromptMode": record.get("sensitivePromptMode") or record.get("sensitive_prompt_mode"),
+            "contentLogsEnabled": record.get("contentLogsEnabled") or record.get("content_logs_enabled"),
+            "metadataOnlyMode": record.get("metadataOnlyMode") or record.get("metadata_only_mode"),
+            "userExportEnabled": record.get("userExportEnabled") or record.get("user_export_enabled"),
+            "userDeletionRequiresApproval": record.get("userDeletionRequiresApproval")
+            or record.get("user_deletion_requires_approval"),
+            "e2eeStrict": record.get("e2eeStrict") or record.get("e2ee_strict"),
+        }
+    return cognix_admin_data_retention.normalize_retention_policy(stored_policy)
+
+
+def _retention_policy_payload_to_dict(payload: AdminDataRetentionPolicyRequest) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    mapping = {
+        "chatRetentionDays": payload.chat_retention_days,
+        "projectArchiveMonths": payload.project_archive_months,
+        "sensitivePromptMode": payload.sensitive_prompt_mode,
+        "contentLogsEnabled": payload.content_logs_enabled,
+        "metadataOnlyMode": payload.metadata_only_mode,
+        "userExportEnabled": payload.user_export_enabled,
+        "userDeletionRequiresApproval": payload.user_deletion_requires_approval,
+        "e2eeStrict": payload.e2ee_strict,
+    }
+    for key, value in mapping.items():
+        if value is not None:
+            values[key] = value
+    return values
+
+
+def _current_retention_policy_record() -> dict[str, Any] | None:
+    return cognix_db.get_retention_policy()
+
+
+def _current_retention_policy() -> dict[str, Any]:
+    return _retention_policy_from_record(_current_retention_policy_record())
+
+
+def _build_admin_data_retention_bundle() -> dict[str, Any]:
+    policy_record = _current_retention_policy_record()
+    policy = _retention_policy_from_record(policy_record)
+    threads = list_chat_threads(
+        include_archived = True,
+        owner_username = "",
+        include_all = True,
+    )
+    projects = list_chat_projects(
+        include_archived = True,
+        owner_username = "",
+        include_all = True,
+    )
+    thread_ids = [str(thread.get("id")) for thread in threads if thread.get("id")]
+    messages = list_chat_messages_for_threads(thread_ids)
+    audit_logs = cognix_db.list_audit_logs(limit = 1000)
+    deletion_jobs = cognix_db.list_deletion_jobs(limit = 500)
+    privacy_events = cognix_db.list_privacy_events(limit = 500)
+    retention_plan = cognix_admin_data_retention.build_retention_plan(
+        policy = policy,
+        threads = threads,
+        projects = projects,
+    )
+    return {
+        "policyRecord": policy_record,
+        "policy": policy,
+        "threads": threads,
+        "projects": projects,
+        "messages": messages,
+        "auditLogs": audit_logs,
+        "deletionJobs": deletion_jobs,
+        "privacyEvents": privacy_events,
+        "retentionPlan": retention_plan,
     }
 
 
@@ -15115,6 +15233,296 @@ async def admin_settings_change_logs(current_subject: str = Depends(get_current_
             "networkCall": False,
         },
         "plannerVersion": cognix_admin_organization_settings.COGNIX_POLICY_CHANGE_LOG_VERSION,
+    }
+
+
+@router.get("/admin/data-retention/blueprint")
+async def admin_data_retention_blueprint(
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    blueprint = cognix_admin_data_retention.build_data_retention_blueprint()
+    return {
+        "username": current_subject,
+        "dataRetentionBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_admin_data_retention.COGNIX_DATA_RETENTION_SERVICE_VERSION,
+    }
+
+
+@router.get("/admin/data-retention")
+async def admin_data_retention(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_data_retention_bundle()
+    return {
+        "username": current_subject,
+        "policy": bundle["policy"],
+        "policyRecord": _row(bundle["policyRecord"]) if bundle["policyRecord"] else None,
+        "retentionPlan": bundle["retentionPlan"],
+        "deletionJobs": _rows(bundle["deletionJobs"]),
+        "privacyEvents": _rows(bundle["privacyEvents"]),
+        "sideEffects": bundle["retentionPlan"].get("sideEffects", {}),
+        "plannerVersion": cognix_admin_data_retention.COGNIX_DATA_RETENTION_SERVICE_VERSION,
+    }
+
+
+@router.put("/admin/data-retention/policy")
+async def admin_update_data_retention_policy(
+    payload: AdminDataRetentionPolicyRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    before_policy = _current_retention_policy()
+    after_policy = dict(before_policy)
+    after_policy.update(_retention_policy_payload_to_dict(payload))
+    normalized_policy = cognix_admin_data_retention.normalize_retention_policy(after_policy)
+    policy_record = cognix_db.upsert_retention_policy(
+        policy = normalized_policy,
+        updated_by = current_subject,
+        reason = payload.reason or "",
+    )
+    side_effects = {
+        **cognix_admin_data_retention.build_data_retention_blueprint()["sideEffects"],
+        "databaseWrite": True,
+        "retentionPolicyWrite": True,
+        "privacyEventWrite": True,
+        "auditWrite": True,
+    }
+    privacy_event = cognix_db.create_privacy_event(
+        actor_username = current_subject,
+        target_username = "",
+        event_type = "retention_policy_updated",
+        privacy_mode = str(normalized_policy.get("sensitivePromptMode") or "metadata_only"),
+        content_readable = False,
+        content_stored = False,
+        metadata_only = True,
+        event = {
+            "before": before_policy,
+            "after": normalized_policy,
+            "reason": payload.reason or "",
+            "sideEffects": side_effects,
+        },
+    )
+    audit = cognix_db.create_audit_log(
+        username = None,
+        actor_username = current_subject,
+        action = "admin_data_retention_policy_updated",
+        resource_type = "retention_policy",
+        resource_id = str(policy_record.get("id") or "default"),
+        severity = "warning",
+        metadata = {
+            "policyEventId": privacy_event.get("id"),
+            "reason": payload.reason or "",
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "policy": normalized_policy,
+        "policyRecord": _row(policy_record),
+        "privacyEvent": _row(privacy_event),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_admin_data_retention.COGNIX_DATA_RETENTION_SERVICE_VERSION,
+    }
+
+
+@router.post("/admin/data-retention/plan")
+async def admin_data_retention_plan(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_data_retention_bundle()
+    return {
+        "username": current_subject,
+        "retentionPlan": bundle["retentionPlan"],
+        "policy": bundle["policy"],
+        "sideEffects": bundle["retentionPlan"].get("sideEffects", {}),
+        "plannerVersion": cognix_admin_data_retention.COGNIX_DATA_RETENTION_SERVICE_VERSION,
+    }
+
+
+@router.post("/admin/data-retention/privacy-decision")
+async def admin_privacy_decision(
+    payload: AdminPrivacyDecisionRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    policy = _current_retention_policy()
+    decision = cognix_admin_data_retention.build_privacy_decision(
+        policy = policy,
+        content = payload.content,
+        e2ee_strict = payload.e2ee_strict,
+    )
+    side_effects = {
+        **decision.get("sideEffects", {}),
+        "databaseWrite": True,
+        "privacyEventWrite": True,
+        "auditWrite": True,
+        "contentStore": False,
+        "contentDelete": False,
+    }
+    privacy_event = cognix_db.create_privacy_event(
+        actor_username = current_subject,
+        target_username = payload.target_username or "",
+        event_type = "privacy_decision_logged",
+        privacy_mode = str(decision.get("storageMode") or "metadata_only"),
+        content_readable = bool(decision.get("contentReadableByServer")),
+        content_stored = bool(decision.get("contentStorageAllowed")),
+        metadata_only = bool(decision.get("metadataOnly")),
+        event = {
+            "decision": decision,
+            "targetUsername": payload.target_username or "",
+            "metadata": payload.metadata,
+            "contentLength": len(str(payload.content or "")),
+            "sideEffects": side_effects,
+        },
+    )
+    audit = cognix_db.create_audit_log(
+        username = payload.target_username,
+        actor_username = current_subject,
+        action = "admin_privacy_decision_logged",
+        resource_type = "privacy_event",
+        resource_id = str(privacy_event.get("id") or ""),
+        severity = "notice",
+        metadata = {
+            "privacyMode": decision.get("storageMode"),
+            "contentReadableByServer": decision.get("contentReadableByServer"),
+            "contentStorageAllowed": decision.get("contentStorageAllowed"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "decision": decision,
+        "privacyEvent": _row(privacy_event),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_admin_data_retention.COGNIX_PRIVACY_POLICY_SERVICE_VERSION,
+    }
+
+
+@router.post("/admin/data-retention/users/{username}/export-plan")
+async def admin_user_export_plan(
+    username: str,
+    payload: AdminUserDataRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_data_retention_bundle()
+    export_plan = cognix_admin_data_retention.build_user_export_plan(
+        username = username,
+        policy = bundle["policy"],
+        threads = bundle["threads"],
+        projects = bundle["projects"],
+        messages = bundle["messages"],
+        audit_logs = bundle["auditLogs"],
+        include_content = payload.include_content,
+    )
+    side_effects = {
+        **export_plan.get("sideEffects", {}),
+        "auditWrite": True,
+        "fileWrite": False,
+        "contentStore": False,
+    }
+    audit = cognix_db.create_audit_log(
+        username = username,
+        actor_username = current_subject,
+        action = "admin_user_export_planned",
+        resource_type = "user_data_export",
+        resource_id = username,
+        severity = "notice",
+        metadata = {
+            "reason": payload.reason,
+            "outputFormat": payload.output_format,
+            "contentIncluded": export_plan.get("contentIncluded"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "targetUsername": username,
+        "exportPlan": export_plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_admin_data_retention.COGNIX_DATA_RETENTION_SERVICE_VERSION,
+    }
+
+
+@router.post("/admin/data-retention/users/{username}/deletion-plan")
+async def admin_user_deletion_plan(
+    username: str,
+    payload: AdminUserDataRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    policy = _current_retention_policy()
+    deletion_plan = cognix_admin_data_retention.build_user_deletion_plan(
+        username = username,
+        policy = policy,
+        reason = payload.reason,
+    )
+    deletion_job = cognix_db.create_deletion_job(
+        target_type = "user",
+        target_id = username,
+        requested_by = current_subject,
+        job_type = "user_deletion",
+        reason = payload.reason,
+        approval_required = bool(deletion_plan.get("requiresApproval")),
+        status = str(deletion_plan.get("status") or "requires_approval"),
+        job = deletion_plan,
+    )
+    side_effects = {
+        **deletion_plan.get("sideEffects", {}),
+        "databaseWrite": True,
+        "deletionJobWrite": True,
+        "auditWrite": True,
+        "contentDelete": False,
+    }
+    audit = cognix_db.create_audit_log(
+        username = username,
+        actor_username = current_subject,
+        action = "admin_user_deletion_planned",
+        resource_type = "deletion_job",
+        resource_id = str(deletion_job.get("id") or ""),
+        severity = "warning",
+        metadata = {
+            "reason": payload.reason,
+            "jobStatus": deletion_job.get("status"),
+            "requiresApproval": deletion_plan.get("requiresApproval"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "targetUsername": username,
+        "deletionPlan": deletion_plan,
+        "deletionJob": _row(deletion_job),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_admin_data_retention.COGNIX_DATA_DELETION_SERVICE_VERSION,
+    }
+
+
+@router.get("/admin/data-retention/deletion-jobs")
+async def admin_deletion_jobs(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    jobs = cognix_db.list_deletion_jobs(limit = 500)
+    return {
+        "username": current_subject,
+        "deletionJobs": _rows(jobs),
+        "sideEffects": cognix_admin_data_retention.build_data_retention_blueprint()["sideEffects"],
+        "plannerVersion": cognix_admin_data_retention.COGNIX_DATA_DELETION_SERVICE_VERSION,
+    }
+
+
+@router.get("/admin/data-retention/privacy-events")
+async def admin_privacy_events(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    events = cognix_db.list_privacy_events(limit = 500)
+    return {
+        "username": current_subject,
+        "privacyEvents": _rows(events),
+        "sideEffects": cognix_admin_data_retention.build_data_retention_blueprint()["sideEffects"],
+        "plannerVersion": cognix_admin_data_retention.COGNIX_PRIVACY_POLICY_SERVICE_VERSION,
     }
 
 

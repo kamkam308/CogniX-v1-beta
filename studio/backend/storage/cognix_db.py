@@ -173,6 +173,11 @@ ADMIN_RISK_SCORING_TABLE_NAMES = (
     "risk_events",
     "risk_recommendations",
 )
+ADMIN_DATA_RETENTION_TABLE_NAMES = (
+    "retention_policies",
+    "deletion_jobs",
+    "privacy_events",
+)
 
 KNOWN_ATTACK_SIGNATURES: list[dict[str, str]] = [
     {
@@ -2692,6 +2697,7 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
     _ensure_admin_organization_settings_columns(conn)
     _ensure_admin_compliance_export_columns(conn)
     _ensure_admin_risk_scoring_columns(conn)
+    _ensure_admin_data_retention_columns(conn)
 
 
 def _ensure_approval_request_columns(conn: sqlite3.Connection) -> None:
@@ -3206,6 +3212,93 @@ def _ensure_admin_risk_scoring_columns(conn: sqlite3.Connection) -> None:
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_risk_recommendations_entity
             ON risk_recommendations(entity_type, entity_id)
+        """
+    )
+
+
+def _ensure_admin_data_retention_columns(conn: sqlite3.Connection) -> None:
+    for table_name in ADMIN_DATA_RETENTION_TABLE_NAMES:
+        quoted_table = _quote_roadmap_table_name(table_name)
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {quoted_table} (
+                id TEXT PRIMARY KEY,
+                organization_id TEXT NOT NULL DEFAULT 'default',
+                username TEXT,
+                project_id TEXT,
+                scope_type TEXT NOT NULL DEFAULT 'organization',
+                scope_id TEXT NOT NULL DEFAULT 'default',
+                status TEXT NOT NULL DEFAULT 'active',
+                payload_json TEXT NOT NULL DEFAULT '{{}}',
+                metadata_json TEXT NOT NULL DEFAULT '{{}}',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+    _ensure_columns(
+        conn,
+        "retention_policies",
+        {
+            "policy_key": "TEXT NOT NULL DEFAULT 'default'",
+            "chat_retention_days": "INTEGER NOT NULL DEFAULT 90",
+            "project_archive_months": "INTEGER NOT NULL DEFAULT 12",
+            "sensitive_prompt_mode": "TEXT NOT NULL DEFAULT 'metadata_only'",
+            "content_logs_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "metadata_only_mode": "INTEGER NOT NULL DEFAULT 1",
+            "user_export_enabled": "INTEGER NOT NULL DEFAULT 1",
+            "user_deletion_requires_approval": "INTEGER NOT NULL DEFAULT 1",
+            "e2ee_strict": "INTEGER NOT NULL DEFAULT 0",
+            "policy_json": "TEXT NOT NULL DEFAULT '{}'",
+            "updated_by": "TEXT NOT NULL DEFAULT ''",
+            "reason": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "deletion_jobs",
+        {
+            "target_type": "TEXT NOT NULL DEFAULT 'user'",
+            "target_id": "TEXT NOT NULL DEFAULT ''",
+            "requested_by": "TEXT NOT NULL DEFAULT ''",
+            "job_type": "TEXT NOT NULL DEFAULT 'user_deletion'",
+            "reason": "TEXT NOT NULL DEFAULT ''",
+            "approval_required": "INTEGER NOT NULL DEFAULT 1",
+            "job_json": "TEXT NOT NULL DEFAULT '{}'",
+            "scheduled_for": "TEXT",
+            "completed_at": "TEXT",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "privacy_events",
+        {
+            "actor_username": "TEXT NOT NULL DEFAULT ''",
+            "target_username": "TEXT NOT NULL DEFAULT ''",
+            "event_type": "TEXT NOT NULL DEFAULT 'privacy_decision'",
+            "privacy_mode": "TEXT NOT NULL DEFAULT 'metadata_only'",
+            "content_readable": "INTEGER NOT NULL DEFAULT 0",
+            "content_stored": "INTEGER NOT NULL DEFAULT 0",
+            "metadata_only": "INTEGER NOT NULL DEFAULT 1",
+            "event_json": "TEXT NOT NULL DEFAULT '{}'",
+        },
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_retention_policies_key
+            ON retention_policies(organization_id, policy_key)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_deletion_jobs_target_status
+            ON deletion_jobs(target_type, target_id, status, updated_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_privacy_events_target_created
+            ON privacy_events(target_username, created_at DESC)
         """
     )
 
@@ -9289,6 +9382,316 @@ def persist_risk_scoring(
         "events": persisted_events,
         "recommendations": persisted_recommendations,
     }
+
+
+def _hydrate_retention_policy(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    policy = _json_or_default(item.get("policy_json"), {})
+    item["organizationId"] = item.get("organization_id")
+    item["policyKey"] = item.get("policy_key")
+    item["policy"] = policy
+    item["chatRetentionDays"] = item.get("chat_retention_days")
+    item["projectArchiveMonths"] = item.get("project_archive_months")
+    item["sensitivePromptMode"] = item.get("sensitive_prompt_mode")
+    item["contentLogsEnabled"] = bool(item.get("content_logs_enabled"))
+    item["metadataOnlyMode"] = bool(item.get("metadata_only_mode"))
+    item["userExportEnabled"] = bool(item.get("user_export_enabled"))
+    item["userDeletionRequiresApproval"] = bool(item.get("user_deletion_requires_approval"))
+    item["e2eeStrict"] = bool(item.get("e2ee_strict"))
+    item["updatedBy"] = item.get("updated_by")
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def upsert_retention_policy(
+    *,
+    policy: dict[str, Any],
+    policy_key: str = "default",
+    organization_id: str = "default",
+    updated_by: str = "",
+    reason: str = "",
+) -> dict[str, Any]:
+    now = _now()
+    normalized_org = (organization_id or "default").strip()[:160] or "default"
+    normalized_key = (policy_key or "default").strip()[:160] or "default"
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO retention_policies
+                (
+                    id, organization_id, username, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    policy_key, chat_retention_days, project_archive_months,
+                    sensitive_prompt_mode, content_logs_enabled, metadata_only_mode,
+                    user_export_enabled, user_deletion_requires_approval, e2ee_strict,
+                    policy_json, updated_by, reason
+                )
+            VALUES (?, ?, ?, 'organization', ?, 'active', ?, '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(organization_id, policy_key) DO UPDATE SET
+                username = excluded.username,
+                status = excluded.status,
+                payload_json = excluded.payload_json,
+                updated_at = excluded.updated_at,
+                chat_retention_days = excluded.chat_retention_days,
+                project_archive_months = excluded.project_archive_months,
+                sensitive_prompt_mode = excluded.sensitive_prompt_mode,
+                content_logs_enabled = excluded.content_logs_enabled,
+                metadata_only_mode = excluded.metadata_only_mode,
+                user_export_enabled = excluded.user_export_enabled,
+                user_deletion_requires_approval = excluded.user_deletion_requires_approval,
+                e2ee_strict = excluded.e2ee_strict,
+                policy_json = excluded.policy_json,
+                updated_by = excluded.updated_by,
+                reason = excluded.reason
+            """,
+            (
+                _new_id("retpol"),
+                normalized_org,
+                updated_by,
+                normalized_org,
+                json.dumps(policy, ensure_ascii = False),
+                now,
+                now,
+                normalized_key,
+                int(policy.get("chatRetentionDays") or 90),
+                int(policy.get("projectArchiveMonths") or 12),
+                str(policy.get("sensitivePromptMode") or "metadata_only")[:80],
+                1 if policy.get("contentLogsEnabled") else 0,
+                1 if policy.get("metadataOnlyMode") else 0,
+                1 if policy.get("userExportEnabled") else 0,
+                1 if policy.get("userDeletionRequiresApproval") else 0,
+                1 if policy.get("e2eeStrict") else 0,
+                json.dumps(policy, ensure_ascii = False),
+                updated_by[:160],
+                reason[:1000],
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            """
+            SELECT * FROM retention_policies
+            WHERE organization_id = ? AND policy_key = ?
+            """,
+            (normalized_org, normalized_key),
+        ).fetchone()
+        return _hydrate_retention_policy(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_retention_policies(*, organization_id: str = "default") -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM retention_policies
+            WHERE organization_id = ?
+            ORDER BY updated_at DESC
+            """,
+            ((organization_id or "default").strip() or "default",),
+        ).fetchall()
+        return [_hydrate_retention_policy(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def get_retention_policy(*, policy_key: str = "default", organization_id: str = "default") -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT * FROM retention_policies
+            WHERE organization_id = ? AND policy_key = ?
+            """,
+            ((organization_id or "default").strip() or "default", (policy_key or "default").strip() or "default"),
+        ).fetchone()
+        return _hydrate_retention_policy(row_to_dict(row) or {}) if row else None
+    finally:
+        conn.close()
+
+
+def _hydrate_deletion_job(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["targetType"] = item.get("target_type")
+    item["targetId"] = item.get("target_id")
+    item["requestedBy"] = item.get("requested_by")
+    item["jobType"] = item.get("job_type")
+    item["approvalRequired"] = bool(item.get("approval_required"))
+    item["job"] = _json_or_default(item.get("job_json"), {})
+    item["scheduledFor"] = item.get("scheduled_for")
+    item["completedAt"] = item.get("completed_at")
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def create_deletion_job(
+    *,
+    target_type: str,
+    target_id: str,
+    requested_by: str,
+    job_type: str,
+    reason: str,
+    approval_required: bool,
+    job: dict[str, Any],
+    status: str = "requires_approval",
+    scheduled_for: str | None = None,
+) -> dict[str, Any]:
+    now = _now()
+    job_id = _new_id("deljob")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO deletion_jobs
+                (
+                    id, organization_id, username, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    target_type, target_id, requested_by, job_type, reason,
+                    approval_required, job_json, scheduled_for, completed_at
+                )
+            VALUES (?, 'default', ?, 'privacy', ?, ?, ?, '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            """,
+            (
+                job_id,
+                target_id if target_type == "user" else None,
+                f"{target_type}:{target_id}",
+                status[:80],
+                json.dumps(job, ensure_ascii = False),
+                now,
+                now,
+                target_type[:80],
+                target_id[:240],
+                requested_by[:160],
+                job_type[:120],
+                reason[:1000],
+                1 if approval_required else 0,
+                json.dumps(job, ensure_ascii = False),
+                scheduled_for,
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM deletion_jobs WHERE id = ?", (job_id,)).fetchone()
+        return _hydrate_deletion_job(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_deletion_jobs(*, target_type: str | None = None, target_id: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 200), 1), 1000)
+    clauses: list[str] = []
+    params: list[Any] = []
+    if target_type:
+        clauses.append("target_type = ?")
+        params.append(target_type)
+    if target_id:
+        clauses.append("target_id = ?")
+        params.append(target_id)
+    params.append(safe_limit)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM deletion_jobs
+            {where}
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_deletion_job(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_privacy_event(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["actorUsername"] = item.get("actor_username")
+    item["targetUsername"] = item.get("target_username")
+    item["eventType"] = item.get("event_type")
+    item["privacyMode"] = item.get("privacy_mode")
+    item["contentReadable"] = bool(item.get("content_readable"))
+    item["contentStored"] = bool(item.get("content_stored"))
+    item["metadataOnly"] = bool(item.get("metadata_only"))
+    item["event"] = _json_or_default(item.get("event_json"), {})
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def create_privacy_event(
+    *,
+    actor_username: str,
+    target_username: str,
+    event_type: str,
+    privacy_mode: str,
+    content_readable: bool,
+    content_stored: bool,
+    metadata_only: bool,
+    event: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    now = _now()
+    event_id = _new_id("privev")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO privacy_events
+                (
+                    id, organization_id, username, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    actor_username, target_username, event_type, privacy_mode,
+                    content_readable, content_stored, metadata_only, event_json
+                )
+            VALUES (?, 'default', ?, 'privacy', ?, 'active', ?, '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                target_username or actor_username,
+                f"{event_type}:{target_username or actor_username}",
+                json.dumps(event or {}, ensure_ascii = False),
+                now,
+                now,
+                actor_username[:160],
+                target_username[:160],
+                event_type[:120],
+                privacy_mode[:80],
+                1 if content_readable else 0,
+                1 if content_stored else 0,
+                1 if metadata_only else 0,
+                json.dumps(event or {}, ensure_ascii = False),
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM privacy_events WHERE id = ?", (event_id,)).fetchone()
+        return _hydrate_privacy_event(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_privacy_events(*, target_username: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 200), 1), 1000)
+    clauses: list[str] = []
+    params: list[Any] = []
+    if target_username:
+        clauses.append("target_username = ?")
+        params.append(target_username)
+    params.append(safe_limit)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM privacy_events
+            {where}
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_privacy_event(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
 
 
 def _hydrate_shared_skill(row: dict[str, Any]) -> dict[str, Any]:
