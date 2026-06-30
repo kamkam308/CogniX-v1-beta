@@ -718,6 +718,109 @@ export async function deleteChatProject(
   notifyChatHistoryUpdated();
 }
 
+export interface ChatProjectBridgeLink {
+  id: string;
+  projectId: string;
+  threadId: string;
+  linkType: "conversation" | "answer_share" | "approval_context";
+  source: string;
+  status: string;
+  metadata?: Record<string, unknown>;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface MessageTaskRecord {
+  id: string;
+  projectId: string;
+  threadId?: string | null;
+  messageId?: string | null;
+  title: string;
+  sourceText: string;
+  status: "open" | "in_progress" | "done" | "blocked";
+  priority: "low" | "medium" | "high" | "critical";
+  approvalRequestId?: string | null;
+  metadata?: Record<string, unknown>;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface ChatProjectBridgeResponse {
+  links: ChatProjectBridgeLink[];
+  tasks: MessageTaskRecord[];
+  summary: {
+    linkCount: number;
+    taskCount: number;
+    openTaskCount: number;
+  };
+}
+
+export async function getChatProjectBridge(
+  args: {
+    projectId?: string;
+    threadId?: string;
+  } = {},
+): Promise<ChatProjectBridgeResponse> {
+  const params = new URLSearchParams();
+  if (args.projectId) params.set("project_id", args.projectId);
+  if (args.threadId) params.set("thread_id", args.threadId);
+  const qs = params.toString();
+  const response = await authFetch(
+    `/api/cognix/chat-project-bridge${qs ? `?${qs}` : ""}`,
+  );
+  const data = await parseJsonOrThrow<ChatProjectBridgeResponse>(response);
+  return {
+    links: Array.isArray(data.links) ? data.links : [],
+    tasks: Array.isArray(data.tasks) ? data.tasks : [],
+    summary: {
+      linkCount: Number(data.summary?.linkCount ?? 0),
+      taskCount: Number(data.summary?.taskCount ?? 0),
+      openTaskCount: Number(data.summary?.openTaskCount ?? 0),
+    },
+  };
+}
+
+export async function createChatProjectBridgeLink(payload: {
+  projectId: string;
+  threadId: string;
+  linkType?: "conversation" | "answer_share" | "approval_context";
+  source?: "chat" | "project" | "manual";
+  metadata?: Record<string, unknown>;
+}): Promise<ChatProjectBridgeLink> {
+  const response = await authFetch("/api/cognix/chat-project-bridge/links", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...payload, storeLink: true }),
+  });
+  const data = await parseJsonOrThrow<{ link: ChatProjectBridgeLink }>(
+    response,
+  );
+  return data.link;
+}
+
+export async function createMessageTask(payload: {
+  projectId: string;
+  threadId?: string | null;
+  messageId?: string | null;
+  title?: string | null;
+  sourceText: string;
+  priority?: "low" | "medium" | "high" | "critical";
+  status?: "open" | "in_progress" | "done" | "blocked";
+  requireApproval?: boolean;
+  metadata?: Record<string, unknown>;
+}): Promise<MessageTaskRecord> {
+  const response = await authFetch(
+    "/api/cognix/chat-project-bridge/message-tasks",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...payload, storeTask: true }),
+    },
+  );
+  const data = await parseJsonOrThrow<{ task: MessageTaskRecord }>(response);
+  return data.task;
+}
+
 export async function listChatMessages(
   threadId: string,
 ): Promise<MessageRecord[]> {

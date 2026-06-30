@@ -2097,6 +2097,48 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_context_edges_project
             ON cognix_context_edges(username, project_id, edge_type);
 
+        CREATE TABLE IF NOT EXISTS chat_project_links (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            link_type TEXT NOT NULL DEFAULT 'conversation',
+            source TEXT NOT NULL DEFAULT 'chat',
+            status TEXT NOT NULL DEFAULT 'active',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(username, project_id, thread_id, link_type)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_chat_project_links_username_project
+            ON chat_project_links(username, project_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_chat_project_links_username_thread
+            ON chat_project_links(username, thread_id, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS message_tasks (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            thread_id TEXT,
+            message_id TEXT,
+            title TEXT NOT NULL,
+            source_text TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open',
+            priority TEXT NOT NULL DEFAULT 'medium',
+            approval_request_id TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_message_tasks_username_project
+            ON message_tasks(username, project_id, status, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_message_tasks_username_thread
+            ON message_tasks(username, thread_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_message_tasks_username_message
+            ON message_tasks(username, message_id, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_scheduled_tasks (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -11132,6 +11174,196 @@ def get_context_graph_snapshot(username: str, snapshot_id: str) -> dict[str, Any
             ).fetchall()
         )
         return snapshot
+    finally:
+        conn.close()
+
+
+def _hydrate_chat_project_link(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    item = row_to_dict(row)
+    if item:
+        item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def _hydrate_message_task(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    item = row_to_dict(row)
+    if item:
+        item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def list_chat_project_links(
+    username: str,
+    *,
+    project_id: str | None = None,
+    thread_id: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    clauses = ["username = ?"]
+    values: list[Any] = [username]
+    if project_id:
+        clauses.append("project_id = ?")
+        values.append(project_id)
+    if thread_id:
+        clauses.append("thread_id = ?")
+        values.append(thread_id)
+    values.append(max(1, min(int(limit or 100), 500)))
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM chat_project_links
+            WHERE {' AND '.join(clauses)}
+            ORDER BY updated_at DESC, created_at DESC
+            LIMIT ?
+            """,
+            values,
+        ).fetchall()
+        return [item for row in rows if (item := _hydrate_chat_project_link(row)) is not None]
+    finally:
+        conn.close()
+
+
+def create_chat_project_link(
+    username: str,
+    *,
+    project_id: str,
+    thread_id: str,
+    link_type: str = "conversation",
+    source: str = "chat",
+    status: str = "active",
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    created_at = _now()
+    link_id = _new_id("cpl")
+    normalized_link_type = link_type if link_type in {"conversation", "answer_share", "approval_context"} else "conversation"
+    normalized_status = status if status in {"active", "archived"} else "active"
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO chat_project_links
+                (
+                    id, username, project_id, thread_id, link_type, source,
+                    status, metadata_json, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(username, project_id, thread_id, link_type) DO UPDATE SET
+                source = excluded.source,
+                status = excluded.status,
+                metadata_json = excluded.metadata_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                link_id,
+                username,
+                project_id,
+                thread_id,
+                normalized_link_type,
+                (source or "chat")[:80],
+                normalized_status,
+                json.dumps(metadata or {}, ensure_ascii = False),
+                created_at,
+                created_at,
+            ),
+        )
+        conn.commit()
+        item = _hydrate_chat_project_link(
+            conn.execute(
+                """
+                SELECT * FROM chat_project_links
+                WHERE username = ? AND project_id = ? AND thread_id = ? AND link_type = ?
+                """,
+                (username, project_id, thread_id, normalized_link_type),
+            ).fetchone()
+        )
+        return item or {}
+    finally:
+        conn.close()
+
+
+def list_message_tasks(
+    username: str,
+    *,
+    project_id: str | None = None,
+    thread_id: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    clauses = ["username = ?"]
+    values: list[Any] = [username]
+    if project_id:
+        clauses.append("project_id = ?")
+        values.append(project_id)
+    if thread_id:
+        clauses.append("thread_id = ?")
+        values.append(thread_id)
+    values.append(max(1, min(int(limit or 100), 500)))
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM message_tasks
+            WHERE {' AND '.join(clauses)}
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            values,
+        ).fetchall()
+        return [item for row in rows if (item := _hydrate_message_task(row)) is not None]
+    finally:
+        conn.close()
+
+
+def create_message_task(
+    username: str,
+    *,
+    project_id: str,
+    title: str,
+    source_text: str,
+    thread_id: str | None = None,
+    message_id: str | None = None,
+    status: str = "open",
+    priority: str = "medium",
+    approval_request_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    created_at = _now()
+    task_id = _new_id("mtk")
+    normalized_status = status if status in {"open", "in_progress", "done", "blocked"} else "open"
+    normalized_priority = priority if priority in {"low", "medium", "high", "critical"} else "medium"
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO message_tasks
+                (
+                    id, username, project_id, thread_id, message_id, title,
+                    source_text, status, priority, approval_request_id,
+                    metadata_json, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_id,
+                username,
+                project_id,
+                thread_id,
+                message_id,
+                title.strip()[:180] or "Task from chat",
+                source_text.strip()[:12000],
+                normalized_status,
+                normalized_priority,
+                approval_request_id,
+                json.dumps(metadata or {}, ensure_ascii = False),
+                created_at,
+                created_at,
+            ),
+        )
+        conn.commit()
+        item = _hydrate_message_task(
+            conn.execute("SELECT * FROM message_tasks WHERE id = ?", (task_id,)).fetchone()
+        )
+        return item or {}
     finally:
         conn.close()
 

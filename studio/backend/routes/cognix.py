@@ -33,6 +33,7 @@ from core.cognix import benchmark as cognix_benchmark
 from core.cognix import batching as cognix_batching
 from core.cognix import background_agents as cognix_background_agents
 from core.cognix import cache_manager as cognix_cache_manager
+from core.cognix import chat_project_bridge as cognix_chat_project_bridge
 from core.cognix import codex_pipeline as cognix_codex_pipeline
 from core.cognix import command_palette as cognix_command_palette
 from core.cognix import context_graph as cognix_context_graph
@@ -102,7 +103,14 @@ from core.cognix import worker_queue as cognix_worker_queue
 from core.cognix.router import classify_objective
 from core.cognix.strategy import build_strategy
 from storage import cognix_db
-from storage.studio_db import get_chat_project, list_chat_messages_for_threads, list_chat_projects, list_chat_threads
+from storage.studio_db import (
+    get_chat_message,
+    get_chat_project,
+    get_chat_thread,
+    list_chat_messages_for_threads,
+    list_chat_projects,
+    list_chat_threads,
+)
 
 
 router = APIRouter()
@@ -630,6 +638,39 @@ class ScheduledTaskCreateRequest(BaseModel):
 
 class ScheduledTaskStatusRequest(BaseModel):
     status: Literal["active", "paused", "done", "cancelled"]
+
+
+class ChatProjectLinkRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    project_id: str = Field(..., alias = "projectId", min_length = 1, max_length = 160)
+    thread_id: str = Field(..., alias = "threadId", min_length = 1, max_length = 160)
+    link_type: Literal["conversation", "answer_share", "approval_context"] = Field("conversation", alias = "linkType")
+    source: Literal["chat", "project", "manual"] = "chat"
+    metadata: dict[str, Any] | None = None
+    store_link: bool = Field(True, alias = "storeLink")
+
+
+class MessageTaskCreateRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    project_id: str = Field(..., alias = "projectId", min_length = 1, max_length = 160)
+    thread_id: str | None = Field(None, alias = "threadId", max_length = 160)
+    message_id: str | None = Field(None, alias = "messageId", max_length = 160)
+    title: str | None = Field(None, max_length = 180)
+    source_text: str = Field(..., alias = "sourceText", min_length = 1, max_length = 12000)
+    priority: Literal["low", "medium", "high", "critical"] = "medium"
+    status: Literal["open", "in_progress", "done", "blocked"] = "open"
+    require_approval: bool = Field(False, alias = "requireApproval")
+    metadata: dict[str, Any] | None = None
+    store_task: bool = Field(True, alias = "storeTask")
+
+
+class ProjectMentionRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    text: str = Field(..., min_length = 1, max_length = 12000)
+    limit: int = Field(8, ge = 1, le = 40)
 
 
 class AppConnectionRequest(BaseModel):
@@ -2036,6 +2077,9 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "scores_json": "scoresJson",
         "message_id": "messageId",
         "thread_id": "threadId",
+        "link_type": "linkType",
+        "source_text": "sourceText",
+        "approval_request_id": "approvalRequestId",
         "confidence_score": "confidenceScore",
         "confidence_label": "confidenceLabel",
         "verification_required": "verificationRequired",
@@ -2399,6 +2443,27 @@ def _require_owned_project(project_id: str, owner_username: str) -> dict[str, An
     if project is None:
         raise HTTPException(status_code = 404, detail = "Project not found")
     return project
+
+
+def _require_owned_thread(thread_id: str, owner_username: str) -> dict[str, Any]:
+    thread = get_chat_thread(
+        thread_id,
+        owner_username = owner_username,
+        include_all = False,
+    )
+    if thread is None:
+        raise HTTPException(status_code = 404, detail = "Thread not found")
+    return thread
+
+
+def _get_owned_message(thread_id: str | None, message_id: str | None, owner_username: str) -> dict[str, Any] | None:
+    if not thread_id or not message_id:
+        return None
+    _require_owned_thread(thread_id, owner_username)
+    message = get_chat_message(thread_id, message_id)
+    if message is None:
+        raise HTTPException(status_code = 404, detail = "Message not found")
+    return message
 
 
 def _dashboard_password_status(user: dict[str, Any]) -> dict[str, Any]:
@@ -11826,6 +11891,223 @@ async def create_library_item(
     return {
         "item": _row(item),
         "assetPlan": asset_plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+    }
+
+
+@router.get("/chat-project-bridge")
+async def chat_project_bridge(
+    project_id: str | None = None,
+    thread_id: str | None = None,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if project_id:
+        _require_owned_project(project_id, current_subject)
+    if thread_id:
+        _require_owned_thread(thread_id, current_subject)
+    links = _rows(
+        cognix_db.list_chat_project_links(
+            current_subject,
+            project_id = project_id,
+            thread_id = thread_id,
+        )
+    )
+    tasks = _rows(
+        cognix_db.list_message_tasks(
+            current_subject,
+            project_id = project_id,
+            thread_id = thread_id,
+        )
+    )
+    return {
+        "links": links,
+        "tasks": tasks,
+        "summary": {
+            "linkCount": len(links),
+            "taskCount": len(tasks),
+            "openTaskCount": sum(1 for task in tasks if task.get("status") in {"open", "in_progress", "blocked"}),
+        },
+        "blueprint": cognix_chat_project_bridge.build_chat_project_bridge_blueprint(),
+    }
+
+
+@router.get("/chat-project-bridge/blueprint")
+async def chat_project_bridge_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_chat_project_bridge.build_chat_project_bridge_blueprint()
+    return {
+        "username": current_subject,
+        "blueprint": blueprint,
+        "sideEffects": blueprint["sideEffects"],
+    }
+
+
+@router.post("/chat-project-bridge/mentions")
+async def detect_chat_project_mentions(
+    payload: ProjectMentionRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    projects = list_chat_projects(
+        include_archived = False,
+        owner_username = current_subject,
+        include_all = False,
+    )
+    mention_plan = cognix_chat_project_bridge.extract_project_mentions(payload.text, projects, limit = payload.limit)
+    return {
+        "username": current_subject,
+        "mentionPlan": mention_plan,
+        "mentions": mention_plan["mentions"],
+        "sideEffects": mention_plan["sideEffects"],
+    }
+
+
+@router.post("/chat-project-bridge/links")
+async def create_chat_project_link(
+    payload: ChatProjectLinkRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    project = _require_owned_project(payload.project_id, current_subject)
+    thread = _require_owned_thread(payload.thread_id, current_subject)
+    plan = cognix_chat_project_bridge.build_thread_link_plan(
+        username = current_subject,
+        project = project,
+        thread = thread,
+        link_type = payload.link_type,
+        source = payload.source,
+        metadata = payload.metadata,
+    )
+    if not payload.store_link:
+        return {
+            "link": None,
+            "chatProjectLinkPlan": plan,
+            "sideEffects": plan["sideEffects"],
+        }
+    link = cognix_db.create_chat_project_link(
+        current_subject,
+        project_id = plan["link"]["projectId"],
+        thread_id = plan["link"]["threadId"],
+        link_type = plan["link"]["linkType"],
+        source = plan["link"]["source"],
+        metadata = {
+            **(payload.metadata or {}),
+            "chatProjectBridgeVersion": plan["chatProjectBridgeVersion"],
+        },
+    )
+    side_effects = {
+        **plan["sideEffects"],
+        "chatProjectLinkWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "chat_project_link_created",
+        resource_type = "chat_project_link",
+        resource_id = str(link.get("id") or ""),
+        severity = "notice",
+        metadata = {
+            "projectId": payload.project_id,
+            "threadId": payload.thread_id,
+            "linkType": payload.link_type,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "link": _row(link),
+        "chatProjectLinkPlan": {**plan, "sideEffects": side_effects},
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+    }
+
+
+@router.post("/chat-project-bridge/message-tasks")
+async def create_message_task(
+    payload: MessageTaskCreateRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    project = _require_owned_project(payload.project_id, current_subject)
+    thread = _require_owned_thread(payload.thread_id, current_subject) if payload.thread_id else None
+    if payload.message_id and not payload.thread_id:
+        raise HTTPException(status_code = 400, detail = "threadId is required when messageId is provided")
+    message = _get_owned_message(payload.thread_id, payload.message_id, current_subject)
+    plan = cognix_chat_project_bridge.build_message_task_plan(
+        username = current_subject,
+        project = project,
+        thread = thread,
+        message = message,
+        source_text = payload.source_text,
+        task_title = payload.title,
+        status = payload.status,
+        priority = payload.priority,
+        require_approval = payload.require_approval,
+        metadata = payload.metadata,
+    )
+    if not payload.store_task:
+        return {
+            "task": None,
+            "messageTaskPlan": plan,
+            "approvalRequest": None,
+            "sideEffects": plan["sideEffects"],
+        }
+    approval = None
+    if payload.require_approval:
+        approval = cognix_db.create_approval_request(
+            current_subject,
+            "chat_message_task_approval",
+            f"Review chat-derived task: {plan['task']['title']}",
+            title = plan["task"]["title"],
+            risk_level = "medium",
+            resource_type = "message_task",
+            resource_id = payload.message_id or payload.thread_id or payload.project_id,
+            metadata = {
+                "projectId": payload.project_id,
+                "threadId": payload.thread_id,
+                "messageId": payload.message_id,
+                "chatProjectBridgeVersion": plan["chatProjectBridgeVersion"],
+            },
+        )
+    task = cognix_db.create_message_task(
+        current_subject,
+        project_id = plan["task"]["projectId"],
+        thread_id = plan["task"]["threadId"],
+        message_id = plan["task"]["messageId"],
+        title = plan["task"]["title"],
+        source_text = plan["task"]["sourceText"],
+        status = plan["task"]["status"],
+        priority = plan["task"]["priority"],
+        approval_request_id = str((approval or {}).get("id") or "") or None,
+        metadata = {
+            **(payload.metadata or {}),
+            "chatProjectBridgeVersion": plan["chatProjectBridgeVersion"],
+            "messageToTaskVersion": plan["messageToTaskVersion"],
+        },
+    )
+    side_effects = {
+        **plan["sideEffects"],
+        "messageTaskWrite": True,
+        "approvalRequestWrite": approval is not None,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "message_task_created",
+        resource_type = "message_task",
+        resource_id = str(task.get("id") or ""),
+        severity = "warning" if approval is not None else "notice",
+        metadata = {
+            "projectId": payload.project_id,
+            "threadId": payload.thread_id,
+            "messageId": payload.message_id,
+            "priority": payload.priority,
+            "approvalRequestId": (approval or {}).get("id"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "task": _row(task),
+        "messageTaskPlan": {**plan, "sideEffects": side_effects},
+        "approvalRequest": _row(approval) if approval else None,
         "auditLogId": audit.get("id"),
         "sideEffects": side_effects,
     }

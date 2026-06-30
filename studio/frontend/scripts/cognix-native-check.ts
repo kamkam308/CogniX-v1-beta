@@ -537,9 +537,7 @@ const checks: Check[] = [
       'authFetch("/api/cognix/context/pack"',
       'authFetch("/api/cognix/orchestrator/plan"',
     ],
-    excludes: [
-      "unsloth-chat-history-updated",
-    ],
+    excludes: ["unsloth-chat-history-updated"],
   },
   {
     file: "src/features/chat/api/chat-adapter.ts",
@@ -552,9 +550,7 @@ const checks: Check[] = [
       "willGenerate",
       "setLatestCogniXRoute",
     ],
-    excludes: [
-      "await classifyCogniXObjective",
-    ],
+    excludes: ["await classifyCogniXObjective"],
   },
   {
     file: "src/features/chat/chat-page.tsx",
@@ -701,6 +697,11 @@ const checks: Check[] = [
       '@router.get("/plugins/marketplace")',
       '@router.post("/plugins/install-plan")',
       '@router.get("/plugins/installations")',
+      '@router.get("/chat-project-bridge")',
+      '@router.get("/chat-project-bridge/blueprint")',
+      '@router.post("/chat-project-bridge/links")',
+      '@router.post("/chat-project-bridge/message-tasks")',
+      '@router.post("/chat-project-bridge/mentions")',
       '@router.get("/projects/{project_id}/dna/blueprint")',
       '@router.get("/projects/{project_id}/dna")',
       '@router.put("/projects/{project_id}/dna")',
@@ -745,6 +746,8 @@ const checks: Check[] = [
       "model_conversion_plan_built",
       "plugin_marketplace_catalog_built",
       "plugin_install_plan_built",
+      "chat_project_link_created",
+      "message_task_created",
       "cache_load_plan_built",
       "performance_snapshot_collected",
       "decision_explanation_built",
@@ -1716,6 +1719,11 @@ const checks: Check[] = [
       '"intelligent_preload_queue_contract"',
       '"project_session_contract"',
       '"direct_project_expert_session"',
+      '"chat_project_bridge"',
+      '"message_to_task_service"',
+      '"project_mention_service"',
+      '"chat_approval_request_bridge"',
+      '"/api/cognix/chat-project-bridge/message-tasks"',
       '"context_boundary_contract"',
       '"raw_history_boundary"',
       '"model_registration_gate"',
@@ -2457,6 +2465,43 @@ const checks: Check[] = [
       '"modelLoad": False',
       '"generation": False',
       '"contextMutation": False',
+    ],
+  },
+  {
+    file: "../backend/core/cognix/chat_project_bridge.py",
+    includes: [
+      'COGNIX_CHAT_PROJECT_BRIDGE_VERSION = "cognix_chat_project_bridge_v1"',
+      'COGNIX_MESSAGE_TO_TASK_VERSION = "cognix_message_to_task_service_v1"',
+      'COGNIX_PROJECT_MENTION_VERSION = "cognix_project_mention_service_v1"',
+      "ChatProjectBridge",
+      "MessageToTaskService",
+      "ProjectMentionService",
+      "def build_chat_project_bridge_blueprint",
+      "def build_thread_link_plan",
+      "def build_message_task_plan",
+      "def extract_project_mentions",
+      '"chat_project_links"',
+      '"message_tasks"',
+      '"modelCallAllowed": False',
+      '"networkCallAllowed": False',
+      '"frontendOnlyOverlay": False',
+      '"chatProjectLinkWrite": False',
+      '"messageTaskWrite": False',
+      '"approvalRequestWrite": False',
+    ],
+  },
+  {
+    file: "../backend/storage/cognix_db.py",
+    includes: [
+      "CREATE TABLE IF NOT EXISTS chat_project_links",
+      "CREATE TABLE IF NOT EXISTS message_tasks",
+      "def create_chat_project_link",
+      "def list_chat_project_links",
+      "def create_message_task",
+      "def list_message_tasks",
+      "idx_chat_project_links_username_project",
+      "idx_message_tasks_username_project",
+      "approval_request_id",
     ],
   },
   {
@@ -3502,6 +3547,43 @@ const checks: Check[] = [
     ],
   },
   {
+    file: "src/features/chat/api/chat-api.ts",
+    includes: [
+      "export interface ChatProjectBridgeLink",
+      "export interface MessageTaskRecord",
+      "export async function getChatProjectBridge",
+      "export async function createChatProjectBridgeLink",
+      "export async function createMessageTask",
+      "`/api/cognix/chat-project-bridge${",
+      '"/api/cognix/chat-project-bridge/links"',
+      '"/api/cognix/chat-project-bridge/message-tasks"',
+    ],
+  },
+  {
+    file: "src/features/chat/projects-page.tsx",
+    includes: [
+      "getChatProjectBridge",
+      "createChatProjectBridgeLink",
+      "createMessageTask",
+      "bridgeByProject",
+      "Link latest chat",
+      "Request approval",
+      "Message tasks",
+    ],
+  },
+  {
+    file: "../backend/tests/test_cognix_chat_project_bridge.py",
+    includes: [
+      "test_chat_project_bridge_blueprint_declares_native_services",
+      "test_chat_project_bridge_endpoint_creates_link_task_and_approval",
+      "test_chat_project_bridge_rejects_cross_user_thread",
+      '"/api/cognix/chat-project-bridge/links"',
+      '"/api/cognix/chat-project-bridge/message-tasks"',
+      '"chat_project_links"',
+      '"message_tasks"',
+    ],
+  },
+  {
     file: "../backend/tests/test_middleware.py",
     includes: [
       "test_ceo_health_unlocks_cloud_training_without_local_gpu",
@@ -3559,22 +3641,33 @@ for (const check of scopedChecks) {
   const startIndex = content.indexOf(check.start);
 
   if (startIndex === -1) {
-    failures.push(`${check.file}: missing scoped start ${JSON.stringify(check.start)}`);
+    failures.push(
+      `${check.file}: missing scoped start ${JSON.stringify(check.start)}`,
+    );
     continue;
   }
 
-  const endIndex = check.end ? content.indexOf(check.end, startIndex + check.start.length) : -1;
-  const scopedContent = content.slice(startIndex, endIndex === -1 ? undefined : endIndex);
+  const endIndex = check.end
+    ? content.indexOf(check.end, startIndex + check.start.length)
+    : -1;
+  const scopedContent = content.slice(
+    startIndex,
+    endIndex === -1 ? undefined : endIndex,
+  );
 
   for (const expected of check.includes ?? []) {
     if (!scopedContent.includes(expected)) {
-      failures.push(`${check.file}: scoped block missing ${JSON.stringify(expected)}`);
+      failures.push(
+        `${check.file}: scoped block missing ${JSON.stringify(expected)}`,
+      );
     }
   }
 
   for (const forbidden of check.excludes ?? []) {
     if (scopedContent.includes(forbidden)) {
-      failures.push(`${check.file}: scoped block contains forbidden ${JSON.stringify(forbidden)}`);
+      failures.push(
+        `${check.file}: scoped block contains forbidden ${JSON.stringify(forbidden)}`,
+      );
     }
   }
 }
