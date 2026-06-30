@@ -5509,6 +5509,27 @@ async def integrations_status(current_subject: str = Depends(get_current_jwt_sub
     )
 
 
+@router.get("/integrations/roadmap-readiness")
+async def integrations_roadmap_readiness(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    is_admin = auth_storage.is_admin(current_subject)
+    has_developer_mode = cognix_db.user_has_permission(
+        current_subject,
+        cognix_db.DEVELOPER_MODE_PERMISSION,
+    )
+    readiness = cognix_integration_manager.build_connector_roadmap_readiness(
+        username = current_subject,
+        is_admin = is_admin,
+        has_developer_mode = has_developer_mode,
+        granted_permissions = _granted_permission_keys(current_subject),
+    )
+    return {
+        "username": current_subject,
+        "connectorRoadmapReadiness": readiness,
+        "sideEffects": readiness.get("sideEffects", {}),
+        "plannerVersion": cognix_integration_manager.COGNIX_CONNECTOR_ROADMAP_READINESS_VERSION,
+    }
+
+
 @router.post("/integrations/plan")
 async def plan_integration(
     payload: IntegrationPlanRequest,

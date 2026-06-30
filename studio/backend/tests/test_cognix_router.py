@@ -9323,12 +9323,15 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "enterprise_connector_manifests" in modules["cognix-integrations"]["capabilities"]
     assert "education_connector_manifests" in modules["cognix-integrations"]["capabilities"]
     assert "business_system_connector_manifests" in modules["cognix-integrations"]["capabilities"]
+    assert "connector_roadmap_readiness" in modules["cognix-integrations"]["capabilities"]
+    assert "mvp_connector_phase_mapping" in modules["cognix-integrations"]["capabilities"]
     assert {"calculator", "physics-solver", "latex-renderer", "sharepoint", "microsoft-teams", "slack", "moodle", "crm", "erp"}.issubset(
         set(modules["cognix-integrations"]["tools"])
     )
     assert "/api/cognix/integrations/plan" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/integrations/preflight-contract" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/integrations/activation-contract" in modules["cognix-integrations"]["routes"]
+    assert "/api/cognix/integrations/roadmap-readiness" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/tools/permission-matrix" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/tools/latex/render" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/tools/plan" in modules["cognix-integrations"]["routes"]
@@ -10509,6 +10512,75 @@ def test_integration_manager_summarizes_connectors_without_secret_access():
     assert integrations["sharepoint"]["maxRiskLevel"] == "critical"
     assert integrations["moodle"]["secretState"] == "required_unverified"
     assert integrations["erp"]["maxRiskLevel"] == "critical"
+
+
+def test_connector_roadmap_readiness_maps_mvp_connectors_without_execution():
+    readiness = cognix_integration_manager.build_connector_roadmap_readiness(
+        username = "alice",
+        is_admin = False,
+        has_developer_mode = True,
+        granted_permissions = {"github:read", "drive:read", "notion:read", "moodle:read", "slack:read", "teams:read"},
+    )
+
+    assert readiness["connectorRoadmapReadinessVersion"] == "cognix_connector_roadmap_readiness_v1"
+    assert readiness["mode"] == "connector_roadmap_readiness_dry_run"
+    assert readiness["sourceOfTruth"] == "roadmap_phase_7_connectors"
+    assert readiness["summary"]["roadmapConnectorCount"] == 6
+    assert readiness["summary"]["declaredConnectorCount"] == 6
+    assert readiness["summary"]["readyForMvpConnectorLayer"] is True
+    assert readiness["summary"]["readyForExternalExecution"] is False
+    connectors = {item["id"]: item for item in readiness["connectors"]}
+    assert set(connectors) == {"github", "google-drive", "microsoft-365", "notion", "moodle", "slack-teams"}
+    assert connectors["github"]["status"] == "manifest_ready_activation_pending"
+    assert connectors["github"]["readyForMvpConnectorLayer"] is True
+    assert connectors["github"]["readyForExecution"] is False
+    assert "github" in connectors["github"]["declaredToolIds"]
+    assert "server_secret_unverified" in connectors["github"]["activationBlockers"]
+    assert connectors["microsoft-365"]["declaredToolIds"] == ["microsoft-365", "sharepoint"]
+    assert connectors["slack-teams"]["declaredToolIds"] == ["slack", "microsoft-teams"]
+    assert connectors["slack-teams"]["writeActionCount"] >= 2
+    assert connectors["moodle"]["maxRiskLevel"] in {"high", "critical"}
+    assert all(item["securityContract"]["auditRequiredForAllActions"] for item in connectors.values())
+    assert all(item["securityContract"]["rateLimitsDeclaredForAllActions"] for item in connectors.values())
+    assert all(item["securityContract"]["humanConfirmationForWrites"] for item in connectors.values())
+    assert readiness["policies"]["frontendDirectToolCallAllowed"] is False
+    assert readiness["policies"]["networkToolCallAllowedHere"] is False
+    assert readiness["policies"]["toolExecutionAllowedHere"] is False
+    assert readiness["sideEffects"]["secretRead"] is False
+    assert readiness["sideEffects"]["toolExecution"] is False
+    assert readiness["sideEffects"]["networkToolCall"] is False
+
+
+def test_connector_roadmap_readiness_endpoint_is_user_scoped_and_read_only():
+    seed_accounts()
+    for permission_key in (
+        "github:read",
+        "drive:read",
+        "notion:read",
+        "moodle:read",
+        "slack:read",
+        "teams:read",
+    ):
+        cognix_db.grant_user_permission(
+            "alice",
+            permission_key,
+            granted_by = storage.DEFAULT_ADMIN_USERNAME,
+        )
+
+    body = run_async(cognix_routes.integrations_roadmap_readiness(current_subject = "alice"))
+
+    readiness = body["connectorRoadmapReadiness"]
+    assert body["plannerVersion"] == "cognix_connector_roadmap_readiness_v1"
+    assert body["username"] == "alice"
+    assert readiness["username"] == "alice"
+    assert readiness["summary"]["roadmapConnectorCount"] == 6
+    assert readiness["summary"]["missingManifestCount"] == 0
+    assert readiness["summary"]["readyForMvpConnectorLayer"] is True
+    assert body["sideEffects"]["secretRead"] is False
+    assert body["sideEffects"]["secretWrite"] is False
+    assert body["sideEffects"]["toolExecution"] is False
+    assert body["sideEffects"]["networkToolCall"] is False
+    assert body["sideEffects"]["auditWrite"] is False
 
 
 def test_enterprise_tool_action_plan_blocks_critical_exports_without_execution():
@@ -11862,6 +11934,10 @@ def test_ceo_cloud_training_access_does_not_require_local_amd_or_nvidia_gpu():
     assert plan["method"]["requiresLocalGpu"] is False
     assert plan["resourceTargetPlan"]["cloudTrainingAllowed"] is True
     assert plan["resourceTargetPlan"]["localGpuBypassAllowed"] is True
+    assert plan["resourceTargetPlan"]["recommendedTargetId"] == "google_colab"
+    assert {"google_colab", "kaggle", "cloud_gpu"}.issubset(
+        {item["id"] for item in plan["resourceTargetPlan"]["availableTargets"]}
+    )
     assert cloud_alias_plan["method"]["type"] == "cloud_qlora"
     assert cloud_alias_plan["resourceTargetPlan"]["localGpuBypassAllowed"] is True
 
