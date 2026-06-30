@@ -1176,6 +1176,7 @@ class CostOptimizationPlanRequest(BaseModel):
     budget_usd: float | None = Field(None, alias = "budgetUsd")
     allow_cloud_when_sensitive: bool = Field(False, alias = "allowCloudWhenSensitive")
     provider_profiles: list[dict[str, Any]] | None = Field(None, alias = "providerProfiles")
+    enforce_quotas: bool = Field(True, alias = "enforceQuotas")
     store_log: bool = Field(True, alias = "storeLog")
 
 
@@ -7916,6 +7917,30 @@ async def cost_optimization_plan(
         allow_cloud_when_sensitive = payload.allow_cloud_when_sensitive,
         provider_profiles = payload.provider_profiles,
     )
+    budget_guard = (
+        cognix_cost_optimizer.build_execution_budget_guard(
+            username = current_subject,
+            cost_plan = plan,
+            quota_matrix = _build_admin_limits_bundle()["matrix"],
+        )
+        if payload.enforce_quotas
+        else None
+    )
+    if budget_guard is not None:
+        plan = {
+            **plan,
+            "budgetGuard": budget_guard,
+            "guardedDecision": budget_guard.get("guardedDecision"),
+            "policy": {
+                **plan.get("policy", {}),
+                "quotaGuardApplied": True,
+                "quotaUsageRecordedHere": False,
+            },
+            "sideEffects": {
+                **plan.get("sideEffects", {}),
+                "quotaUsageWrite": False,
+            },
+        }
     stored_profiles = cognix_db.upsert_provider_profiles(
         plan.get("providerPricingStore", {}).get("profiles", [])
     )
@@ -7932,6 +7957,7 @@ async def cost_optimization_plan(
         **plan.get("sideEffects", {}),
         "providerProfileWrite": bool(stored_profiles),
         "executionCostLogWrite": cost_log is not None,
+        "quotaUsageWrite": False,
         "auditWrite": True,
     }
     audit = cognix_db.create_audit_log(
@@ -7949,6 +7975,9 @@ async def cost_optimization_plan(
             "priority": plan.get("priority"),
             "selectedProviderId": plan.get("decision", {}).get("selectedProviderId"),
             "selectedExecutionTarget": plan.get("decision", {}).get("selectedExecutionTarget"),
+            "guardedSelectedProviderId": plan.get("guardedDecision", {}).get("selectedProviderId"),
+            "guardedSelectedExecutionTarget": plan.get("guardedDecision", {}).get("selectedExecutionTarget"),
+            "budgetGuardStatus": (budget_guard or {}).get("status"),
             "estimatedCostUsd": plan.get("decision", {}).get("estimatedCostUsd"),
             "cloudBlockedBecauseSensitive": plan.get("policy", {}).get("cloudBlockedBecauseSensitive"),
             "sideEffects": side_effects,

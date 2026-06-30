@@ -19,6 +19,7 @@ COGNIX_COST_OPTIMIZER_VERSION = "cognix_cost_optimizer_v1"
 COGNIX_PROVIDER_PRICING_STORE_VERSION = "cognix_provider_pricing_store_v1"
 COGNIX_EXECUTION_PLANNER_VERSION = "cognix_execution_planner_v1"
 COGNIX_PRIVACY_POLICY_VERSION = "cognix_privacy_policy_v1"
+COGNIX_EXECUTION_BUDGET_GUARD_VERSION = "cognix_execution_budget_guard_v1"
 
 PRIORITY_ALIASES = {
     "balanced": "balanced",
@@ -173,6 +174,60 @@ def _as_int(value: Any, default: int, *, minimum: int, maximum: int) -> int:
     except (TypeError, ValueError):
         parsed = default
     return max(minimum, min(maximum, parsed))
+
+
+def _quota_for_user(quota_matrix: dict[str, Any] | None, username: str, quota_key: str) -> dict[str, Any]:
+    normalized_username = _normalize(username).casefold()
+    for item in _as_dict(quota_matrix).get("users") or []:
+        if not isinstance(item, dict):
+            continue
+        if _normalize(item.get("username")).casefold() != normalized_username:
+            continue
+        quota = _as_dict(_as_dict(item.get("quotas")).get(quota_key))
+        if quota:
+            return quota
+    return {}
+
+
+def _quota_remaining(quota: dict[str, Any]) -> float | None:
+    if not quota:
+        return None
+    return _as_float(quota.get("remainingValue"), _as_float(quota.get("quotaValue")))
+
+
+def _quota_allowed_for_units(quota: dict[str, Any], requested_units: float) -> bool:
+    if not quota:
+        return True
+    if quota.get("unit") == "boolean":
+        return _as_float(quota.get("quotaValue")) >= 1
+    remaining = _quota_remaining(quota)
+    return remaining is None or remaining >= max(0.0, requested_units)
+
+
+def _quota_status(quota: dict[str, Any], requested_units: float) -> dict[str, Any]:
+    remaining_before = _quota_remaining(quota)
+    requested = max(0.0, requested_units)
+    remaining_after = None if remaining_before is None else round(remaining_before - requested, 4)
+    allowed = _quota_allowed_for_units(quota, requested)
+    status = "allowed" if allowed else "quota_exceeded"
+    if quota.get("unit") == "boolean":
+        status = "allowed" if allowed else "blocked"
+    elif allowed and remaining_after is not None and _as_float(quota.get("quotaValue")) > 0:
+        if remaining_after <= _as_float(quota.get("quotaValue")) * 0.1:
+            status = "warning"
+    return {
+        "quotaKey": quota.get("quotaKey"),
+        "source": quota.get("source"),
+        "unit": quota.get("unit"),
+        "period": quota.get("period"),
+        "quotaValue": _as_float(quota.get("quotaValue")),
+        "usedValue": _as_float(quota.get("usedValue")),
+        "remainingBefore": remaining_before,
+        "requestedUnits": requested,
+        "remainingAfter": remaining_after,
+        "allowed": allowed,
+        "status": status,
+    }
 
 
 def _normalize(value: Any) -> str:
@@ -546,5 +601,128 @@ def build_cost_optimization_plan(
             "runtimeConfigWrite": False,
             "providerProfileWrite": False,
             "executionCostLogWrite": False,
+        },
+    }
+
+
+def build_execution_budget_guard(
+    *,
+    username: str,
+    cost_plan: dict[str, Any],
+    quota_matrix: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Apply native quota gates to a dry-run cost plan without recording usage."""
+
+    task = _as_dict(cost_plan.get("task"))
+    requested_tokens = _as_float(task.get("estimatedTotalTokens"))
+    token_quota = _quota_for_user(quota_matrix, username, "tokens_daily")
+    cloud_quota = _quota_for_user(quota_matrix, username, "cloud_model_access")
+    token_status = _quota_status(token_quota, requested_tokens) if token_quota else {
+        "quotaKey": "tokens_daily",
+        "allowed": True,
+        "status": "not_declared",
+        "requestedUnits": requested_tokens,
+    }
+    cloud_status = _quota_status(cloud_quota, 1.0) if cloud_quota else {
+        "quotaKey": "cloud_model_access",
+        "allowed": True,
+        "status": "not_declared",
+        "requestedUnits": 1.0,
+    }
+
+    guarded_candidates: list[dict[str, Any]] = []
+    for candidate in cost_plan.get("candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        guarded = dict(candidate)
+        blocked_reasons = [
+            str(item)
+            for item in guarded.get("blockedReasons") or []
+            if str(item).strip()
+        ]
+        if not token_status.get("allowed"):
+            blocked_reasons.append("tokens_daily_quota_exceeded")
+        if guarded.get("executionTarget") == "cloud_api" and not cloud_status.get("allowed"):
+            blocked_reasons.append("cloud_model_access_quota_blocked")
+        guarded["blockedReasons"] = sorted(set(blocked_reasons))
+        guarded["quotaGuardStatus"] = "blocked" if guarded["blockedReasons"] else "allowed"
+        guarded["status"] = "blocked" if guarded["blockedReasons"] else guarded.get("status", "candidate")
+        guarded_candidates.append(guarded)
+
+    allowed_candidates = [
+        item
+        for item in guarded_candidates
+        if item.get("quotaGuardStatus") == "allowed" and item.get("status") != "blocked"
+    ]
+    original_decision = _as_dict(cost_plan.get("decision"))
+    original_provider = str(original_decision.get("selectedProviderId") or "")
+    original_candidate = next(
+        (item for item in guarded_candidates if item.get("providerId") == original_provider),
+        guarded_candidates[0] if guarded_candidates else {},
+    )
+    guarded_selection = (
+        max(allowed_candidates, key = lambda item: _as_float(item.get("decisionScore")))
+        if allowed_candidates
+        else original_candidate
+    )
+    selected_blocked_reasons = list(guarded_selection.get("blockedReasons") or [])
+    allowed_to_execute = bool(guarded_selection) and not selected_blocked_reasons and token_status.get("allowed") is not False
+    selected_changed = bool(
+        guarded_selection
+        and original_provider
+        and guarded_selection.get("providerId") != original_provider
+    )
+    blocking_reasons = sorted(
+        {
+            reason
+            for item in guarded_candidates
+            for reason in item.get("blockedReasons") or []
+            if reason in {"tokens_daily_quota_exceeded", "cloud_model_access_quota_blocked"}
+        }
+    )
+    return {
+        "budgetGuardVersion": COGNIX_EXECUTION_BUDGET_GUARD_VERSION,
+        "mode": "quota_guard_dry_run",
+        "username": username,
+        "quotaKeysChecked": ["tokens_daily", "cloud_model_access"],
+        "status": "allowed" if allowed_to_execute else "blocked_by_quota",
+        "allowedToExecute": allowed_to_execute,
+        "blockingReasons": blocking_reasons,
+        "tokenQuota": token_status,
+        "cloudQuota": cloud_status,
+        "originalDecision": {
+            "selectedProviderId": original_decision.get("selectedProviderId"),
+            "selectedExecutionTarget": original_decision.get("selectedExecutionTarget"),
+            "estimatedCostUsd": original_decision.get("estimatedCostUsd"),
+            "estimatedLatencyMs": original_decision.get("estimatedLatencyMs"),
+        },
+        "guardedDecision": {
+            "selectedProviderId": guarded_selection.get("providerId"),
+            "selectedExecutionTarget": guarded_selection.get("executionTarget"),
+            "providerLabel": guarded_selection.get("displayName"),
+            "estimatedCostUsd": _as_dict(guarded_selection.get("costEstimate")).get("estimatedCostUsd"),
+            "estimatedLatencyMs": _as_dict(guarded_selection.get("latencyEstimate")).get("estimatedLatencyMs"),
+            "decisionScore": guarded_selection.get("decisionScore"),
+            "quotaGuardStatus": guarded_selection.get("quotaGuardStatus"),
+            "blockedReasons": selected_blocked_reasons,
+            "selectedExecutionTargetChanged": selected_changed,
+        },
+        "guardedCandidates": guarded_candidates,
+        "policy": {
+            "tokensQuotaRequiredBeforeExecution": True,
+            "cloudQuotaRequiredBeforeCloudProvider": True,
+            "quotaUsageRecordedHere": False,
+            "providerCallAllowedHere": False,
+            "billingMutationAllowedHere": False,
+            "frontendDirectProviderCallAllowed": False,
+        },
+        "sideEffects": {
+            "quotaUsageWrite": False,
+            "providerCall": False,
+            "billingMutation": False,
+            "modelLoad": False,
+            "generation": False,
+            "runtimeConfigWrite": False,
+            "networkCall": False,
         },
     }

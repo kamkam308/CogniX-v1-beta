@@ -3257,6 +3257,91 @@ def test_cost_optimizer_prefers_cloud_for_speed_when_data_is_not_sensitive_witho
     assert plan["sideEffects"]["runtimeConfigWrite"] is False
 
 
+def test_execution_budget_guard_blocks_cloud_without_quota_and_falls_back_without_provider_call():
+    plan = cognix_cost_optimizer.build_cost_optimization_plan(
+        objective = "Repondre vite a une question publique de demonstration.",
+        hardware = stub_hardware_profile(),
+        project_type = "demo",
+        priority = "speed",
+        sensitivity_level = "public",
+        expected_input_tokens = 8000,
+        expected_output_tokens = 4000,
+        message_count = 3,
+    )
+    quota_matrix = cognix_admin_limits.build_quota_matrix(
+        users = [{"username": "alice", "role": "user"}],
+        user_quotas = [],
+        role_quotas = [],
+        quota_overrides = [],
+        quota_usage = [],
+        legacy_limits = [],
+    )
+    guard = cognix_cost_optimizer.build_execution_budget_guard(
+        username = "alice",
+        cost_plan = plan,
+        quota_matrix = quota_matrix,
+    )
+
+    assert plan["decision"]["selectedProviderId"] == "cloud-fast-api"
+    assert guard["budgetGuardVersion"] == "cognix_execution_budget_guard_v1"
+    assert guard["mode"] == "quota_guard_dry_run"
+    assert guard["allowedToExecute"] is True
+    assert guard["cloudQuota"]["allowed"] is False
+    assert guard["guardedDecision"]["selectedProviderId"] != "cloud-fast-api"
+    assert guard["guardedDecision"]["selectedExecutionTarget"] != "cloud_api"
+    assert guard["guardedDecision"]["selectedExecutionTargetChanged"] is True
+    cloud_candidate = next(item for item in guard["guardedCandidates"] if item["providerId"] == "cloud-fast-api")
+    assert "cloud_model_access_quota_blocked" in cloud_candidate["blockedReasons"]
+    assert guard["policy"]["providerCallAllowedHere"] is False
+    assert guard["sideEffects"]["quotaUsageWrite"] is False
+    assert guard["sideEffects"]["providerCall"] is False
+    assert guard["sideEffects"]["billingMutation"] is False
+
+
+def test_execution_budget_guard_blocks_all_targets_when_daily_token_quota_is_exceeded():
+    plan = cognix_cost_optimizer.build_cost_optimization_plan(
+        objective = "Analyser un gros dossier de recherche.",
+        hardware = stub_hardware_profile(),
+        project_type = "research",
+        priority = "balanced",
+        sensitivity_level = "public",
+        expected_input_tokens = 100,
+        expected_output_tokens = 40,
+    )
+    quota_matrix = cognix_admin_limits.build_quota_matrix(
+        users = [{"username": "alice", "role": "user"}],
+        user_quotas = [
+            {
+                "username": "alice",
+                "quota_key": "tokens_daily",
+                "quota_value": 100,
+                "unit": "tokens",
+                "period": "day",
+                "status": "active",
+            }
+        ],
+        role_quotas = [],
+        quota_overrides = [],
+        quota_usage = [{"username": "alice", "quota_key": "tokens_daily", "used_value": 80}],
+        legacy_limits = [],
+    )
+
+    guard = cognix_cost_optimizer.build_execution_budget_guard(
+        username = "alice",
+        cost_plan = plan,
+        quota_matrix = quota_matrix,
+    )
+
+    assert guard["allowedToExecute"] is False
+    assert guard["status"] == "blocked_by_quota"
+    assert guard["tokenQuota"]["remainingBefore"] == 20
+    assert guard["tokenQuota"]["remainingAfter"] == -120
+    assert "tokens_daily_quota_exceeded" in guard["blockingReasons"]
+    assert all("tokens_daily_quota_exceeded" in item["blockedReasons"] for item in guard["guardedCandidates"])
+    assert guard["sideEffects"]["generation"] is False
+    assert guard["sideEffects"]["quotaUsageWrite"] is False
+
+
 def test_cost_optimization_endpoint_stores_execution_cost_log_and_logs_audit(monkeypatch):
     seed_accounts()
     monkeypatch.setattr(
@@ -3299,6 +3384,44 @@ def test_cost_optimization_endpoint_stores_execution_cost_log_and_logs_audit(mon
     assert log["action"] == "cost_optimization_plan_built"
     assert log["metadata"]["selectedProviderId"] == plan["decision"]["selectedProviderId"]
     assert log["metadata"]["sideEffects"]["providerCall"] is False
+
+
+def test_cost_optimization_endpoint_applies_native_quota_guard_before_cloud_execution(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_routes.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+
+    body = run_async(
+        cognix_routes.cost_optimization_plan(
+            cognix_routes.CostOptimizationPlanRequest(
+                objective = "Repondre vite a une question publique de demonstration.",
+                project_type = "demo",
+                priority = "speed",
+                sensitivity_level = "public",
+                expected_input_tokens = 8000,
+                expected_output_tokens = 4000,
+                store_log = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    plan = body["costOptimizationPlan"]
+    assert plan["decision"]["selectedProviderId"] == "cloud-fast-api"
+    assert plan["budgetGuard"]["cloudQuota"]["allowed"] is False
+    assert plan["budgetGuard"]["guardedDecision"]["selectedExecutionTarget"] != "cloud_api"
+    assert plan["guardedDecision"] == plan["budgetGuard"]["guardedDecision"]
+    assert body["costLog"]["decision"]["budgetGuard"]["budgetGuardVersion"] == "cognix_execution_budget_guard_v1"
+    assert body["sideEffects"]["quotaUsageWrite"] is False
+    assert body["sideEffects"]["providerCall"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["metadata"]["budgetGuardStatus"] == "allowed"
+    assert log["metadata"]["guardedSelectedExecutionTarget"] != "cloud_api"
 
 
 def test_runtime_adapter_registry_and_plan_select_ollama_without_side_effects():
@@ -9285,6 +9408,9 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "model_variant_registry" in modules["cognix-optimization-engine"]["capabilities"]
     assert "cost_optimizer" in modules["cognix-optimization-engine"]["capabilities"]
     assert "provider_pricing_store" in modules["cognix-optimization-engine"]["capabilities"]
+    assert "execution_budget_guard" in modules["cognix-optimization-engine"]["capabilities"]
+    assert "cloud_quota_guard" in modules["cognix-optimization-engine"]["capabilities"]
+    assert "token_quota_guard" in modules["cognix-optimization-engine"]["capabilities"]
     assert "privacy_aware_provider_selection" in modules["cognix-optimization-engine"]["capabilities"]
     assert "/api/cognix/quantization/plan" in modules["cognix-optimization-engine"]["routes"]
     assert "/api/cognix/quantization/variants" in modules["cognix-optimization-engine"]["routes"]
