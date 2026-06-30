@@ -1194,6 +1194,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
             "cloud_training_job_specs",
             "rag_indexing_job_specs",
             "connector_sync_job_specs",
+            "tool_execution_job_specs",
             "benchmark_job_planning",
             "batching_experiment_job_specs",
             "enterprise_throughput_queue",

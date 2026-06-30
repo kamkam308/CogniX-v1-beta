@@ -8013,6 +8013,9 @@ def test_worker_queue_registry_declares_cloud_training_without_execution():
     assert "simulation_run" in queues["local_probe"]["acceptedJobTypes"]
     assert "sandbox_experiment" in queues["local_probe"]["acceptedJobTypes"]
     assert "rag_connector_sync" in queues["io_bound"]["acceptedJobTypes"]
+    assert "tool_execution" in queues
+    assert "tool_execution" in queues["tool_execution"]["acceptedJobTypes"]
+    assert queues["tool_execution"]["requiresHumanConfirmation"] is True
     assert "distillation_job" in queues["gpu_long_running"]["acceptedJobTypes"]
     assert "cloud_training" in queues
     assert "cloud_training_job" in queues["cloud_training"]["acceptedJobTypes"]
@@ -8134,6 +8137,78 @@ def test_worker_job_spec_plan_materializes_connector_sync_without_network_or_enq
     assert job_contracts["rag_connector_sync"]["readyForQueueReview"] is True
     assert all(gate["passed"] for gate in job_contracts["rag_connector_sync"]["gates"])
     assert job_contracts["rag_connector_sync"]["payloadBoundary"]["secretValuesIncluded"] is False
+
+
+def test_worker_job_spec_plan_materializes_tool_execution_handoff_without_enqueuing_or_payload_storage():
+    tool_plan = cognix_tool_registry.plan_tool_action(
+        tool_id = "codex-secure-agent",
+        action_id = "plan_feature",
+        username = "alice",
+        has_developer_mode = True,
+        granted_permissions = set(),
+    )
+    tool_plan = cognix_tool_registry.apply_rate_limit_result(
+        tool_plan,
+        {
+            "allowed": True,
+            "remaining": 19,
+            "resetAt": "2026-06-29T00:00:00Z",
+        },
+    )
+    handoff = cognix_tool_registry.build_tool_execution_handoff(
+        plan = tool_plan,
+        request_id = "req_tool_worker",
+    )
+
+    spec_plan = cognix_worker_queue.build_worker_job_spec_plan(
+        objective = "Planifier une action outil via worker",
+        project_id = "project-tools",
+        worker_queue_plan = {},
+        tool_execution_handoff = handoff,
+    )
+
+    assert handoff["readyForExecutorReview"] is True
+    assert spec_plan["jobSpecVersion"] == "cognix_worker_job_spec_v1"
+    assert spec_plan["summary"]["safeToEnqueueAutomatically"] is False
+    assert spec_plan["sideEffects"]["jobEnqueue"] is False
+    assert spec_plan["sideEffects"]["toolExecution"] is False
+    assert spec_plan["sideEffects"]["externalWrite"] is False
+    assert spec_plan["sideEffects"]["networkToolCall"] is False
+    assert spec_plan["sideEffects"]["secretRead"] is False
+
+    specs = {item["jobType"]: item for item in spec_plan["jobSpecs"]}
+    assert "tool_execution" in specs
+    tool_spec = specs["tool_execution"]
+    assert tool_spec["queueId"] == "tool_execution"
+    assert tool_spec["sourcePlanStatus"] == "ready_for_executor_review"
+    assert tool_spec["requiresHumanConfirmation"] is True
+    assert tool_spec["willEnqueue"] is False
+    assert tool_spec["willExecute"] is False
+    assert tool_spec["payloadSummary"]["handoffId"] == handoff["handoffId"]
+    assert tool_spec["payloadSummary"]["toolId"] == "codex-secure-agent"
+    assert tool_spec["payloadSummary"]["actionId"] == "plan_feature"
+    assert tool_spec["payloadSummary"]["readyForExecutorReview"] is True
+    assert tool_spec["payloadSummary"]["readyForJobEnqueue"] is False
+    assert tool_spec["payloadSummary"]["rawPayloadIncluded"] is False
+    assert tool_spec["payloadSummary"]["rawToolPayloadIncluded"] is False
+    assert tool_spec["payloadSummary"]["secretValuesIncluded"] is False
+    assert tool_spec["payloadSummary"]["rawSecretsIncluded"] is False
+    assert "access_token" not in str(tool_spec["payloadSummary"]).lower()
+
+    enqueue_contract = cognix_worker_queue.build_worker_enqueue_contract(
+        job_spec_plan = spec_plan,
+        confirmation_id = "conf_tool_worker",
+        request_id = "req_tool_worker",
+    )
+    job_contracts = {item["jobType"]: item for item in enqueue_contract["jobContracts"]}
+    assert enqueue_contract["readyForQueueReview"] is True
+    assert enqueue_contract["readyForJobEnqueue"] is False
+    assert enqueue_contract["sideEffects"]["jobEnqueue"] is False
+    assert enqueue_contract["sideEffects"]["toolExecution"] is False
+    assert job_contracts["tool_execution"]["readyForQueueReview"] is True
+    assert all(gate["passed"] for gate in job_contracts["tool_execution"]["gates"])
+    assert job_contracts["tool_execution"]["payloadBoundary"]["rawPayloadIncluded"] is False
+    assert job_contracts["tool_execution"]["payloadBoundary"]["secretValuesIncluded"] is False
 
 
 def test_worker_enqueue_contract_adds_retry_dead_letter_and_idempotency_without_enqueueing():
@@ -8369,6 +8444,70 @@ def test_worker_job_spec_endpoint_accepts_connector_sync_plan_without_raw_filter
     assert log["action"] == "worker_job_spec_plan_built"
     assert "rag_connector_sync" in log["metadata"]["jobTypes"]
     assert "private-folder" not in log["metadataJson"]
+
+
+def test_worker_job_spec_endpoint_accepts_tool_execution_handoff_without_raw_payload(monkeypatch):
+    seed_accounts()
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_hardware,
+        "get_hardware_profile",
+        stub_hardware_profile,
+    )
+    monkeypatch.setattr(
+        cognix_orchestrator.cognix_recommender,
+        "build_model_recommendation",
+        stub_recommendation,
+    )
+    tool_plan = cognix_tool_registry.plan_tool_action(
+        tool_id = "codex-secure-agent",
+        action_id = "plan_feature",
+        username = "alice",
+        has_developer_mode = True,
+        granted_permissions = set(),
+    )
+    tool_plan = cognix_tool_registry.apply_rate_limit_result(
+        tool_plan,
+        {
+            "allowed": True,
+            "remaining": 19,
+            "resetAt": "2026-06-29T00:00:00Z",
+        },
+    )
+    handoff = cognix_tool_registry.build_tool_execution_handoff(
+        plan = tool_plan,
+        request_id = "req_tool_worker_endpoint",
+    )
+
+    body = run_async(
+        cognix_routes.worker_job_spec_plan(
+            cognix_routes.WorkerJobSpecPlanRequest(
+                objective = "Planifier une action outil via worker",
+                project_id = "project-tools",
+                toolExecutionHandoff = handoff,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    specs = {item["jobType"]: item for item in body["workerJobSpecPlan"]["jobSpecs"]}
+    assert body["auditLogId"].startswith("aud_")
+    assert "tool_execution" in specs
+    assert specs["tool_execution"]["queueId"] == "tool_execution"
+    assert specs["tool_execution"]["payloadSummary"]["toolId"] == "codex-secure-agent"
+    assert specs["tool_execution"]["payloadSummary"]["rawPayloadIncluded"] is False
+    assert specs["tool_execution"]["payloadSummary"]["rawToolPayloadIncluded"] is False
+    assert specs["tool_execution"]["payloadSummary"]["secretValuesIncluded"] is False
+    assert body["sideEffects"]["jobEnqueue"] is False
+    assert body["sideEffects"]["toolExecution"] is False
+    assert body["sideEffects"]["secretRead"] is False
+
+    admin_read = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    log = admin_read["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "worker_job_spec_plan_built"
+    assert "tool_execution" in log["metadata"]["jobTypes"]
+    assert "access_token" not in log["metadataJson"].lower()
+    assert "secret_value" not in log["metadataJson"].lower()
 
 
 def test_worker_enqueue_contract_endpoint_logs_retry_policy_without_enqueueing(monkeypatch):
@@ -9915,6 +10054,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "cloud_training_job_specs" in modules["cognix-worker-queue"]["capabilities"]
     assert "rag_indexing_job_specs" in modules["cognix-worker-queue"]["capabilities"]
     assert "connector_sync_job_specs" in modules["cognix-worker-queue"]["capabilities"]
+    assert "tool_execution_job_specs" in modules["cognix-worker-queue"]["capabilities"]
     assert "batching_experiment_job_specs" in modules["cognix-worker-queue"]["capabilities"]
     assert "enterprise_throughput_queue" in modules["cognix-worker-queue"]["capabilities"]
     assert "/api/cognix/workers/registry" in modules["cognix-worker-queue"]["routes"]

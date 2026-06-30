@@ -1336,6 +1336,7 @@ class WorkerJobSpecPlanRequest(BaseModel):
     project_id: str | None = Field(None, max_length = 160)
     sources: list[dict[str, Any]] | None = None
     rag_connector_sync_plan: dict[str, Any] | None = Field(None, alias = "ragConnectorSyncPlan")
+    tool_execution_handoff: dict[str, Any] | None = Field(None, alias = "toolExecutionHandoff")
     dataset: dict[str, Any] | None = None
     target_id: str | None = Field(None, alias = "targetId", max_length = 120)
 
@@ -1348,6 +1349,7 @@ class WorkerEnqueueContractRequest(BaseModel):
     project_id: str | None = Field(None, max_length = 160)
     sources: list[dict[str, Any]] | None = None
     rag_connector_sync_plan: dict[str, Any] | None = Field(None, alias = "ragConnectorSyncPlan")
+    tool_execution_handoff: dict[str, Any] | None = Field(None, alias = "toolExecutionHandoff")
     dataset: dict[str, Any] | None = None
     target_id: str | None = Field(None, alias = "targetId", max_length = 120)
     confirmation_id: str | None = Field(None, alias = "confirmationId", max_length = 180)
@@ -5098,6 +5100,7 @@ async def worker_job_spec_plan(
         rag_connector_sync_plan = payload.rag_connector_sync_plan,
         rag_indexing_plan = rag_indexing_plan,
         cloud_handoff_plan = cloud_handoff_plan,
+        tool_execution_handoff = payload.tool_execution_handoff,
         preload_plan = plan["preloadPlan"],
     )
     audit = cognix_db.create_audit_log(
@@ -5123,6 +5126,7 @@ async def worker_job_spec_plan(
         "taskStrategy": plan["taskStrategy"],
         "workerQueuePlan": plan["workerQueuePlan"],
         "ragConnectorSyncPlan": payload.rag_connector_sync_plan or {},
+        "toolExecutionHandoff": payload.tool_execution_handoff or {},
         "ragIndexingPlan": rag_indexing_plan,
         "cloudHandoffPlan": cloud_handoff_plan,
         "workerJobSpecPlan": spec_plan,
@@ -5189,6 +5193,7 @@ async def worker_enqueue_contract(
         rag_connector_sync_plan = payload.rag_connector_sync_plan,
         rag_indexing_plan = rag_indexing_plan,
         cloud_handoff_plan = cloud_handoff_plan,
+        tool_execution_handoff = payload.tool_execution_handoff,
         preload_plan = plan["preloadPlan"],
     )
     enqueue_contract = cognix_worker_queue.build_worker_enqueue_contract(
@@ -5229,6 +5234,7 @@ async def worker_enqueue_contract(
         "taskStrategy": plan["taskStrategy"],
         "workerQueuePlan": plan["workerQueuePlan"],
         "ragConnectorSyncPlan": payload.rag_connector_sync_plan or {},
+        "toolExecutionHandoff": payload.tool_execution_handoff or {},
         "ragIndexingPlan": rag_indexing_plan,
         "cloudHandoffPlan": cloud_handoff_plan,
         "workerJobSpecPlan": spec_plan,

@@ -44,6 +44,14 @@ QUEUE_DEFINITIONS: list[dict[str, Any]] = [
         "requiresHumanConfirmation": True,
     },
     {
+        "id": "tool_execution",
+        "label": "Tool execution",
+        "acceptedJobTypes": ["tool_execution"],
+        "maxConcurrentJobs": 1,
+        "requiresAudit": True,
+        "requiresHumanConfirmation": True,
+    },
+    {
         "id": "gpu_long_running",
         "label": "GPU long running",
         "acceptedJobTypes": ["fine_tuning_job", "distillation_job"],
@@ -181,6 +189,8 @@ def build_worker_queue_registry() -> dict[str, Any]:
             "modelLoad": False,
             "connectorSync": False,
             "documentDownload": False,
+            "toolExecution": False,
+            "externalWrite": False,
             "networkToolCall": False,
             "secretRead": False,
             "ragIndexing": False,
@@ -240,6 +250,8 @@ def _job_enqueue_contract(
             "rawDocumentContentIncluded",
             "rawFilterValuesIncluded",
             "rawDatasetContentIncluded",
+            "rawToolPayloadIncluded",
+            "dataBoundaryRawPayloadIncluded",
         )
     )
     secret_values_absent = not any(
@@ -404,6 +416,8 @@ def build_worker_enqueue_contract(
             "modelLoad": False,
             "connectorSync": False,
             "documentDownload": False,
+            "toolExecution": False,
+            "externalWrite": False,
             "networkToolCall": False,
             "secretRead": False,
             "ragIndexing": False,
@@ -602,6 +616,8 @@ def build_worker_queue_plan(
             "networkModelCall": False,
             "connectorSync": False,
             "documentDownload": False,
+            "toolExecution": False,
+            "externalWrite": False,
             "networkToolCall": False,
             "secretRead": False,
             "ragIndexing": False,
@@ -624,6 +640,7 @@ def _payload_summary_for_job(
     rag_connector_sync_plan: dict[str, Any],
     rag_indexing_plan: dict[str, Any],
     cloud_handoff_plan: dict[str, Any],
+    tool_execution_handoff: dict[str, Any],
     preload_plan: dict[str, Any],
 ) -> dict[str, Any]:
     job_type = str(job.get("type") or "")
@@ -645,6 +662,33 @@ def _payload_summary_for_job(
             "rawFilterValuesIncluded": False,
             "rawDocumentContentIncluded": False,
             "rawSecretsIncluded": False,
+            "networkToolCallPlannedOnly": True,
+        }
+    if job_type == "tool_execution":
+        executor_input = _as_dict(tool_execution_handoff.get("executorInput"))
+        execution_boundary = _as_dict(tool_execution_handoff.get("executionBoundary"))
+        data_boundary = _as_dict(tool_execution_handoff.get("dataBoundary"))
+        secret_refs = _as_list(executor_input.get("secretRefs"))
+        return {
+            "sourcePlan": "toolExecutionHandoff",
+            "handoffId": tool_execution_handoff.get("handoffId"),
+            "toolId": tool_execution_handoff.get("toolId"),
+            "actionId": tool_execution_handoff.get("actionId"),
+            "connector": tool_execution_handoff.get("connector"),
+            "status": tool_execution_handoff.get("status"),
+            "readyForExecutorReview": tool_execution_handoff.get("readyForExecutorReview"),
+            "readyForJobEnqueue": tool_execution_handoff.get("readyForJobEnqueue"),
+            "executorQueue": tool_execution_handoff.get("executorQueue"),
+            "executionBoundaryStatus": execution_boundary.get("status"),
+            "executorMustRecheckBoundary": execution_boundary.get("executorMustRecheckBoundary"),
+            "confirmationProvided": bool(str(executor_input.get("confirmationId") or "").strip()),
+            "sandboxRunProvided": bool(str(executor_input.get("sandboxRunId") or "").strip()),
+            "secretRefCount": len(secret_refs),
+            "secretValuesIncluded": False,
+            "rawSecretsIncluded": False,
+            "rawPayloadIncluded": False,
+            "rawToolPayloadIncluded": False,
+            "dataBoundaryRawPayloadIncluded": bool(data_boundary.get("rawPayloadIncluded")),
             "networkToolCallPlannedOnly": True,
         }
     if job_type == "rag_indexing":
@@ -687,6 +731,7 @@ def _spec_for_job(
     rag_connector_sync_plan: dict[str, Any],
     rag_indexing_plan: dict[str, Any],
     cloud_handoff_plan: dict[str, Any],
+    tool_execution_handoff: dict[str, Any],
     preload_plan: dict[str, Any],
 ) -> dict[str, Any]:
     queue = _queue(str(job.get("queueId") or "none"))
@@ -697,6 +742,8 @@ def _spec_for_job(
     source_plan_status = "planned"
     if job_type == "rag_connector_sync":
         source_plan_status = str(rag_connector_sync_plan.get("status") or "planned")
+    elif job_type == "tool_execution":
+        source_plan_status = str(tool_execution_handoff.get("status") or "planned")
     elif job_type == "rag_indexing":
         source_plan_status = str(rag_indexing_plan.get("status") or "planned")
     elif job_type == "cloud_training_job":
@@ -722,6 +769,7 @@ def _spec_for_job(
             rag_connector_sync_plan = rag_connector_sync_plan,
             rag_indexing_plan = rag_indexing_plan,
             cloud_handoff_plan = cloud_handoff_plan,
+            tool_execution_handoff = tool_execution_handoff,
             preload_plan = preload_plan,
         ),
         "willEnqueue": False,
@@ -738,12 +786,14 @@ def build_worker_job_spec_plan(
     rag_connector_sync_plan: dict[str, Any] | None = None,
     rag_indexing_plan: dict[str, Any] | None = None,
     cloud_handoff_plan: dict[str, Any] | None = None,
+    tool_execution_handoff: dict[str, Any] | None = None,
     preload_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     worker_queue_plan = _as_dict(worker_queue_plan)
     rag_connector_sync_plan = _as_dict(rag_connector_sync_plan)
     rag_indexing_plan = _as_dict(rag_indexing_plan)
     cloud_handoff_plan = _as_dict(cloud_handoff_plan)
+    tool_execution_handoff = _as_dict(tool_execution_handoff)
     preload_plan = _as_dict(preload_plan)
     jobs = [item for item in _as_list(worker_queue_plan.get("jobs")) if isinstance(item, dict)]
     existing_job_ids = {str(job.get("id") or "") for job in jobs}
@@ -767,6 +817,29 @@ def build_worker_job_spec_plan(
                     "post_sync_indexing_plan",
                 ],
                 source_plan = "ragConnectorSyncPlan",
+                requires_human_confirmation = True,
+            )
+        )
+
+    if tool_execution_handoff and tool_execution_handoff.get("readyForExecutorReview") and "tool_execution" not in existing_job_ids:
+        jobs.append(
+            _job(
+                job_id = "tool_execution",
+                job_type = "tool_execution",
+                queue_id = "tool_execution",
+                label = "Preparer une execution outil controlee",
+                reason = "Handoff outil pret pour revue executor et worker queue.",
+                priority = 82,
+                required_gates = [
+                    "connector_enabled",
+                    "permissions_resolved",
+                    "rate_limit_checked",
+                    "sandbox_ready",
+                    "secret_policy_review",
+                    "human_approval",
+                    "executor_boundary_review",
+                ],
+                source_plan = "toolExecutionHandoff",
                 requires_human_confirmation = True,
             )
         )
@@ -808,6 +881,7 @@ def build_worker_job_spec_plan(
             rag_connector_sync_plan = rag_connector_sync_plan,
             rag_indexing_plan = rag_indexing_plan,
             cloud_handoff_plan = cloud_handoff_plan,
+            tool_execution_handoff = tool_execution_handoff,
             preload_plan = preload_plan,
         )
         for job in jobs
@@ -856,6 +930,8 @@ def build_worker_job_spec_plan(
             "modelLoad": False,
             "connectorSync": False,
             "documentDownload": False,
+            "toolExecution": False,
+            "externalWrite": False,
             "networkToolCall": False,
             "secretRead": False,
             "ragIndexing": False,
