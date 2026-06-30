@@ -759,6 +759,22 @@ class ResponseReflectionRequest(BaseModel):
     response_sources: list[dict[str, Any]] | None = Field(None, alias = "responseSources")
 
 
+class ExpertGeneralistQualityGateRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    prompt: str = Field(..., min_length = 1, max_length = 120000)
+    expert_response: str = Field("", alias = "expertResponse", max_length = 400000)
+    message_id: str | None = Field(None, alias = "messageId", max_length = 160)
+    thread_id: str | None = Field(None, alias = "threadId", max_length = 160)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    expert_model_id: str | None = Field(None, alias = "expertModelId", max_length = 240)
+    generalist_model_id: str | None = Field(None, alias = "generalistModelId", max_length = 240)
+    task_type: str | None = Field(None, alias = "taskType", max_length = 80)
+    domain: str | None = Field(None, max_length = 80)
+    requires_sources: bool = Field(False, alias = "requiresSources")
+    response_sources: list[dict[str, Any]] | None = Field(None, alias = "responseSources")
+
+
 class DraftGenerationPlanRequest(BaseModel):
     model_config = ConfigDict(populate_by_name = True)
 
@@ -4025,6 +4041,70 @@ async def response_reflection_evaluations(
     return {
         "username": current_subject,
         "evaluations": _rows(evaluations),
+    }
+
+
+@router.post("/reflection/expert-generalist-gate")
+async def response_reflection_expert_generalist_gate(
+    payload: ExpertGeneralistQualityGateRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    gate = cognix_response_reflection.build_expert_generalist_quality_gate(
+        prompt = payload.prompt,
+        expert_response = payload.expert_response,
+        expert_model_id = payload.expert_model_id,
+        generalist_model_id = payload.generalist_model_id,
+        response_sources = payload.response_sources,
+        requires_sources = payload.requires_sources,
+        task_type = payload.task_type,
+        domain = payload.domain,
+    )
+    record = cognix_db.create_response_evaluation(
+        current_subject,
+        evaluation = gate,
+        message_id = payload.message_id,
+        thread_id = payload.thread_id,
+        project_id = payload.project_id,
+        model_id = payload.expert_model_id,
+    )
+    side_effects = {
+        **gate.get("sideEffects", {}),
+        "evaluationWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "expert_generalist_quality_gate_built",
+        resource_type = "cognix_expert_generalist_quality_gate",
+        resource_id = record.get("id"),
+        severity = "warning" if gate.get("summary", {}).get("secondPassRecommended") else "notice",
+        metadata = {
+            "qualityGateVersion": gate.get("qualityGateVersion"),
+            "reflectionVersion": gate.get("reflectionVersion"),
+            "status": gate.get("status"),
+            "secondPassRecommended": gate.get("summary", {}).get("secondPassRecommended"),
+            "recommendedAction": gate.get("summary", {}).get("recommendedAction"),
+            "confidenceLabel": gate.get("summary", {}).get("confidenceLabel"),
+            "expertModelId": payload.expert_model_id,
+            "generalistModelId": gate.get("generalist", {}).get("modelId"),
+            "messageId": payload.message_id,
+            "threadId": payload.thread_id,
+            "projectId": payload.project_id,
+            "rawPromptIncluded": gate.get("handoffContract", {}).get("rawPromptIncluded"),
+            "rawExpertResponseIncluded": gate.get("handoffContract", {}).get("rawExpertResponseIncluded"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "expertGeneralistGate": gate,
+        "record": _row(record),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_response_reflection.COGNIX_EXPERT_GENERALIST_QUALITY_GATE_VERSION,
     }
 
 

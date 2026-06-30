@@ -5052,6 +5052,34 @@ def test_response_reflection_flags_missing_sources_and_incomplete_answer():
     assert evaluation["sideEffects"]["memoryWrite"] is False
 
 
+def test_expert_generalist_quality_gate_recommends_review_without_second_model_call():
+    gate = cognix_response_reflection.build_expert_generalist_quality_gate(
+        prompt = "Explique avec sources pourquoi le RAG est meilleur que le fine-tuning pour ce PDF. token=sk-1234567890abcdef",
+        expert_response = "C'est probablement mieux.",
+        expert_model_id = "cognix-research",
+        generalist_model_id = "cognix-general",
+        response_sources = [],
+        requires_sources = True,
+        task_type = "research",
+        domain = "rag",
+    )
+
+    assert gate["qualityGateVersion"] == "cognix_expert_generalist_quality_gate_v1"
+    assert gate["mode"] == "expert_generalist_quality_gate"
+    assert gate["summary"]["secondPassRecommended"] is True
+    assert gate["generalist"]["modelId"] == "cognix-general"
+    assert "source_verification" in gate["generalist"]["allowedReviewModes"]
+    assert gate["handoffContract"]["backendOrchestratorRequired"] is True
+    assert gate["handoffContract"]["automaticSecondModelCallAllowed"] is False
+    assert gate["handoffContract"]["frontendDirectSecondPassAllowed"] is False
+    assert gate["handoffContract"]["rawPromptIncluded"] is False
+    assert gate["handoffContract"]["rawExpertResponseIncluded"] is False
+    assert "sk-1234567890abcdef" not in str(gate)
+    assert gate["sideEffects"]["generation"] is False
+    assert gate["sideEffects"]["secondModelCall"] is False
+    assert gate["sideEffects"]["networkModelCall"] is False
+
+
 def test_response_reflection_endpoint_stores_evaluation_and_logs_audit():
     seed_accounts()
 
@@ -5097,6 +5125,51 @@ def test_response_reflection_endpoint_stores_evaluation_and_logs_audit():
     assert log["metadata"]["verificationRequired"] is True
     assert log["metadata"]["sideEffects"]["generation"] is False
     assert log["metadata"]["storageSideEffects"]["evaluationWrite"] is True
+
+
+def test_expert_generalist_quality_gate_endpoint_stores_metadata_and_audits():
+    seed_accounts()
+
+    body = run_async(
+        cognix_routes.response_reflection_expert_generalist_gate(
+            cognix_routes.ExpertGeneralistQualityGateRequest(
+                prompt = "Explique avec sources les limites du fine-tuning pour des documents internes.",
+                expertResponse = "Il faut faire attention.",
+                messageId = "msg_gate",
+                threadId = "thread_gate",
+                expertModelId = "cognix-research",
+                generalistModelId = "cognix-general",
+                requiresSources = True,
+                responseSources = [],
+                taskType = "research",
+                domain = "rag",
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    gate = body["expertGeneralistGate"]
+    record = body["record"]
+    assert body["plannerVersion"] == "cognix_expert_generalist_quality_gate_v1"
+    assert body["auditLogId"].startswith("aud_")
+    assert gate["summary"]["secondPassRecommended"] is True
+    assert gate["handoffContract"]["rawPromptIncluded"] is False
+    assert gate["handoffContract"]["rawExpertResponseIncluded"] is False
+    assert record["id"].startswith("rfl_")
+    assert record["messageId"] == "msg_gate"
+    assert record["evaluation"]["qualityGateVersion"] == "cognix_expert_generalist_quality_gate_v1"
+    assert record["verificationRequired"] is True
+    assert body["sideEffects"]["secondModelCall"] is False
+    assert body["sideEffects"]["generation"] is False
+    assert body["sideEffects"]["evaluationWrite"] is True
+
+    log = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))["logs"][0]
+    assert log["action"] == "expert_generalist_quality_gate_built"
+    assert log["metadata"]["qualityGateVersion"] == "cognix_expert_generalist_quality_gate_v1"
+    assert log["metadata"]["secondPassRecommended"] is True
+    assert log["metadata"]["rawPromptIncluded"] is False
+    assert log["metadata"]["rawExpertResponseIncluded"] is False
+    assert log["metadata"]["sideEffects"]["secondModelCall"] is False
 
 
 def test_response_reflection_list_endpoint_is_user_scoped():
@@ -9346,9 +9419,11 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/thinking/plan" in modules["cognix-thinking-status"]["routes"]
     assert modules["cognix-response-reflection"]["dependencyState"]["ready"] is True
     assert "response_quality_evaluation" in modules["cognix-response-reflection"]["capabilities"]
+    assert "expert_generalist_quality_gate" in modules["cognix-response-reflection"]["capabilities"]
     assert "raw_reasoning_redaction" in modules["cognix-response-reflection"]["capabilities"]
     assert "/api/cognix/reflection/evaluate" in modules["cognix-response-reflection"]["routes"]
     assert "/api/cognix/reflection/evaluations" in modules["cognix-response-reflection"]["routes"]
+    assert "/api/cognix/reflection/expert-generalist-gate" in modules["cognix-response-reflection"]["routes"]
     assert modules["cognix-multi-draft-generation"]["dependencyState"]["ready"] is True
     assert "style_profile_registry" in modules["cognix-multi-draft-generation"]["capabilities"]
     assert "response_variant_store" in modules["cognix-multi-draft-generation"]["capabilities"]

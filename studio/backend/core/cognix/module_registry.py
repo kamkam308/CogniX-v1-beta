@@ -694,6 +694,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "status": "planned",
         "capabilities": [
             "response_quality_evaluation",
+            "expert_generalist_quality_gate",
             "confidence_scoring",
             "verification_recommendation",
             "reflection_logs",
@@ -702,6 +703,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "routes": [
             "/api/cognix/reflection/evaluate",
             "/api/cognix/reflection/evaluations",
+            "/api/cognix/reflection/expert-generalist-gate",
         ],
         "permissions": ["authenticated"],
         "tools": [],

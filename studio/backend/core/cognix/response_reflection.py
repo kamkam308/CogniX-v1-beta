@@ -14,6 +14,7 @@ from typing import Any
 
 
 COGNIX_RESPONSE_REFLECTION_VERSION = "cognix_response_reflection_v1"
+COGNIX_EXPERT_GENERALIST_QUALITY_GATE_VERSION = "cognix_expert_generalist_quality_gate_v1"
 
 UNCERTAINTY_MARKERS = (
     "je ne suis pas sur",
@@ -292,5 +293,135 @@ def build_response_reflection_evaluation(
             "toolExecution": False,
             "memoryWrite": False,
             "rawReasoningExposure": False,
+        },
+    }
+
+
+def _review_modes_for_issues(issues: list[dict[str, Any]], task_type: str | None) -> list[str]:
+    issue_ids = {str(issue.get("id")) for issue in issues}
+    modes: list[str] = []
+    if "missing_sources" in issue_ids or "long_unsourced_answer" in issue_ids:
+        modes.append("source_verification")
+    if "missing_code_shape" in issue_ids:
+        modes.append("code_shape_review")
+    if "missing_math_trace" in issue_ids:
+        modes.append("math_trace_review")
+    if "incomplete_response" in issue_ids or "uncertainty_detected" in issue_ids:
+        modes.append("clarity_and_completeness_review")
+    if str(task_type or "").lower() in {"education", "math", "physics", "code"}:
+        modes.append("pedagogical_explanation_review")
+    return sorted(set(modes)) or ["light_consistency_review"]
+
+
+def build_expert_generalist_quality_gate(
+    *,
+    prompt: str,
+    expert_response: str,
+    expert_model_id: str | None = None,
+    generalist_model_id: str | None = None,
+    response_sources: list[dict[str, Any]] | None = None,
+    requires_sources: bool = False,
+    task_type: str | None = None,
+    domain: str | None = None,
+) -> dict[str, Any]:
+    """Plan whether a specialist answer should be reviewed by a generalist.
+
+    The gate is deliberately non-executing: it records a quality decision for
+    the orchestrator without starting a model, generating text, or exposing raw
+    prompt/response payloads to the frontend.
+    """
+
+    evaluation = build_response_reflection_evaluation(
+        prompt = prompt,
+        response = expert_response,
+        response_sources = response_sources,
+        requires_sources = requires_sources,
+        task_type = task_type or domain,
+        model_id = expert_model_id,
+    )
+    confidence = evaluation["confidence"]
+    issues = [item for item in evaluation.get("issues", []) if isinstance(item, dict)]
+    severities = {str(issue.get("severity")) for issue in issues}
+    issue_ids = {str(issue.get("id")) for issue in issues}
+    task_family = str(task_type or domain or "general").strip().lower() or "general"
+    specialist_domains = {"code", "math", "physics", "research", "security", "rag", "education"}
+    second_pass_recommended = bool(
+        confidence.get("verificationRequired")
+        or confidence.get("label") in {"low", "medium"} and task_family in specialist_domains
+        or "missing_sources" in issue_ids
+        or "critical" in severities
+        or "high" in severities
+    )
+    status = "generalist_review_recommended" if second_pass_recommended else "expert_answer_accepted"
+    if "empty_response" in issue_ids:
+        status = "blocked_empty_expert_response"
+    review_modes = _review_modes_for_issues(issues, task_family)
+    return {
+        "qualityGateVersion": COGNIX_EXPERT_GENERALIST_QUALITY_GATE_VERSION,
+        "reflectionVersion": COGNIX_RESPONSE_REFLECTION_VERSION,
+        "mode": "expert_generalist_quality_gate",
+        "status": status,
+        "domain": domain or task_type or "general",
+        "taskType": task_type or "general",
+        "expert": {
+            "role": "specialist_solver",
+            "modelId": expert_model_id,
+            "responseQuality": confidence,
+        },
+        "generalist": {
+            "role": "clarity_verifier_explainer",
+            "modelId": generalist_model_id or "cognix-general",
+            "secondPassRecommended": second_pass_recommended,
+            "allowedReviewModes": review_modes,
+            "selectionReason": (
+                "Verifier, sourcer ou clarifier la reponse experte avant affichage final."
+                if second_pass_recommended
+                else "La reponse experte passe les garde-fous heuristiques sans revue supplementaire."
+            ),
+        },
+        "expertEvaluation": evaluation,
+        "qualitySignals": {
+            **evaluation["qualitySignals"],
+            "specialistDomain": task_family in specialist_domains,
+            "issueIds": sorted(issue_ids),
+        },
+        "handoffContract": {
+            "backendOrchestratorRequired": True,
+            "automaticSecondModelCallAllowed": False,
+            "frontendDirectSecondPassAllowed": False,
+            "generalistMayRewriteAutomatically": False,
+            "humanCanRequestSecondPass": True,
+            "rawPromptIncluded": False,
+            "rawExpertResponseIncluded": False,
+            "rawChainOfThoughtAllowed": False,
+            "secretValuesAllowed": False,
+            "requiresServerSidePayloadLookup": second_pass_recommended,
+        },
+        "policies": {
+            "expertPlusGeneralistArchitecture": True,
+            "rawChainOfThoughtAllowed": False,
+            "frontendMustNotShowHiddenReasoning": True,
+            "secondModelCallAutomatic": False,
+            "lowConfidenceRequiresReview": confidence.get("label") == "low",
+            "storeOnlyQualityMetadata": True,
+        },
+        "confidence": confidence,
+        "issues": issues,
+        "summary": {
+            "secondPassRecommended": second_pass_recommended,
+            "recommendedAction": confidence.get("recommendedAction"),
+            "confidenceLabel": confidence.get("label"),
+            "issueCount": len(issues),
+            "reviewModeCount": len(review_modes),
+        },
+        "sideEffects": {
+            "modelLoad": False,
+            "generation": False,
+            "secondModelCall": False,
+            "networkModelCall": False,
+            "toolExecution": False,
+            "memoryWrite": False,
+            "rawReasoningExposure": False,
+            "frontendPromptMutation": False,
         },
     }
