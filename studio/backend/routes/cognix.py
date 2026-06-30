@@ -92,6 +92,7 @@ from core.cognix import scheduled as cognix_scheduled
 from core.cognix import security_policy as cognix_security_policy
 from core.cognix import semantic_cache as cognix_semantic_cache
 from core.cognix import skill_memory as cognix_skill_memory
+from core.cognix import skill_marketplace as cognix_skill_marketplace
 from core.cognix import simulation as cognix_simulation
 from core.cognix import speculative_decoding as cognix_speculative_decoding
 from core.cognix import thinking_status as cognix_thinking_status
@@ -884,6 +885,36 @@ class ToolDiscoveryRequest(BaseModel):
     installed_tool_ids: list[str] | None = Field(None, alias = "installedToolIds")
     store_recommendations: bool = Field(True, alias = "storeRecommendations")
     record_installed_snapshot: bool = Field(False, alias = "recordInstalledSnapshot")
+
+
+class SkillMarketplacePublishRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    skill_manifest: dict[str, Any] | None = Field(None, alias = "skillManifest")
+    display_name: str | None = Field(None, alias = "displayName", max_length = 160)
+    description: str | None = Field(None, max_length = 600)
+    category: str | None = Field(None, max_length = 120)
+    version: str | None = Field(None, max_length = 80)
+    instructions: str | None = Field(None, max_length = 4000)
+    allowed_roles: list[str] | None = Field(None, alias = "allowedRoles")
+    organization_id: str = Field("local", alias = "organizationId", max_length = 120)
+    store_skill: bool = Field(True, alias = "storeSkill")
+
+
+class SkillMarketplaceApprovalRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    status: Literal["approved", "denied", "disabled"]
+    admin_note: str | None = Field(None, alias = "adminNote", max_length = 1200)
+
+
+class SkillMarketplaceUsageRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    skill_id: str = Field(..., alias = "skillId", min_length = 1, max_length = 160)
+    action: Literal["view", "use", "share", "version", "disable"] = "use"
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    metadata: dict[str, Any] | None = None
 
 
 class ProjectDefaultModelRequest(BaseModel):
@@ -2098,6 +2129,17 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "public_summary": "publicSummary",
         "tool_id": "toolId",
         "tool_name": "toolName",
+        "organization_id": "organizationId",
+        "skill_key": "skillKey",
+        "current_version": "currentVersion",
+        "allowed_roles_json": "allowedRolesJson",
+        "version_history_json": "versionHistoryJson",
+        "created_by": "createdBy",
+        "approved_by": "approvedBy",
+        "approved_at": "approvedAt",
+        "skill_id": "skillId",
+        "requester_username": "requesterUsername",
+        "reviewer_username": "reviewerUsername",
         "need_id": "needId",
         "recommendation_json": "recommendationJson",
         "command_id": "commandId",
@@ -6060,6 +6102,244 @@ async def plugin_installations(
         "username": current_subject,
         "installations": [_row(item) for item in installations],
         "count": len(installations),
+    }
+
+
+def _skill_marketplace_manifest_from_payload(payload: SkillMarketplacePublishRequest) -> dict[str, Any]:
+    manifest = dict(payload.skill_manifest or {})
+    if payload.display_name is not None:
+        manifest["displayName"] = payload.display_name
+    if payload.description is not None:
+        manifest["description"] = payload.description
+    if payload.category is not None:
+        manifest["category"] = payload.category
+    if payload.version is not None:
+        manifest["version"] = payload.version
+    if payload.instructions is not None:
+        manifest["instructions"] = payload.instructions
+    if payload.allowed_roles is not None:
+        manifest["allowedRoles"] = payload.allowed_roles
+    return manifest
+
+
+def _builtin_shared_skill(skill_id: str) -> dict[str, Any] | None:
+    for skill in cognix_skill_marketplace.build_builtin_catalog():
+        if str(skill.get("id") or "") == skill_id:
+            return skill
+    return None
+
+
+@router.get("/skills/marketplace/blueprint")
+async def skill_marketplace_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_skill_marketplace.build_skill_marketplace_blueprint()
+    return {
+        "username": current_subject,
+        "skillMarketplaceBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_skill_marketplace.COGNIX_SKILL_MARKETPLACE_SERVICE_VERSION,
+    }
+
+
+@router.get("/skills/marketplace")
+async def skill_marketplace_catalog(
+    organization_id: str = "local",
+    include_disabled: bool = False,
+    limit: int = 120,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    is_admin = auth_storage.is_admin(current_subject)
+    shared_skills = cognix_db.list_shared_skills(
+        organization_id = organization_id,
+        include_disabled = include_disabled and is_admin,
+        limit = limit,
+    )
+    approvals = cognix_db.list_skill_approvals(limit = 200) if is_admin else []
+    usage_logs = (
+        cognix_db.list_skill_usage_logs(limit = 200)
+        if is_admin
+        else cognix_db.list_skill_usage_logs(username = current_subject, limit = 80)
+    )
+    catalog = cognix_skill_marketplace.build_marketplace_catalog(
+        shared_skills = [_row(item) for item in shared_skills],
+        approvals = [_row(item) for item in approvals],
+        usage_logs = [_row(item) for item in usage_logs],
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "skill_marketplace_catalog_built",
+        resource_type = "cognix_skill_marketplace",
+        resource_id = organization_id,
+        severity = "notice",
+        metadata = {
+            "skillMarketplaceVersion": catalog.get("skillMarketplaceVersion"),
+            "skillCount": catalog.get("summary", {}).get("skillCount"),
+            "pendingApprovalCount": catalog.get("summary", {}).get("pendingApprovalCount"),
+            "sideEffects": catalog.get("sideEffects", {}),
+        },
+    )
+    return {
+        "username": current_subject,
+        "skillMarketplaceCatalog": catalog,
+        "auditLogId": audit.get("id"),
+        "sideEffects": catalog.get("sideEffects", {}),
+        "plannerVersion": cognix_skill_marketplace.COGNIX_SKILL_MARKETPLACE_SERVICE_VERSION,
+    }
+
+
+@router.post("/skills/marketplace/skills")
+async def publish_shared_skill(
+    payload: SkillMarketplacePublishRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    is_admin = auth_storage.is_admin(current_subject)
+    plan = cognix_skill_marketplace.build_skill_publish_plan(
+        username = current_subject,
+        skill_manifest = _skill_marketplace_manifest_from_payload(payload),
+        organization_id = payload.organization_id,
+        is_admin = is_admin,
+    )
+    stored_skill = (
+        cognix_db.create_shared_skill(
+            current_subject,
+            plan = plan,
+            organization_id = payload.organization_id,
+        )
+        if payload.store_skill
+        else None
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "skillWrite": stored_skill is not None,
+        "approvalWrite": stored_skill is not None,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "shared_skill_publish_planned",
+        resource_type = "shared_skill",
+        resource_id = str((stored_skill or {}).get("id") or plan.get("skill", {}).get("skillKey") or "skill"),
+        severity = "warning" if plan.get("status") != "approved" else "notice",
+        metadata = {
+            "skillMarketplaceVersion": plan.get("skillMarketplaceVersion"),
+            "skillKey": plan.get("skill", {}).get("skillKey"),
+            "status": plan.get("status"),
+            "autoApprovedByAdmin": plan.get("approvalPlan", {}).get("autoApprovedByAdmin"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "skillPublishPlan": plan,
+        "sharedSkill": _row(stored_skill) if stored_skill else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_skill_marketplace.COGNIX_SKILL_MARKETPLACE_SERVICE_VERSION,
+    }
+
+
+@router.patch("/skills/marketplace/skills/{skill_id}/approval")
+async def decide_shared_skill_approval(
+    skill_id: str,
+    payload: SkillMarketplaceApprovalRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if not auth_storage.is_admin(current_subject):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin privileges required.")
+    skill = cognix_db.get_shared_skill(skill_id)
+    if skill is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Shared skill not found.")
+    plan = cognix_skill_marketplace.build_skill_approval_plan(
+        skill = _row(skill),
+        reviewer_username = current_subject,
+        status = payload.status,
+        admin_note = payload.admin_note,
+    )
+    updated = cognix_db.decide_shared_skill(
+        skill_id,
+        reviewer_username = current_subject,
+        status = payload.status,
+        admin_note = payload.admin_note,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "shared_skill_approval_decided",
+        resource_type = "shared_skill",
+        resource_id = skill_id,
+        severity = "notice" if payload.status == "approved" else "warning",
+        metadata = {
+            "skillApprovalVersion": plan.get("skillApprovalVersion"),
+            "status": payload.status,
+            "sideEffects": {**plan.get("sideEffects", {}), "approvalWrite": True, "skillWrite": True, "auditWrite": True},
+        },
+    )
+    return {
+        "username": current_subject,
+        "skillApprovalPlan": plan,
+        "sharedSkill": _row(updated) if updated else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": {**plan.get("sideEffects", {}), "approvalWrite": True, "skillWrite": True, "auditWrite": True},
+        "plannerVersion": cognix_skill_marketplace.COGNIX_SKILL_APPROVAL_SERVICE_VERSION,
+    }
+
+
+@router.post("/skills/marketplace/usage")
+async def record_shared_skill_usage(
+    payload: SkillMarketplaceUsageRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    skill = cognix_db.get_shared_skill(payload.skill_id) or _builtin_shared_skill(payload.skill_id)
+    if skill is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Shared skill not found.")
+    profile = auth_storage.get_user_profile(current_subject) or {}
+    user_role = str(profile.get("role") or "user")
+    usage_plan = cognix_skill_marketplace.build_skill_usage_plan(
+        username = current_subject,
+        skill = _row(skill),
+        action = payload.action,
+        user_role = user_role,
+    )
+    if not usage_plan.get("allowed"):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            {
+                "message": "Shared skill usage blocked.",
+                "blockedReasons": usage_plan.get("blockedReasons", []),
+            },
+        )
+    usage_log = cognix_db.record_skill_usage(
+        current_subject,
+        skill_id = payload.skill_id,
+        action = payload.action,
+        project_id = payload.project_id,
+        version = str(skill.get("currentVersion") or skill.get("current_version") or ""),
+        metadata = {"usagePlan": usage_plan, **(payload.metadata or {})},
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "shared_skill_usage_logged",
+        resource_type = "shared_skill",
+        resource_id = payload.skill_id,
+        severity = "notice",
+        metadata = {
+            "skillMarketplaceVersion": usage_plan.get("skillMarketplaceVersion"),
+            "action": payload.action,
+            "projectId": payload.project_id,
+            "sideEffects": {**usage_plan.get("sideEffects", {}), "usageLogWrite": True, "auditWrite": True},
+        },
+    )
+    return {
+        "username": current_subject,
+        "skillUsagePlan": usage_plan,
+        "usageLog": _row(usage_log),
+        "auditLogId": audit.get("id"),
+        "sideEffects": {**usage_plan.get("sideEffects", {}), "usageLogWrite": True, "auditWrite": True},
+        "plannerVersion": cognix_skill_marketplace.COGNIX_SKILL_MARKETPLACE_SERVICE_VERSION,
     }
 
 

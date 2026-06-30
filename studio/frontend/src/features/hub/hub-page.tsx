@@ -15,7 +15,10 @@ import {
 } from "@/features/hub/hooks/use-hub-model-search";
 import { useOnlineStatus } from "@/features/hub/hooks/use-online-status";
 import { useHubInfiniteScroll } from "@/features/hub/hooks/use-hub-infinite-scroll";
-import { ggufVariantsMatch, modelIdsMatch } from "@/features/hub/lib/model-identity";
+import {
+  ggufVariantsMatch,
+  modelIdsMatch,
+} from "@/features/hub/lib/model-identity";
 import { cn } from "@/lib/utils";
 import { usePlatformStore } from "@/config/env";
 import {
@@ -63,6 +66,7 @@ import { useFeedWriteBack } from "./hooks/use-feed-write-back";
 import { useHubFeed } from "./hooks/use-hub-feed";
 import { useHubModelVram } from "./hooks/use-hub-model-vram";
 import { useModelsSelection } from "./hooks/use-models-selection";
+import { InternalSkillsMarketplace } from "./internal-skills-marketplace";
 import {
   CHANNEL_TO_SECTION,
   type ChannelId,
@@ -695,7 +699,10 @@ export function ModelsPage() {
     return discoverRows.filter(
       (row) =>
         !isHiddenModelId(row.id) &&
-        matchesFormat(detectResultFormat(row.result), effectiveDiscoverFormat) &&
+        matchesFormat(
+          detectResultFormat(row.result),
+          effectiveDiscoverFormat,
+        ) &&
         matchesCapability(row.capabilities, deferredCapabilityFilter) &&
         (!activeChannel?.finetunableOnly || isUnslothFinetunable(row.result)),
     );
@@ -738,7 +745,10 @@ export function ModelsPage() {
     }
     return merged;
   }, [isFeedMode, feedTrendingRows, filteredDiscoverRows]);
-  const feedResults = useMemo(() => feedRows.map((row) => row.result), [feedRows]);
+  const feedResults = useMemo(
+    () => feedRows.map((row) => row.result),
+    [feedRows],
+  );
   const selectionDiscoverRows = isFeedMode ? feedRows : discoverRows;
   const selectionFilteredDiscoverRows = isFeedMode
     ? feedRows
@@ -1349,7 +1359,9 @@ export function ModelsPage() {
       <div className="flex flex-col gap-3 pt-6">
         {isChannelListMode ? (
           <HubListHeader
-            title={channelSection ? HUB_SECTION_TITLE[channelSection] : "Models"}
+            title={
+              channelSection ? HUB_SECTION_TITLE[channelSection] : "Models"
+            }
             count={listCount}
             view={allModelsView}
             onViewChange={setAllModelsView}
@@ -1450,6 +1462,9 @@ export function ModelsPage() {
           onOpenFineTune={() => handleOpenList("finetune")}
         />
       </HubTopBar>
+      {!detailOpen && !splitMode && isDiscoverTab && isFeedMode && (
+        <InternalSkillsMarketplace />
+      )}
 
       <div
         className={cn(

@@ -1185,6 +1185,64 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cognix_user_skill_memories_username_status
             ON cognix_user_skill_memories(username, status, updated_at DESC);
 
+        CREATE TABLE IF NOT EXISTS shared_skills (
+            id TEXT PRIMARY KEY,
+            organization_id TEXT NOT NULL DEFAULT 'local',
+            skill_key TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            category TEXT NOT NULL DEFAULT 'operations',
+            current_version TEXT NOT NULL DEFAULT '1.0.0',
+            status TEXT NOT NULL DEFAULT 'pending_approval',
+            allowed_roles_json TEXT NOT NULL DEFAULT '[]',
+            manifest_json TEXT NOT NULL DEFAULT '{}',
+            version_history_json TEXT NOT NULL DEFAULT '[]',
+            created_by TEXT NOT NULL,
+            approved_by TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            approved_at TEXT,
+            UNIQUE(organization_id, skill_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_shared_skills_org_status
+            ON shared_skills(organization_id, status, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_shared_skills_created_by
+            ON shared_skills(created_by, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS skill_approvals (
+            id TEXT PRIMARY KEY,
+            skill_id TEXT NOT NULL,
+            requester_username TEXT NOT NULL,
+            reviewer_username TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            reason TEXT NOT NULL DEFAULT '',
+            policy_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            decided_at TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_skill_approvals_skill
+            ON skill_approvals(skill_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_skill_approvals_status
+            ON skill_approvals(status, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS skill_usage_logs (
+            id TEXT PRIMARY KEY,
+            skill_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            project_id TEXT,
+            action TEXT NOT NULL DEFAULT 'use',
+            version TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_skill_usage_logs_skill
+            ON skill_usage_logs(skill_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_skill_usage_logs_username
+            ON skill_usage_logs(username, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS cognix_user_preferences (
             id TEXT PRIMARY KEY,
             username TEXT NOT NULL,
@@ -7265,6 +7323,334 @@ def list_skill_memories(
                 (username, safe_limit),
             ).fetchall()
         return [_hydrate_skill_memory(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_shared_skill(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["allowedRoles"] = _json_or_default(item.get("allowed_roles_json"), [])
+    item["manifest"] = _json_or_default(item.get("manifest_json"), {})
+    item["versionHistory"] = _json_or_default(item.get("version_history_json"), [])
+    item["organizationId"] = item.get("organization_id")
+    item["skillKey"] = item.get("skill_key")
+    item["displayName"] = item.get("display_name")
+    item["currentVersion"] = item.get("current_version")
+    item["createdBy"] = item.get("created_by")
+    item["approvedBy"] = item.get("approved_by")
+    item["approvedAt"] = item.get("approved_at")
+    return item
+
+
+def _hydrate_skill_approval(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["policy"] = _json_or_default(item.get("policy_json"), {})
+    item["skillId"] = item.get("skill_id")
+    item["requesterUsername"] = item.get("requester_username")
+    item["reviewerUsername"] = item.get("reviewer_username")
+    item["decidedAt"] = item.get("decided_at")
+    return item
+
+
+def _hydrate_skill_usage_log(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    item["skillId"] = item.get("skill_id")
+    item["projectId"] = item.get("project_id")
+    return item
+
+
+def list_shared_skills(
+    *,
+    organization_id: str = "local",
+    include_disabled: bool = False,
+    limit: int = 120,
+) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 120), 1), 300)
+    conn = get_connection()
+    try:
+        if include_disabled:
+            rows = conn.execute(
+                """
+                SELECT * FROM shared_skills
+                WHERE organization_id = ?
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (organization_id, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM shared_skills
+                WHERE organization_id = ? AND status != 'disabled'
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (organization_id, safe_limit),
+            ).fetchall()
+        return [_hydrate_shared_skill(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def get_shared_skill(skill_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT * FROM shared_skills WHERE id = ?", (skill_id,)).fetchone()
+        return _hydrate_shared_skill(row_to_dict(row) or {}) if row else None
+    finally:
+        conn.close()
+
+
+def create_shared_skill(
+    username: str,
+    *,
+    plan: dict[str, Any],
+    organization_id: str = "local",
+) -> dict[str, Any]:
+    now = _now()
+    manifest = plan.get("manifest") if isinstance(plan.get("manifest"), dict) else {}
+    skill = plan.get("skill") if isinstance(plan.get("skill"), dict) else {}
+    skill_key = str(skill.get("skillKey") or manifest.get("skillKey") or _new_id("skill"))[:120]
+    status = str(plan.get("status") or "pending_approval")[:80]
+    allowed_roles = skill.get("allowedRoles") or manifest.get("allowedRoles") or ["admin"]
+    version = str(skill.get("currentVersion") or manifest.get("version") or "1.0.0")[:80]
+    approved_by = username if status == "approved" else None
+    approved_at = now if status == "approved" else None
+    version_entry = {
+        "version": version,
+        "manifestHash": manifest.get("manifestHash"),
+        "createdBy": username,
+        "createdAt": now,
+    }
+    conn = get_connection()
+    try:
+        existing = conn.execute(
+            "SELECT * FROM shared_skills WHERE organization_id = ? AND skill_key = ?",
+            (organization_id, skill_key),
+        ).fetchone()
+        existing_item = row_to_dict(existing) or {}
+        skill_id = str(existing_item.get("id") or _new_id("sskill"))
+        history = _json_or_default(existing_item.get("version_history_json"), [])
+        history.append(version_entry)
+        conn.execute(
+            """
+            INSERT INTO shared_skills
+                (
+                    id, organization_id, skill_key, display_name, description,
+                    category, current_version, status, allowed_roles_json,
+                    manifest_json, version_history_json, created_by, approved_by,
+                    created_at, updated_at, approved_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(organization_id, skill_key) DO UPDATE SET
+                display_name = excluded.display_name,
+                description = excluded.description,
+                category = excluded.category,
+                current_version = excluded.current_version,
+                status = excluded.status,
+                allowed_roles_json = excluded.allowed_roles_json,
+                manifest_json = excluded.manifest_json,
+                version_history_json = excluded.version_history_json,
+                approved_by = excluded.approved_by,
+                updated_at = excluded.updated_at,
+                approved_at = excluded.approved_at
+            """,
+            (
+                skill_id,
+                organization_id,
+                skill_key,
+                str(skill.get("displayName") or manifest.get("displayName") or skill_key)[:160],
+                str(manifest.get("description") or "")[:600],
+                str(skill.get("category") or manifest.get("category") or "operations")[:120],
+                version,
+                status,
+                json.dumps(allowed_roles, ensure_ascii = False),
+                json.dumps(manifest, ensure_ascii = False),
+                json.dumps(history, ensure_ascii = False),
+                username,
+                approved_by,
+                str(existing_item.get("created_at") or now),
+                now,
+                approved_at,
+            ),
+        )
+        approval_status = "approved" if status == "approved" else "pending"
+        conn.execute(
+            """
+            INSERT INTO skill_approvals
+                (
+                    id, skill_id, requester_username, reviewer_username,
+                    status, reason, policy_json, created_at, decided_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _new_id("sapp"),
+                skill_id,
+                username,
+                approved_by,
+                approval_status,
+                str(plan.get("approvalPlan", {}).get("requestType") or "internal_skill_approval")[:600],
+                json.dumps(plan.get("approvalPlan") or {}, ensure_ascii = False),
+                now,
+                approved_at,
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM shared_skills WHERE id = ?", (skill_id,)).fetchone()
+        return _hydrate_shared_skill(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def decide_shared_skill(
+    skill_id: str,
+    *,
+    reviewer_username: str,
+    status: str,
+    admin_note: str | None = None,
+) -> dict[str, Any] | None:
+    now = _now()
+    normalized_status = status if status in {"approved", "denied", "disabled"} else "denied"
+    approved_by = reviewer_username if normalized_status == "approved" else None
+    approved_at = now if normalized_status == "approved" else None
+    conn = get_connection()
+    try:
+        current = conn.execute("SELECT * FROM shared_skills WHERE id = ?", (skill_id,)).fetchone()
+        if current is None:
+            return None
+        conn.execute(
+            """
+            UPDATE shared_skills
+            SET status = ?, approved_by = ?, updated_at = ?, approved_at = ?
+            WHERE id = ?
+            """,
+            (normalized_status, approved_by, now, approved_at, skill_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO skill_approvals
+                (
+                    id, skill_id, requester_username, reviewer_username,
+                    status, reason, policy_json, created_at, decided_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _new_id("sapp"),
+                skill_id,
+                str((row_to_dict(current) or {}).get("created_by") or ""),
+                reviewer_username,
+                normalized_status,
+                str(admin_note or "")[:1200],
+                json.dumps({"adminNote": admin_note or "", "decision": normalized_status}, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM shared_skills WHERE id = ?", (skill_id,)).fetchone()
+        return _hydrate_shared_skill(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_skill_approvals(status: str | None = None, *, limit: int = 120) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 120), 1), 300)
+    conn = get_connection()
+    try:
+        if status:
+            rows = conn.execute(
+                """
+                SELECT * FROM skill_approvals
+                WHERE status = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (status, safe_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM skill_approvals
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+        return [_hydrate_skill_approval(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def record_skill_usage(
+    username: str,
+    *,
+    skill_id: str,
+    action: str = "use",
+    project_id: str | None = None,
+    version: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    created_at = _now()
+    log_id = _new_id("susage")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO skill_usage_logs
+                (id, skill_id, username, project_id, action, version, metadata_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                log_id,
+                skill_id,
+                username,
+                project_id,
+                str(action or "use")[:80],
+                str(version or "")[:80],
+                json.dumps(metadata or {}, ensure_ascii = False),
+                created_at,
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM skill_usage_logs WHERE id = ?", (log_id,)).fetchone()
+        return _hydrate_skill_usage_log(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_skill_usage_logs(
+    *,
+    username: str | None = None,
+    skill_id: str | None = None,
+    limit: int = 120,
+) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 120), 1), 300)
+    clauses: list[str] = []
+    params: list[Any] = []
+    if username:
+        clauses.append("username = ?")
+        params.append(username)
+    if skill_id:
+        clauses.append("skill_id = ?")
+        params.append(skill_id)
+    params.append(safe_limit)
+    conn = get_connection()
+    try:
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = conn.execute(
+            f"""
+            SELECT * FROM skill_usage_logs
+            {where}
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_skill_usage_log(row) for row in _rows_to_dicts(rows)]
     finally:
         conn.close()
 
