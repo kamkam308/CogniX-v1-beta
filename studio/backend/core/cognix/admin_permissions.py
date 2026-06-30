@@ -427,7 +427,7 @@ def build_permission_matrix(
     organization_policy: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     catalog = _catalog_map(permissions)
-    for item in role_permissions + user_overrides + project_permissions + legacy_user_permissions:
+    for item in role_permissions + user_overrides + project_permissions + legacy_user_permissions + list(organization_policy or []):
         permission_key = _permission_key(item)
         if permission_key:
             catalog.setdefault(

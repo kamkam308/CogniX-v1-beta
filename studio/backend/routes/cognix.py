@@ -23,6 +23,7 @@ from core.cognix import admin_approvals as cognix_admin_approvals
 from core.cognix import admin_banned as cognix_admin_banned
 from core.cognix import admin_chat as cognix_admin_chat
 from core.cognix import admin_limits as cognix_admin_limits
+from core.cognix import admin_organization_settings as cognix_admin_organization_settings
 from core.cognix import admin_permissions as cognix_admin_permissions
 from core.cognix import admin_project_oversight as cognix_admin_project_oversight
 from core.cognix import admin_security as cognix_admin_security
@@ -213,6 +214,35 @@ class AdminProjectReportRequest(BaseModel):
     report_type: Literal["summary", "security", "usage", "full"] = Field("summary", alias = "reportType")
     output_format: Literal["json", "markdown"] = Field("json", alias = "outputFormat")
     reason: str | None = Field("", max_length = 1000)
+
+
+class AdminOrganizationSettingsRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    cloud_allowed: bool | None = Field(None, alias = "cloudAllowed")
+    external_models_allowed: bool | None = Field(None, alias = "externalModelsAllowed")
+    e2ee_allowed: bool | None = Field(None, alias = "e2eeAllowed")
+    admin_chat_access_allowed: bool | None = Field(None, alias = "adminChatAccessAllowed")
+    data_retention_days: int | None = Field(None, alias = "dataRetentionDays", ge = 1, le = 3650)
+    role_quotas: dict[str, Any] | None = Field(None, alias = "roleQuotas")
+    allowed_models: list[str] | None = Field(None, alias = "allowedModels")
+    allowed_apps: list[str] | None = Field(None, alias = "allowedApps")
+    default_permissions: list[str] | None = Field(None, alias = "defaultPermissions")
+    approval_required: bool | None = Field(None, alias = "approvalRequired")
+    reason: str | None = Field("", max_length = 1000)
+
+
+class AdminPolicyEnforcementRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    action_type: Literal["cloud", "model", "generation", "app", "permission", "admin_chat_access"] = Field(
+        "model",
+        alias = "actionType",
+    )
+    model_id: str | None = Field(None, alias = "modelId", max_length = 240)
+    provider: str | None = Field(None, max_length = 120)
+    app_id: str | None = Field(None, alias = "appId", max_length = 160)
+    permission_key: str | None = Field(None, alias = "permissionKey", max_length = 160)
 
 
 class AdminPermissionDecisionRequest(BaseModel):
@@ -1852,6 +1882,7 @@ def _build_admin_permissions_bundle() -> dict[str, Any]:
     role_permissions = cognix_db.list_role_permissions()
     user_overrides = cognix_db.list_user_permission_overrides()
     project_permissions = cognix_db.list_project_permissions()
+    organization_policy = cognix_db.list_organization_policies()
     matrix = cognix_admin_permissions.build_permission_matrix(
         users = users,
         roles = roles,
@@ -1860,7 +1891,7 @@ def _build_admin_permissions_bundle() -> dict[str, Any]:
         user_overrides = user_overrides,
         project_permissions = project_permissions,
         legacy_user_permissions = legacy_permissions,
-        organization_policy = [],
+        organization_policy = organization_policy,
     )
     return {
         "users": users,
@@ -1869,6 +1900,7 @@ def _build_admin_permissions_bundle() -> dict[str, Any]:
         "rolePermissions": role_permissions,
         "userOverrides": user_overrides,
         "projectPermissions": project_permissions,
+        "organizationPolicy": organization_policy,
         "legacyPermissions": legacy_permissions,
         "matrix": matrix,
     }
@@ -2056,6 +2088,55 @@ def _build_admin_project_oversight_bundle() -> dict[str, Any]:
         "adminProjectEvents": admin_project_events,
         "projectAdminReports": project_admin_reports,
         "oversight": oversight,
+    }
+
+
+def _settings_from_records(records: list[dict[str, Any]]) -> dict[str, Any]:
+    settings = dict(cognix_admin_organization_settings.DEFAULT_ORGANIZATION_SETTINGS)
+    for record in records:
+        key = str(record.get("settingKey") or record.get("setting_key") or "")
+        if not key:
+            continue
+        settings[key] = record.get("settingValue")
+    return cognix_admin_organization_settings.normalize_organization_settings(settings)
+
+
+def _settings_payload_to_dict(payload: AdminOrganizationSettingsRequest) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    mapping = {
+        "cloudAllowed": payload.cloud_allowed,
+        "externalModelsAllowed": payload.external_models_allowed,
+        "e2eeAllowed": payload.e2ee_allowed,
+        "adminChatAccessAllowed": payload.admin_chat_access_allowed,
+        "dataRetentionDays": payload.data_retention_days,
+        "roleQuotas": payload.role_quotas,
+        "allowedModels": payload.allowed_models,
+        "allowedApps": payload.allowed_apps,
+        "defaultPermissions": payload.default_permissions,
+        "approvalRequired": payload.approval_required,
+    }
+    for key, value in mapping.items():
+        if value is not None:
+            values[key] = value
+    return values
+
+
+def _build_admin_organization_settings_bundle() -> dict[str, Any]:
+    setting_records = cognix_db.list_organization_settings()
+    policies = cognix_db.list_organization_policies()
+    change_logs = cognix_db.list_policy_change_logs(limit = 200)
+    settings = _settings_from_records(setting_records)
+    bundle = cognix_admin_organization_settings.build_policy_bundle(
+        settings = settings,
+        policies = policies,
+        change_logs = change_logs,
+    )
+    return {
+        "settings": settings,
+        "settingRecords": setting_records,
+        "policies": policies,
+        "changeLogs": change_logs,
+        "bundle": bundle,
     }
 
 
@@ -14839,6 +14920,167 @@ async def admin_project_report(
         "auditLogId": audit.get("id"),
         "sideEffects": side_effects,
         "plannerVersion": cognix_admin_project_oversight.COGNIX_PROJECT_REPORT_VERSION,
+    }
+
+
+@router.get("/admin/settings/blueprint")
+async def admin_settings_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    blueprint = cognix_admin_organization_settings.build_organization_settings_blueprint()
+    return {
+        "username": current_subject,
+        "organizationSettingsBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_admin_organization_settings.COGNIX_ADMIN_SETTINGS_SERVICE_VERSION,
+    }
+
+
+@router.get("/admin/settings")
+async def admin_settings(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_organization_settings_bundle()
+    return {
+        "username": current_subject,
+        "organizationSettings": bundle["bundle"],
+        "settings": bundle["settings"],
+        "settingRecords": _rows(bundle["settingRecords"]),
+        "policies": _rows(bundle["policies"]),
+        "changeLogs": _rows(bundle["changeLogs"]),
+        "sideEffects": bundle["bundle"].get("sideEffects", {}),
+        "plannerVersion": cognix_admin_organization_settings.COGNIX_ADMIN_SETTINGS_SERVICE_VERSION,
+    }
+
+
+@router.put("/admin/settings")
+async def admin_update_settings(
+    payload: AdminOrganizationSettingsRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    before_bundle = _build_admin_organization_settings_bundle()
+    incoming = _settings_payload_to_dict(payload)
+    after = dict(before_bundle["settings"])
+    after.update(incoming)
+    normalized_after = cognix_admin_organization_settings.normalize_organization_settings(after)
+    change_record = cognix_admin_organization_settings.build_policy_change_record(
+        before = before_bundle["settings"],
+        after = normalized_after,
+        changed_by = current_subject,
+        reason = payload.reason or "",
+    )
+    setting_records = [
+        cognix_db.upsert_organization_setting(
+            setting_key = key,
+            setting_value = value,
+            setting_type = "policy",
+            updated_by = current_subject,
+        )
+        for key, value in normalized_after.items()
+    ]
+    policy_records = [
+        cognix_db.upsert_organization_policy(
+            policy_key = str(record.get("policyKey") or ""),
+            policy_value = record.get("policyValue"),
+            policy_type = str(record.get("policyType") or "setting"),
+            permission_key = record.get("permissionKey") or record.get("policyKey"),
+            allowed = bool(record.get("allowed")),
+            enforced = bool(record.get("enforced", True)),
+            updated_by = current_subject,
+            reason = payload.reason or "",
+        )
+        for record in cognix_admin_organization_settings.policy_records_from_settings(
+            settings = normalized_after,
+            updated_by = current_subject,
+        )
+    ]
+    change_log = cognix_db.create_policy_change_log(
+        changed_by = current_subject,
+        changed_keys = change_record["changedKeys"],
+        before = change_record["before"],
+        after = change_record["after"],
+        reason = payload.reason or "",
+    )
+    updated_bundle = cognix_admin_organization_settings.build_policy_bundle(
+        settings = normalized_after,
+        policies = policy_records,
+        change_logs = [change_log, *before_bundle["changeLogs"]],
+    )
+    side_effects = {
+        **updated_bundle.get("sideEffects", {}),
+        "databaseWrite": True,
+        "policyWrite": True,
+        "settingsWrite": True,
+        "changeLogWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = None,
+        actor_username = current_subject,
+        action = "admin_organization_settings_updated",
+        resource_type = "organization_settings",
+        resource_id = "default",
+        severity = "warning" if change_record["changedKeys"] else "notice",
+        metadata = {
+            "changedKeys": change_record["changedKeys"],
+            "reason": payload.reason,
+            "policyChangeLogId": change_log.get("id"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "organizationSettings": updated_bundle,
+        "settingRecords": _rows(setting_records),
+        "policies": _rows(policy_records),
+        "policyChangeLog": _row(change_log),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_admin_organization_settings.COGNIX_ADMIN_SETTINGS_SERVICE_VERSION,
+    }
+
+
+@router.post("/admin/settings/enforcement-plan")
+async def admin_settings_enforcement_plan(
+    payload: AdminPolicyEnforcementRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_organization_settings_bundle()
+    plan = cognix_admin_organization_settings.build_policy_enforcement_plan(
+        settings = bundle["settings"],
+        action_type = payload.action_type,
+        model_id = payload.model_id,
+        provider = payload.provider,
+        app_id = payload.app_id,
+        permission_key = payload.permission_key,
+    )
+    return {
+        "username": current_subject,
+        "enforcementPlan": plan,
+        "sideEffects": plan.get("sideEffects", {}),
+        "plannerVersion": cognix_admin_organization_settings.COGNIX_POLICY_ENFORCER_VERSION,
+    }
+
+
+@router.get("/admin/settings/change-logs")
+async def admin_settings_change_logs(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    logs = cognix_db.list_policy_change_logs(limit = 500)
+    return {
+        "username": current_subject,
+        "changeLogs": _rows(logs),
+        "sideEffects": {
+            "databaseWrite": False,
+            "policyWrite": False,
+            "settingsWrite": False,
+            "changeLogWrite": False,
+            "auditWrite": False,
+            "modelLoad": False,
+            "generation": False,
+            "toolExecution": False,
+            "networkCall": False,
+        },
+        "plannerVersion": cognix_admin_organization_settings.COGNIX_POLICY_CHANGE_LOG_VERSION,
     }
 
 

@@ -159,6 +159,11 @@ ADMIN_PROJECT_OVERSIGHT_TABLE_NAMES = (
     "admin_project_events",
     "project_admin_reports",
 )
+ADMIN_ORGANIZATION_SETTINGS_TABLE_NAMES = (
+    "organization_policies",
+    "organization_settings",
+    "policy_change_logs",
+)
 
 KNOWN_ATTACK_SIGNATURES: list[dict[str, str]] = [
     {
@@ -2675,6 +2680,7 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
     _ensure_global_roadmap_tables(conn)
     _ensure_project_skill_directive_columns(conn)
     _ensure_admin_project_oversight_columns(conn)
+    _ensure_admin_organization_settings_columns(conn)
 
 
 def _ensure_approval_request_columns(conn: sqlite3.Connection) -> None:
@@ -2975,6 +2981,83 @@ def _ensure_admin_project_oversight_columns(conn: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_project_admin_reports_generated_status
             ON project_admin_reports(generated_by, status, updated_at DESC)
+        """
+    )
+
+
+def _ensure_admin_organization_settings_columns(conn: sqlite3.Connection) -> None:
+    for table_name in ADMIN_ORGANIZATION_SETTINGS_TABLE_NAMES:
+        quoted_table = _quote_roadmap_table_name(table_name)
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {quoted_table} (
+                id TEXT PRIMARY KEY,
+                organization_id TEXT NOT NULL DEFAULT 'default',
+                username TEXT,
+                project_id TEXT,
+                scope_type TEXT NOT NULL DEFAULT 'organization',
+                scope_id TEXT NOT NULL DEFAULT 'default',
+                status TEXT NOT NULL DEFAULT 'active',
+                payload_json TEXT NOT NULL DEFAULT '{{}}',
+                metadata_json TEXT NOT NULL DEFAULT '{{}}',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+
+    _ensure_columns(
+        conn,
+        "organization_policies",
+        {
+            "policy_key": "TEXT NOT NULL DEFAULT ''",
+            "policy_type": "TEXT NOT NULL DEFAULT 'setting'",
+            "policy_value_json": "TEXT NOT NULL DEFAULT '{}'",
+            "permission_key": "TEXT NOT NULL DEFAULT ''",
+            "allowed": "INTEGER NOT NULL DEFAULT 1",
+            "enforced": "INTEGER NOT NULL DEFAULT 1",
+            "updated_by": "TEXT NOT NULL DEFAULT ''",
+            "reason": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "organization_settings",
+        {
+            "setting_key": "TEXT NOT NULL DEFAULT ''",
+            "setting_type": "TEXT NOT NULL DEFAULT 'general'",
+            "setting_value_json": "TEXT NOT NULL DEFAULT '{}'",
+            "updated_by": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "policy_change_logs",
+        {
+            "changed_by": "TEXT NOT NULL DEFAULT ''",
+            "change_type": "TEXT NOT NULL DEFAULT 'settings_update'",
+            "changed_keys_json": "TEXT NOT NULL DEFAULT '[]'",
+            "before_json": "TEXT NOT NULL DEFAULT '{}'",
+            "after_json": "TEXT NOT NULL DEFAULT '{}'",
+            "reason": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_organization_policies_org_key
+            ON organization_policies(organization_id, policy_key)
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_organization_settings_org_key
+            ON organization_settings(organization_id, setting_key)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_change_logs_org_created
+            ON policy_change_logs(organization_id, created_at DESC)
         """
     )
 
@@ -8283,6 +8366,290 @@ def list_project_admin_reports(
             tuple(params),
         ).fetchall()
         return [_hydrate_project_admin_report(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_organization_policy(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    policy_value = _json_or_default(item.get("policy_value_json"), {})
+    item["organizationId"] = item.get("organization_id")
+    item["policyKey"] = item.get("policy_key")
+    item["policyType"] = item.get("policy_type")
+    item["policyValue"] = policy_value
+    item["permissionKey"] = item.get("permission_key") or item.get("policy_key")
+    item["allowed"] = bool(item.get("allowed"))
+    item["enforced"] = bool(item.get("enforced"))
+    item["updatedBy"] = item.get("updated_by")
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def upsert_organization_policy(
+    *,
+    organization_id: str = "default",
+    policy_key: str,
+    policy_value: Any,
+    policy_type: str = "setting",
+    permission_key: str | None = None,
+    allowed: bool = True,
+    enforced: bool = True,
+    updated_by: str = "",
+    reason: str = "",
+) -> dict[str, Any]:
+    now = _now()
+    normalized_org = (organization_id or "default").strip()[:160] or "default"
+    normalized_key = policy_key.strip()[:160]
+    if not normalized_key:
+        raise ValueError("Invalid policy key")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO organization_policies
+                (
+                    id, organization_id, username, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    policy_key, policy_type, policy_value_json, permission_key,
+                    allowed, enforced, updated_by, reason
+                )
+            VALUES (?, ?, ?, 'organization', ?, 'active', ?, '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(organization_id, policy_key) DO UPDATE SET
+                username = excluded.username,
+                status = excluded.status,
+                payload_json = excluded.payload_json,
+                updated_at = excluded.updated_at,
+                policy_type = excluded.policy_type,
+                policy_value_json = excluded.policy_value_json,
+                permission_key = excluded.permission_key,
+                allowed = excluded.allowed,
+                enforced = excluded.enforced,
+                updated_by = excluded.updated_by,
+                reason = excluded.reason
+            """,
+            (
+                _new_id("orgpol"),
+                normalized_org,
+                updated_by,
+                normalized_org,
+                json.dumps(policy_value, ensure_ascii = False),
+                now,
+                now,
+                normalized_key,
+                policy_type.strip()[:80] or "setting",
+                json.dumps(policy_value, ensure_ascii = False),
+                (permission_key or normalized_key).strip()[:160],
+                1 if allowed else 0,
+                1 if enforced else 0,
+                updated_by[:160],
+                reason[:1000],
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            """
+            SELECT * FROM organization_policies
+            WHERE organization_id = ? AND policy_key = ?
+            """,
+            (normalized_org, normalized_key),
+        ).fetchone()
+        return _hydrate_organization_policy(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_organization_policies(
+    *,
+    organization_id: str = "default",
+    include_disabled: bool = False,
+) -> list[dict[str, Any]]:
+    clauses = ["organization_id = ?"]
+    params: list[Any] = [(organization_id or "default").strip() or "default"]
+    if not include_disabled:
+        clauses.append("status != 'disabled'")
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM organization_policies
+            WHERE {' AND '.join(clauses)}
+            ORDER BY policy_key ASC
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_organization_policy(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_organization_setting(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["organizationId"] = item.get("organization_id")
+    item["settingKey"] = item.get("setting_key")
+    item["settingType"] = item.get("setting_type")
+    item["settingValue"] = _json_or_default(item.get("setting_value_json"), None)
+    item["updatedBy"] = item.get("updated_by")
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def upsert_organization_setting(
+    *,
+    organization_id: str = "default",
+    setting_key: str,
+    setting_value: Any,
+    setting_type: str = "general",
+    updated_by: str = "",
+) -> dict[str, Any]:
+    now = _now()
+    normalized_org = (organization_id or "default").strip()[:160] or "default"
+    normalized_key = setting_key.strip()[:160]
+    if not normalized_key:
+        raise ValueError("Invalid setting key")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO organization_settings
+                (
+                    id, organization_id, username, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    setting_key, setting_type, setting_value_json, updated_by
+                )
+            VALUES (?, ?, ?, 'organization', ?, 'active', ?, '{}', ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(organization_id, setting_key) DO UPDATE SET
+                username = excluded.username,
+                payload_json = excluded.payload_json,
+                updated_at = excluded.updated_at,
+                setting_type = excluded.setting_type,
+                setting_value_json = excluded.setting_value_json,
+                updated_by = excluded.updated_by
+            """,
+            (
+                _new_id("orgset"),
+                normalized_org,
+                updated_by,
+                normalized_org,
+                json.dumps(setting_value, ensure_ascii = False),
+                now,
+                now,
+                normalized_key,
+                setting_type.strip()[:80] or "general",
+                json.dumps(setting_value, ensure_ascii = False),
+                updated_by[:160],
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            """
+            SELECT * FROM organization_settings
+            WHERE organization_id = ? AND setting_key = ?
+            """,
+            (normalized_org, normalized_key),
+        ).fetchone()
+        return _hydrate_organization_setting(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_organization_settings(
+    *,
+    organization_id: str = "default",
+) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM organization_settings
+            WHERE organization_id = ?
+            ORDER BY setting_key ASC
+            """,
+            ((organization_id or "default").strip() or "default",),
+        ).fetchall()
+        return [_hydrate_organization_setting(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_policy_change_log(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["organizationId"] = item.get("organization_id")
+    item["changedBy"] = item.get("changed_by")
+    item["changeType"] = item.get("change_type")
+    item["changedKeys"] = _json_or_default(item.get("changed_keys_json"), [])
+    item["before"] = _json_or_default(item.get("before_json"), {})
+    item["after"] = _json_or_default(item.get("after_json"), {})
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def create_policy_change_log(
+    *,
+    organization_id: str = "default",
+    changed_by: str,
+    change_type: str = "settings_update",
+    changed_keys: list[str] | None = None,
+    before: dict[str, Any] | None = None,
+    after: dict[str, Any] | None = None,
+    reason: str = "",
+) -> dict[str, Any]:
+    now = _now()
+    log_id = _new_id("polchg")
+    normalized_org = (organization_id or "default").strip()[:160] or "default"
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO policy_change_logs
+                (
+                    id, organization_id, username, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    changed_by, change_type, changed_keys_json, before_json,
+                    after_json, reason
+                )
+            VALUES (?, ?, ?, 'organization', ?, 'active', ?, '{}', ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                log_id,
+                normalized_org,
+                changed_by,
+                normalized_org,
+                json.dumps({"before": before or {}, "after": after or {}}, ensure_ascii = False),
+                now,
+                now,
+                changed_by[:160],
+                change_type[:120],
+                json.dumps(changed_keys or [], ensure_ascii = False),
+                json.dumps(before or {}, ensure_ascii = False),
+                json.dumps(after or {}, ensure_ascii = False),
+                reason[:1000],
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM policy_change_logs WHERE id = ?", (log_id,)).fetchone()
+        return _hydrate_policy_change_log(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_policy_change_logs(
+    *,
+    organization_id: str = "default",
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 200), 1), 1000)
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM policy_change_logs
+            WHERE organization_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            ((organization_id or "default").strip() or "default", safe_limit),
+        ).fetchall()
+        return [_hydrate_policy_change_log(row) for row in _rows_to_dicts(rows)]
     finally:
         conn.close()
 
