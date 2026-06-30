@@ -3489,6 +3489,19 @@ const checks: Check[] = [
     ],
   },
   {
+    file: "src/features/cognix-modules/module-pages.tsx",
+    includes: [
+      "export function AppsPage()",
+      '"/api/cognix/plugins/marketplace"',
+      '"/api/cognix/plugins/installations"',
+      '"/api/cognix/plugins/install-plan"',
+      "storePlan: true",
+      "Dry run only",
+      "Plan install",
+      "No plugin was installed or activated.",
+    ],
+  },
+  {
     file: "../backend/tests/test_middleware.py",
     includes: [
       "test_ceo_health_unlocks_cloud_training_without_local_gpu",

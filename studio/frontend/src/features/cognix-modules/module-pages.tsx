@@ -762,12 +762,26 @@ export function ScheduledPage() {
 }
 
 export function AppsPage() {
-  const { data, error, loading, reload } = useCognixResource("/api/cognix/apps");
+  const appsResource = useCognixResource("/api/cognix/apps");
+  const marketplaceResource = useCognixResource("/api/cognix/plugins/marketplace");
+  const installationsResource = useCognixResource("/api/cognix/plugins/installations");
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
-  const registry = asRecord(data?.appRegistry);
+  const [pluginPlans, setPluginPlans] = useState<Record<string, JsonRecord>>({});
+  const loading = appsResource.loading || marketplaceResource.loading || installationsResource.loading;
+  const error = appsResource.error ?? marketplaceResource.error ?? installationsResource.error;
+  const registry = asRecord(appsResource.data?.appRegistry);
+  const marketplace = asRecord(marketplaceResource.data?.marketplaceCatalog);
+  const marketplaceSummary = asRecord(marketplace.summary);
+  const plugins = asArray(marketplace.plugins);
+  const installations = asArray(installationsResource.data?.installations);
   const apps = asArray(registry.apps);
   const summary = asRecord(registry.summary);
+  const reload = useCallback(() => {
+    appsResource.reload();
+    marketplaceResource.reload();
+    installationsResource.reload();
+  }, [appsResource.reload, marketplaceResource.reload, installationsResource.reload]);
   const visibleApps = useMemo(() => {
     const needle = query.trim().toLowerCase();
     if (!needle) return apps;
@@ -777,6 +791,15 @@ export function AppsPage() {
         .some((value) => value.includes(needle)),
     );
   }, [apps, query]);
+  const visiblePlugins = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return plugins;
+    return plugins.filter((plugin) =>
+      [plugin.displayName, plugin.category, plugin.description, plugin.id, plugin.publisher]
+        .map((value) => readString(value).toLowerCase())
+        .some((value) => value.includes(needle)),
+    );
+  }, [plugins, query]);
 
   async function setConnection(app: JsonRecord, status: "connected" | "disabled") {
     const appId = readString(app.id);
@@ -800,6 +823,32 @@ export function AppsPage() {
     }
   }
 
+  async function planPluginInstall(plugin: JsonRecord) {
+    const pluginId = readString(plugin.id);
+    if (!pluginId) return;
+    setBusy(`plugin:${pluginId}`);
+    try {
+      const payload = await cognixJson("/api/cognix/plugins/install-plan", {
+        method: "POST",
+        body: jsonBody({
+          pluginId,
+          targetScope: "user",
+          storePlan: true,
+        }),
+      });
+      const plan = asRecord(payload.pluginInstallPlan);
+      setPluginPlans((current) => ({ ...current, [pluginId]: plan }));
+      toast.success("Plugin install plan created", {
+        description: labelize(plan.status),
+      });
+      installationsResource.reload();
+    } catch (err) {
+      notifyError("Plugin planning failed", err);
+    } finally {
+      setBusy(null);
+    }
+  }
+
   return (
     <ModuleShell
       title="Apps"
@@ -811,54 +860,118 @@ export function AppsPage() {
           <StatGrid>
             <Stat label="Apps" value={readNumber(summary.appCount, apps.length)} icon={AppWindow} tone="blue" />
             <Stat label="Connected" value={readNumber(summary.connectedCount)} icon={CheckCircle2} tone="green" />
-            <Stat label="Visible" value={visibleApps.length} icon={Search} />
-            <Stat label="High risk" value={readNumber(asRecord(summary.byRisk).high) + readNumber(asRecord(summary.byRisk).critical)} icon={ShieldCheck} tone="amber" />
+            <Stat label="Marketplace" value={readNumber(marketplaceSummary.pluginCount, plugins.length)} icon={Sparkles} />
+            <Stat label="Install plans" value={installations.length} icon={ShieldCheck} tone="amber" />
           </StatGrid>
-          <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-3">
-            {visibleApps.map((app, index) => {
-              const appId = recordId(app, String(index));
-              const connection = asRecord(app.connection);
-              const connected = readBoolean(connection.connected);
-              const permissions = asArray(app.requestedPermissions);
-              return (
-                <div key={appId} className="flex min-h-52 flex-col rounded-lg border border-border bg-card p-4">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Badge variant={statusVariant(connection.status)}>{connected ? "Connected" : labelize(connection.status || "available")}</Badge>
-                        <Badge variant={riskVariant(app.riskLevel)}>{labelize(app.riskLevel)} risk</Badge>
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.05fr_0.95fr]">
+            <Panel title="App registry">
+              {visibleApps.length > 0 ? (
+                <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                  {visibleApps.map((app, index) => {
+                    const appId = recordId(app, String(index));
+                    const connection = asRecord(app.connection);
+                    const connected = readBoolean(connection.connected);
+                    const permissions = asArray(app.requestedPermissions);
+                    return (
+                      <div key={appId} className="flex min-h-52 flex-col rounded-lg border border-border bg-background p-4">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <Badge variant={statusVariant(connection.status)}>{connected ? "Connected" : labelize(connection.status || "available")}</Badge>
+                              <Badge variant={riskVariant(app.riskLevel)}>{labelize(app.riskLevel)} risk</Badge>
+                            </div>
+                            <h3 className="mt-3 truncate text-sm font-semibold text-foreground">{readString(app.name, appId)}</h3>
+                            <p className="mt-1 text-xs text-muted-foreground">{readString(app.category, "Integration")}</p>
+                          </div>
+                          <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+                            <AppWindow className="size-4" />
+                          </span>
+                        </div>
+                        <p className="mt-3 line-clamp-3 text-sm leading-6 text-muted-foreground">{readString(app.description)}</p>
+                        <div className="mt-4 flex flex-wrap gap-2">
+                          {permissions.slice(0, 4).map((permission, permissionIndex) => (
+                            <Badge key={`${appId}-${permissionIndex}`} variant={riskVariant(permission.riskLevel)}>
+                              {readString(permission.permission, "permission")}
+                            </Badge>
+                          ))}
+                        </div>
+                        <div className="mt-auto pt-5">
+                          <Button
+                            variant={connected ? "outline" : "default"}
+                            className="w-full"
+                            disabled={busy === appId}
+                            onClick={() => void setConnection(app, connected ? "disabled" : "connected")}
+                          >
+                            {busy === appId ? <Loader2 className="size-4 animate-spin" /> : connected ? <Pause className="size-4" /> : <CheckCircle2 className="size-4" />}
+                            {connected ? "Disable" : "Connect"}
+                          </Button>
+                        </div>
                       </div>
-                      <h3 className="mt-3 truncate text-sm font-semibold text-foreground">{readString(app.name, appId)}</h3>
-                      <p className="mt-1 text-xs text-muted-foreground">{readString(app.category, "Integration")}</p>
-                    </div>
-                    <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
-                      <AppWindow className="size-4" />
-                    </span>
-                  </div>
-                  <p className="mt-3 line-clamp-3 text-sm leading-6 text-muted-foreground">{readString(app.description)}</p>
-                  <div className="mt-4 flex flex-wrap gap-2">
-                    {permissions.slice(0, 4).map((permission, permissionIndex) => (
-                      <Badge key={`${appId}-${permissionIndex}`} variant={riskVariant(permission.riskLevel)}>
-                        {readString(permission.permission, "permission")}
-                      </Badge>
-                    ))}
-                  </div>
-                  <div className="mt-auto pt-5">
-                    <Button
-                      variant={connected ? "outline" : "default"}
-                      className="w-full"
-                      disabled={busy === appId}
-                      onClick={() => void setConnection(app, connected ? "disabled" : "connected")}
-                    >
-                      {busy === appId ? <Loader2 className="size-4 animate-spin" /> : connected ? <Pause className="size-4" /> : <CheckCircle2 className="size-4" />}
-                      {connected ? "Disable" : "Connect"}
-                    </Button>
-                  </div>
+                    );
+                  })}
                 </div>
-              );
-            })}
+              ) : (
+                <EmptyState label="No apps match this search." />
+              )}
+            </Panel>
+            <Panel title="Marketplace" action={<Badge variant="outline">Dry run only</Badge>}>
+              {visiblePlugins.length > 0 ? (
+                <div className="space-y-3">
+                  {visiblePlugins.map((plugin, index) => {
+                    const pluginId = recordId(plugin, String(index));
+                    const plan = asRecord(pluginPlans[pluginId]);
+                    const installable = readBoolean(plugin.installable);
+                    const planStatus = readString(plan.status);
+                    const permissionScan = asRecord(plan.permissionScan);
+                    const missingPermissions = readStringList(permissionScan.missingPermissions);
+                    return (
+                      <div key={pluginId} className="rounded-lg border border-border bg-background p-4">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <Badge variant={installable ? "default" : "destructive"}>{installable ? "Verified" : "Blocked"}</Badge>
+                              <Badge variant={riskVariant(plugin.maxRiskLevel)}>{labelize(plugin.maxRiskLevel)} risk</Badge>
+                              <Badge variant="outline">{readString(plugin.signatureStatus, "unknown")}</Badge>
+                            </div>
+                            <h3 className="mt-3 truncate text-sm font-semibold text-foreground">{readString(plugin.displayName, pluginId)}</h3>
+                            <p className="mt-1 text-xs text-muted-foreground">{readString(plugin.publisher, "CogniX")} · {readString(plugin.version, "0.0.0")}</p>
+                          </div>
+                          <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+                            <Sparkles className="size-4" />
+                          </span>
+                        </div>
+                        <p className="mt-3 line-clamp-3 text-sm leading-6 text-muted-foreground">{readString(plugin.description)}</p>
+                        {planStatus ? (
+                          <div className="mt-3 rounded-lg border border-border bg-card p-3">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <Badge variant={statusVariant(planStatus)}>{labelize(planStatus)}</Badge>
+                              <Badge variant="outline">no install</Badge>
+                            </div>
+                            <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                              {missingPermissions.length > 0
+                                ? `Missing permissions: ${missingPermissions.join(", ")}`
+                                : "Ready for human confirmation. No plugin was installed or activated."}
+                            </p>
+                          </div>
+                        ) : null}
+                        <Button
+                          variant="outline"
+                          className="mt-4 w-full"
+                          disabled={busy === `plugin:${pluginId}`}
+                          onClick={() => void planPluginInstall(plugin)}
+                        >
+                          {busy === `plugin:${pluginId}` ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />}
+                          Plan install
+                        </Button>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <EmptyState label="No marketplace plugins match this search." />
+              )}
+            </Panel>
           </div>
-          {visibleApps.length === 0 ? <EmptyState label="No apps match this search." /> : null}
         </>
       )}
     </ModuleShell>
