@@ -10,6 +10,7 @@ external calls.
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 from core.cognix import tool_registry as cognix_tool_registry
@@ -19,6 +20,7 @@ COGNIX_INTEGRATION_MANAGER_VERSION = "cognix_integration_manager_v1"
 COGNIX_INTEGRATION_ACTIVATION_CONTRACT_VERSION = "cognix_integration_activation_contract_v1"
 COGNIX_CONNECTOR_PREFLIGHT_CONTRACT_VERSION = "cognix_connector_preflight_contract_v1"
 COGNIX_CONNECTOR_ROADMAP_READINESS_VERSION = "cognix_connector_roadmap_readiness_v1"
+COGNIX_SECRET_ROTATION_CONTRACT_VERSION = "cognix_secret_rotation_contract_v1"
 
 MVP_CONNECTOR_TARGETS: list[dict[str, Any]] = [
     {
@@ -114,6 +116,16 @@ def _permission_set(
 
 def _risk_rank(risk_level: str) -> int:
     return cognix_tool_registry.RISK_ORDER.get(str(risk_level or "").lower(), 0)
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 0 else default
 
 
 def _max_risk(actions: list[dict[str, Any]]) -> str:
@@ -421,6 +433,177 @@ def build_connector_preflight_contract(
             "external_write",
             "permission_write",
             "frontend_direct_connector_call",
+        ],
+        "sideEffects": side_effects,
+    }
+
+
+def build_secret_rotation_contract(
+    *,
+    tool_id: str,
+    username: str,
+    rotation_reason: str | None = None,
+    current_secret_age_days: int | None = None,
+    last_rotation_at: str | None = None,
+    is_admin: bool = False,
+    has_developer_mode: bool = False,
+    granted_permissions: set[str] | None = None,
+) -> dict[str, Any]:
+    preflight = build_connector_preflight_contract(
+        tool_id = tool_id,
+        username = username,
+        is_admin = is_admin,
+        has_developer_mode = has_developer_mode,
+        granted_permissions = granted_permissions,
+    )
+    side_effects = {
+        "secretRead": False,
+        "secretWrite": False,
+        "secretRotation": False,
+        "connectorActivation": False,
+        "toolExecution": False,
+        "networkToolCall": False,
+        "externalWrite": False,
+        "permissionWrite": False,
+        "auditWrite": False,
+    }
+    secret_names = [
+        str(item).strip()
+        for item in preflight.get("secretContract", {}).get("secretSourceNames", [])
+        if str(item or "").strip()
+    ]
+    connector = preflight.get("connector")
+    max_risk = str(preflight.get("riskContract", {}).get("maxRiskLevel") or "low")
+    age_days = _as_int(current_secret_age_days, 0)
+    normalized_reason = str(rotation_reason or "").strip().casefold()
+    immediate_reason = normalized_reason in {
+        "suspected_leak",
+        "credential_exposure",
+        "incident",
+        "employee_offboarding",
+        "admin_requested",
+    }
+    high_risk = _risk_rank(max_risk) >= _risk_rank("high")
+    age_exceeded = age_days >= 90
+    rotation_recommended = bool(secret_names and (immediate_reason or high_risk or age_exceeded))
+    preflight_blocked = bool(preflight.get("summary", {}).get("blockedGateIds")) or preflight.get("status") == "unknown_integration"
+    ready_for_rotation_request = bool(secret_names and not preflight_blocked)
+    status = (
+        "unknown_integration"
+        if preflight.get("status") == "unknown_integration"
+        else "blocked_missing_secret_source"
+        if not secret_names
+        else "blocked_preflight"
+        if preflight_blocked
+        else "rotation_recommended"
+        if rotation_recommended
+        else "rotation_review_optional"
+    )
+    gates = [
+        {
+            "id": "connector_preflight_ready",
+            "status": "pass" if not preflight_blocked else "blocked",
+            "severity": "info" if not preflight_blocked else "error",
+            "reason": "Connector preflight is available before secret rotation.",
+            "detail": preflight.get("status"),
+        },
+        {
+            "id": "secret_sources_declared",
+            "status": "pass" if secret_names else "blocked",
+            "severity": "info" if secret_names else "error",
+            "reason": "Server-side secret source names must be declared.",
+            "detail": secret_names,
+        },
+        {
+            "id": "secret_value_not_read",
+            "status": "pass",
+            "severity": "info",
+            "reason": "This contract never reads or returns current secret values.",
+        },
+        {
+            "id": "human_approval_required",
+            "status": "planned",
+            "severity": "warning",
+            "reason": "Secret rotation requires an explicit admin or owner approval.",
+        },
+        {
+            "id": "secret_manager_executor_required",
+            "status": "planned",
+            "severity": "warning",
+            "reason": "Only a guarded backend secret manager executor may rotate the secret.",
+        },
+    ]
+    blocked_gate_ids = [str(item["id"]) for item in gates if item.get("severity") == "error"]
+    warning_gate_ids = [str(item["id"]) for item in gates if item.get("severity") == "warning"]
+    return {
+        "secretRotationContractVersion": COGNIX_SECRET_ROTATION_CONTRACT_VERSION,
+        "integrationManagerVersion": COGNIX_INTEGRATION_MANAGER_VERSION,
+        "preflightContractVersion": preflight.get("contractVersion"),
+        "mode": "secret_rotation_contract_dry_run",
+        "username": username,
+        "toolId": preflight.get("toolId") or tool_id,
+        "connector": connector,
+        "status": status,
+        "readyForRotationRequest": ready_for_rotation_request,
+        "readyForSecretRotation": False,
+        "rotationRecommended": rotation_recommended,
+        "rotationPolicy": {
+            "maxSecretAgeDays": 90,
+            "currentSecretAgeDays": age_days if current_secret_age_days is not None else None,
+            "lastRotationAt": last_rotation_at,
+            "rotationReason": normalized_reason or "routine_review",
+            "immediateRotationReason": immediate_reason,
+            "highRiskConnector": high_risk,
+            "ageExceeded": age_exceeded,
+            "requiresHumanApproval": True,
+            "requiresAuditLog": True,
+            "requiresServerSideSecretManager": True,
+        },
+        "secretSources": [
+            {
+                "name": name,
+                "sourceRefHash": "secret_ref_" + hashlib.sha256(f"{connector}:{name}".encode("utf-8")).hexdigest()[:12],
+                "currentValueIncluded": False,
+                "newValueIncluded": False,
+                "clientSideAccessAllowed": False,
+            }
+            for name in secret_names
+        ],
+        "preflightSummary": {
+            "status": preflight.get("status"),
+            "readyForActivationRequest": preflight.get("readyForActivationRequest"),
+            "blockedGateIds": preflight.get("summary", {}).get("blockedGateIds", []),
+            "warningGateIds": preflight.get("summary", {}).get("warningGateIds", []),
+            "maxRiskLevel": max_risk,
+        },
+        "executorContract": {
+            "plannedExecutor": "cognix_secret_manager:rotate_connector_secret" if ready_for_rotation_request else None,
+            "readyForExecutor": False,
+            "secretReadAllowedHere": False,
+            "secretWriteAllowedHere": False,
+            "networkReauthAllowedHere": False,
+            "frontendDirectSecretRotationAllowed": False,
+            "requiresConfirmationId": True,
+            "requiresRollbackSecretVersion": True,
+            "requiresPostRotationConnectorTest": True,
+            "nextRequiredGate": blocked_gate_ids[0] if blocked_gate_ids else "human_approval_required",
+        },
+        "gates": gates,
+        "summary": {
+            "secretSourceCount": len(secret_names),
+            "blockedGateIds": blocked_gate_ids,
+            "warningGateIds": warning_gate_ids,
+            "rotationRecommended": rotation_recommended,
+            "readyForRotationRequest": ready_for_rotation_request,
+        },
+        "blockedActions": [
+            "secret_read",
+            "secret_write",
+            "secret_rotation",
+            "connector_reauth",
+            "network_tool_call",
+            "frontend_secret_access",
+            "secret_value_logging",
         ],
         "sideEffects": side_effects,
     }

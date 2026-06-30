@@ -1430,6 +1430,15 @@ class IntegrationPreflightContractRequest(BaseModel):
     tool_id: str = Field(..., min_length = 1, max_length = 120)
 
 
+class IntegrationSecretRotationContractRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    tool_id: str = Field(..., alias = "toolId", min_length = 1, max_length = 120)
+    rotation_reason: str | None = Field(None, alias = "rotationReason", max_length = 120)
+    current_secret_age_days: int | None = Field(None, alias = "currentSecretAgeDays", ge = 0, le = 10000)
+    last_rotation_at: str | None = Field(None, alias = "lastRotationAt", max_length = 120)
+
+
 class ModulePlanRequest(BaseModel):
     module_id: str = Field(..., min_length = 1, max_length = 160)
 
@@ -5738,6 +5747,62 @@ async def integration_preflight_contract(
         "preflightContract": contract,
         "auditLogId": audit.get("id"),
         "sideEffects": contract.get("sideEffects", {}),
+    }
+
+
+@router.post("/integrations/secret-rotation-contract")
+async def integration_secret_rotation_contract(
+    payload: IntegrationSecretRotationContractRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    is_admin = auth_storage.is_admin(current_subject)
+    has_developer_mode = cognix_db.user_has_permission(
+        current_subject,
+        cognix_db.DEVELOPER_MODE_PERMISSION,
+    )
+    contract = cognix_integration_manager.build_secret_rotation_contract(
+        tool_id = payload.tool_id,
+        username = current_subject,
+        rotation_reason = payload.rotation_reason,
+        current_secret_age_days = payload.current_secret_age_days,
+        last_rotation_at = payload.last_rotation_at,
+        is_admin = is_admin,
+        has_developer_mode = has_developer_mode,
+        granted_permissions = _granted_permission_keys(current_subject),
+    )
+    audit_side_effects = {
+        **contract.get("sideEffects", {}),
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "integration_secret_rotation_contract_built",
+        resource_type = "cognix_secret_rotation_contract",
+        resource_id = str(payload.tool_id),
+        severity = "warning" if contract.get("rotationRecommended") else "notice",
+        metadata = {
+            "secretRotationContractVersion": contract.get("secretRotationContractVersion"),
+            "integrationManagerVersion": contract.get("integrationManagerVersion"),
+            "preflightContractVersion": contract.get("preflightContractVersion"),
+            "toolId": contract.get("toolId"),
+            "connector": contract.get("connector"),
+            "status": contract.get("status"),
+            "readyForRotationRequest": contract.get("readyForRotationRequest"),
+            "readyForSecretRotation": contract.get("readyForSecretRotation"),
+            "rotationRecommended": contract.get("rotationRecommended"),
+            "secretSourceCount": contract.get("summary", {}).get("secretSourceCount"),
+            "blockedGateIds": contract.get("summary", {}).get("blockedGateIds", []),
+            "warningGateIds": contract.get("summary", {}).get("warningGateIds", []),
+            "sideEffects": audit_side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "secretRotationContract": contract,
+        "auditLogId": audit.get("id"),
+        "sideEffects": audit_side_effects,
+        "plannerVersion": cognix_integration_manager.COGNIX_SECRET_ROTATION_CONTRACT_VERSION,
     }
 
 

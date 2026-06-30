@@ -9744,6 +9744,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "safe_latex_render_packets" in modules["cognix-integrations"]["capabilities"]
     assert "connector_preflight_contract" in modules["cognix-integrations"]["capabilities"]
     assert "integration_activation_contract" in modules["cognix-integrations"]["capabilities"]
+    assert "connector_secret_rotation_contract" in modules["cognix-integrations"]["capabilities"]
+    assert "server_side_secret_rotation" in modules["cognix-integrations"]["capabilities"]
     assert "enterprise_connector_manifests" in modules["cognix-integrations"]["capabilities"]
     assert "education_connector_manifests" in modules["cognix-integrations"]["capabilities"]
     assert "business_system_connector_manifests" in modules["cognix-integrations"]["capabilities"]
@@ -9755,6 +9757,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/integrations/plan" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/integrations/preflight-contract" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/integrations/activation-contract" in modules["cognix-integrations"]["routes"]
+    assert "/api/cognix/integrations/secret-rotation-contract" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/integrations/roadmap-readiness" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/tools/permission-matrix" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/tools/latex/render" in modules["cognix-integrations"]["routes"]
@@ -11005,6 +11008,91 @@ def test_connector_roadmap_readiness_endpoint_is_user_scoped_and_read_only():
     assert body["sideEffects"]["toolExecution"] is False
     assert body["sideEffects"]["networkToolCall"] is False
     assert body["sideEffects"]["auditWrite"] is False
+
+
+def test_secret_rotation_contract_recommends_high_risk_rotation_without_secret_io():
+    contract = cognix_integration_manager.build_secret_rotation_contract(
+        tool_id = "github",
+        username = "alice",
+        rotation_reason = "admin_requested",
+        current_secret_age_days = 120,
+        has_developer_mode = True,
+        granted_permissions = {"github:read"},
+    )
+
+    assert contract["secretRotationContractVersion"] == "cognix_secret_rotation_contract_v1"
+    assert contract["mode"] == "secret_rotation_contract_dry_run"
+    assert contract["toolId"] == "github"
+    assert contract["connector"] == "github"
+    assert contract["rotationRecommended"] is True
+    assert contract["readyForRotationRequest"] is True
+    assert contract["readyForSecretRotation"] is False
+    assert contract["rotationPolicy"]["requiresServerSideSecretManager"] is True
+    assert contract["rotationPolicy"]["ageExceeded"] is True
+    assert contract["executorContract"]["plannedExecutor"] == "cognix_secret_manager:rotate_connector_secret"
+    assert contract["executorContract"]["secretReadAllowedHere"] is False
+    assert contract["executorContract"]["secretWriteAllowedHere"] is False
+    assert contract["secretSources"][0]["currentValueIncluded"] is False
+    assert contract["secretSources"][0]["newValueIncluded"] is False
+    assert contract["sideEffects"]["secretRead"] is False
+    assert contract["sideEffects"]["secretWrite"] is False
+    assert contract["sideEffects"]["secretRotation"] is False
+    assert "secret_rotation" in contract["blockedActions"]
+
+
+def test_secret_rotation_contract_blocks_unknown_integration_without_secret_io():
+    contract = cognix_integration_manager.build_secret_rotation_contract(
+        tool_id = "unknown-connector",
+        username = "alice",
+        rotation_reason = "suspected_leak",
+    )
+
+    assert contract["status"] == "unknown_integration"
+    assert contract["readyForRotationRequest"] is False
+    assert contract["readyForSecretRotation"] is False
+    assert contract["summary"]["secretSourceCount"] == 0
+    assert "connector_preflight_ready" in contract["summary"]["blockedGateIds"]
+    assert "secret_sources_declared" in contract["summary"]["blockedGateIds"]
+    assert contract["executorContract"]["plannedExecutor"] is None
+    assert contract["sideEffects"]["secretRead"] is False
+    assert contract["sideEffects"]["secretWrite"] is False
+
+
+def test_secret_rotation_contract_endpoint_logs_sanitized_contract():
+    seed_accounts()
+    cognix_db.grant_user_permission(
+        "alice",
+        "github:read",
+        granted_by = storage.DEFAULT_ADMIN_USERNAME,
+    )
+
+    body = run_async(
+        cognix_routes.integration_secret_rotation_contract(
+            cognix_routes.IntegrationSecretRotationContractRequest(
+                toolId = "github",
+                rotationReason = "admin_requested",
+                currentSecretAgeDays = 120,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    contract = body["secretRotationContract"]
+    assert body["auditLogId"].startswith("aud_")
+    assert body["plannerVersion"] == "cognix_secret_rotation_contract_v1"
+    assert contract["rotationRecommended"] is True
+    assert body["sideEffects"]["secretRead"] is False
+    assert body["sideEffects"]["secretWrite"] is False
+    assert body["sideEffects"]["secretRotation"] is False
+
+    log = run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))["logs"][0]
+    assert log["id"] == body["auditLogId"]
+    assert log["action"] == "integration_secret_rotation_contract_built"
+    assert log["metadata"]["secretRotationContractVersion"] == "cognix_secret_rotation_contract_v1"
+    assert log["metadata"]["secretSourceCount"] == contract["summary"]["secretSourceCount"]
+    assert log["metadata"]["sideEffects"]["secretRead"] is False
+    assert "secretSources" not in log["metadataJson"]
+    assert "currentValue" not in log["metadataJson"]
 
 
 def test_enterprise_tool_action_plan_blocks_critical_exports_without_execution():
