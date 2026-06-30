@@ -47,8 +47,22 @@ const checks: Check[] = [
     ],
   },
   {
+    file: "src/features/auth/token-storage.ts",
+    includes: [
+      "AUTH_TOKEN_KEY",
+      "AUTH_REFRESH_TOKEN_KEY",
+      "getStoredAuthToken",
+      "localStorage.getItem(AUTH_TOKEN_KEY)",
+      "sessionStorage.setItem(AUTH_TOKEN_KEY, legacy)",
+      "storeAuthTokenPair",
+      "clearStoredAuthTokens",
+    ],
+  },
+  {
     file: "src/config/env.ts",
     includes: [
+      'import { getStoredAuthToken } from "@/features/auth/token-storage";',
+      "const token = getStoredAuthToken()",
       "cloudTrainingUnlocked",
       "cloud_training_unlocked",
       "cloud_training_providers",

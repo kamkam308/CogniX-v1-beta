@@ -3,9 +3,19 @@
 
 import { usePlatformStore } from "@/config/env";
 import { isTauri } from "@/lib/api-base";
+import {
+  AUTH_REFRESH_TOKEN_KEY,
+  AUTH_TOKEN_KEY,
+  clearStoredAuthTokens,
+  getStoredAuthToken,
+  getStoredRefreshToken,
+  hasStoredAuthToken,
+  hasStoredRefreshToken,
+  storeAuthTokenPair,
+} from "./token-storage";
 
-export const AUTH_TOKEN_KEY = "unsloth_auth_token";
-export const AUTH_REFRESH_TOKEN_KEY = "unsloth_auth_refresh_token";
+export { AUTH_REFRESH_TOKEN_KEY, AUTH_TOKEN_KEY };
+
 export const ONBOARDING_DONE_KEY = "unsloth_onboarding_done";
 export const AUTH_MUST_CHANGE_PASSWORD_KEY = "unsloth_auth_must_change_password";
 
@@ -15,45 +25,26 @@ function canUseStorage(): boolean {
   return typeof window !== "undefined";
 }
 
-function removeLegacyPersistentAuthTokens(): void {
-  localStorage.removeItem(AUTH_TOKEN_KEY);
-  localStorage.removeItem(AUTH_REFRESH_TOKEN_KEY);
-}
-
 export function hasAuthToken(): boolean {
-  if (!canUseStorage()) return false;
-  const legacy = localStorage.getItem(AUTH_TOKEN_KEY);
-  if (legacy) {
-    sessionStorage.setItem(AUTH_TOKEN_KEY, legacy);
-    localStorage.removeItem(AUTH_TOKEN_KEY);
-    return true;
-  }
-  return Boolean(sessionStorage.getItem(AUTH_TOKEN_KEY));
+  return hasStoredAuthToken();
 }
 
 export function hasRefreshToken(): boolean {
   if (!canUseStorage()) return false;
   localStorage.removeItem(AUTH_REFRESH_TOKEN_KEY);
   if (!isTauri) return true;
-  return Boolean(sessionStorage.getItem(AUTH_REFRESH_TOKEN_KEY));
+  return hasStoredRefreshToken();
 }
 
 export function getAuthToken(): string | null {
-  if (!canUseStorage()) return null;
-  const token = sessionStorage.getItem(AUTH_TOKEN_KEY);
-  const legacy = localStorage.getItem(AUTH_TOKEN_KEY);
-  if (legacy) {
-    localStorage.removeItem(AUTH_TOKEN_KEY);
-    if (!token) sessionStorage.setItem(AUTH_TOKEN_KEY, legacy);
-  }
-  return token || legacy;
+  return getStoredAuthToken();
 }
 
 export function getRefreshToken(): string | null {
   if (!canUseStorage()) return null;
   localStorage.removeItem(AUTH_REFRESH_TOKEN_KEY);
   if (!isTauri) return null;
-  return sessionStorage.getItem(AUTH_REFRESH_TOKEN_KEY);
+  return getStoredRefreshToken();
 }
 
 export function storeAuthTokens(
@@ -63,21 +54,12 @@ export function storeAuthTokens(
   // must_change_password is set via setMustChangePassword(), not here: routing
   // it through would let CodeQL trace the boolean into localStorage and flag the
   // deliberate JWT writes as sensitive-info storage.
-  if (!canUseStorage()) return;
-  sessionStorage.setItem(AUTH_TOKEN_KEY, accessToken);
-  removeLegacyPersistentAuthTokens();
-  if (isTauri) {
-    sessionStorage.setItem(AUTH_REFRESH_TOKEN_KEY, refreshToken);
-  } else {
-    sessionStorage.removeItem(AUTH_REFRESH_TOKEN_KEY);
-  }
+  storeAuthTokenPair(accessToken, isTauri ? refreshToken : null);
 }
 
 export function clearAuthTokens(): void {
   if (!canUseStorage()) return;
-  sessionStorage.removeItem(AUTH_TOKEN_KEY);
-  sessionStorage.removeItem(AUTH_REFRESH_TOKEN_KEY);
-  removeLegacyPersistentAuthTokens();
+  clearStoredAuthTokens();
   localStorage.removeItem(AUTH_MUST_CHANGE_PASSWORD_KEY);
 }
 

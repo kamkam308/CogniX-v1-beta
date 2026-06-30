@@ -2,6 +2,7 @@
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
 import { apiUrl } from "@/lib/api-base";
+import { getStoredAuthToken } from "@/features/auth/token-storage";
 import { create } from "zustand";
 
 export const env = {
@@ -114,13 +115,10 @@ export async function fetchDeviceType(options?: {
   if (fetched && !options?.force) return usePlatformStore.getState().deviceType;
 
   try {
-    // /api/health only reports the server's device_type to authed callers.
-    // Read the token from storage directly: importing features/auth here
-    // would be an import cycle (auth/session imports this store).
-    const token =
-      typeof window === "undefined"
-        ? null
-        : sessionStorage.getItem("unsloth_auth_token");
+    // /api/health only reports training entitlements to authed callers. Use
+    // the same token migration helper as authFetch so legacy localStorage
+    // sessions still unlock CEO cloud training before local GPU checks run.
+    const token = getStoredAuthToken();
     const res = await fetch(apiUrl("/api/health"), {
       headers: token ? { Authorization: `Bearer ${token}` } : undefined,
     });
