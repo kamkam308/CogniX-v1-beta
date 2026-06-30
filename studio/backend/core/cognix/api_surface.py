@@ -14,6 +14,7 @@ from typing import Any, Iterable
 
 
 COGNIX_API_SURFACE_CONTRACT_VERSION = "cognix_api_surface_contract_v1"
+PRODUCT_NAVIGATION_ROUTE_SOURCE = "v2_section_41_recommended_routes"
 
 RECOMMENDED_ENDPOINTS: list[dict[str, Any]] = [
     {
@@ -123,6 +124,36 @@ RECOMMENDED_ENDPOINTS: list[dict[str, Any]] = [
     },
 ]
 
+PRODUCT_NAVIGATION_ROUTES: list[dict[str, Any]] = [
+    {"path": "/pulse", "equivalentRoutes": ["/api/cognix/pulse"]},
+    {"path": "/library", "equivalentRoutes": ["/api/cognix/library"]},
+    {"path": "/codex", "equivalentRoutes": ["/api/cognix/codex/pipeline-plan"]},
+    {"path": "/scheduled", "equivalentRoutes": ["/api/cognix/scheduled-tasks"]},
+    {"path": "/images", "equivalentRoutes": ["/api/cognix/images"]},
+    {"path": "/apps", "equivalentRoutes": ["/api/cognix/apps"]},
+    {"path": "/gpts", "equivalentRoutes": ["/api/cognix/gpts"]},
+    {"path": "/admin", "equivalentRoutes": ["/api/cognix/admin/dashboard"]},
+    {"path": "/admin/users", "equivalentRoutes": ["/api/cognix/admin/users"]},
+    {"path": "/admin/chats", "equivalentRoutes": ["/api/cognix/admin/chats"]},
+    {"path": "/admin/activity", "equivalentRoutes": ["/api/cognix/admin/activity"]},
+    {"path": "/admin/limits", "equivalentRoutes": ["/api/cognix/admin/limits"]},
+    {"path": "/admin/permissions", "equivalentRoutes": ["/api/cognix/admin/permissions/matrix"]},
+    {"path": "/admin/approvals", "equivalentRoutes": ["/api/cognix/admin/approvals"]},
+    {"path": "/admin/banned", "equivalentRoutes": ["/api/cognix/admin/banned", "/api/cognix/admin/bans"]},
+    {"path": "/admin/security-threats", "equivalentRoutes": ["/api/cognix/admin/security-threats"]},
+    {"path": "/admin/token-usage", "equivalentRoutes": ["/api/cognix/admin/usage"]},
+    {"path": "/admin/model-usage", "equivalentRoutes": ["/api/cognix/admin/usage"]},
+    {"path": "/admin/projects", "equivalentRoutes": ["/api/projects", "/api/cognix/admin/database-blueprint"]},
+    {"path": "/admin/settings", "equivalentRoutes": ["/api/cognix/admin/api-surface-contract"]},
+    {"path": "/admin/system-health", "equivalentRoutes": ["/api/cognix/admin/system-health"]},
+    {"path": "/chat", "equivalentRoutes": ["/api/inference/chat/completions", "/v1/chat/completions"]},
+    {"path": "/chat/enterprise", "equivalentRoutes": ["/api/cognix/admin/chats/policy", "/api/cognix/admin/chats"]},
+    {"path": "/projects/:id/collaboration", "equivalentRoutes": ["/api/cognix/chat-project-bridge/links", "/api/projects/{project_id}"]},
+    {"path": "/projects/:id/skills", "equivalentRoutes": ["/api/cognix/skills/marketplace", "/api/cognix/memory/skills"]},
+    {"path": "/projects/:id/directives", "equivalentRoutes": []},
+    {"path": "/cowork", "equivalentRoutes": ["/api/cognix/admin/approvals", "/api/cognix/command-palette/plan"]},
+]
+
 
 def _normalize_method(value: Any) -> str:
     return str(value or "").strip().upper()
@@ -145,6 +176,10 @@ def _registered_route_keys(registered_routes: Iterable[dict[str, Any]]) -> set[s
     return keys
 
 
+def _registered_paths(registered_routes: Iterable[dict[str, Any]]) -> set[str]:
+    return {str(route.get("path") or "").strip() for route in registered_routes if str(route.get("path") or "").strip()}
+
+
 def _endpoint_record(endpoint: dict[str, Any], registered: set[str]) -> dict[str, Any]:
     method = str(endpoint["method"])
     expected_key = _route_key(method, endpoint["path"])
@@ -165,12 +200,35 @@ def _endpoint_record(endpoint: dict[str, Any], registered: set[str]) -> dict[str
     }
 
 
+def _product_route_record(route: dict[str, Any], registered_paths: set[str]) -> dict[str, Any]:
+    path = str(route["path"])
+    equivalent_routes = [str(item) for item in route.get("equivalentRoutes") or []]
+    matched_exact = path in registered_paths
+    matched_equivalent = [item for item in equivalent_routes if item in registered_paths]
+    status = "exact" if matched_exact else "equivalent" if matched_equivalent else "planned"
+    return {
+        "path": path,
+        "status": status,
+        "matchedRoute": path if matched_exact else matched_equivalent[0] if matched_equivalent else None,
+        "equivalentRoutes": equivalent_routes,
+        "sourceOfTruth": PRODUCT_NAVIGATION_ROUTE_SOURCE,
+        "frontendDirectModelCallAllowed": False,
+        "routeRegistrationAllowedHere": False,
+    }
+
+
 def build_api_surface_contract(registered_routes: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    registered_routes = list(registered_routes)
     registered = _registered_route_keys(registered_routes)
+    registered_paths = _registered_paths(registered_routes)
     endpoints = [_endpoint_record(endpoint, registered) for endpoint in RECOMMENDED_ENDPOINTS]
+    product_routes = [_product_route_record(route, registered_paths) for route in PRODUCT_NAVIGATION_ROUTES]
     exact = [item["path"] for item in endpoints if item["status"] == "exact"]
     equivalent = [item["path"] for item in endpoints if item["status"] == "equivalent"]
     planned = [item["path"] for item in endpoints if item["status"] == "planned"]
+    product_exact = [item["path"] for item in product_routes if item["status"] == "exact"]
+    product_equivalent = [item["path"] for item in product_routes if item["status"] == "equivalent"]
+    product_planned = [item["path"] for item in product_routes if item["status"] == "planned"]
     return {
         "apiSurfaceContractVersion": COGNIX_API_SURFACE_CONTRACT_VERSION,
         "mode": "api_surface_contract_read_only",
@@ -182,12 +240,26 @@ def build_api_surface_contract(registered_routes: Iterable[dict[str, Any]]) -> d
             "plannedEndpointCount": len(planned),
             "registeredRouteCount": len(registered),
             "readyForMvpApi": not planned,
+            "productRouteCount": len(product_routes),
+            "coveredProductRouteCount": len(product_exact) + len(product_equivalent),
+            "plannedProductRouteCount": len(product_planned),
         },
         "coverage": {
             "exactEndpoints": exact,
             "equivalentEndpoints": equivalent,
             "plannedEndpoints": planned,
             "missingEndpoints": planned,
+        },
+        "productNavigationContract": {
+            "sourceOfTruth": PRODUCT_NAVIGATION_ROUTE_SOURCE,
+            "routes": product_routes,
+            "coverage": {
+                "exactRoutes": product_exact,
+                "equivalentRoutes": product_equivalent,
+                "plannedRoutes": product_planned,
+                "missingRoutes": product_planned,
+                "readyForV2Navigation": not product_planned,
+            },
         },
         "endpoints": endpoints,
         "policies": {

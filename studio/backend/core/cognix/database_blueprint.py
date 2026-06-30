@@ -18,6 +18,69 @@ from utils.paths import auth_db_path, rag_db_path, studio_db_path
 
 
 COGNIX_DATABASE_BLUEPRINT_VERSION = "cognix_database_blueprint_v1"
+GLOBAL_ROADMAP_TABLE_SOURCE = "v2_sections_42_global_tables"
+GLOBAL_ROADMAP_TABLE_NAMES: tuple[str, ...] = (
+    "pulse_events",
+    "pulse_summaries",
+    "library_assets",
+    "library_collections",
+    "library_permissions",
+    "codex_tasks",
+    "codex_reports",
+    "codex_security_reviews",
+    "scheduled_tasks",
+    "scheduled_task_runs",
+    "image_assets",
+    "image_generations",
+    "apps",
+    "installed_apps",
+    "app_permissions",
+    "gpts",
+    "gpt_versions",
+    "gpt_tools",
+    "gpt_permissions",
+    "admin_chat_access_logs",
+    "approval_requests",
+    "approval_decisions",
+    "banned_users",
+    "ban_reports",
+    "security_threats",
+    "security_reports",
+    "token_usage_events",
+    "daily_user_token_usage",
+    "daily_model_usage",
+    "organization_usage_summary",
+    "enterprise_chats",
+    "enterprise_chat_members",
+    "encrypted_messages",
+    "chat_key_metadata",
+    "chat_policies",
+    "project_members",
+    "project_roles",
+    "project_activity_events",
+    "presence_sessions",
+    "project_comments",
+    "agent_sessions",
+    "agent_steps",
+    "agent_tool_calls",
+    "favorite_models",
+    "user_model_defaults",
+    "project_model_defaults",
+    "cowork_sessions",
+    "cowork_actions",
+    "cowork_permissions",
+    "skills",
+    "skill_versions",
+    "project_skills",
+    "model_skills",
+    "directives",
+    "project_directives",
+    "model_directives",
+    "organization_policies",
+    "risk_scores",
+    "audit_logs",
+    "notifications",
+)
 
 ROADMAP_TABLES: list[dict[str, Any]] = [
     {
@@ -282,6 +345,33 @@ def _table_record(definition: dict[str, Any], all_tables: set[str]) -> dict[str,
     }
 
 
+def _global_table_domain(table_name: str) -> str:
+    if table_name.startswith("admin_") or table_name in {"approval_requests", "approval_decisions", "banned_users"}:
+        return "admin"
+    if table_name.startswith("project_") or table_name in {"presence_sessions", "project_members", "project_roles"}:
+        return "projects"
+    if table_name.startswith("enterprise_") or table_name.startswith("encrypted_") or table_name.startswith("chat_"):
+        return "enterprise_chat"
+    if table_name.startswith("skill") or table_name.endswith("_skills"):
+        return "skills"
+    if table_name.startswith("directive") or table_name.endswith("_directives"):
+        return "directives"
+    return table_name.split("_", 1)[0]
+
+
+def _global_table_record(table_name: str, all_tables: set[str]) -> dict[str, Any]:
+    available = table_name in all_tables
+    return {
+        "tableName": table_name,
+        "domain": _global_table_domain(table_name),
+        "status": "available" if available else "planned",
+        "present": available,
+        "sourceOfTruth": GLOBAL_ROADMAP_TABLE_SOURCE,
+        "schemaManagedByBootstrap": True,
+        "destructiveChangeAllowed": False,
+    }
+
+
 def build_database_blueprint(
     *,
     auth_tables: set[str] | None = None,
@@ -294,9 +384,12 @@ def build_database_blueprint(
         rag_tables = rag_tables,
     )
     records = [_table_record(definition, schemas["all"]) for definition in ROADMAP_TABLES]
+    global_records = [_global_table_record(table_name, schemas["all"]) for table_name in GLOBAL_ROADMAP_TABLE_NAMES]
     available = [item["logicalName"] for item in records if item["status"] == "available"]
     partial = [item["logicalName"] for item in records if item["status"] == "partial"]
     planned = [item["logicalName"] for item in records if item["status"] == "planned"]
+    available_global = [item["tableName"] for item in global_records if item["status"] == "available"]
+    planned_global = [item["tableName"] for item in global_records if item["status"] == "planned"]
     sensitive = [
         item["logicalName"]
         for item in records
@@ -312,6 +405,9 @@ def build_database_blueprint(
             "partialLogicalTableCount": len(partial),
             "plannedLogicalTableCount": len(planned),
             "physicalTableCount": len(schemas["all"]),
+            "globalRoadmapTableCount": len(global_records),
+            "availableGlobalRoadmapTableCount": len(available_global),
+            "plannedGlobalRoadmapTableCount": len(planned_global),
             "migrationExecutionAllowed": False,
             "destructiveChangeAllowed": False,
         },
@@ -322,6 +418,13 @@ def build_database_blueprint(
             "plannedLogicalTables": planned,
             "readyForMvpSchema": all(name in available for name in ("users", "projects", "chats", "messages", "audit_logs")),
         },
+        "globalCoverage": {
+            "sourceOfTruth": GLOBAL_ROADMAP_TABLE_SOURCE,
+            "requiredTables": list(GLOBAL_ROADMAP_TABLE_NAMES),
+            "availableTables": available_global,
+            "plannedTables": planned_global,
+            "readyForV2GlobalSchema": not planned_global,
+        },
         "schemaSources": {
             "auth": sorted(schemas["auth"]),
             "studio": sorted(schemas["studio"]),
@@ -329,6 +432,7 @@ def build_database_blueprint(
             "rawCreateSqlReturned": False,
         },
         "logicalTables": records,
+        "globalRoadmapTables": global_records,
         "migrationPolicy": {
             "schemaChangesAllowedHere": False,
             "requiresReviewedMigration": True,

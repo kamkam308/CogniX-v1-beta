@@ -82,6 +82,68 @@ AUDIT_ASSIGNMENT_VALUE_RE = re.compile(
 AUDIT_URL_CREDENTIAL_VALUE_RE = re.compile(
     r"(?i)\b([a-z][a-z0-9+.-]*://)([^/\s:@]+):([^@\s/]+)@"
 )
+GLOBAL_ROADMAP_TABLE_NAMES = (
+    "pulse_events",
+    "pulse_summaries",
+    "library_assets",
+    "library_collections",
+    "library_permissions",
+    "codex_tasks",
+    "codex_reports",
+    "codex_security_reviews",
+    "scheduled_tasks",
+    "scheduled_task_runs",
+    "image_assets",
+    "image_generations",
+    "apps",
+    "installed_apps",
+    "app_permissions",
+    "gpts",
+    "gpt_versions",
+    "gpt_tools",
+    "gpt_permissions",
+    "admin_chat_access_logs",
+    "approval_requests",
+    "approval_decisions",
+    "banned_users",
+    "ban_reports",
+    "security_threats",
+    "security_reports",
+    "token_usage_events",
+    "daily_user_token_usage",
+    "daily_model_usage",
+    "organization_usage_summary",
+    "enterprise_chats",
+    "enterprise_chat_members",
+    "encrypted_messages",
+    "chat_key_metadata",
+    "chat_policies",
+    "project_members",
+    "project_roles",
+    "project_activity_events",
+    "presence_sessions",
+    "project_comments",
+    "agent_sessions",
+    "agent_steps",
+    "agent_tool_calls",
+    "favorite_models",
+    "user_model_defaults",
+    "project_model_defaults",
+    "cowork_sessions",
+    "cowork_actions",
+    "cowork_permissions",
+    "skills",
+    "skill_versions",
+    "project_skills",
+    "model_skills",
+    "directives",
+    "project_directives",
+    "model_directives",
+    "organization_policies",
+    "risk_scores",
+    "audit_logs",
+    "notifications",
+)
 
 KNOWN_ATTACK_SIGNATURES: list[dict[str, str]] = [
     {
@@ -2595,6 +2657,7 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
     )
     _ensure_approval_request_columns(conn)
     _ensure_token_usage_columns(conn)
+    _ensure_global_roadmap_tables(conn)
 
 
 def _ensure_approval_request_columns(conn: sqlite3.Connection) -> None:
@@ -2638,6 +2701,62 @@ def _ensure_token_usage_columns(conn: sqlite3.Connection) -> None:
             ON cognix_token_usage_events(project_id, created_at DESC)
         """
     )
+
+
+def _quote_roadmap_table_name(table_name: str) -> str:
+    if not re.fullmatch(r"[a-z][a-z0-9_]{1,80}", table_name):
+        raise RuntimeError(f"Invalid global roadmap table name: {table_name}")
+    return f'"{table_name}"'
+
+
+def _ensure_global_roadmap_tables(conn: sqlite3.Connection) -> None:
+    common_columns = {
+        "organization_id": "TEXT NOT NULL DEFAULT 'default'",
+        "username": "TEXT",
+        "project_id": "TEXT",
+        "scope_type": "TEXT NOT NULL DEFAULT 'global'",
+        "scope_id": "TEXT NOT NULL DEFAULT ''",
+        "status": "TEXT NOT NULL DEFAULT 'active'",
+        "payload_json": "TEXT NOT NULL DEFAULT '{}'",
+        "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+        "created_at": "TEXT NOT NULL DEFAULT ''",
+        "updated_at": "TEXT NOT NULL DEFAULT ''",
+    }
+    for table_name in GLOBAL_ROADMAP_TABLE_NAMES:
+        quoted_table = _quote_roadmap_table_name(table_name)
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {quoted_table} (
+                id TEXT PRIMARY KEY,
+                organization_id TEXT NOT NULL DEFAULT 'default',
+                username TEXT,
+                project_id TEXT,
+                scope_type TEXT NOT NULL DEFAULT 'global',
+                scope_id TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'active',
+                payload_json TEXT NOT NULL DEFAULT '{{}}',
+                metadata_json TEXT NOT NULL DEFAULT '{{}}',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({quoted_table})").fetchall()}
+        for column_name, definition in common_columns.items():
+            if column_name not in columns:
+                conn.execute(f"ALTER TABLE {quoted_table} ADD COLUMN {column_name} {definition}")
+        conn.execute(
+            f"""
+            CREATE INDEX IF NOT EXISTS idx_{table_name}_org_status
+                ON {quoted_table}(organization_id, status, updated_at DESC)
+            """
+        )
+        conn.execute(
+            f"""
+            CREATE INDEX IF NOT EXISTS idx_{table_name}_scope
+                ON {quoted_table}(scope_type, scope_id, updated_at DESC)
+            """
+        )
 
 
 def ensure_schema() -> None:
