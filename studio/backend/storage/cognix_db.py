@@ -164,6 +164,10 @@ ADMIN_ORGANIZATION_SETTINGS_TABLE_NAMES = (
     "organization_settings",
     "policy_change_logs",
 )
+ADMIN_COMPLIANCE_EXPORT_TABLE_NAMES = (
+    "compliance_exports",
+    "export_jobs",
+)
 
 KNOWN_ATTACK_SIGNATURES: list[dict[str, str]] = [
     {
@@ -2681,6 +2685,7 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
     _ensure_project_skill_directive_columns(conn)
     _ensure_admin_project_oversight_columns(conn)
     _ensure_admin_organization_settings_columns(conn)
+    _ensure_admin_compliance_export_columns(conn)
 
 
 def _ensure_approval_request_columns(conn: sqlite3.Connection) -> None:
@@ -3058,6 +3063,64 @@ def _ensure_admin_organization_settings_columns(conn: sqlite3.Connection) -> Non
         """
         CREATE INDEX IF NOT EXISTS idx_policy_change_logs_org_created
             ON policy_change_logs(organization_id, created_at DESC)
+        """
+    )
+
+
+def _ensure_admin_compliance_export_columns(conn: sqlite3.Connection) -> None:
+    for table_name in ADMIN_COMPLIANCE_EXPORT_TABLE_NAMES:
+        quoted_table = _quote_roadmap_table_name(table_name)
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {quoted_table} (
+                id TEXT PRIMARY KEY,
+                organization_id TEXT NOT NULL DEFAULT 'default',
+                username TEXT,
+                project_id TEXT,
+                scope_type TEXT NOT NULL DEFAULT 'organization',
+                scope_id TEXT NOT NULL DEFAULT 'default',
+                status TEXT NOT NULL DEFAULT 'active',
+                payload_json TEXT NOT NULL DEFAULT '{{}}',
+                metadata_json TEXT NOT NULL DEFAULT '{{}}',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+    _ensure_columns(
+        conn,
+        "compliance_exports",
+        {
+            "generated_by": "TEXT NOT NULL DEFAULT ''",
+            "export_type": "TEXT NOT NULL DEFAULT 'full'",
+            "output_format": "TEXT NOT NULL DEFAULT 'json'",
+            "title": "TEXT NOT NULL DEFAULT ''",
+            "checksum": "TEXT NOT NULL DEFAULT ''",
+            "content_json": "TEXT NOT NULL DEFAULT '{}'",
+            "content_text": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "export_jobs",
+        {
+            "export_id": "TEXT NOT NULL DEFAULT ''",
+            "queued_by": "TEXT NOT NULL DEFAULT ''",
+            "job_type": "TEXT NOT NULL DEFAULT 'compliance_export'",
+            "progress_percent": "INTEGER NOT NULL DEFAULT 0",
+            "job_json": "TEXT NOT NULL DEFAULT '{}'",
+        },
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_compliance_exports_generated_status
+            ON compliance_exports(generated_by, status, updated_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_export_jobs_export_status
+            ON export_jobs(export_id, status, updated_at DESC)
         """
     )
 
@@ -8650,6 +8713,193 @@ def list_policy_change_logs(
             ((organization_id or "default").strip() or "default", safe_limit),
         ).fetchall()
         return [_hydrate_policy_change_log(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_compliance_export(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["organizationId"] = item.get("organization_id")
+    item["generatedBy"] = item.get("generated_by")
+    item["exportType"] = item.get("export_type")
+    item["outputFormat"] = item.get("output_format")
+    item["content"] = _json_or_default(item.get("content_json"), {})
+    item["contentText"] = item.get("content_text") or ""
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def create_compliance_export(
+    *,
+    generated_by: str,
+    report: dict[str, Any],
+    status: str = "generated",
+    organization_id: str = "default",
+) -> dict[str, Any]:
+    now = _now()
+    export_id = _new_id("cexp")
+    normalized_org = (organization_id or "default").strip()[:160] or "default"
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO compliance_exports
+                (
+                    id, organization_id, username, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    generated_by, export_type, output_format, title, checksum,
+                    content_json, content_text
+                )
+            VALUES (?, ?, ?, 'organization', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                export_id,
+                normalized_org,
+                generated_by,
+                normalized_org,
+                status[:80],
+                json.dumps(report, ensure_ascii = False),
+                json.dumps({"reportBuilderVersion": report.get("reportBuilderVersion")}, ensure_ascii = False),
+                now,
+                now,
+                generated_by[:160],
+                str(report.get("reportType") or "full")[:80],
+                str(report.get("outputFormat") or "json")[:40],
+                str(report.get("title") or "")[:240],
+                str(report.get("checksum") or "")[:128],
+                json.dumps(report, ensure_ascii = False),
+                str(report.get("renderedContent") or "")[:200_000],
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM compliance_exports WHERE id = ?", (export_id,)).fetchone()
+        return _hydrate_compliance_export(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_compliance_exports(
+    *,
+    generated_by: str | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 200), 1), 1000)
+    clauses: list[str] = []
+    params: list[Any] = []
+    if generated_by:
+        clauses.append("generated_by = ?")
+        params.append(generated_by)
+    params.append(safe_limit)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM compliance_exports
+            {where}
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_compliance_export(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def get_compliance_export(export_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT * FROM compliance_exports WHERE id = ?", (export_id,)).fetchone()
+        return _hydrate_compliance_export(row_to_dict(row) or {}) if row else None
+    finally:
+        conn.close()
+
+
+def _hydrate_export_job(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["organizationId"] = item.get("organization_id")
+    item["exportId"] = item.get("export_id")
+    item["queuedBy"] = item.get("queued_by")
+    item["jobType"] = item.get("job_type")
+    item["progressPercent"] = item.get("progress_percent")
+    item["job"] = _json_or_default(item.get("job_json"), {})
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def create_export_job(
+    *,
+    export_id: str,
+    queued_by: str,
+    job: dict[str, Any],
+    status: str = "queued",
+    organization_id: str = "default",
+) -> dict[str, Any]:
+    now = _now()
+    job_id = _new_id("expjob")
+    normalized_org = (organization_id or "default").strip()[:160] or "default"
+    progress = int(job.get("progressPercent") or 0)
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO export_jobs
+                (
+                    id, organization_id, username, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    export_id, queued_by, job_type, progress_percent, job_json
+                )
+            VALUES (?, ?, ?, 'organization', ?, ?, ?, '{}', ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                job_id,
+                normalized_org,
+                queued_by,
+                normalized_org,
+                status[:80],
+                json.dumps(job, ensure_ascii = False),
+                now,
+                now,
+                export_id,
+                queued_by[:160],
+                str(job.get("jobType") or "compliance_export")[:120],
+                max(0, min(progress, 100)),
+                json.dumps(job, ensure_ascii = False),
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM export_jobs WHERE id = ?", (job_id,)).fetchone()
+        return _hydrate_export_job(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_export_jobs(
+    *,
+    export_id: str | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 200), 1), 1000)
+    clauses: list[str] = []
+    params: list[Any] = []
+    if export_id:
+        clauses.append("export_id = ?")
+        params.append(export_id)
+    params.append(safe_limit)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM export_jobs
+            {where}
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_export_job(row) for row in _rows_to_dicts(rows)]
     finally:
         conn.close()
 

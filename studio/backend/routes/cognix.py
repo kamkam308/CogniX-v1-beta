@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from auth import storage as auth_storage
 from auth.authentication import get_current_jwt_subject
 from core.cognix import admin_activity as cognix_admin_activity
+from core.cognix import admin_compliance_export as cognix_admin_compliance_export
 from core.cognix import admin_approvals as cognix_admin_approvals
 from core.cognix import admin_banned as cognix_admin_banned
 from core.cognix import admin_chat as cognix_admin_chat
@@ -243,6 +244,25 @@ class AdminPolicyEnforcementRequest(BaseModel):
     provider: str | None = Field(None, max_length = 120)
     app_id: str | None = Field(None, alias = "appId", max_length = 160)
     permission_key: str | None = Field(None, alias = "permissionKey", max_length = 160)
+
+
+class AdminComplianceExportRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    report_type: Literal[
+        "full",
+        "usage_tokens",
+        "user_activity",
+        "security_threats",
+        "banned_users",
+        "approvals",
+        "models_used",
+        "tools_used",
+        "document_access",
+        "admin_chat_access",
+    ] = Field("full", alias = "reportType")
+    output_format: Literal["json", "markdown", "csv", "pdf"] = Field("json", alias = "outputFormat")
+    reason: str | None = Field("", max_length = 1000)
 
 
 class AdminPermissionDecisionRequest(BaseModel):
@@ -2137,6 +2157,20 @@ def _build_admin_organization_settings_bundle() -> dict[str, Any]:
         "policies": policies,
         "changeLogs": change_logs,
         "bundle": bundle,
+    }
+
+
+def _build_admin_compliance_export_bundle() -> dict[str, Any]:
+    return {
+        "tokenEvents": cognix_db.list_token_usage_events(limit = 5000),
+        "activityEvents": cognix_db.list_user_activity_events(limit = 5000),
+        "securityEvents": cognix_db.list_security_events(limit = 1000),
+        "bans": cognix_db.list_bans(),
+        "approvals": cognix_db.list_approval_requests(),
+        "adminChatAccessLogs": cognix_db.list_admin_chat_access_logs(limit = 1000),
+        "auditLogs": cognix_db.list_audit_logs(limit = 1000),
+        "exports": cognix_db.list_compliance_exports(limit = 500),
+        "exportJobs": cognix_db.list_export_jobs(limit = 500),
     }
 
 
@@ -15081,6 +15115,155 @@ async def admin_settings_change_logs(current_subject: str = Depends(get_current_
             "networkCall": False,
         },
         "plannerVersion": cognix_admin_organization_settings.COGNIX_POLICY_CHANGE_LOG_VERSION,
+    }
+
+
+@router.get("/admin/compliance/exports/blueprint")
+async def admin_compliance_exports_blueprint(
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    blueprint = cognix_admin_compliance_export.build_compliance_export_blueprint()
+    return {
+        "username": current_subject,
+        "complianceExportBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_admin_compliance_export.COGNIX_COMPLIANCE_EXPORT_SERVICE_VERSION,
+    }
+
+
+@router.get("/admin/compliance/exports")
+async def admin_compliance_exports(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_compliance_export_bundle()
+    return {
+        "username": current_subject,
+        "exports": _rows(bundle["exports"]),
+        "exportJobs": _rows(bundle["exportJobs"]),
+        "sideEffects": cognix_admin_compliance_export.build_compliance_export_blueprint()["sideEffects"],
+        "plannerVersion": cognix_admin_compliance_export.COGNIX_COMPLIANCE_EXPORT_SERVICE_VERSION,
+    }
+
+
+@router.post("/admin/compliance/exports/plan")
+async def admin_compliance_export_plan(
+    payload: AdminComplianceExportRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_compliance_export_bundle()
+    try:
+        report = cognix_admin_compliance_export.build_compliance_report(
+            report_type = payload.report_type,
+            output_format = payload.output_format,
+            generated_by = current_subject,
+            token_events = bundle["tokenEvents"],
+            activity_events = bundle["activityEvents"],
+            security_events = bundle["securityEvents"],
+            bans = bundle["bans"],
+            approvals = bundle["approvals"],
+            admin_chat_access_logs = bundle["adminChatAccessLogs"],
+            audit_logs = bundle["auditLogs"],
+        )
+        job_plan = cognix_admin_compliance_export.build_export_job_plan(
+            report = report,
+            queued_by = current_subject,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from exc
+    return {
+        "username": current_subject,
+        "report": report,
+        "exportJobPlan": job_plan,
+        "sideEffects": report.get("sideEffects", {}),
+        "plannerVersion": cognix_admin_compliance_export.COGNIX_COMPLIANCE_EXPORT_SERVICE_VERSION,
+    }
+
+
+@router.post("/admin/compliance/exports")
+async def admin_create_compliance_export(
+    payload: AdminComplianceExportRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_compliance_export_bundle()
+    try:
+        report = cognix_admin_compliance_export.build_compliance_report(
+            report_type = payload.report_type,
+            output_format = payload.output_format,
+            generated_by = current_subject,
+            token_events = bundle["tokenEvents"],
+            activity_events = bundle["activityEvents"],
+            security_events = bundle["securityEvents"],
+            bans = bundle["bans"],
+            approvals = bundle["approvals"],
+            admin_chat_access_logs = bundle["adminChatAccessLogs"],
+            audit_logs = bundle["auditLogs"],
+        )
+        job_plan = cognix_admin_compliance_export.build_export_job_plan(
+            report = report,
+            queued_by = current_subject,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code = 400, detail = str(exc)) from exc
+    export = cognix_db.create_compliance_export(
+        generated_by = current_subject,
+        report = report,
+    )
+    job = cognix_db.create_export_job(
+        export_id = str(export.get("id") or ""),
+        queued_by = current_subject,
+        job = job_plan,
+    )
+    side_effects = {
+        **report.get("sideEffects", {}),
+        "databaseWrite": True,
+        "exportWrite": True,
+        "exportJobWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = None,
+        actor_username = current_subject,
+        action = "admin_compliance_export_created",
+        resource_type = "compliance_export",
+        resource_id = str(export.get("id") or ""),
+        severity = "notice",
+        metadata = {
+            "reportType": payload.report_type,
+            "outputFormat": payload.output_format,
+            "reason": payload.reason,
+            "checksum": export.get("checksum"),
+            "jobId": job.get("id"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "export": _row(export),
+        "exportJob": _row(job),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_admin_compliance_export.COGNIX_COMPLIANCE_EXPORT_SERVICE_VERSION,
+    }
+
+
+@router.get("/admin/compliance/exports/{export_id}")
+async def admin_compliance_export_detail(
+    export_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    export = cognix_db.get_compliance_export(export_id)
+    if export is None:
+        raise HTTPException(status_code = 404, detail = "Compliance export not found")
+    jobs = cognix_db.list_export_jobs(export_id = export_id)
+    return {
+        "username": current_subject,
+        "export": _row(export),
+        "exportJobs": _rows(jobs),
+        "sideEffects": cognix_admin_compliance_export.build_compliance_export_blueprint()["sideEffects"],
+        "plannerVersion": cognix_admin_compliance_export.COGNIX_COMPLIANCE_EXPORT_SERVICE_VERSION,
     }
 
 
