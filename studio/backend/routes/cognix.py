@@ -30,6 +30,7 @@ from core.cognix import admin_organization_settings as cognix_admin_organization
 from core.cognix import admin_permissions as cognix_admin_permissions
 from core.cognix import admin_project_oversight as cognix_admin_project_oversight
 from core.cognix import admin_security as cognix_admin_security
+from core.cognix import admin_secure_model_registry as cognix_admin_secure_model_registry
 from core.cognix import admin_usage as cognix_admin_usage
 from core.cognix import admin_users as cognix_admin_users
 from core.cognix import api_surface as cognix_api_surface
@@ -261,6 +262,39 @@ class AdminLocalOnlyDecisionRequest(BaseModel):
     )
     document_transfer: bool = Field(False, alias = "documentTransfer")
     metadata: dict[str, Any] = Field(default_factory = dict)
+
+
+class AdminSecureModelApprovalRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    model_id: str = Field(..., alias = "modelId", min_length = 1, max_length = 240)
+    display_name: str | None = Field(None, alias = "displayName", max_length = 240)
+    provider_type: str = Field("local", alias = "providerType", max_length = 80)
+    allowed_roles: list[str] = Field(default_factory = list, alias = "allowedRoles")
+    quantization_required: str | None = Field("", alias = "quantizationRequired", max_length = 80)
+    local_only_required: bool = Field(False, alias = "localOnlyRequired")
+    license_name: str | None = Field("unknown", alias = "license", max_length = 160)
+    source: str | None = Field("unknown", max_length = 500)
+    checksum: str | None = Field("", max_length = 160)
+    reason: str | None = Field("", max_length = 1000)
+
+
+class AdminSecureModelBlockRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    model_id: str = Field(..., alias = "modelId", min_length = 1, max_length = 240)
+    provider_type: str | None = Field("", alias = "providerType", max_length = 80)
+    reason: str = Field(..., min_length = 3, max_length = 1000)
+
+
+class AdminSecureModelDecisionRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    model_id: str = Field(..., alias = "modelId", min_length = 1, max_length = 240)
+    provider_type: str | None = Field("local", alias = "providerType", max_length = 80)
+    role: str | None = Field("user", max_length = 80)
+    quantization: str | None = Field("", max_length = 80)
+    local_only_active: bool = Field(False, alias = "localOnlyActive")
 
 
 class AdminPolicyEnforcementRequest(BaseModel):
@@ -2283,6 +2317,72 @@ def _build_admin_local_only_bundle() -> dict[str, Any]:
         "policy": policy,
         "blockedCalls": blocked_calls,
         "enforcementPlan": enforcement_plan,
+    }
+
+
+def _build_admin_secure_model_registry_bundle() -> dict[str, Any]:
+    model_registry_payload = cognix_registry.build_model_registry()
+    approved_models = cognix_db.list_approved_models()
+    blocked_models = cognix_db.list_blocked_models()
+    security_metadata = cognix_db.list_model_security_metadata()
+    secure_registry = cognix_admin_secure_model_registry.build_secure_registry_bundle(
+        model_registry = model_registry_payload,
+        approved_models = approved_models,
+        blocked_models = blocked_models,
+        metadata = security_metadata,
+    )
+    return {
+        "modelRegistry": model_registry_payload,
+        "approvedModels": approved_models,
+        "blockedModels": blocked_models,
+        "modelSecurityMetadata": security_metadata,
+        "secureRegistry": secure_registry,
+    }
+
+
+def _sync_allowed_models_setting(
+    *,
+    model_id: str,
+    current_subject: str,
+    reason: str = "",
+    remove: bool = False,
+) -> dict[str, Any]:
+    settings_bundle = _build_admin_organization_settings_bundle()
+    allowed = {str(item) for item in settings_bundle["settings"].get("allowedModels", []) if str(item)}
+    if remove:
+        allowed.discard(model_id)
+    else:
+        allowed.add(model_id)
+    allowed_models = sorted(allowed)
+    setting = cognix_db.upsert_organization_setting(
+        setting_key = "allowedModels",
+        setting_value = allowed_models,
+        setting_type = "secure_model_registry",
+        updated_by = current_subject,
+    )
+    policy = cognix_db.upsert_organization_policy(
+        policy_key = "models:allowed",
+        policy_value = allowed_models,
+        policy_type = "permission",
+        permission_key = "models:allowed",
+        allowed = True,
+        enforced = True,
+        updated_by = current_subject,
+        reason = reason,
+    )
+    change_log = cognix_db.create_policy_change_log(
+        changed_by = current_subject,
+        change_type = "secure_model_registry_update",
+        changed_keys = ["allowedModels"],
+        before = settings_bundle["settings"],
+        after = {**settings_bundle["settings"], "allowedModels": allowed_models},
+        reason = reason,
+    )
+    return {
+        "allowedModels": allowed_models,
+        "setting": setting,
+        "policy": policy,
+        "changeLog": change_log,
     }
 
 
@@ -15549,6 +15649,197 @@ async def admin_local_only_blocked_calls(current_subject: str = Depends(get_curr
         "blockedExternalCalls": _rows(blocked_calls),
         "sideEffects": cognix_admin_local_only.build_local_only_blueprint()["sideEffects"],
         "plannerVersion": cognix_admin_local_only.COGNIX_PROVIDER_BLOCKER_VERSION,
+    }
+
+
+@router.get("/admin/models/secure-registry/blueprint")
+async def admin_secure_model_registry_blueprint(
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    blueprint = cognix_admin_secure_model_registry.build_secure_model_registry_blueprint()
+    return {
+        "username": current_subject,
+        "secureModelRegistryBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_admin_secure_model_registry.COGNIX_SECURE_MODEL_REGISTRY_VERSION,
+    }
+
+
+@router.get("/admin/models/secure-registry")
+async def admin_secure_model_registry(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_secure_model_registry_bundle()
+    return {
+        "username": current_subject,
+        "secureModelRegistry": bundle["secureRegistry"],
+        "approvedModels": _rows(bundle["approvedModels"]),
+        "blockedModels": _rows(bundle["blockedModels"]),
+        "modelSecurityMetadata": _rows(bundle["modelSecurityMetadata"]),
+        "sideEffects": bundle["secureRegistry"].get("sideEffects", {}),
+        "plannerVersion": cognix_admin_secure_model_registry.COGNIX_SECURE_MODEL_REGISTRY_VERSION,
+    }
+
+
+@router.post("/admin/models/secure-registry/approve")
+async def admin_approve_secure_model(
+    payload: AdminSecureModelApprovalRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    security_metadata = cognix_admin_secure_model_registry.build_model_security_metadata(
+        model_id = payload.model_id,
+        provider_type = payload.provider_type,
+        license_name = payload.license_name,
+        source = payload.source,
+        checksum = payload.checksum,
+    )
+    approved = cognix_db.approve_model(
+        model_id = payload.model_id,
+        display_name = payload.display_name or payload.model_id,
+        provider_type = payload.provider_type,
+        allowed_roles = payload.allowed_roles,
+        quantization_required = payload.quantization_required or "",
+        local_only_required = payload.local_only_required,
+        license_name = payload.license_name or "unknown",
+        source = payload.source or "unknown",
+        checksum = payload.checksum or "",
+        approved_by = current_subject,
+        reason = payload.reason or "",
+    )
+    metadata_record = cognix_db.upsert_model_security_metadata(
+        metadata = security_metadata,
+        updated_by = current_subject,
+    )
+    allowed_sync = _sync_allowed_models_setting(
+        model_id = payload.model_id,
+        current_subject = current_subject,
+        reason = payload.reason or "Secure model approval",
+    )
+    side_effects = {
+        **security_metadata.get("sideEffects", {}),
+        "databaseWrite": True,
+        "approvedModelWrite": True,
+        "metadataWrite": True,
+        "organizationSettingsWrite": True,
+        "changeLogWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = None,
+        actor_username = current_subject,
+        action = "admin_secure_model_approved",
+        resource_type = "approved_model",
+        resource_id = str(approved.get("id") or payload.model_id),
+        severity = "notice" if security_metadata.get("riskLevel") == "low" else "warning",
+        metadata = {
+            "modelId": payload.model_id,
+            "providerType": payload.provider_type,
+            "checksumVerified": security_metadata.get("checksumVerified"),
+            "riskLevel": security_metadata.get("riskLevel"),
+            "allowedModels": allowed_sync["allowedModels"],
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "approvedModel": _row(approved),
+        "modelSecurityMetadata": _row(metadata_record),
+        "allowedModels": allowed_sync["allowedModels"],
+        "policyChangeLog": _row(allowed_sync["changeLog"]),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_admin_secure_model_registry.COGNIX_MODEL_APPROVAL_SERVICE_VERSION,
+    }
+
+
+@router.post("/admin/models/secure-registry/block")
+async def admin_block_secure_model(
+    payload: AdminSecureModelBlockRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    blocked = cognix_db.block_model(
+        model_id = payload.model_id,
+        provider_type = payload.provider_type or "",
+        reason = payload.reason,
+        blocked_by = current_subject,
+    )
+    allowed_sync = _sync_allowed_models_setting(
+        model_id = payload.model_id,
+        current_subject = current_subject,
+        reason = payload.reason,
+        remove = True,
+    )
+    side_effects = {
+        **cognix_admin_secure_model_registry.build_secure_model_registry_blueprint()["sideEffects"],
+        "databaseWrite": True,
+        "blockedModelWrite": True,
+        "organizationSettingsWrite": True,
+        "changeLogWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = None,
+        actor_username = current_subject,
+        action = "admin_secure_model_blocked",
+        resource_type = "blocked_model",
+        resource_id = str(blocked.get("id") or payload.model_id),
+        severity = "warning",
+        metadata = {
+            "modelId": payload.model_id,
+            "providerType": payload.provider_type,
+            "reason": payload.reason,
+            "allowedModels": allowed_sync["allowedModels"],
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "blockedModel": _row(blocked),
+        "allowedModels": allowed_sync["allowedModels"],
+        "policyChangeLog": _row(allowed_sync["changeLog"]),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_admin_secure_model_registry.COGNIX_MODEL_APPROVAL_SERVICE_VERSION,
+    }
+
+
+@router.post("/admin/models/secure-registry/access-decision")
+async def admin_secure_model_access_decision(
+    payload: AdminSecureModelDecisionRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_secure_model_registry_bundle()
+    decision = cognix_admin_secure_model_registry.build_model_access_decision(
+        model_id = payload.model_id,
+        provider_type = payload.provider_type,
+        role = payload.role,
+        quantization = payload.quantization,
+        local_only_active = payload.local_only_active,
+        approved_models = bundle["approvedModels"],
+        blocked_models = bundle["blockedModels"],
+    )
+    return {
+        "username": current_subject,
+        "decision": decision,
+        "sideEffects": decision.get("sideEffects", {}),
+        "plannerVersion": cognix_admin_secure_model_registry.COGNIX_SECURE_MODEL_REGISTRY_VERSION,
+    }
+
+
+@router.get("/admin/models/secure-registry/security-metadata")
+async def admin_secure_model_security_metadata(
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    metadata = cognix_db.list_model_security_metadata()
+    return {
+        "username": current_subject,
+        "modelSecurityMetadata": _rows(metadata),
+        "sideEffects": cognix_admin_secure_model_registry.build_secure_model_registry_blueprint()["sideEffects"],
+        "plannerVersion": cognix_admin_secure_model_registry.COGNIX_MODEL_LICENSE_CHECKER_VERSION,
     }
 
 

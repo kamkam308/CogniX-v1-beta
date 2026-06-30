@@ -168,6 +168,11 @@ ADMIN_LOCAL_ONLY_TABLE_NAMES = (
     "local_only_policies",
     "blocked_external_calls",
 )
+ADMIN_SECURE_MODEL_REGISTRY_TABLE_NAMES = (
+    "approved_models",
+    "blocked_models",
+    "model_security_metadata",
+)
 ADMIN_COMPLIANCE_EXPORT_TABLE_NAMES = (
     "compliance_exports",
     "export_jobs",
@@ -2700,6 +2705,7 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
     _ensure_admin_project_oversight_columns(conn)
     _ensure_admin_organization_settings_columns(conn)
     _ensure_admin_local_only_columns(conn)
+    _ensure_admin_secure_model_registry_columns(conn)
     _ensure_admin_compliance_export_columns(conn)
     _ensure_admin_risk_scoring_columns(conn)
     _ensure_admin_data_retention_columns(conn)
@@ -3145,6 +3151,90 @@ def _ensure_admin_local_only_columns(conn: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_blocked_external_calls_actor_created
             ON blocked_external_calls(actor_username, created_at DESC)
+        """
+    )
+
+
+def _ensure_admin_secure_model_registry_columns(conn: sqlite3.Connection) -> None:
+    for table_name in ADMIN_SECURE_MODEL_REGISTRY_TABLE_NAMES:
+        quoted_table = _quote_roadmap_table_name(table_name)
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {quoted_table} (
+                id TEXT PRIMARY KEY,
+                organization_id TEXT NOT NULL DEFAULT 'default',
+                username TEXT,
+                project_id TEXT,
+                scope_type TEXT NOT NULL DEFAULT 'model_registry',
+                scope_id TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'active',
+                payload_json TEXT NOT NULL DEFAULT '{{}}',
+                metadata_json TEXT NOT NULL DEFAULT '{{}}',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+    _ensure_columns(
+        conn,
+        "approved_models",
+        {
+            "model_id": "TEXT NOT NULL DEFAULT ''",
+            "display_name": "TEXT NOT NULL DEFAULT ''",
+            "provider_type": "TEXT NOT NULL DEFAULT 'local'",
+            "allowed_roles_json": "TEXT NOT NULL DEFAULT '[]'",
+            "quantization_required": "TEXT NOT NULL DEFAULT ''",
+            "local_only_required": "INTEGER NOT NULL DEFAULT 0",
+            "license": "TEXT NOT NULL DEFAULT 'unknown'",
+            "source": "TEXT NOT NULL DEFAULT 'unknown'",
+            "checksum": "TEXT NOT NULL DEFAULT ''",
+            "approved_by": "TEXT NOT NULL DEFAULT ''",
+            "approved_at": "TEXT NOT NULL DEFAULT ''",
+            "reason": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "blocked_models",
+        {
+            "model_id": "TEXT NOT NULL DEFAULT ''",
+            "provider_type": "TEXT NOT NULL DEFAULT ''",
+            "reason": "TEXT NOT NULL DEFAULT ''",
+            "blocked_by": "TEXT NOT NULL DEFAULT ''",
+            "blocked_at": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "model_security_metadata",
+        {
+            "model_id": "TEXT NOT NULL DEFAULT ''",
+            "provider_type": "TEXT NOT NULL DEFAULT 'local'",
+            "license": "TEXT NOT NULL DEFAULT 'unknown'",
+            "source": "TEXT NOT NULL DEFAULT 'unknown'",
+            "checksum": "TEXT NOT NULL DEFAULT ''",
+            "checksum_verified": "INTEGER NOT NULL DEFAULT 0",
+            "risk_level": "TEXT NOT NULL DEFAULT 'medium'",
+            "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+            "updated_by": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_approved_models_org_model
+            ON approved_models(organization_id, model_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_blocked_models_org_model
+            ON blocked_models(organization_id, model_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_model_security_metadata_org_model
+            ON model_security_metadata(organization_id, model_id)
         """
     )
 
@@ -9091,6 +9181,349 @@ def list_blocked_external_calls(*, actor_username: str | None = None, limit: int
             tuple(params),
         ).fetchall()
         return [_hydrate_blocked_external_call(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_approved_model(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["organizationId"] = item.get("organization_id")
+    item["modelId"] = item.get("model_id")
+    item["displayName"] = item.get("display_name")
+    item["providerType"] = item.get("provider_type")
+    item["allowedRoles"] = _json_or_default(item.get("allowed_roles_json"), [])
+    item["quantizationRequired"] = item.get("quantization_required")
+    item["localOnlyRequired"] = bool(item.get("local_only_required"))
+    item["approvedBy"] = item.get("approved_by")
+    item["approvedAt"] = item.get("approved_at")
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def approve_model(
+    *,
+    model_id: str,
+    display_name: str = "",
+    provider_type: str = "local",
+    allowed_roles: list[str] | None = None,
+    quantization_required: str = "",
+    local_only_required: bool = False,
+    license_name: str = "unknown",
+    source: str = "unknown",
+    checksum: str = "",
+    approved_by: str = "",
+    reason: str = "",
+    organization_id: str = "default",
+) -> dict[str, Any]:
+    now = _now()
+    normalized_org = (organization_id or "default").strip()[:160] or "default"
+    normalized_model = model_id.strip()[:240]
+    if not normalized_model:
+        raise ValueError("Invalid model id")
+    roles = allowed_roles or []
+    payload = {
+        "modelId": normalized_model,
+        "providerType": provider_type,
+        "allowedRoles": roles,
+        "quantizationRequired": quantization_required,
+        "localOnlyRequired": local_only_required,
+        "license": license_name,
+        "source": source,
+        "checksum": checksum,
+    }
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO approved_models
+                (
+                    id, organization_id, username, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    model_id, display_name, provider_type, allowed_roles_json,
+                    quantization_required, local_only_required, license, source,
+                    checksum, approved_by, approved_at, reason
+                )
+            VALUES (?, ?, ?, 'model_registry', ?, 'approved', ?, '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(organization_id, model_id) DO UPDATE SET
+                username = excluded.username,
+                status = excluded.status,
+                payload_json = excluded.payload_json,
+                updated_at = excluded.updated_at,
+                display_name = excluded.display_name,
+                provider_type = excluded.provider_type,
+                allowed_roles_json = excluded.allowed_roles_json,
+                quantization_required = excluded.quantization_required,
+                local_only_required = excluded.local_only_required,
+                license = excluded.license,
+                source = excluded.source,
+                checksum = excluded.checksum,
+                approved_by = excluded.approved_by,
+                approved_at = excluded.approved_at,
+                reason = excluded.reason
+            """,
+            (
+                _new_id("apmodel"),
+                normalized_org,
+                approved_by,
+                normalized_model,
+                json.dumps(payload, ensure_ascii = False),
+                now,
+                now,
+                normalized_model,
+                (display_name or normalized_model)[:240],
+                provider_type[:80],
+                json.dumps(roles, ensure_ascii = False),
+                quantization_required[:80],
+                1 if local_only_required else 0,
+                license_name[:160],
+                source[:500],
+                checksum[:160],
+                approved_by[:160],
+                now,
+                reason[:1000],
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            """
+            SELECT * FROM approved_models
+            WHERE organization_id = ? AND model_id = ?
+            """,
+            (normalized_org, normalized_model),
+        ).fetchone()
+        return _hydrate_approved_model(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def get_approved_model(model_id: str, *, organization_id: str = "default") -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT * FROM approved_models
+            WHERE organization_id = ? AND model_id = ?
+            """,
+            ((organization_id or "default").strip() or "default", model_id.strip()[:240]),
+        ).fetchone()
+        return _hydrate_approved_model(row_to_dict(row) or {}) if row else None
+    finally:
+        conn.close()
+
+
+def list_approved_models(*, organization_id: str = "default") -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM approved_models
+            WHERE organization_id = ?
+            ORDER BY model_id ASC
+            """,
+            ((organization_id or "default").strip() or "default",),
+        ).fetchall()
+        return [_hydrate_approved_model(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_blocked_model(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["organizationId"] = item.get("organization_id")
+    item["modelId"] = item.get("model_id")
+    item["providerType"] = item.get("provider_type")
+    item["blockedBy"] = item.get("blocked_by")
+    item["blockedAt"] = item.get("blocked_at")
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def block_model(
+    *,
+    model_id: str,
+    provider_type: str = "",
+    reason: str,
+    blocked_by: str = "",
+    organization_id: str = "default",
+) -> dict[str, Any]:
+    now = _now()
+    normalized_org = (organization_id or "default").strip()[:160] or "default"
+    normalized_model = model_id.strip()[:240]
+    if not normalized_model:
+        raise ValueError("Invalid model id")
+    payload = {"modelId": normalized_model, "providerType": provider_type, "reason": reason}
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO blocked_models
+                (
+                    id, organization_id, username, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    model_id, provider_type, reason, blocked_by, blocked_at
+                )
+            VALUES (?, ?, ?, 'model_registry', ?, 'blocked', ?, '{}', ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(organization_id, model_id) DO UPDATE SET
+                username = excluded.username,
+                status = excluded.status,
+                payload_json = excluded.payload_json,
+                updated_at = excluded.updated_at,
+                provider_type = excluded.provider_type,
+                reason = excluded.reason,
+                blocked_by = excluded.blocked_by,
+                blocked_at = excluded.blocked_at
+            """,
+            (
+                _new_id("blmodel"),
+                normalized_org,
+                blocked_by,
+                normalized_model,
+                json.dumps(payload, ensure_ascii = False),
+                now,
+                now,
+                normalized_model,
+                provider_type[:80],
+                reason[:1000],
+                blocked_by[:160],
+                now,
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            """
+            SELECT * FROM blocked_models
+            WHERE organization_id = ? AND model_id = ?
+            """,
+            (normalized_org, normalized_model),
+        ).fetchone()
+        return _hydrate_blocked_model(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def get_blocked_model(model_id: str, *, organization_id: str = "default") -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT * FROM blocked_models
+            WHERE organization_id = ? AND model_id = ?
+            """,
+            ((organization_id or "default").strip() or "default", model_id.strip()[:240]),
+        ).fetchone()
+        return _hydrate_blocked_model(row_to_dict(row) or {}) if row else None
+    finally:
+        conn.close()
+
+
+def list_blocked_models(*, organization_id: str = "default") -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM blocked_models
+            WHERE organization_id = ?
+            ORDER BY updated_at DESC
+            """,
+            ((organization_id or "default").strip() or "default",),
+        ).fetchall()
+        return [_hydrate_blocked_model(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_model_security_metadata(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["organizationId"] = item.get("organization_id")
+    item["modelId"] = item.get("model_id")
+    item["providerType"] = item.get("provider_type")
+    item["checksumVerified"] = bool(item.get("checksum_verified"))
+    item["riskLevel"] = item.get("risk_level")
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    item["updatedBy"] = item.get("updated_by")
+    return item
+
+
+def upsert_model_security_metadata(
+    *,
+    metadata: dict[str, Any],
+    updated_by: str = "",
+    organization_id: str = "default",
+) -> dict[str, Any]:
+    now = _now()
+    normalized_org = (organization_id or "default").strip()[:160] or "default"
+    normalized_model = str(metadata.get("modelId") or metadata.get("model_id") or "").strip()[:240]
+    if not normalized_model:
+        raise ValueError("Invalid model id")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO model_security_metadata
+                (
+                    id, organization_id, username, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    model_id, provider_type, license, source, checksum,
+                    checksum_verified, risk_level, updated_by
+                )
+            VALUES (?, ?, ?, 'model_registry', ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(organization_id, model_id) DO UPDATE SET
+                username = excluded.username,
+                payload_json = excluded.payload_json,
+                metadata_json = excluded.metadata_json,
+                updated_at = excluded.updated_at,
+                provider_type = excluded.provider_type,
+                license = excluded.license,
+                source = excluded.source,
+                checksum = excluded.checksum,
+                checksum_verified = excluded.checksum_verified,
+                risk_level = excluded.risk_level,
+                updated_by = excluded.updated_by
+            """,
+            (
+                _new_id("modelsec"),
+                normalized_org,
+                updated_by,
+                normalized_model,
+                json.dumps(metadata, ensure_ascii = False),
+                json.dumps(metadata, ensure_ascii = False),
+                now,
+                now,
+                normalized_model,
+                str(metadata.get("providerType") or "local")[:80],
+                str(metadata.get("license") or "unknown")[:160],
+                str(metadata.get("source") or "unknown")[:500],
+                str(metadata.get("checksum") or "")[:160],
+                1 if metadata.get("checksumVerified") else 0,
+                str(metadata.get("riskLevel") or "medium")[:80],
+                updated_by[:160],
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            """
+            SELECT * FROM model_security_metadata
+            WHERE organization_id = ? AND model_id = ?
+            """,
+            (normalized_org, normalized_model),
+        ).fetchone()
+        return _hydrate_model_security_metadata(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_model_security_metadata(*, organization_id: str = "default") -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM model_security_metadata
+            WHERE organization_id = ?
+            ORDER BY updated_at DESC
+            """,
+            ((organization_id or "default").strip() or "default",),
+        ).fetchall()
+        return [_hydrate_model_security_metadata(row) for row in _rows_to_dicts(rows)]
     finally:
         conn.close()
 
