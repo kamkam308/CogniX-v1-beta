@@ -510,7 +510,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-performance-monitor",
         "displayName": "CogniX Live Performance Monitor",
         "editionTargets": ["developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "runtime_metrics",
             "metrics_streaming",
@@ -536,7 +536,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-explain-decisions",
         "displayName": "CogniX Explain Decisions",
         "editionTargets": ["free", "local", "developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "decision_logs",
             "reason_codes",

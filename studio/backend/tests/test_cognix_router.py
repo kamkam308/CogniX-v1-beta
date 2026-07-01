@@ -9860,12 +9860,16 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/optimizations/kv-cache-plan" in modules["cognix-optimization-engine"]["routes"]
     assert "/api/cognix/optimizations/prompt-cache-plan" in modules["cognix-optimization-engine"]["routes"]
     assert "/api/cognix/optimizations/batching-plan" in modules["cognix-optimization-engine"]["routes"]
+    assert modules["cognix-performance-monitor"]["status"] == "enabled"
+    assert modules["cognix-performance-monitor"]["activationState"] == "ready"
     assert modules["cognix-performance-monitor"]["dependencyState"]["ready"] is True
     assert "runtime_metrics" in modules["cognix-performance-monitor"]["capabilities"]
     assert "metrics_streaming" in modules["cognix-performance-monitor"]["capabilities"]
     assert "model_performance_logs" in modules["cognix-performance-monitor"]["capabilities"]
     assert "/api/cognix/performance/snapshot" in modules["cognix-performance-monitor"]["routes"]
     assert "/api/cognix/performance/logs" in modules["cognix-performance-monitor"]["routes"]
+    assert modules["cognix-explain-decisions"]["status"] == "enabled"
+    assert modules["cognix-explain-decisions"]["activationState"] == "ready"
     assert modules["cognix-explain-decisions"]["dependencyState"]["ready"] is True
     assert "decision_logs" in modules["cognix-explain-decisions"]["capabilities"]
     assert "reason_codes" in modules["cognix-explain-decisions"]["capabilities"]
