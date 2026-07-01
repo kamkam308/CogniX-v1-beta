@@ -60,6 +60,7 @@ GLOBAL_ROADMAP_TABLE_NAMES: tuple[str, ...] = (
     "project_activity_events",
     "presence_sessions",
     "project_comments",
+    "collaboration_events",
     "agent_sessions",
     "agent_steps",
     "agent_tool_calls",

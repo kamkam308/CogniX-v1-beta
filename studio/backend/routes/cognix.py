@@ -96,6 +96,7 @@ from core.cognix import rag_compression as cognix_rag_compression
 from core.cognix import rag_planner as cognix_rag_planner
 from core.cognix import registry as cognix_registry
 from core.cognix import recommender as cognix_recommender
+from core.cognix import realtime_collaboration as cognix_realtime_collaboration
 from core.cognix import research_watch as cognix_research_watch
 from core.cognix import response_reflection as cognix_response_reflection
 from core.cognix import runtime_adapter as cognix_runtime_adapter
@@ -1272,6 +1273,57 @@ class EnterpriseKeyRotationRequest(BaseModel):
 
     reason: str | None = Field(None, max_length = 500)
     revoked_member: str | None = Field(None, alias = "revokedMember", max_length = 160)
+
+
+class RealtimePresenceRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    client_id: str = Field("browser", alias = "clientId", max_length = 160)
+    status: Literal["online", "idle", "editing", "viewing", "offline"] = "online"
+    cursor: dict[str, Any] | None = None
+    activity: str | None = Field(None, max_length = 180)
+    ttl_seconds: int = Field(90, alias = "ttlSeconds", ge = 15, le = 600)
+    metadata: dict[str, Any] | None = None
+
+
+class ProjectCommentRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    body: str = Field(..., min_length = 1, max_length = 3000)
+    target: dict[str, Any] | None = None
+    parent_comment_id: str | None = Field(None, alias = "parentCommentId", max_length = 160)
+    metadata: dict[str, Any] | None = None
+    store_comment: bool = Field(True, alias = "storeComment")
+
+
+class ProjectCommentResolutionRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    status: Literal["resolved", "open", "archived"] = "resolved"
+    note: str | None = Field(None, max_length = 1000)
+
+
+class CollaborationEventRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    event_type: str = Field(..., alias = "eventType", min_length = 1, max_length = 120)
+    resource_type: str = Field("project", alias = "resourceType", max_length = 120)
+    resource_id: str | None = Field(None, alias = "resourceId", max_length = 200)
+    payload: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
+    store_event: bool = Field(True, alias = "storeEvent")
+
+
+class ConflictResolutionRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    resource_type: str = Field("document", alias = "resourceType", max_length = 120)
+    resource_id: str = Field(..., alias = "resourceId", min_length = 1, max_length = 200)
+    base_revision: str | None = Field(None, alias = "baseRevision", max_length = 120)
+    local_revision: str | None = Field(None, alias = "localRevision", max_length = 120)
+    remote_revision: str | None = Field(None, alias = "remoteRevision", max_length = 120)
+    strategy: Literal["manual_review", "latest_wins", "owner_wins", "merge_if_clean"] = "manual_review"
+    changes: list[Any] | None = None
 
 
 class ImageRequest(BaseModel):
@@ -3228,6 +3280,41 @@ def _require_owned_project(project_id: str, owner_username: str) -> dict[str, An
     if project is None:
         raise HTTPException(status_code = 404, detail = "Project not found")
     return project
+
+
+def _require_project_collaboration_access(
+    project_id: str,
+    username: str,
+    *,
+    require_edit: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    project = get_chat_project(project_id, include_all = True)
+    if project is None:
+        raise HTTPException(status_code = 404, detail = "Project not found")
+    owner_username = str(project.get("ownerUsername") or "")
+    if owner_username == username:
+        return project, {
+            "role": "owner",
+            "permission": "owner",
+            "canRead": True,
+            "canComment": True,
+            "canEdit": True,
+        }
+    collaborator = cognix_db.get_project_collaborator(project_id, username)
+    if collaborator is None:
+        raise HTTPException(status_code = 404, detail = "Project not found")
+    permission = str(collaborator.get("permission") or "view")
+    can_edit = permission == "edit"
+    if require_edit and not can_edit:
+        raise HTTPException(status_code = 403, detail = "Project edit permission required")
+    return project, {
+        "role": "collaborator",
+        "permission": permission,
+        "canRead": True,
+        "canComment": True,
+        "canEdit": can_edit,
+        "shareId": collaborator.get("share_id"),
+    }
 
 
 def _require_owned_thread(thread_id: str, owner_username: str) -> dict[str, Any]:
@@ -7392,6 +7479,362 @@ async def compile_project_directives(
         "auditLogId": audit.get("id"),
         "sideEffects": {**plan.get("sideEffects", {}), "auditWrite": True},
         "plannerVersion": cognix_project_skills_directives.COGNIX_DIRECTIVE_COMPILER_VERSION,
+    }
+
+
+@router.get("/projects/{project_id}/realtime/blueprint")
+async def project_realtime_blueprint(
+    project_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    project, access = _require_project_collaboration_access(project_id, current_subject)
+    blueprint = cognix_realtime_collaboration.build_realtime_collaboration_blueprint()
+    return {
+        "username": current_subject,
+        "projectId": project_id,
+        "project": _row(project),
+        "access": access,
+        "realtimeCollaborationBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_realtime_collaboration.COGNIX_REALTIME_COLLABORATION_VERSION,
+    }
+
+
+@router.post("/projects/{project_id}/realtime/presence")
+async def update_project_presence(
+    project_id: str,
+    payload: RealtimePresenceRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    project, access = _require_project_collaboration_access(project_id, current_subject)
+    plan = cognix_realtime_collaboration.build_presence_plan(
+        username = current_subject,
+        project = project,
+        client_id = payload.client_id,
+        status = payload.status,
+        cursor = payload.cursor,
+        activity = payload.activity,
+        ttl_seconds = payload.ttl_seconds,
+        metadata = payload.metadata,
+    )
+    presence = cognix_db.upsert_project_presence(current_subject, project_id = project_id, plan = plan)
+    event_plan = cognix_realtime_collaboration.build_collaboration_event_plan(
+        username = current_subject,
+        project = project,
+        event_type = "presence_updated",
+        resource_type = "project",
+        resource_id = project_id,
+        payload = {"clientId": plan.get("presence", {}).get("clientId"), "status": plan.get("presence", {}).get("status")},
+    )
+    event = cognix_db.create_collaboration_event(current_subject, project_id = project_id, plan = event_plan)
+    side_effects = {**plan.get("sideEffects", {}), "presenceWrite": True, "eventWrite": True, "auditWrite": True}
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "project_presence_updated",
+        resource_type = "presence_session",
+        resource_id = str(presence.get("id") or project_id),
+        severity = "notice",
+        metadata = {
+            "presenceServiceVersion": plan.get("presenceServiceVersion"),
+            "projectId": project_id,
+            "access": access,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "projectId": project_id,
+        "presencePlan": plan,
+        "presence": _row(presence),
+        "collaborationEvent": _row(event),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_realtime_collaboration.COGNIX_PRESENCE_SERVICE_VERSION,
+    }
+
+
+@router.get("/projects/{project_id}/realtime/presence")
+async def list_project_presence(
+    project_id: str,
+    active_only: bool = True,
+    limit: int = 100,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    project, access = _require_project_collaboration_access(project_id, current_subject)
+    sessions = cognix_db.list_project_presence_sessions(project_id, active_only = active_only, limit = limit)
+    return {
+        "username": current_subject,
+        "projectId": project_id,
+        "project": _row(project),
+        "access": access,
+        "presenceSessions": _rows(sessions),
+        "count": len(sessions),
+        "sideEffects": {"presenceWrite": False, "eventWrite": False, "modelLoad": False, "generation": False},
+        "plannerVersion": cognix_realtime_collaboration.COGNIX_PRESENCE_SERVICE_VERSION,
+    }
+
+
+@router.post("/projects/{project_id}/comments")
+async def create_project_comment(
+    project_id: str,
+    payload: ProjectCommentRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    project, access = _require_project_collaboration_access(project_id, current_subject)
+    plan = cognix_realtime_collaboration.build_comment_plan(
+        username = current_subject,
+        project = project,
+        body = payload.body,
+        target = payload.target,
+        parent_comment_id = payload.parent_comment_id,
+        metadata = payload.metadata,
+    )
+    if not plan.get("valid"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Comment body is required.")
+    comment = (
+        cognix_db.create_project_comment(current_subject, project_id = project_id, plan = plan)
+        if payload.store_comment
+        else None
+    )
+    event_plan = cognix_realtime_collaboration.build_collaboration_event_plan(
+        username = current_subject,
+        project = project,
+        event_type = "comment_created",
+        resource_type = "project_comment",
+        resource_id = str((comment or {}).get("id") or project_id),
+        payload = {"commentId": (comment or {}).get("id"), "target": plan.get("comment", {}).get("target")},
+    )
+    event = cognix_db.create_collaboration_event(current_subject, project_id = project_id, plan = event_plan)
+    side_effects = {**plan.get("sideEffects", {}), "commentWrite": comment is not None, "eventWrite": True, "auditWrite": True}
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "project_comment_created",
+        resource_type = "project_comment",
+        resource_id = str((comment or {}).get("id") or project_id),
+        severity = "notice",
+        metadata = {
+            "commentServiceVersion": plan.get("commentServiceVersion"),
+            "projectId": project_id,
+            "access": access,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "projectId": project_id,
+        "projectCommentPlan": plan,
+        "projectComment": _row(comment) if comment else None,
+        "collaborationEvent": _row(event),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_realtime_collaboration.COGNIX_COMMENT_SERVICE_VERSION,
+    }
+
+
+@router.get("/projects/{project_id}/comments")
+async def list_project_comments(
+    project_id: str,
+    status_filter: str | None = None,
+    limit: int = 100,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    project, access = _require_project_collaboration_access(project_id, current_subject)
+    comments = cognix_db.list_project_comments(project_id, status = status_filter, limit = limit)
+    return {
+        "username": current_subject,
+        "projectId": project_id,
+        "project": _row(project),
+        "access": access,
+        "projectComments": _rows(comments),
+        "count": len(comments),
+        "sideEffects": {"commentWrite": False, "eventWrite": False, "modelLoad": False, "generation": False},
+        "plannerVersion": cognix_realtime_collaboration.COGNIX_COMMENT_SERVICE_VERSION,
+    }
+
+
+@router.post("/projects/{project_id}/comments/{comment_id}/resolve")
+async def resolve_project_comment(
+    project_id: str,
+    comment_id: str,
+    payload: ProjectCommentResolutionRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    project, access = _require_project_collaboration_access(project_id, current_subject)
+    comment = cognix_db.get_project_comment(comment_id, project_id = project_id)
+    if comment is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Project comment not found.")
+    if not access.get("canEdit") and comment.get("username") != current_subject:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Comment owner or project edit permission required.")
+    plan = cognix_realtime_collaboration.build_comment_resolution_plan(
+        username = current_subject,
+        project = project,
+        comment = comment,
+        status = payload.status,
+        note = payload.note,
+    )
+    updated = cognix_db.resolve_project_comment(
+        current_subject,
+        project_id = project_id,
+        comment_id = comment_id,
+        plan = plan,
+    )
+    event_plan = cognix_realtime_collaboration.build_collaboration_event_plan(
+        username = current_subject,
+        project = project,
+        event_type = "comment_resolved" if payload.status == "resolved" else "comment_updated",
+        resource_type = "project_comment",
+        resource_id = comment_id,
+        payload = {"commentId": comment_id, "status": payload.status},
+    )
+    event = cognix_db.create_collaboration_event(current_subject, project_id = project_id, plan = event_plan)
+    side_effects = {**plan.get("sideEffects", {}), "commentStatusWrite": updated is not None, "eventWrite": True, "auditWrite": True}
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "project_comment_resolution_planned",
+        resource_type = "project_comment",
+        resource_id = comment_id,
+        severity = "notice",
+        metadata = {
+            "commentServiceVersion": plan.get("commentServiceVersion"),
+            "projectId": project_id,
+            "nextStatus": payload.status,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "projectId": project_id,
+        "commentResolutionPlan": plan,
+        "projectComment": _row(updated) if updated else None,
+        "collaborationEvent": _row(event),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_realtime_collaboration.COGNIX_COMMENT_SERVICE_VERSION,
+    }
+
+
+@router.post("/projects/{project_id}/collaboration/events")
+async def create_project_collaboration_event(
+    project_id: str,
+    payload: CollaborationEventRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    project, access = _require_project_collaboration_access(project_id, current_subject)
+    plan = cognix_realtime_collaboration.build_collaboration_event_plan(
+        username = current_subject,
+        project = project,
+        event_type = payload.event_type,
+        resource_type = payload.resource_type,
+        resource_id = payload.resource_id,
+        payload = payload.payload,
+        metadata = payload.metadata,
+    )
+    event = (
+        cognix_db.create_collaboration_event(current_subject, project_id = project_id, plan = plan)
+        if payload.store_event
+        else None
+    )
+    side_effects = {**plan.get("sideEffects", {}), "eventWrite": event is not None, "auditWrite": True}
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "project_collaboration_event_planned",
+        resource_type = "collaboration_event",
+        resource_id = str((event or {}).get("id") or project_id),
+        severity = "notice",
+        metadata = {
+            "realtimeCollaborationVersion": plan.get("realtimeCollaborationVersion"),
+            "projectId": project_id,
+            "eventType": plan.get("event", {}).get("type"),
+            "access": access,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "projectId": project_id,
+        "collaborationEventPlan": plan,
+        "collaborationEvent": _row(event) if event else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_realtime_collaboration.COGNIX_REALTIME_COLLABORATION_VERSION,
+    }
+
+
+@router.get("/projects/{project_id}/collaboration/events")
+async def list_project_collaboration_events(
+    project_id: str,
+    limit: int = 100,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    project, access = _require_project_collaboration_access(project_id, current_subject)
+    events = cognix_db.list_collaboration_events(project_id, limit = limit)
+    return {
+        "username": current_subject,
+        "projectId": project_id,
+        "project": _row(project),
+        "access": access,
+        "collaborationEvents": _rows(events),
+        "count": len(events),
+        "sideEffects": {"eventWrite": False, "modelLoad": False, "generation": False},
+        "plannerVersion": cognix_realtime_collaboration.COGNIX_REALTIME_COLLABORATION_VERSION,
+    }
+
+
+@router.post("/projects/{project_id}/collaboration/conflict-plan")
+async def project_collaboration_conflict_plan(
+    project_id: str,
+    payload: ConflictResolutionRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    project, access = _require_project_collaboration_access(project_id, current_subject, require_edit = True)
+    plan = cognix_realtime_collaboration.build_conflict_resolution_plan(
+        username = current_subject,
+        project = project,
+        resource_type = payload.resource_type,
+        resource_id = payload.resource_id,
+        base_revision = payload.base_revision,
+        local_revision = payload.local_revision,
+        remote_revision = payload.remote_revision,
+        strategy = payload.strategy,
+        changes = payload.changes,
+    )
+    event_plan = cognix_realtime_collaboration.build_collaboration_event_plan(
+        username = current_subject,
+        project = project,
+        event_type = "conflict_detected",
+        resource_type = payload.resource_type,
+        resource_id = payload.resource_id,
+        payload = {"conflict": plan.get("conflict"), "resolutionPolicy": plan.get("resolutionPolicy")},
+    )
+    event = cognix_db.create_collaboration_event(current_subject, project_id = project_id, plan = event_plan)
+    side_effects = {**plan.get("sideEffects", {}), "eventWrite": True, "auditWrite": True}
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "project_conflict_resolution_planned",
+        resource_type = payload.resource_type,
+        resource_id = payload.resource_id,
+        severity = "warning" if plan.get("resolutionPolicy", {}).get("requiresHumanReview") else "notice",
+        metadata = {
+            "conflictResolverVersion": plan.get("conflictResolverVersion"),
+            "projectId": project_id,
+            "access": access,
+            "automaticOverwriteAllowed": False,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "projectId": project_id,
+        "conflictResolutionPlan": plan,
+        "collaborationEvent": _row(event),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_realtime_collaboration.COGNIX_CONFLICT_RESOLVER_VERSION,
     }
 
 

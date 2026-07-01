@@ -185,6 +185,12 @@ PRODUCT_NAVIGATION_ROUTES: list[dict[str, Any]] = [
     {
         "path": "/projects/:id/collaboration",
         "equivalentRoutes": [
+            "/api/cognix/projects/{project_id}/realtime/blueprint",
+            "/api/cognix/projects/{project_id}/realtime/presence",
+            "/api/cognix/projects/{project_id}/comments",
+            "/api/cognix/projects/{project_id}/comments/{comment_id}/resolve",
+            "/api/cognix/projects/{project_id}/collaboration/events",
+            "/api/cognix/projects/{project_id}/collaboration/conflict-plan",
             "/api/cognix/chat-project-bridge/links",
             "/api/cognix/chat-project-bridge/answer-shares",
             "/api/cognix/chat-project-bridge/projects-from-discussion",

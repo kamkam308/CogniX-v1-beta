@@ -125,6 +125,7 @@ GLOBAL_ROADMAP_TABLE_NAMES = (
     "project_activity_events",
     "presence_sessions",
     "project_comments",
+    "collaboration_events",
     "agent_sessions",
     "agent_steps",
     "agent_tool_calls",
@@ -17360,6 +17361,318 @@ def list_enterprise_encrypted_messages(
                 LIMIT ?
                 """,
                 (chat_id, max(1, min(int(limit or 100), 300))),
+            ).fetchall()
+        )
+        return _hydrate_global_payload_rows(rows)
+    finally:
+        conn.close()
+
+
+def get_project_collaborator(project_id: str, collaborator_username: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        return row_to_dict(
+            conn.execute(
+                """
+                SELECT *
+                FROM cognix_project_collaborators
+                WHERE project_id = ? AND collaborator_username = ? AND status = 'accepted'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (project_id, collaborator_username),
+            ).fetchone()
+        )
+    finally:
+        conn.close()
+
+
+def upsert_project_presence(username: str, *, project_id: str, plan: dict[str, Any]) -> dict[str, Any]:
+    now = _now()
+    presence = plan.get("presence") if isinstance(plan.get("presence"), dict) else {}
+    client_id = str(presence.get("clientId") or "browser")[:160]
+    status = str(presence.get("status") or "online")[:80]
+    payload = {**plan, "projectId": project_id}
+    metadata = {
+        "projectId": project_id,
+        "clientId": client_id,
+        "status": status,
+        "visibleToProjectMembers": True,
+        "hiddenPresenceAllowed": False,
+    }
+    conn = get_connection()
+    try:
+        existing = conn.execute(
+            """
+            SELECT id
+            FROM presence_sessions
+            WHERE project_id = ? AND username = ? AND scope_type = 'presence_session' AND scope_id = ?
+            LIMIT 1
+            """,
+            (project_id, username, client_id),
+        ).fetchone()
+        if existing:
+            presence_id = str(existing["id"])
+            conn.execute(
+                """
+                UPDATE presence_sessions
+                SET status = ?, payload_json = ?, metadata_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    json.dumps(payload, ensure_ascii = False),
+                    json.dumps(metadata, ensure_ascii = False),
+                    now,
+                    presence_id,
+                ),
+            )
+        else:
+            presence_id = _new_id("prs")
+            conn.execute(
+                """
+                INSERT INTO presence_sessions
+                    (id, organization_id, username, project_id, scope_type, scope_id, status,
+                     payload_json, metadata_json, created_at, updated_at)
+                VALUES (?, 'local', ?, ?, 'presence_session', ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    presence_id,
+                    username,
+                    project_id,
+                    client_id,
+                    status,
+                    json.dumps(payload, ensure_ascii = False),
+                    json.dumps(metadata, ensure_ascii = False),
+                    now,
+                    now,
+                ),
+            )
+        conn.commit()
+        item = _hydrate_global_payload_row(
+            dict(conn.execute("SELECT * FROM presence_sessions WHERE id = ?", (presence_id,)).fetchone())
+        )
+        if item is None:
+            raise RuntimeError("Presence session was not readable after upsert.")
+        return item
+    finally:
+        conn.close()
+
+
+def list_project_presence_sessions(project_id: str, *, active_only: bool = True, limit: int = 100) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        status_clause = "AND status != 'offline'" if active_only else ""
+        rows = _rows_to_dicts(
+            conn.execute(
+                f"""
+                SELECT *
+                FROM presence_sessions
+                WHERE project_id = ? AND scope_type = 'presence_session'
+                {status_clause}
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (project_id, max(1, min(int(limit or 100), 300))),
+            ).fetchall()
+        )
+        return _hydrate_global_payload_rows(rows)
+    finally:
+        conn.close()
+
+
+def create_project_comment(username: str, *, project_id: str, plan: dict[str, Any]) -> dict[str, Any]:
+    now = _now()
+    comment_id = _new_id("pcm")
+    comment = plan.get("comment") if isinstance(plan.get("comment"), dict) else {}
+    target = comment.get("target") if isinstance(comment.get("target"), dict) else {}
+    payload = {**plan, "commentId": comment_id, "projectId": project_id}
+    metadata = {
+        "projectId": project_id,
+        "targetType": target.get("type") or "project",
+        "targetId": target.get("id") or project_id,
+        "parentCommentId": comment.get("parentCommentId"),
+    }
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO project_comments
+                (id, organization_id, username, project_id, scope_type, scope_id, status,
+                 payload_json, metadata_json, created_at, updated_at)
+            VALUES (?, 'local', ?, ?, 'project_comment', ?, 'open', ?, ?, ?, ?)
+            """,
+            (
+                comment_id,
+                username,
+                project_id,
+                project_id,
+                json.dumps(payload, ensure_ascii = False),
+                json.dumps(metadata, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        item = _hydrate_global_payload_row(
+            dict(conn.execute("SELECT * FROM project_comments WHERE id = ?", (comment_id,)).fetchone())
+        )
+        if item is None:
+            raise RuntimeError("Project comment was not readable after creation.")
+        return item
+    finally:
+        conn.close()
+
+
+def get_project_comment(comment_id: str, *, project_id: str | None = None) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        if project_id:
+            row = conn.execute(
+                "SELECT * FROM project_comments WHERE id = ? AND project_id = ?",
+                (comment_id, project_id),
+            ).fetchone()
+        else:
+            row = conn.execute("SELECT * FROM project_comments WHERE id = ?", (comment_id,)).fetchone()
+        return _hydrate_global_payload_row(dict(row) if row else None)
+    finally:
+        conn.close()
+
+
+def list_project_comments(project_id: str, *, status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        params: list[Any] = [project_id]
+        status_clause = ""
+        if status:
+            status_clause = "AND status = ?"
+            params.append(status)
+        params.append(max(1, min(int(limit or 100), 300)))
+        rows = _rows_to_dicts(
+            conn.execute(
+                f"""
+                SELECT *
+                FROM project_comments
+                WHERE project_id = ? AND scope_type = 'project_comment'
+                {status_clause}
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        )
+        return _hydrate_global_payload_rows(rows)
+    finally:
+        conn.close()
+
+
+def resolve_project_comment(username: str, *, project_id: str, comment_id: str, plan: dict[str, Any]) -> dict[str, Any] | None:
+    now = _now()
+    current = get_project_comment(comment_id, project_id = project_id)
+    if current is None:
+        return None
+    next_status = str((plan.get("comment") or {}).get("nextStatus") or "resolved")[:80]
+    payload = dict(current.get("payload") or {})
+    payload["resolution"] = plan
+    metadata = dict(current.get("metadata") or {})
+    metadata["resolvedBy"] = username
+    metadata["resolutionStatus"] = next_status
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            UPDATE project_comments
+            SET status = ?, payload_json = ?, metadata_json = ?, updated_at = ?
+            WHERE id = ? AND project_id = ?
+            """,
+            (
+                next_status,
+                json.dumps(payload, ensure_ascii = False),
+                json.dumps(metadata, ensure_ascii = False),
+                now,
+                comment_id,
+                project_id,
+            ),
+        )
+        conn.commit()
+        return get_project_comment(comment_id, project_id = project_id)
+    finally:
+        conn.close()
+
+
+def create_collaboration_event(username: str, *, project_id: str, plan: dict[str, Any]) -> dict[str, Any]:
+    now = _now()
+    event_id = _new_id("cev")
+    event = plan.get("event") if isinstance(plan.get("event"), dict) else {}
+    payload = {**plan, "eventId": event_id, "projectId": project_id}
+    metadata = {
+        "projectId": project_id,
+        "eventType": event.get("type") or "presence_updated",
+        "resourceType": event.get("resourceType") or "project",
+        "resourceId": event.get("resourceId") or project_id,
+    }
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO collaboration_events
+                (id, organization_id, username, project_id, scope_type, scope_id, status,
+                 payload_json, metadata_json, created_at, updated_at)
+            VALUES (?, 'local', ?, ?, 'collaboration_event', ?, 'active', ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                username,
+                project_id,
+                project_id,
+                json.dumps(payload, ensure_ascii = False),
+                json.dumps(metadata, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO project_activity_events
+                (id, organization_id, username, project_id, scope_type, scope_id, status,
+                 payload_json, metadata_json, created_at, updated_at)
+            VALUES (?, 'local', ?, ?, 'collaboration_activity', ?, 'active', ?, ?, ?, ?)
+            """,
+            (
+                _new_id("pae"),
+                username,
+                project_id,
+                project_id,
+                json.dumps(payload, ensure_ascii = False),
+                json.dumps(metadata, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        item = _hydrate_global_payload_row(
+            dict(conn.execute("SELECT * FROM collaboration_events WHERE id = ?", (event_id,)).fetchone())
+        )
+        if item is None:
+            raise RuntimeError("Collaboration event was not readable after creation.")
+        return item
+    finally:
+        conn.close()
+
+
+def list_collaboration_events(project_id: str, *, limit: int = 100) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        rows = _rows_to_dicts(
+            conn.execute(
+                """
+                SELECT *
+                FROM collaboration_events
+                WHERE project_id = ? AND scope_type = 'collaboration_event'
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (project_id, max(1, min(int(limit or 100), 300))),
             ).fetchall()
         )
         return _hydrate_global_payload_rows(rows)
