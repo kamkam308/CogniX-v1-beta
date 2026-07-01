@@ -237,7 +237,18 @@ PRODUCT_NAVIGATION_ROUTES: list[dict[str, Any]] = [
     },
     {"path": "/projects/:id/skills", "equivalentRoutes": ["/api/cognix/projects/{project_id}/skills", "/api/cognix/skills/marketplace", "/api/cognix/memory/skills"]},
     {"path": "/projects/:id/directives", "equivalentRoutes": ["/api/cognix/projects/{project_id}/directives"]},
-    {"path": "/cowork", "equivalentRoutes": ["/api/cognix/admin/approvals", "/api/cognix/command-palette/plan"]},
+    {
+        "path": "/cowork",
+        "equivalentRoutes": [
+            "/api/cognix/cowork/blueprint",
+            "/api/cognix/cowork/sessions",
+            "/api/cognix/cowork/sessions/{session_id}",
+            "/api/cognix/cowork/sessions/{session_id}/status",
+            "/api/cognix/cowork/sessions/{session_id}/actions",
+            "/api/cognix/admin/approvals",
+            "/api/cognix/command-palette/plan",
+        ],
+    },
 ]
 
 

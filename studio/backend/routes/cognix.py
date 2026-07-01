@@ -50,6 +50,7 @@ from core.cognix import context_graph as cognix_context_graph
 from core.cognix import context_heatmap as cognix_context_heatmap
 from core.cognix import context_manager as cognix_context_manager
 from core.cognix import cost_optimizer as cognix_cost_optimizer
+from core.cognix import cowork as cognix_cowork
 from core.cognix import database_blueprint as cognix_database_blueprint
 from core.cognix import dataset_builder as cognix_dataset_builder
 from core.cognix import debate_orchestrator as cognix_debate_orchestrator
@@ -1424,6 +1425,34 @@ class AgentOutputRequest(BaseModel):
     output_type: str = Field("final_report", alias = "outputType", max_length = 120)
     metadata: dict[str, Any] | None = None
     store_output: bool = Field(True, alias = "storeOutput")
+
+
+class CoworkSessionRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    level: Literal["read_only", "suggest_only", "edit_project_files", "run_dev_commands", "full_dev_project"] = "suggest_only"
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    objective: str | None = Field(None, max_length = 2000)
+    approval_id: str | None = Field(None, alias = "approvalId", max_length = 160)
+    store_session: bool = Field(True, alias = "storeSession")
+
+
+class CoworkStatusRequest(BaseModel):
+    status: Literal["active", "paused", "stopped"] = "paused"
+
+
+class CoworkActionRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    action_type: Literal["read_file", "suggest_change", "edit_file", "run_command", "pause", "stop"] = Field(
+        "read_file",
+        alias = "actionType",
+    )
+    command: str | None = Field(None, max_length = 1200)
+    path: str | None = Field(None, max_length = 800)
+    description: str | None = Field(None, max_length = 1200)
+    approval_id: str | None = Field(None, alias = "approvalId", max_length = 160)
+    store_action: bool = Field(True, alias = "storeAction")
 
 
 class RouterClassifyRequest(BaseModel):
@@ -15925,6 +15954,206 @@ async def create_agent_mode_output(
         "output": _row(stored) if stored else None,
         "auditLog": _row(audit),
     }
+
+
+@router.get("/cowork/blueprint")
+async def cowork_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    return {
+        "username": current_subject,
+        "blueprint": cognix_cowork.build_cowork_blueprint(),
+    }
+
+
+@router.get("/cowork/sessions")
+async def cowork_sessions(
+    project_id: str | None = None,
+    status: Literal["active", "paused", "stopped", "pending_approval"] | None = None,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if project_id:
+        _require_owned_project(project_id, current_subject)
+    return {
+        "sessions": _rows(
+            cognix_db.list_cowork_sessions(
+                current_subject,
+                project_id = project_id,
+                status = status,
+            )
+        )
+    }
+
+
+@router.post("/cowork/sessions")
+async def create_cowork_session(
+    payload: CoworkSessionRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_cowork.build_cowork_session_plan(
+        username = current_subject,
+        level = payload.level,
+        project_id = payload.project_id,
+        objective = payload.objective,
+        approval_id = payload.approval_id,
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "sessionWrite": bool(payload.store_session),
+        "permissionWrite": bool(payload.store_session),
+        "approvalWrite": bool(payload.store_session and plan.get("approval", {}).get("required")),
+        "auditWrite": True,
+    }
+    session = cognix_db.create_cowork_session(current_subject, plan = plan) if payload.store_session else None
+    cowork = plan.get("cowork") if isinstance(plan.get("cowork"), dict) else {}
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "cowork_session_planned",
+        resource_type = "cowork_session",
+        resource_id = str((session or {}).get("id") or ""),
+        severity = "warning" if cowork.get("approvalRequired") else "notice",
+        metadata = {
+            "level": payload.level,
+            "projectId": payload.project_id,
+            "approvalRequired": bool(cowork.get("approvalRequired")),
+            "stored": bool(session),
+            "neverStealth": True,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "plan": {**plan, "sideEffects": side_effects},
+        "coworkSession": _row(session) if session else None,
+        "requiresApproval": bool(cowork.get("approvalRequired")),
+        "auditLog": _row(audit),
+    }
+
+
+@router.get("/cowork/sessions/{session_id}")
+async def get_cowork_session(
+    session_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    session = cognix_db.get_cowork_session(session_id, username = current_subject)
+    if session is None:
+        raise HTTPException(status_code = 404, detail = "Cowork session not found")
+    return {"coworkSession": _row(session)}
+
+
+@router.patch("/cowork/sessions/{session_id}/status")
+async def update_cowork_session_status(
+    session_id: str,
+    payload: CoworkStatusRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    session = cognix_db.get_cowork_session(session_id, username = current_subject)
+    if session is None:
+        raise HTTPException(status_code = 404, detail = "Cowork session not found")
+    plan = cognix_cowork.build_cowork_status_update_plan(
+        username = current_subject,
+        session = session,
+        status = payload.status,
+    )
+    updated = cognix_db.update_cowork_session_status(
+        current_subject,
+        session_id = session_id,
+        plan = plan,
+    )
+    if updated is None:
+        raise HTTPException(status_code = 404, detail = "Cowork session not found")
+    side_effects = {**plan.get("sideEffects", {}), "sessionWrite": True, "auditWrite": True}
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "cowork_status_updated",
+        resource_type = "cowork_session",
+        resource_id = session_id,
+        severity = "notice",
+        metadata = {
+            "status": payload.status,
+            "previousStatus": plan.get("previousStatus"),
+            "neverStealth": True,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "statusPlan": {**plan, "sideEffects": side_effects},
+        "coworkSession": _row(updated),
+        "auditLog": _row(audit),
+    }
+
+
+@router.post("/cowork/sessions/{session_id}/actions")
+async def create_cowork_action(
+    session_id: str,
+    payload: CoworkActionRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    session = cognix_db.get_cowork_session(session_id, username = current_subject)
+    if session is None:
+        raise HTTPException(status_code = 404, detail = "Cowork session not found")
+    plan = cognix_cowork.build_cowork_action_plan(
+        username = current_subject,
+        session = session,
+        action_type = payload.action_type,
+        command = payload.command,
+        path = payload.path,
+        description = payload.description,
+        approval_id = payload.approval_id,
+    )
+    action = plan.get("action") if isinstance(plan.get("action"), dict) else {}
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "actionWrite": bool(payload.store_action),
+        "auditWrite": True,
+    }
+    stored = (
+        cognix_db.create_cowork_action(
+            current_subject,
+            session_id = session_id,
+            plan = plan,
+        )
+        if payload.store_action
+        else None
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "cowork_action_planned",
+        resource_type = "cowork_action",
+        resource_id = str((stored or {}).get("id") or action.get("id") or ""),
+        severity = "warning" if action.get("requiresApproval") else "notice",
+        metadata = {
+            "sessionId": session_id,
+            "actionType": payload.action_type,
+            "riskLevel": action.get("riskLevel"),
+            "allowed": bool(action.get("allowed")),
+            "requiresApproval": bool(action.get("requiresApproval")),
+            "willExecuteNow": False,
+            "neverStealth": True,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "actionPlan": {**plan, "sideEffects": side_effects},
+        "coworkAction": _row(stored) if stored else None,
+        "allowed": bool(action.get("allowed")),
+        "requiresApproval": bool(action.get("requiresApproval")),
+        "willExecuteNow": False,
+        "auditLog": _row(audit),
+    }
+
+
+@router.get("/cowork/sessions/{session_id}/actions")
+async def cowork_actions(
+    session_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    session = cognix_db.get_cowork_session(session_id, username = current_subject)
+    if session is None:
+        raise HTTPException(status_code = 404, detail = "Cowork session not found")
+    return {"actions": _rows(cognix_db.list_cowork_actions(current_subject, session_id = session_id))}
 
 
 @router.get("/games")

@@ -136,6 +136,7 @@ GLOBAL_ROADMAP_TABLE_NAMES = (
     "cowork_sessions",
     "cowork_actions",
     "cowork_permissions",
+    "cowork_approvals",
     "skills",
     "skill_versions",
     "project_skills",
@@ -18536,6 +18537,338 @@ def create_agent_output(username: str, *, session_id: str, plan: dict[str, Any])
         if item is None:
             raise RuntimeError("Agent output was not readable after creation.")
         return item
+    finally:
+        conn.close()
+
+
+def _attach_cowork_children(conn: sqlite3.Connection, session: dict[str, Any]) -> dict[str, Any]:
+    session_id = str(session.get("id") or "")
+    if not session_id:
+        return session
+    actions = _rows_to_dicts(
+        conn.execute(
+            """
+            SELECT *
+            FROM cowork_actions
+            WHERE scope_id = ?
+            ORDER BY created_at ASC
+            """,
+            (session_id,),
+        ).fetchall()
+    )
+    permissions = _rows_to_dicts(
+        conn.execute(
+            """
+            SELECT *
+            FROM cowork_permissions
+            WHERE scope_id = ?
+            ORDER BY created_at ASC
+            """,
+            (session_id,),
+        ).fetchall()
+    )
+    approvals = _rows_to_dicts(
+        conn.execute(
+            """
+            SELECT *
+            FROM cowork_approvals
+            WHERE scope_id = ?
+            ORDER BY created_at ASC
+            """,
+            (session_id,),
+        ).fetchall()
+    )
+    session["actions"] = _hydrate_global_payload_rows(actions)
+    session["permissions"] = _hydrate_global_payload_rows(permissions)
+    session["approvals"] = _hydrate_global_payload_rows(approvals)
+    return session
+
+
+def create_cowork_session(username: str, *, plan: dict[str, Any]) -> dict[str, Any]:
+    now = _now()
+    session_id = _new_id("cwk")
+    cowork = plan.get("cowork") if isinstance(plan.get("cowork"), dict) else {}
+    project_id = plan.get("projectId")
+    status = str(cowork.get("status") or "active")[:80]
+    payload = {**plan, "sessionId": session_id}
+    metadata = {
+        "level": cowork.get("level"),
+        "objective": cowork.get("objective"),
+        "approvalRequired": bool(cowork.get("approvalRequired")),
+        "neverStealth": bool(cowork.get("neverStealth")),
+        "capabilityCount": len(cowork.get("capabilities") or []),
+    }
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cowork_sessions
+                (id, organization_id, username, project_id, scope_type, scope_id, status,
+                 payload_json, metadata_json, created_at, updated_at)
+            VALUES (?, 'local', ?, ?, 'cowork_session', ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                username,
+                project_id,
+                session_id,
+                status,
+                json.dumps(payload, ensure_ascii = False),
+                json.dumps(metadata, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        for capability in cowork.get("capabilities") or []:
+            conn.execute(
+                """
+                INSERT INTO cowork_permissions
+                    (id, organization_id, username, project_id, scope_type, scope_id, status,
+                     payload_json, metadata_json, created_at, updated_at)
+                VALUES (?, 'local', ?, ?, 'cowork_permission', ?, 'active', ?, ?, ?, ?)
+                """,
+                (
+                    _new_id("cwkp"),
+                    username,
+                    project_id,
+                    session_id,
+                    json.dumps(
+                        {
+                            "sessionId": session_id,
+                            "level": cowork.get("level"),
+                            "permissionKey": capability,
+                        },
+                        ensure_ascii = False,
+                    ),
+                    json.dumps(
+                        {
+                            "sessionId": session_id,
+                            "level": cowork.get("level"),
+                            "permissionKey": capability,
+                        },
+                        ensure_ascii = False,
+                    ),
+                    now,
+                    now,
+                ),
+            )
+        approval = plan.get("approval") if isinstance(plan.get("approval"), dict) else {}
+        if approval.get("required"):
+            conn.execute(
+                """
+                INSERT INTO cowork_approvals
+                    (id, organization_id, username, project_id, scope_type, scope_id, status,
+                     payload_json, metadata_json, created_at, updated_at)
+                VALUES (?, 'local', ?, ?, 'cowork_approval', ?, 'pending', ?, ?, ?, ?)
+                """,
+                (
+                    _new_id("cwkap"),
+                    username,
+                    project_id,
+                    session_id,
+                    json.dumps(
+                        {
+                            "sessionId": session_id,
+                            "requestType": approval.get("requestType") or "cowork:control",
+                            "reason": approval.get("reason") or "",
+                        },
+                        ensure_ascii = False,
+                    ),
+                    json.dumps(
+                        {
+                            "sessionId": session_id,
+                            "requestType": approval.get("requestType") or "cowork:control",
+                        },
+                        ensure_ascii = False,
+                    ),
+                    now,
+                    now,
+                ),
+            )
+        conn.commit()
+        stored = get_cowork_session(session_id, username = username)
+        if stored is None:
+            raise RuntimeError("Cowork session was not readable after creation.")
+        return stored
+    finally:
+        conn.close()
+
+
+def get_cowork_session(session_id: str, *, username: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM cowork_sessions
+            WHERE id = ? AND username = ?
+            LIMIT 1
+            """,
+            (session_id, username),
+        ).fetchone()
+        session = _hydrate_global_payload_row(dict(row) if row else None)
+        if session is None:
+            return None
+        return _attach_cowork_children(conn, session)
+    finally:
+        conn.close()
+
+
+def list_cowork_sessions(
+    username: str,
+    *,
+    project_id: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        clauses = ["username = ?", "scope_type = 'cowork_session'"]
+        params: list[Any] = [username]
+        if project_id:
+            clauses.append("project_id = ?")
+            params.append(project_id)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        params.append(max(1, min(int(limit or 100), 300)))
+        rows = _rows_to_dicts(
+            conn.execute(
+                f"""
+                SELECT *
+                FROM cowork_sessions
+                WHERE {" AND ".join(clauses)}
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        )
+        sessions = []
+        for row in rows:
+            session = _hydrate_global_payload_row(row)
+            if session is not None:
+                sessions.append(_attach_cowork_children(conn, session))
+        return sessions
+    finally:
+        conn.close()
+
+
+def update_cowork_session_status(
+    username: str,
+    *,
+    session_id: str,
+    plan: dict[str, Any],
+) -> dict[str, Any] | None:
+    session = get_cowork_session(session_id, username = username)
+    if session is None:
+        return None
+    now = _now()
+    status = str(plan.get("status") or "paused")[:80]
+    payload = dict(session.get("payload") or {})
+    cowork = payload.get("cowork") if isinstance(payload.get("cowork"), dict) else {}
+    cowork["status"] = status
+    payload["cowork"] = cowork
+    payload["lastStatusUpdatePlan"] = plan
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            UPDATE cowork_sessions
+            SET status = ?, payload_json = ?, updated_at = ?
+            WHERE id = ? AND username = ?
+            """,
+            (
+                status,
+                json.dumps(payload, ensure_ascii = False),
+                now,
+                session_id,
+                username,
+            ),
+        )
+        conn.commit()
+        return get_cowork_session(session_id, username = username)
+    finally:
+        conn.close()
+
+
+def create_cowork_action(
+    username: str,
+    *,
+    session_id: str,
+    plan: dict[str, Any],
+) -> dict[str, Any] | None:
+    session = get_cowork_session(session_id, username = username)
+    if session is None:
+        return None
+    now = _now()
+    action = plan.get("action") if isinstance(plan.get("action"), dict) else {}
+    action_id = _new_id("cwka")
+    payload = {**plan, "actionRecordId": action_id}
+    metadata = {
+        "sessionId": session_id,
+        "actionType": action.get("type"),
+        "riskLevel": action.get("riskLevel"),
+        "requiresApproval": bool(action.get("requiresApproval")),
+        "allowed": bool(action.get("allowed")),
+        "willExecuteNow": False,
+    }
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cowork_actions
+                (id, organization_id, username, project_id, scope_type, scope_id, status,
+                 payload_json, metadata_json, created_at, updated_at)
+            VALUES (?, 'local', ?, ?, 'cowork_action', ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                action_id,
+                username,
+                session.get("project_id"),
+                session_id,
+                str(action.get("status") or "planned")[:80],
+                json.dumps(payload, ensure_ascii = False),
+                json.dumps(metadata, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE cowork_sessions
+            SET updated_at = ?
+            WHERE id = ? AND username = ?
+            """,
+            (now, session_id, username),
+        )
+        conn.commit()
+        item = _hydrate_global_payload_row(
+            dict(conn.execute("SELECT * FROM cowork_actions WHERE id = ?", (action_id,)).fetchone())
+        )
+        if item is None:
+            raise RuntimeError("Cowork action was not readable after creation.")
+        return item
+    finally:
+        conn.close()
+
+
+def list_cowork_actions(username: str, *, session_id: str, limit: int = 100) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        rows = _rows_to_dicts(
+            conn.execute(
+                """
+                SELECT *
+                FROM cowork_actions
+                WHERE username = ? AND scope_id = ?
+                ORDER BY created_at ASC
+                LIMIT ?
+                """,
+                (username, session_id, max(1, min(int(limit or 100), 300))),
+            ).fetchall()
+        )
+        return _hydrate_global_payload_rows(rows)
     finally:
         conn.close()
 

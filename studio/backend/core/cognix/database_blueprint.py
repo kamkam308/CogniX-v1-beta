@@ -71,6 +71,7 @@ GLOBAL_ROADMAP_TABLE_NAMES: tuple[str, ...] = (
     "cowork_sessions",
     "cowork_actions",
     "cowork_permissions",
+    "cowork_approvals",
     "skills",
     "skill_versions",
     "project_skills",
