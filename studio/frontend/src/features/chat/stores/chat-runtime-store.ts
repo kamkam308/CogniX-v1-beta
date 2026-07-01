@@ -9,6 +9,7 @@ import {
   COGNIX_DEFAULT_EXTERNAL_CHECKPOINT,
   externalProviderCanSendWithoutFallback,
   getExternalProviderApiKey,
+  isHuggingFaceProviderConnection,
   isExternalModelId,
   loadExternalProviders,
   parseExternalModelId,
@@ -168,7 +169,7 @@ function loadLastExternalCheckpoint(): string | null {
     );
     if (!provider) return null;
     if (
-      provider.providerType === "huggingface" &&
+      isHuggingFaceProviderConnection(provider) &&
       !externalProviderCanSendWithoutFallback(
         provider,
         getExternalProviderApiKey(provider.id),

@@ -217,9 +217,14 @@ export function isHuggingFaceProviderConnection(
 }
 
 export function externalProviderAllowsMissingApiKey(
-  provider: Pick<ExternalProviderConfig, "providerType" | "baseUrl"> | null | undefined,
+  provider:
+    | (Pick<ExternalProviderConfig, "providerType" | "baseUrl"> &
+        Partial<Pick<ExternalProviderConfig, "name">>)
+    | null
+    | undefined,
 ): boolean {
   if (!provider) return false;
+  if (isHuggingFaceProviderConnection(provider)) return false;
   if (isCustomProviderType(provider.providerType)) return true;
   if (provider.providerType !== "gemini") return false;
   try {
@@ -231,16 +236,21 @@ export function externalProviderAllowsMissingApiKey(
 }
 
 export function externalProviderApiKeyStatus(
-  provider: Pick<ExternalProviderConfig, "providerType" | "baseUrl"> | null | undefined,
+  provider:
+    | (Pick<ExternalProviderConfig, "providerType" | "baseUrl"> &
+        Partial<Pick<ExternalProviderConfig, "name">>)
+    | null
+    | undefined,
   apiKey: string | null | undefined,
 ): "not_required" | "usable" | "missing" | "invalid" {
   if (!provider) return "missing";
-  if (externalProviderAllowsMissingApiKey(provider)) return "not_required";
   const key = (apiKey ?? "").trim();
-  if (!key) return "missing";
-  if (isHuggingFaceProviderConnection(provider) && !isHuggingFaceTokenCandidate(key)) {
-    return "invalid";
+  if (isHuggingFaceProviderConnection(provider)) {
+    if (!key) return "missing";
+    return isHuggingFaceTokenCandidate(key) ? "usable" : "invalid";
   }
+  if (externalProviderAllowsMissingApiKey(provider)) return "not_required";
+  if (!key) return "missing";
   return "usable";
 }
 
