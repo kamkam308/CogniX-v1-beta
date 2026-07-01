@@ -398,7 +398,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-live-model-comparison",
         "displayName": "CogniX Live Model Comparison",
         "editionTargets": ["free", "local", "developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "side_by_side_model_comparison",
             "parallel_inference_planning",
@@ -621,7 +621,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-intent-prediction",
         "displayName": "CogniX Intent Prediction",
         "editionTargets": ["free", "local", "developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "intent_prediction",
             "domain_probability",
@@ -645,7 +645,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-dynamic-ui",
         "displayName": "CogniX Dynamic UI",
         "editionTargets": ["free", "local", "developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "ui_layout_profiles",
             "adaptive_panels",

@@ -9818,6 +9818,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/models/cache/load-plan" in modules["cognix-model-lifecycle"]["routes"]
     assert "/api/cognix/models/cache/pressure-plan" in modules["cognix-model-lifecycle"]["routes"]
     assert "/api/cognix/models/preload-plan" in modules["cognix-model-lifecycle"]["routes"]
+    assert modules["cognix-live-model-comparison"]["status"] == "enabled"
+    assert modules["cognix-live-model-comparison"]["activationState"] == "ready"
     assert modules["cognix-live-model-comparison"]["dependencyState"]["ready"] is True
     assert "side_by_side_model_comparison" in modules["cognix-live-model-comparison"]["capabilities"]
     assert "parallel_inference_planning" in modules["cognix-live-model-comparison"]["capabilities"]
@@ -9901,12 +9903,16 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/context/heatmap/entries" in modules["cognix-context-heatmap"]["routes"]
     assert "/api/cognix/memory/cleanup/plan" in modules["cognix-context-heatmap"]["routes"]
     assert "/api/cognix/memory/cleanup/conflicts" in modules["cognix-context-heatmap"]["routes"]
+    assert modules["cognix-intent-prediction"]["status"] == "enabled"
+    assert modules["cognix-intent-prediction"]["activationState"] == "ready"
     assert modules["cognix-intent-prediction"]["dependencyState"]["ready"] is True
     assert "intent_prediction" in modules["cognix-intent-prediction"]["capabilities"]
     assert "preload_planning" in modules["cognix-intent-prediction"]["capabilities"]
     assert "single_useful_suggestion" in modules["cognix-intent-prediction"]["capabilities"]
     assert "/api/cognix/intent/predict" in modules["cognix-intent-prediction"]["routes"]
     assert "/api/cognix/intent/preload-events" in modules["cognix-intent-prediction"]["routes"]
+    assert modules["cognix-dynamic-ui"]["status"] == "enabled"
+    assert modules["cognix-dynamic-ui"]["activationState"] == "ready"
     assert modules["cognix-dynamic-ui"]["dependencyState"]["ready"] is True
     assert "ui_layout_profiles" in modules["cognix-dynamic-ui"]["capabilities"]
     assert "adaptive_panels" in modules["cognix-dynamic-ui"]["capabilities"]
