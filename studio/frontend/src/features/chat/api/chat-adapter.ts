@@ -256,6 +256,8 @@ function isHuggingFaceAuthFailure(error: unknown): boolean {
   const message = error.message.toLowerCase();
   return (
     message.includes("invalid username or password") ||
+    message.includes("invalid username") ||
+    message.includes("invalid password") ||
     (message.includes("hugging face") &&
       (message.includes("token") ||
         message.includes("auth") ||
@@ -263,6 +265,47 @@ function isHuggingFaceAuthFailure(error: unknown): boolean {
         message.includes("unauthorized") ||
         message.includes("forbidden")))
   );
+}
+
+function providerErrorMessageFromUnknown(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as {
+    detail?: unknown;
+    error?: unknown;
+    message?: unknown;
+  };
+  if (typeof record.message === "string" && record.message.trim()) {
+    return record.message.trim();
+  }
+  if (typeof record.error === "string" && record.error.trim()) {
+    return record.error.trim();
+  }
+  if (record.error && typeof record.error === "object") {
+    return providerErrorMessageFromUnknown(record.error);
+  }
+  if (typeof record.detail === "string" && record.detail.trim()) {
+    return record.detail.trim();
+  }
+  if (record.detail && typeof record.detail === "object") {
+    return providerErrorMessageFromUnknown(record.detail);
+  }
+  return null;
+}
+
+function huggingFaceAuthErrorFromStreamContent(text: string): Error | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  let message: string | null = null;
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+    try {
+      message = providerErrorMessageFromUnknown(JSON.parse(trimmed));
+    } catch {
+      message = null;
+    }
+  }
+  message ??= trimmed;
+  const error = new Error(message);
+  return isHuggingFaceAuthFailure(error) ? error : null;
 }
 
 async function updateStoredChatThreadEventually(
@@ -565,6 +608,11 @@ async function planLatestCogniXObjective(
         classification.recommendedModelLabel,
       domainModelLabel:
         strategy.domainModelLabel ?? classification.recommendedModelLabel,
+      providerId: strategy.providerId ?? null,
+      providerType: strategy.providerType ?? null,
+      baseUrl: strategy.baseUrl ?? null,
+      selectedModelId: strategy.selectedModelId ?? null,
+      selectedModelLabel: strategy.selectedModelLabel ?? null,
       executionStatus: strategy.status,
       executionMode: strategy.executionMode ?? plan.mode,
       willLoadModel: strategy.willLoadModel,
@@ -1255,6 +1303,35 @@ function checkpointFromProjectDefault(
   return modelId;
 }
 
+function checkpointFromCogniXRoute(
+  route: CogniXRouteSnapshot | null,
+): string | null {
+  if (!route) {
+    return null;
+  }
+  const providerType = route.providerType?.trim();
+  const modelId = route.selectedModelId?.trim();
+  if (providerType !== "ollama" || !modelId) {
+    return null;
+  }
+  const providerId = route.providerId?.trim();
+  const providers = loadExternalProviders();
+  const provider =
+    (providerId
+      ? providers.find((item) => item.id === providerId)
+      : undefined) ??
+    providers.find(
+      (item) =>
+        item.providerType === "ollama" &&
+        (item.models.includes(modelId) ||
+          (item.availableModels ?? []).includes(modelId)),
+    );
+  if (!provider) {
+    return null;
+  }
+  return buildExternalModelId(provider.id, modelId);
+}
+
 async function resolveSandboxSessionId(
   threadId: string | undefined,
 ): Promise<string | undefined> {
@@ -1720,6 +1797,16 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
         showToast: !runtimeBeforeRoute.params.checkpoint,
         projectId: ragProjectId,
       });
+      const cognixRouteCheckpoint = projectDefaultCheckpoint
+        ? null
+        : checkpointFromCogniXRoute(cognixRoute);
+      if (
+        cognixRouteCheckpoint &&
+        cognixRouteCheckpoint !== useChatRuntimeStore.getState().params.checkpoint
+      ) {
+        useChatRuntimeStore.getState().setCheckpoint(cognixRouteCheckpoint);
+        runtime = useChatRuntimeStore.getState();
+      }
 
       if (!useChatRuntimeStore.getState().params.checkpoint) {
         // Prefer a model already loaded by the CLI/API before auto-loading.
@@ -2386,6 +2473,32 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
         usage?: ServerUsage;
         timings?: ServerTimings;
       } | null = null;
+      const hasSubstantiveAssistantContent = (): boolean => {
+        const visibleText = cumulativeText
+          .replace(/<think>[\s\S]*?<\/think>/g, "")
+          .replace(/<\/?think>/g, "")
+          .trim();
+        if (!visibleText) return false;
+        const lowered = visibleText.toLowerCase();
+        if (
+          visibleText.startsWith("{") &&
+          lowered.includes("error") &&
+          lowered.includes("invalid username")
+        ) {
+          return false;
+        }
+        return true;
+      };
+      const resetExternalRetryState = (): void => {
+        waitingFirstChunk = true;
+        firstTokenTime = undefined;
+        cumulativeText = "";
+        reasoningContentOpen = false;
+        reasoningStartAt = null;
+        reasoningDuration = 0;
+        serverMetadata = null;
+        toolCallParts.length = 0;
+      };
 
       // Per-run cancellation token so a delayed stop POST can't match
       // the next run on the same thread.
@@ -3200,6 +3313,18 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
               const rawDelta = chunk.choices?.[0]?.delta?.content;
               // Normalize structured delta.content (mistral magistral).
               const delta = extractDeltaText(rawDelta);
+              if (
+                delta &&
+                isExternalRequest &&
+                externalProvider?.providerType === "huggingface"
+              ) {
+                const contentError = huggingFaceAuthErrorFromStreamContent(
+                  `${cumulativeText}${delta}`,
+                );
+                if (contentError) {
+                  throw contentError;
+                }
+              }
               // Latest Gemini text-part thoughtSignature for next-turn replay.
               const deltaExtraContent = (
                 chunk.choices?.[0]?.delta as
@@ -3426,13 +3551,12 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
               isExternalRequest &&
               externalProvider?.providerType === "huggingface" &&
               !retriedWithCogniXOllamaFallback &&
-              waitingFirstChunk &&
-              cumulativeText.length === 0 &&
-              toolCallParts.length === 0 &&
+              !hasSubstantiveAssistantContent() &&
               isHuggingFaceAuthFailure(streamError) &&
               switchToCogniXOllamaFallback()
             ) {
               retriedWithCogniXOllamaFallback = true;
+              resetExternalRetryState();
               toast("CogniX Auto", {
                 description:
                   "Hugging Face rejected the saved token. Using Ollama Qwen 4B instead.",

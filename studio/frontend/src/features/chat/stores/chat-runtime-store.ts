@@ -226,6 +226,11 @@ export type CogniXRouteSnapshot = {
   label: string;
   recommendedModelLabel: string;
   domainModelLabel?: string | null;
+  providerId?: string | null;
+  providerType?: string | null;
+  baseUrl?: string | null;
+  selectedModelId?: string | null;
+  selectedModelLabel?: string | null;
   executionStatus?: string | null;
   executionMode?: string | null;
   willLoadModel?: boolean;
