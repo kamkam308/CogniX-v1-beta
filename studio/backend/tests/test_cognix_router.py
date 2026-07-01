@@ -9912,11 +9912,15 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "adaptive_panels" in modules["cognix-dynamic-ui"]["capabilities"]
     assert "theme_safe_layout_planning" in modules["cognix-dynamic-ui"]["capabilities"]
     assert "/api/cognix/dynamic-ui/profile" in modules["cognix-dynamic-ui"]["routes"]
+    assert modules["cognix-background-agents"]["status"] == "enabled"
+    assert modules["cognix-background-agents"]["activationState"] == "ready"
     assert modules["cognix-background-agents"]["dependencyState"]["ready"] is True
     assert "background_job_planning" in modules["cognix-background-agents"]["capabilities"]
     assert "agent_queue_contract" in modules["cognix-background-agents"]["capabilities"]
     assert "progress_tracking" in modules["cognix-background-agents"]["capabilities"]
     assert "/api/cognix/background-agents/job-plan" in modules["cognix-background-agents"]["routes"]
+    assert modules["cognix-ai-timeline"]["status"] == "enabled"
+    assert modules["cognix-ai-timeline"]["activationState"] == "ready"
     assert modules["cognix-ai-timeline"]["dependencyState"]["ready"] is True
     assert "project_timeline_events" in modules["cognix-ai-timeline"]["capabilities"]
     assert "timeline_event_classification" in modules["cognix-ai-timeline"]["capabilities"]
@@ -10026,6 +10030,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/sandbox/plans" in modules["cognix-ai-sandbox"]["routes"]
     assert "/api/cognix/sandbox/runs" in modules["cognix-ai-sandbox"]["routes"]
     assert "/api/cognix/sandbox/runs/{run_id}" in modules["cognix-ai-sandbox"]["routes"]
+    assert modules["cognix-ai-workflow-recorder"]["status"] == "enabled"
+    assert modules["cognix-ai-workflow-recorder"]["activationState"] == "ready"
     assert modules["cognix-ai-workflow-recorder"]["dependencyState"]["ready"] is True
     assert "workflow_recording" in modules["cognix-ai-workflow-recorder"]["capabilities"]
     assert "workflow_replay_planning" in modules["cognix-ai-workflow-recorder"]["capabilities"]
@@ -10059,12 +10065,16 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/fine-tuning/evaluation-plan" in modules["cognix-fine-tuning"]["routes"]
     assert "/api/cognix/fine-tuning/cloud-handoff-plan" in modules["cognix-fine-tuning"]["routes"]
     assert "/api/cognix/fine-tuning/distillation-plan" in modules["cognix-fine-tuning"]["routes"]
+    assert modules["cognix-dataset-builder"]["status"] == "enabled"
+    assert modules["cognix-dataset-builder"]["activationState"] == "ready"
     assert modules["cognix-dataset-builder"]["dependencyState"]["ready"] is True
     assert "dataset_builder" in modules["cognix-dataset-builder"]["capabilities"]
     assert "synthetic_example_generation" in modules["cognix-dataset-builder"]["capabilities"]
     assert "dataset_quality_filter" in modules["cognix-dataset-builder"]["capabilities"]
     assert "/api/cognix/datasets/plan" in modules["cognix-dataset-builder"]["routes"]
     assert "/api/cognix/datasets" in modules["cognix-dataset-builder"]["routes"]
+    assert modules["cognix-persona-builder"]["status"] == "enabled"
+    assert modules["cognix-persona-builder"]["activationState"] == "ready"
     assert modules["cognix-persona-builder"]["dependencyState"]["ready"] is True
     assert "persona_manager" in modules["cognix-persona-builder"]["capabilities"]
     assert "persona_template_engine" in modules["cognix-persona-builder"]["capabilities"]

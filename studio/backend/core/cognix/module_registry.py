@@ -668,7 +668,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-background-agents",
         "displayName": "CogniX Autonomous Background Agents",
         "editionTargets": ["developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "background_job_planning",
             "agent_queue_contract",
@@ -768,7 +768,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-ai-timeline",
         "displayName": "CogniX AI Timeline",
         "editionTargets": ["free", "local", "developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "project_timeline_events",
             "timeline_event_classification",
@@ -1071,7 +1071,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-ai-workflow-recorder",
         "displayName": "CogniX AI Workflow Recorder",
         "editionTargets": ["free", "local", "developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "workflow_recording",
             "workflow_steps_store",
@@ -1287,7 +1287,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-dataset-builder",
         "displayName": "CogniX Dataset Builder",
         "editionTargets": ["developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "dataset_builder",
             "synthetic_example_generation",
@@ -1310,7 +1310,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-persona-builder",
         "displayName": "CogniX Persona Builder",
         "editionTargets": ["free", "local", "developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "persona_manager",
             "persona_template_engine",
