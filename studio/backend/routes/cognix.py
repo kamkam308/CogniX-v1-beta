@@ -60,6 +60,7 @@ from core.cognix import draft_generation as cognix_draft_generation
 from core.cognix import decision_engine as cognix_decision_engine
 from core.cognix import decision_explainer as cognix_decision_explainer
 from core.cognix import dynamic_ui as cognix_dynamic_ui
+from core.cognix import education_spaces as cognix_education_spaces
 from core.cognix import enterprise_chat as cognix_enterprise_chat
 from core.cognix import evolution_engine as cognix_evolution_engine
 from core.cognix import favorite_models as cognix_favorite_models
@@ -353,6 +354,64 @@ class SharedKnowledgeQueryRequest(BaseModel):
     query: str = Field(..., min_length = 1, max_length = 4000)
     role: str = Field("user", max_length = 80)
     limit: int = Field(5, ge = 1, le = 20)
+
+
+class EducationSpaceRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    name: str = Field(..., min_length = 1, max_length = 240)
+    institution_type: str = Field("school", alias = "institutionType", max_length = 80)
+    visibility: Literal["restricted", "organization", "public_readonly"] = "restricted"
+
+
+class EducationClassRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    name: str = Field(..., min_length = 1, max_length = 240)
+    subject: str = Field("general", max_length = 160)
+    teacher_username: str = Field(..., alias = "teacherUsername", min_length = 1, max_length = 160)
+    class_code: str | None = Field(None, alias = "classCode", max_length = 80)
+
+
+class EducationMemberRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    member_username: str = Field(..., alias = "memberUsername", min_length = 1, max_length = 160)
+    role: Literal["teacher", "student", "admin", "guardian"] = "student"
+
+
+class EducationCourseRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    title: str = Field(..., min_length = 1, max_length = 240)
+    subject: str = Field("general", max_length = 160)
+    outline: list[str] = Field(default_factory = list, max_length = 100)
+
+
+class EducationAssignmentRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    title: str = Field(..., min_length = 1, max_length = 240)
+    assignment_type: Literal["homework", "quiz", "exam", "project"] = Field("homework", alias = "assignmentType")
+    course_id: str | None = Field(None, alias = "courseId", max_length = 160)
+    instructions: str | None = Field("", max_length = 4000)
+    due_at: str | None = Field(None, alias = "dueAt", max_length = 120)
+
+
+class EducationExamPolicyRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    exam_mode: Literal["open_book", "restricted", "lockdown_planned"] = Field("restricted", alias = "examMode")
+    anti_abuse_level: Literal["low", "medium", "high", "strict"] = Field("medium", alias = "antiAbuseLevel")
+    allowed_tools: list[str] = Field(default_factory = list, alias = "allowedTools", max_length = 40)
+
+
+class EducationExamAccessRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    role: Literal["teacher", "student", "admin", "guardian"] = "student"
+    action: str = Field("view", max_length = 120)
+    tool_id: str | None = Field(None, alias = "toolId", max_length = 120)
 
 
 class AdminPolicyEnforcementRequest(BaseModel):
@@ -2722,6 +2781,36 @@ def _build_shared_knowledge_bundle(knowledge_base_id: str | None = None) -> dict
         "documents": documents,
         "chunks": chunks,
         "permissions": permissions,
+    }
+
+
+def _build_education_bundle(space_id: str | None = None, class_id: str | None = None) -> dict[str, Any]:
+    classes = cognix_db.list_education_classes(space_id = space_id)
+    selected_class_ids = {str(item.get("id") or "") for item in classes}
+    if class_id:
+        selected_class_ids.add(class_id)
+    courses = [
+        course
+        for target_class_id in selected_class_ids
+        for course in cognix_db.list_education_courses(class_id = target_class_id)
+    ]
+    assignments = [
+        assignment
+        for target_class_id in selected_class_ids
+        for assignment in cognix_db.list_education_assignments(class_id = target_class_id)
+    ]
+    exam_policies = [
+        policy
+        for target_class_id in selected_class_ids
+        for policy in cognix_db.list_education_exam_policies(class_id = target_class_id)
+    ]
+    return {
+        "spaces": cognix_db.list_education_spaces(),
+        "classes": classes,
+        "members": cognix_db.list_education_members(space_id = space_id, class_id = class_id),
+        "courses": courses,
+        "assignments": assignments,
+        "examPolicies": exam_policies,
     }
 
 
@@ -18064,6 +18153,366 @@ async def query_shared_knowledge_base(
         "retrieval": result,
         "sideEffects": result.get("sideEffects", {}),
         "plannerVersion": cognix_shared_knowledge_base.COGNIX_ORGANIZATION_RAG_SERVICE_VERSION,
+    }
+
+
+@router.get("/education/blueprint")
+async def education_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_education_spaces.build_education_blueprint()
+    return {
+        "username": current_subject,
+        "educationBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_education_spaces.COGNIX_EDUCATION_SPACE_SERVICE_VERSION,
+    }
+
+
+@router.get("/education/spaces")
+async def education_spaces(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    spaces = cognix_db.list_education_spaces(
+        username = None if auth_storage.is_admin(current_subject) else current_subject
+    )
+    return {
+        "username": current_subject,
+        "spaces": _rows(spaces),
+        "sideEffects": cognix_education_spaces.build_education_blueprint()["sideEffects"],
+        "plannerVersion": cognix_education_spaces.COGNIX_EDUCATION_SPACE_SERVICE_VERSION,
+    }
+
+
+@router.post("/education/spaces")
+async def create_education_space(
+    payload: EducationSpaceRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    plan = cognix_education_spaces.build_space_plan(
+        name = payload.name,
+        institution_type = payload.institution_type,
+        created_by = current_subject,
+        visibility = payload.visibility,
+    )
+    space = cognix_db.create_education_space(plan = plan)
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "databaseWrite": True,
+        "spaceWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = None,
+        actor_username = current_subject,
+        action = "education_space_created",
+        resource_type = "education_space",
+        resource_id = str(space.get("id") or ""),
+        severity = "notice",
+        metadata = {
+            "educationSpaceServiceVersion": plan.get("educationSpaceServiceVersion"),
+            "spaceId": space.get("id"),
+            "institutionType": space.get("institutionType"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "spacePlan": {**plan, "sideEffects": side_effects},
+        "space": _row(space),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_education_spaces.COGNIX_EDUCATION_SPACE_SERVICE_VERSION,
+    }
+
+
+@router.post("/education/spaces/{space_id}/classes")
+async def create_education_class(
+    space_id: str,
+    payload: EducationClassRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    if cognix_db.get_education_space(space_id) is None:
+        raise HTTPException(status_code = 404, detail = "Education space not found")
+    plan = cognix_education_spaces.build_class_plan(
+        space_id = space_id,
+        name = payload.name,
+        subject = payload.subject,
+        teacher_username = payload.teacher_username,
+        class_code = payload.class_code,
+    )
+    klass = cognix_db.create_education_class(plan = plan)
+    teacher_member = cognix_db.add_education_member(
+        space_id = space_id,
+        class_id = str(klass.get("id") or ""),
+        member_username = payload.teacher_username,
+        role = "teacher",
+        added_by = current_subject,
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "databaseWrite": True,
+        "classWrite": True,
+        "memberWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = None,
+        actor_username = current_subject,
+        action = "education_class_created",
+        resource_type = "education_class",
+        resource_id = str(klass.get("id") or ""),
+        severity = "notice",
+        metadata = {
+            "classroomManagerVersion": plan.get("classroomManagerVersion"),
+            "spaceId": space_id,
+            "teacherUsername": payload.teacher_username,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "classPlan": {**plan, "sideEffects": side_effects},
+        "class": _row(klass),
+        "teacherMember": _row(teacher_member),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_education_spaces.COGNIX_CLASSROOM_MANAGER_VERSION,
+    }
+
+
+@router.get("/education/spaces/{space_id}/classes")
+async def education_classes(
+    space_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if cognix_db.get_education_space(space_id) is None:
+        raise HTTPException(status_code = 404, detail = "Education space not found")
+    bundle = _build_education_bundle(space_id = space_id)
+    return {
+        "username": current_subject,
+        "education": _row(bundle),
+        "sideEffects": cognix_education_spaces.build_education_blueprint()["sideEffects"],
+        "plannerVersion": cognix_education_spaces.COGNIX_CLASSROOM_MANAGER_VERSION,
+    }
+
+
+@router.post("/education/classes/{class_id}/members")
+async def add_education_class_member(
+    class_id: str,
+    payload: EducationMemberRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    klass = cognix_db.get_education_class(class_id)
+    if klass is None:
+        raise HTTPException(status_code = 404, detail = "Education class not found")
+    member = cognix_db.add_education_member(
+        space_id = str(klass.get("spaceId") or klass.get("space_id") or ""),
+        class_id = class_id,
+        member_username = payload.member_username,
+        role = payload.role,
+        added_by = current_subject,
+    )
+    side_effects = {
+        **cognix_education_spaces.build_education_blueprint()["sideEffects"],
+        "databaseWrite": True,
+        "memberWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = payload.member_username,
+        actor_username = current_subject,
+        action = "education_member_added",
+        resource_type = "education_member",
+        resource_id = str(member.get("id") or ""),
+        severity = "notice",
+        metadata = {
+            "classId": class_id,
+            "role": payload.role,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "member": _row(member),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_education_spaces.COGNIX_CLASSROOM_MANAGER_VERSION,
+    }
+
+
+@router.post("/education/classes/{class_id}/courses")
+async def create_education_course(
+    class_id: str,
+    payload: EducationCourseRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    klass = cognix_db.get_education_class(class_id)
+    if klass is None:
+        raise HTTPException(status_code = 404, detail = "Education class not found")
+    plan = cognix_education_spaces.build_course_plan(
+        space_id = str(klass.get("spaceId") or klass.get("space_id") or ""),
+        class_id = class_id,
+        title = payload.title,
+        subject = payload.subject,
+        outline = payload.outline,
+        created_by = current_subject,
+    )
+    course = cognix_db.create_education_course(plan = plan)
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "databaseWrite": True,
+        "courseWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = None,
+        actor_username = current_subject,
+        action = "education_course_created",
+        resource_type = "education_course",
+        resource_id = str(course.get("id") or ""),
+        severity = "notice",
+        metadata = {
+            "coursePlannerVersion": plan.get("coursePlannerVersion"),
+            "classId": class_id,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "coursePlan": {**plan, "sideEffects": side_effects},
+        "course": _row(course),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_education_spaces.COGNIX_COURSE_PLANNER_VERSION,
+    }
+
+
+@router.post("/education/classes/{class_id}/assignments")
+async def create_education_assignment(
+    class_id: str,
+    payload: EducationAssignmentRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    klass = cognix_db.get_education_class(class_id)
+    if klass is None:
+        raise HTTPException(status_code = 404, detail = "Education class not found")
+    plan = cognix_education_spaces.build_assignment_plan(
+        space_id = str(klass.get("spaceId") or klass.get("space_id") or ""),
+        class_id = class_id,
+        course_id = payload.course_id,
+        title = payload.title,
+        assignment_type = payload.assignment_type,
+        instructions = payload.instructions or "",
+        due_at = payload.due_at,
+        created_by = current_subject,
+    )
+    assignment = cognix_db.create_education_assignment(plan = plan)
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "databaseWrite": True,
+        "assignmentWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = None,
+        actor_username = current_subject,
+        action = "education_assignment_created",
+        resource_type = "education_assignment",
+        resource_id = str(assignment.get("id") or ""),
+        severity = "warning" if payload.assignment_type == "exam" else "notice",
+        metadata = {
+            "assessmentPolicyEngineVersion": plan.get("assessmentPolicyEngineVersion"),
+            "classId": class_id,
+            "assignmentType": payload.assignment_type,
+            "requiresExamPolicy": plan.get("assignment", {}).get("requiresExamPolicy"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "assignmentPlan": {**plan, "sideEffects": side_effects},
+        "assignment": _row(assignment),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_education_spaces.COGNIX_ASSESSMENT_POLICY_ENGINE_VERSION,
+    }
+
+
+@router.put("/education/assignments/{assignment_id}/exam-policy")
+async def upsert_education_exam_policy(
+    assignment_id: str,
+    payload: EducationExamPolicyRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    assignment = cognix_db.get_education_assignment(assignment_id)
+    if assignment is None:
+        raise HTTPException(status_code = 404, detail = "Education assignment not found")
+    plan = cognix_education_spaces.build_exam_policy_plan(
+        space_id = str(assignment.get("spaceId") or assignment.get("space_id") or ""),
+        class_id = str(assignment.get("classId") or assignment.get("class_id") or ""),
+        assignment_id = assignment_id,
+        exam_mode = payload.exam_mode,
+        anti_abuse_level = payload.anti_abuse_level,
+        allowed_tools = payload.allowed_tools,
+        created_by = current_subject,
+    )
+    policy = cognix_db.upsert_education_exam_policy(plan = plan)
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "databaseWrite": True,
+        "examPolicyWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = None,
+        actor_username = current_subject,
+        action = "education_exam_policy_updated",
+        resource_type = "education_exam_policy",
+        resource_id = str(policy.get("id") or assignment_id),
+        severity = "warning",
+        metadata = {
+            "examGuardVersion": plan.get("examGuardVersion"),
+            "assignmentId": assignment_id,
+            "risk": plan.get("risk"),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "examPolicyPlan": {**plan, "sideEffects": side_effects},
+        "examPolicy": _row(policy),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_education_spaces.COGNIX_EXAM_GUARD_VERSION,
+    }
+
+
+@router.post("/education/assignments/{assignment_id}/exam-access-decision")
+async def education_exam_access_decision(
+    assignment_id: str,
+    payload: EducationExamAccessRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    assignment = cognix_db.get_education_assignment(assignment_id)
+    if assignment is None:
+        raise HTTPException(status_code = 404, detail = "Education assignment not found")
+    policy = cognix_db.get_education_exam_policy(assignment_id) or {}
+    decision = cognix_education_spaces.build_exam_access_decision(
+        role = payload.role,
+        action = payload.action,
+        exam_policy = policy,
+        tool_id = payload.tool_id,
+    )
+    return {
+        "username": current_subject,
+        "assignment": _row(assignment),
+        "examPolicy": _row(policy),
+        "decision": decision,
+        "sideEffects": decision.get("sideEffects", {}),
+        "plannerVersion": cognix_education_spaces.COGNIX_EXAM_GUARD_VERSION,
     }
 
 

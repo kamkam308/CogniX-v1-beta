@@ -151,6 +151,12 @@ GLOBAL_ROADMAP_TABLE_NAMES = (
     "notifications",
     "notification_preferences",
     "admin_alerts",
+    "education_spaces",
+    "education_classes",
+    "education_members",
+    "education_courses",
+    "education_assignments",
+    "education_exam_policies",
 )
 PROJECT_SKILL_DIRECTIVE_TABLE_NAMES = (
     "skills",
@@ -186,6 +192,14 @@ SHARED_KNOWLEDGE_TABLE_NAMES = (
     "knowledge_documents",
     "knowledge_chunks",
     "knowledge_permissions",
+)
+EDUCATION_SPACE_TABLE_NAMES = (
+    "education_spaces",
+    "education_classes",
+    "education_members",
+    "education_courses",
+    "education_assignments",
+    "education_exam_policies",
 )
 ADMIN_COMPLIANCE_EXPORT_TABLE_NAMES = (
     "compliance_exports",
@@ -2738,6 +2752,7 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
     _ensure_admin_local_only_columns(conn)
     _ensure_admin_secure_model_registry_columns(conn)
     _ensure_shared_knowledge_columns(conn)
+    _ensure_education_space_columns(conn)
     _ensure_admin_compliance_export_columns(conn)
     _ensure_admin_risk_scoring_columns(conn)
     _ensure_admin_system_health_columns(conn)
@@ -3496,6 +3511,138 @@ def _ensure_shared_knowledge_columns(conn: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_knowledge_permissions_subject_scope
             ON knowledge_permissions(subject_type, subject_id, knowledge_base_id, document_id)
+        """
+    )
+
+
+def _ensure_education_space_columns(conn: sqlite3.Connection) -> None:
+    for table_name in EDUCATION_SPACE_TABLE_NAMES:
+        quoted_table = _quote_roadmap_table_name(table_name)
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {quoted_table} (
+                id TEXT PRIMARY KEY,
+                organization_id TEXT NOT NULL DEFAULT 'default',
+                username TEXT,
+                project_id TEXT,
+                scope_type TEXT NOT NULL DEFAULT 'education',
+                scope_id TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'active',
+                payload_json TEXT NOT NULL DEFAULT '{{}}',
+                metadata_json TEXT NOT NULL DEFAULT '{{}}',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+    _ensure_columns(
+        conn,
+        "education_spaces",
+        {
+            "name": "TEXT NOT NULL DEFAULT ''",
+            "institution_type": "TEXT NOT NULL DEFAULT 'school'",
+            "created_by": "TEXT NOT NULL DEFAULT ''",
+            "visibility": "TEXT NOT NULL DEFAULT 'restricted'",
+            "settings_json": "TEXT NOT NULL DEFAULT '{}'",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "education_classes",
+        {
+            "space_id": "TEXT NOT NULL DEFAULT ''",
+            "name": "TEXT NOT NULL DEFAULT ''",
+            "subject": "TEXT NOT NULL DEFAULT 'general'",
+            "teacher_username": "TEXT NOT NULL DEFAULT ''",
+            "class_code": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "education_members",
+        {
+            "space_id": "TEXT NOT NULL DEFAULT ''",
+            "class_id": "TEXT NOT NULL DEFAULT ''",
+            "member_username": "TEXT NOT NULL DEFAULT ''",
+            "role": "TEXT NOT NULL DEFAULT 'student'",
+            "added_by": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "education_courses",
+        {
+            "space_id": "TEXT NOT NULL DEFAULT ''",
+            "class_id": "TEXT NOT NULL DEFAULT ''",
+            "title": "TEXT NOT NULL DEFAULT ''",
+            "subject": "TEXT NOT NULL DEFAULT 'general'",
+            "created_by": "TEXT NOT NULL DEFAULT ''",
+            "outline_json": "TEXT NOT NULL DEFAULT '[]'",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "education_assignments",
+        {
+            "space_id": "TEXT NOT NULL DEFAULT ''",
+            "class_id": "TEXT NOT NULL DEFAULT ''",
+            "course_id": "TEXT NOT NULL DEFAULT ''",
+            "title": "TEXT NOT NULL DEFAULT ''",
+            "assignment_type": "TEXT NOT NULL DEFAULT 'homework'",
+            "instructions": "TEXT NOT NULL DEFAULT ''",
+            "due_at": "TEXT NOT NULL DEFAULT ''",
+            "created_by": "TEXT NOT NULL DEFAULT ''",
+            "policy_json": "TEXT NOT NULL DEFAULT '{}'",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "education_exam_policies",
+        {
+            "space_id": "TEXT NOT NULL DEFAULT ''",
+            "class_id": "TEXT NOT NULL DEFAULT ''",
+            "assignment_id": "TEXT NOT NULL DEFAULT ''",
+            "exam_mode": "TEXT NOT NULL DEFAULT 'restricted'",
+            "anti_abuse_level": "TEXT NOT NULL DEFAULT 'medium'",
+            "allowed_tools_json": "TEXT NOT NULL DEFAULT '[]'",
+            "restrictions_json": "TEXT NOT NULL DEFAULT '{}'",
+            "created_by": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_education_spaces_org_status
+            ON education_spaces(organization_id, status, updated_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_education_classes_space
+            ON education_classes(space_id, status, updated_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_education_members_user
+            ON education_members(member_username, role, updated_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_education_courses_class
+            ON education_courses(class_id, updated_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_education_assignments_class
+            ON education_assignments(class_id, assignment_type, updated_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_education_exam_policies_assignment
+            ON education_exam_policies(assignment_id)
         """
     )
 
@@ -10726,6 +10873,525 @@ def list_knowledge_permissions(*, knowledge_base_id: str | None = None) -> list[
             tuple(params),
         ).fetchall()
         return [_hydrate_knowledge_permission(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_education_space(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["organizationId"] = item.get("organization_id")
+    item["createdBy"] = item.get("created_by")
+    item["institutionType"] = item.get("institution_type")
+    item["settings"] = _json_or_default(item.get("settings_json"), {})
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def create_education_space(*, plan: dict[str, Any]) -> dict[str, Any]:
+    now = _now()
+    space = plan.get("space") if isinstance(plan.get("space"), dict) else {}
+    space_id = _new_id("eduspace")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO education_spaces
+                (
+                    id, organization_id, username, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    name, institution_type, created_by, visibility, settings_json
+                )
+            VALUES (?, 'default', ?, 'education_space', ?, 'active', ?, '{}', ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                space_id,
+                str(space.get("createdBy") or "")[:160],
+                space_id,
+                json.dumps(plan, ensure_ascii = False),
+                now,
+                now,
+                str(space.get("name") or "")[:240],
+                str(space.get("institutionType") or "school")[:80],
+                str(space.get("createdBy") or "")[:160],
+                str(space.get("visibility") or "restricted")[:80],
+                json.dumps(space.get("defaultPolicies") or {}, ensure_ascii = False),
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM education_spaces WHERE id = ?", (space_id,)).fetchone()
+        return _hydrate_education_space(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def get_education_space(space_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT * FROM education_spaces WHERE id = ?", (space_id,)).fetchone()
+        return _hydrate_education_space(row_to_dict(row) or {}) if row else None
+    finally:
+        conn.close()
+
+
+def list_education_spaces(*, username: str | None = None, include_archived: bool = False) -> list[dict[str, Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if username:
+        clauses.append(
+            """
+            (
+                created_by = ?
+                OR id IN (
+                    SELECT space_id FROM education_members WHERE member_username = ?
+                )
+            )
+            """
+        )
+        params.extend([username, username])
+    if not include_archived:
+        clauses.append("status != 'archived'")
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM education_spaces
+            {where}
+            ORDER BY updated_at DESC
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_education_space(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_education_class(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["spaceId"] = item.get("space_id")
+    item["teacherUsername"] = item.get("teacher_username")
+    item["classCode"] = item.get("class_code")
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def create_education_class(*, plan: dict[str, Any]) -> dict[str, Any]:
+    now = _now()
+    class_plan = plan.get("class") if isinstance(plan.get("class"), dict) else {}
+    class_id = _new_id("educlass")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO education_classes
+                (
+                    id, organization_id, username, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    space_id, name, subject, teacher_username, class_code
+                )
+            VALUES (?, 'default', ?, 'education_class', ?, 'active', ?, '{}', ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                class_id,
+                str(class_plan.get("teacherUsername") or "")[:160],
+                str(class_plan.get("spaceId") or "")[:160],
+                json.dumps(plan, ensure_ascii = False),
+                now,
+                now,
+                str(class_plan.get("spaceId") or "")[:160],
+                str(class_plan.get("name") or "")[:240],
+                str(class_plan.get("subject") or "general")[:160],
+                str(class_plan.get("teacherUsername") or "")[:160],
+                str(class_plan.get("classCode") or "")[:80],
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM education_classes WHERE id = ?", (class_id,)).fetchone()
+        return _hydrate_education_class(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def get_education_class(class_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT * FROM education_classes WHERE id = ?", (class_id,)).fetchone()
+        return _hydrate_education_class(row_to_dict(row) or {}) if row else None
+    finally:
+        conn.close()
+
+
+def list_education_classes(*, space_id: str | None = None) -> list[dict[str, Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if space_id:
+        clauses.append("space_id = ?")
+        params.append(space_id)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM education_classes
+            {where}
+            ORDER BY updated_at DESC
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_education_class(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_education_member(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["spaceId"] = item.get("space_id")
+    item["classId"] = item.get("class_id")
+    item["memberUsername"] = item.get("member_username")
+    item["addedBy"] = item.get("added_by")
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def add_education_member(
+    *,
+    space_id: str,
+    class_id: str,
+    member_username: str,
+    role: str = "student",
+    added_by: str = "",
+) -> dict[str, Any]:
+    now = _now()
+    member_id = _new_id("edumem")
+    payload = {
+        "spaceId": space_id,
+        "classId": class_id,
+        "memberUsername": member_username,
+        "role": role,
+    }
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO education_members
+                (
+                    id, organization_id, username, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    space_id, class_id, member_username, role, added_by
+                )
+            VALUES (?, 'default', ?, 'education_member', ?, 'active', ?, '{}', ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                member_id,
+                member_username[:160],
+                class_id or space_id,
+                json.dumps(payload, ensure_ascii = False),
+                now,
+                now,
+                space_id[:160],
+                class_id[:160],
+                member_username[:160],
+                role[:80],
+                added_by[:160],
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM education_members WHERE id = ?", (member_id,)).fetchone()
+        return _hydrate_education_member(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_education_members(
+    *,
+    space_id: str | None = None,
+    class_id: str | None = None,
+    member_username: str | None = None,
+) -> list[dict[str, Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if space_id:
+        clauses.append("space_id = ?")
+        params.append(space_id)
+    if class_id:
+        clauses.append("class_id = ?")
+        params.append(class_id)
+    if member_username:
+        clauses.append("member_username = ?")
+        params.append(member_username)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM education_members
+            {where}
+            ORDER BY updated_at DESC
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_education_member(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_education_course(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["spaceId"] = item.get("space_id")
+    item["classId"] = item.get("class_id")
+    item["createdBy"] = item.get("created_by")
+    item["outline"] = _json_or_default(item.get("outline_json"), [])
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def create_education_course(*, plan: dict[str, Any]) -> dict[str, Any]:
+    now = _now()
+    course = plan.get("course") if isinstance(plan.get("course"), dict) else {}
+    course_id = _new_id("educourse")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO education_courses
+                (
+                    id, organization_id, username, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    space_id, class_id, title, subject, created_by, outline_json
+                )
+            VALUES (?, 'default', ?, 'education_course', ?, 'active', ?, '{}', ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                course_id,
+                str(course.get("createdBy") or "")[:160],
+                str(course.get("classId") or "")[:160],
+                json.dumps(plan, ensure_ascii = False),
+                now,
+                now,
+                str(course.get("spaceId") or "")[:160],
+                str(course.get("classId") or "")[:160],
+                str(course.get("title") or "")[:240],
+                str(course.get("subject") or "general")[:160],
+                str(course.get("createdBy") or "")[:160],
+                json.dumps(course.get("outline") or [], ensure_ascii = False),
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM education_courses WHERE id = ?", (course_id,)).fetchone()
+        return _hydrate_education_course(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_education_courses(*, class_id: str | None = None) -> list[dict[str, Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if class_id:
+        clauses.append("class_id = ?")
+        params.append(class_id)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM education_courses
+            {where}
+            ORDER BY updated_at DESC
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_education_course(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_education_assignment(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["spaceId"] = item.get("space_id")
+    item["classId"] = item.get("class_id")
+    item["courseId"] = item.get("course_id")
+    item["assignmentType"] = item.get("assignment_type")
+    item["dueAt"] = item.get("due_at")
+    item["createdBy"] = item.get("created_by")
+    item["policy"] = _json_or_default(item.get("policy_json"), {})
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def create_education_assignment(*, plan: dict[str, Any]) -> dict[str, Any]:
+    now = _now()
+    assignment = plan.get("assignment") if isinstance(plan.get("assignment"), dict) else {}
+    assignment_id = _new_id("eduassign")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO education_assignments
+                (
+                    id, organization_id, username, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    space_id, class_id, course_id, title, assignment_type,
+                    instructions, due_at, created_by, policy_json
+                )
+            VALUES (?, 'default', ?, 'education_assignment', ?, 'active', ?, '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                assignment_id,
+                str(assignment.get("createdBy") or "")[:160],
+                str(assignment.get("classId") or "")[:160],
+                json.dumps(plan, ensure_ascii = False),
+                now,
+                now,
+                str(assignment.get("spaceId") or "")[:160],
+                str(assignment.get("classId") or "")[:160],
+                str(assignment.get("courseId") or "")[:160],
+                str(assignment.get("title") or "")[:240],
+                str(assignment.get("assignmentType") or "homework")[:80],
+                str(assignment.get("instructions") or ""),
+                str(assignment.get("dueAt") or "")[:120],
+                str(assignment.get("createdBy") or "")[:160],
+                json.dumps(plan.get("policy") or {}, ensure_ascii = False),
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM education_assignments WHERE id = ?", (assignment_id,)).fetchone()
+        return _hydrate_education_assignment(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def get_education_assignment(assignment_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT * FROM education_assignments WHERE id = ?", (assignment_id,)).fetchone()
+        return _hydrate_education_assignment(row_to_dict(row) or {}) if row else None
+    finally:
+        conn.close()
+
+
+def list_education_assignments(*, class_id: str | None = None) -> list[dict[str, Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if class_id:
+        clauses.append("class_id = ?")
+        params.append(class_id)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM education_assignments
+            {where}
+            ORDER BY updated_at DESC
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_education_assignment(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_education_exam_policy(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["spaceId"] = item.get("space_id")
+    item["classId"] = item.get("class_id")
+    item["assignmentId"] = item.get("assignment_id")
+    item["examMode"] = item.get("exam_mode")
+    item["antiAbuseLevel"] = item.get("anti_abuse_level")
+    item["allowedTools"] = _json_or_default(item.get("allowed_tools_json"), [])
+    item["restrictions"] = _json_or_default(item.get("restrictions_json"), {})
+    item["createdBy"] = item.get("created_by")
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def upsert_education_exam_policy(*, plan: dict[str, Any]) -> dict[str, Any]:
+    now = _now()
+    policy = plan.get("examPolicy") if isinstance(plan.get("examPolicy"), dict) else {}
+    assignment_id = str(policy.get("assignmentId") or "")[:160]
+    policy_id = _new_id("eduexam")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO education_exam_policies
+                (
+                    id, organization_id, username, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    space_id, class_id, assignment_id, exam_mode, anti_abuse_level,
+                    allowed_tools_json, restrictions_json, created_by
+                )
+            VALUES (?, 'default', ?, 'education_exam_policy', ?, 'active', ?, '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(assignment_id) DO UPDATE SET
+                username = excluded.username,
+                payload_json = excluded.payload_json,
+                metadata_json = excluded.metadata_json,
+                updated_at = excluded.updated_at,
+                space_id = excluded.space_id,
+                class_id = excluded.class_id,
+                exam_mode = excluded.exam_mode,
+                anti_abuse_level = excluded.anti_abuse_level,
+                allowed_tools_json = excluded.allowed_tools_json,
+                restrictions_json = excluded.restrictions_json,
+                created_by = excluded.created_by
+            """,
+            (
+                policy_id,
+                str(policy.get("createdBy") or "")[:160],
+                assignment_id,
+                json.dumps(plan, ensure_ascii = False),
+                now,
+                now,
+                str(policy.get("spaceId") or "")[:160],
+                str(policy.get("classId") or "")[:160],
+                assignment_id,
+                str(policy.get("examMode") or "restricted")[:80],
+                str(policy.get("antiAbuseLevel") or "medium")[:80],
+                json.dumps(policy.get("allowedTools") or [], ensure_ascii = False),
+                json.dumps(policy.get("restrictions") or {}, ensure_ascii = False),
+                str(policy.get("createdBy") or "")[:160],
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM education_exam_policies WHERE assignment_id = ?",
+            (assignment_id,),
+        ).fetchone()
+        return _hydrate_education_exam_policy(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def get_education_exam_policy(assignment_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM education_exam_policies WHERE assignment_id = ?",
+            (assignment_id,),
+        ).fetchone()
+        return _hydrate_education_exam_policy(row_to_dict(row) or {}) if row else None
+    finally:
+        conn.close()
+
+
+def list_education_exam_policies(*, class_id: str | None = None) -> list[dict[str, Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if class_id:
+        clauses.append("class_id = ?")
+        params.append(class_id)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM education_exam_policies
+            {where}
+            ORDER BY updated_at DESC
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_education_exam_policy(row) for row in _rows_to_dicts(rows)]
     finally:
         conn.close()
 

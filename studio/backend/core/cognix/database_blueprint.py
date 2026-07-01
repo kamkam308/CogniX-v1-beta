@@ -83,6 +83,12 @@ GLOBAL_ROADMAP_TABLE_NAMES: tuple[str, ...] = (
     "risk_scores",
     "audit_logs",
     "notifications",
+    "education_spaces",
+    "education_classes",
+    "education_members",
+    "education_courses",
+    "education_assignments",
+    "education_exam_policies",
 )
 
 ROADMAP_TABLES: list[dict[str, Any]] = [

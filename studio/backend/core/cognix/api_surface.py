@@ -148,6 +148,17 @@ RECOMMENDED_ENDPOINTS: list[dict[str, Any]] = [
 PRODUCT_NAVIGATION_ROUTES: list[dict[str, Any]] = [
     {"path": "/pulse", "equivalentRoutes": ["/api/cognix/pulse"]},
     {"path": "/library", "equivalentRoutes": ["/api/cognix/library", "/api/cognix/knowledge/shared/bases"]},
+    {
+        "path": "/education",
+        "equivalentRoutes": [
+            "/api/cognix/education/blueprint",
+            "/api/cognix/education/spaces",
+            "/api/cognix/education/spaces/{space_id}/classes",
+            "/api/cognix/education/classes/{class_id}/courses",
+            "/api/cognix/education/classes/{class_id}/assignments",
+            "/api/cognix/education/assignments/{assignment_id}/exam-access-decision",
+        ],
+    },
     {"path": "/codex", "equivalentRoutes": ["/api/cognix/codex/pipeline-plan"]},
     {"path": "/scheduled", "equivalentRoutes": ["/api/cognix/scheduled-tasks"]},
     {"path": "/images", "equivalentRoutes": ["/api/cognix/images"]},
