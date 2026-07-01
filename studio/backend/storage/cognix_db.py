@@ -129,6 +129,7 @@ GLOBAL_ROADMAP_TABLE_NAMES = (
     "agent_sessions",
     "agent_steps",
     "agent_tool_calls",
+    "agent_outputs",
     "favorite_models",
     "user_model_defaults",
     "project_model_defaults",
@@ -18143,6 +18144,398 @@ def list_collaboration_events(project_id: str, *, limit: int = 100) -> list[dict
             ).fetchall()
         )
         return _hydrate_global_payload_rows(rows)
+    finally:
+        conn.close()
+
+
+def _attach_agent_mode_children(conn: sqlite3.Connection, session: dict[str, Any]) -> dict[str, Any]:
+    session_id = str(session.get("id") or "")
+    if not session_id:
+        return session
+    steps = _rows_to_dicts(
+        conn.execute(
+            """
+            SELECT *
+            FROM agent_steps
+            WHERE scope_id = ?
+            ORDER BY created_at ASC
+            """,
+            (session_id,),
+        ).fetchall()
+    )
+    tool_calls = _rows_to_dicts(
+        conn.execute(
+            """
+            SELECT *
+            FROM agent_tool_calls
+            WHERE scope_id = ?
+            ORDER BY created_at ASC
+            """,
+            (session_id,),
+        ).fetchall()
+    )
+    outputs = _rows_to_dicts(
+        conn.execute(
+            """
+            SELECT *
+            FROM agent_outputs
+            WHERE scope_id = ?
+            ORDER BY created_at ASC
+            """,
+            (session_id,),
+        ).fetchall()
+    )
+    session["steps"] = _hydrate_global_payload_rows(steps)
+    session["toolCalls"] = _hydrate_global_payload_rows(tool_calls)
+    session["outputs"] = _hydrate_global_payload_rows(outputs)
+    return session
+
+
+def create_agent_mode_session(username: str, *, plan: dict[str, Any]) -> dict[str, Any]:
+    now = _now()
+    session_id = _new_id("ags")
+    project_id = plan.get("projectId")
+    agent = plan.get("agent") if isinstance(plan.get("agent"), dict) else {}
+    payload = {**plan, "sessionId": session_id}
+    metadata = {
+        "goal": agent.get("goal"),
+        "mode": agent.get("mode") or "agent",
+        "progressPercent": agent.get("progressPercent") or 0,
+        "stepCount": agent.get("stepCount") or 0,
+    }
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO agent_sessions
+                (id, organization_id, username, project_id, scope_type, scope_id, status,
+                 payload_json, metadata_json, created_at, updated_at)
+            VALUES (?, 'local', ?, ?, 'agent_session', ?, 'planned', ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                username,
+                project_id,
+                session_id,
+                json.dumps(payload, ensure_ascii = False),
+                json.dumps(metadata, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        for index, step in enumerate(plan.get("steps") or []):
+            if not isinstance(step, dict):
+                continue
+            step_key = str(step.get("id") or f"step-{index + 1}")[:160]
+            conn.execute(
+                """
+                INSERT INTO agent_steps
+                    (id, organization_id, username, project_id, scope_type, scope_id, status,
+                     payload_json, metadata_json, created_at, updated_at)
+                VALUES (?, 'local', ?, ?, 'agent_step', ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _new_id("astp"),
+                    username,
+                    project_id,
+                    session_id,
+                    str(step.get("status") or "planned")[:80],
+                    json.dumps({"sessionId": session_id, "step": step, "index": index}, ensure_ascii = False),
+                    json.dumps({"sessionId": session_id, "stepId": step_key, "riskLevel": step.get("riskLevel")}, ensure_ascii = False),
+                    now,
+                    now,
+                ),
+            )
+        conn.execute(
+            """
+            INSERT INTO cognix_agent_runs
+                (id, username, goal, mode, status, plan_json, result, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'planned', ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                username,
+                str(agent.get("goal") or plan.get("goal") or "")[:2000],
+                str(agent.get("mode") or "agent")[:80],
+                json.dumps([step.get("title") for step in plan.get("steps") or [] if isinstance(step, dict)], ensure_ascii = False),
+                "Agent session planned; tool execution has not started.",
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        stored = get_agent_mode_session(session_id, username = username)
+        if stored is None:
+            raise RuntimeError("Agent session was not readable after creation.")
+        return stored
+    finally:
+        conn.close()
+
+
+def get_agent_mode_session(session_id: str, *, username: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM agent_sessions
+            WHERE id = ? AND username = ?
+            LIMIT 1
+            """,
+            (session_id, username),
+        ).fetchone()
+        session = _hydrate_global_payload_row(dict(row) if row else None)
+        if session is None:
+            return None
+        return _attach_agent_mode_children(conn, session)
+    finally:
+        conn.close()
+
+
+def list_agent_mode_sessions(
+    username: str,
+    *,
+    project_id: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        params: list[Any] = [username]
+        project_clause = ""
+        if project_id:
+            project_clause = "AND project_id = ?"
+            params.append(project_id)
+        params.append(max(1, min(int(limit or 100), 300)))
+        rows = _rows_to_dicts(
+            conn.execute(
+                f"""
+                SELECT *
+                FROM agent_sessions
+                WHERE username = ? AND scope_type = 'agent_session'
+                {project_clause}
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        )
+        sessions = []
+        for row in rows:
+            session = _hydrate_global_payload_row(row)
+            if session is not None:
+                sessions.append(_attach_agent_mode_children(conn, session))
+        return sessions
+    finally:
+        conn.close()
+
+
+def _find_agent_step_row(conn: sqlite3.Connection, *, session_id: str, step_id: str, username: str) -> dict[str, Any] | None:
+    rows = _rows_to_dicts(
+        conn.execute(
+            """
+            SELECT *
+            FROM agent_steps
+            WHERE username = ? AND scope_id = ?
+            ORDER BY created_at ASC
+            """,
+            (username, session_id),
+        ).fetchall()
+    )
+    for row in rows:
+        payload = _json_or_default(row.get("payload_json"), {})
+        metadata = _json_or_default(row.get("metadata_json"), {})
+        step = payload.get("step") if isinstance(payload.get("step"), dict) else {}
+        if step.get("id") == step_id or metadata.get("stepId") == step_id:
+            return row
+    return None
+
+
+def update_agent_mode_step(
+    username: str,
+    *,
+    session_id: str,
+    step_id: str,
+    plan: dict[str, Any],
+) -> dict[str, Any] | None:
+    session = get_agent_mode_session(session_id, username = username)
+    if session is None:
+        return None
+    now = _now()
+    conn = get_connection()
+    try:
+        row = _find_agent_step_row(conn, session_id = session_id, step_id = step_id, username = username)
+        if row is None:
+            return None
+        payload = _json_or_default(row.get("payload_json"), {})
+        step = payload.get("step") if isinstance(payload.get("step"), dict) else {}
+        update = plan.get("step") if isinstance(plan.get("step"), dict) else {}
+        step.update(
+            {
+                "status": update.get("status") or step.get("status") or "planned",
+                "result": update.get("result") or step.get("result") or "",
+                "progressPercent": update.get("progressPercent") if update.get("progressPercent") is not None else step.get("progressPercent", 0),
+            }
+        )
+        payload["step"] = step
+        payload["updatePlan"] = plan
+        conn.execute(
+            """
+            UPDATE agent_steps
+            SET status = ?, payload_json = ?, updated_at = ?
+            WHERE id = ? AND username = ?
+            """,
+            (
+                str(step.get("status") or "planned")[:80],
+                json.dumps(payload, ensure_ascii = False),
+                now,
+                row["id"],
+                username,
+            ),
+        )
+        progress_values = []
+        for item in _rows_to_dicts(
+            conn.execute(
+                "SELECT payload_json FROM agent_steps WHERE username = ? AND scope_id = ?",
+                (username, session_id),
+            ).fetchall()
+        ):
+            item_payload = _json_or_default(item.get("payload_json"), {})
+            item_step = item_payload.get("step") if isinstance(item_payload.get("step"), dict) else {}
+            try:
+                progress_values.append(int(item_step.get("progressPercent") or 0))
+            except Exception:
+                progress_values.append(0)
+        session_progress = int(sum(progress_values) / len(progress_values)) if progress_values else 0
+        session_payload = dict(session.get("payload") or {})
+        agent = session_payload.get("agent") if isinstance(session_payload.get("agent"), dict) else {}
+        agent["progressPercent"] = session_progress
+        if all(value >= 100 for value in progress_values) and progress_values:
+            agent["status"] = "complete"
+        session_payload["agent"] = agent
+        conn.execute(
+            """
+            UPDATE agent_sessions
+            SET status = ?, payload_json = ?, updated_at = ?
+            WHERE id = ? AND username = ?
+            """,
+            (
+                str(agent.get("status") or session.get("status") or "planned")[:80],
+                json.dumps(session_payload, ensure_ascii = False),
+                now,
+                session_id,
+                username,
+            ),
+        )
+        conn.commit()
+        updated = _hydrate_global_payload_row(
+            dict(conn.execute("SELECT * FROM agent_steps WHERE id = ?", (row["id"],)).fetchone())
+        )
+        return updated
+    finally:
+        conn.close()
+
+
+def create_agent_tool_call_plan(
+    username: str,
+    *,
+    session_id: str,
+    plan: dict[str, Any],
+) -> dict[str, Any] | None:
+    session = get_agent_mode_session(session_id, username = username)
+    if session is None:
+        return None
+    now = _now()
+    tool_call = plan.get("toolCall") if isinstance(plan.get("toolCall"), dict) else {}
+    tool_call_id = _new_id("atool")
+    payload = {**plan, "toolCallRecordId": tool_call_id}
+    metadata = {
+        "sessionId": session_id,
+        "stepId": plan.get("stepId"),
+        "toolId": tool_call.get("toolId"),
+        "riskLevel": tool_call.get("riskLevel"),
+        "requiresApproval": bool(tool_call.get("requiresApproval")),
+    }
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO agent_tool_calls
+                (id, organization_id, username, project_id, scope_type, scope_id, status,
+                 payload_json, metadata_json, created_at, updated_at)
+            VALUES (?, 'local', ?, ?, 'agent_tool_call', ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                tool_call_id,
+                username,
+                session.get("project_id"),
+                session_id,
+                str(tool_call.get("status") or "planned")[:80],
+                json.dumps(payload, ensure_ascii = False),
+                json.dumps(metadata, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        item = _hydrate_global_payload_row(
+            dict(conn.execute("SELECT * FROM agent_tool_calls WHERE id = ?", (tool_call_id,)).fetchone())
+        )
+        if item is None:
+            raise RuntimeError("Agent tool call was not readable after creation.")
+        return item
+    finally:
+        conn.close()
+
+
+def create_agent_output(username: str, *, session_id: str, plan: dict[str, Any]) -> dict[str, Any] | None:
+    session = get_agent_mode_session(session_id, username = username)
+    if session is None:
+        return None
+    now = _now()
+    output = plan.get("output") if isinstance(plan.get("output"), dict) else {}
+    output_id = _new_id("aout")
+    payload = {**plan, "outputId": output_id}
+    metadata = {
+        "sessionId": session_id,
+        "outputType": output.get("type"),
+        "memoryCandidate": bool(output.get("memoryCandidate")),
+        "memoryWriteNow": bool(output.get("memoryWriteNow")),
+    }
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO agent_outputs
+                (id, organization_id, username, project_id, scope_type, scope_id, status,
+                 payload_json, metadata_json, created_at, updated_at)
+            VALUES (?, 'local', ?, ?, 'agent_output', ?, 'active', ?, ?, ?, ?)
+            """,
+            (
+                output_id,
+                username,
+                session.get("project_id"),
+                session_id,
+                json.dumps(payload, ensure_ascii = False),
+                json.dumps(metadata, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE cognix_agent_runs
+            SET result = ?, updated_at = ?
+            WHERE id = ? AND username = ?
+            """,
+            (str(output.get("content") or "")[:4000], now, session_id, username),
+        )
+        conn.commit()
+        item = _hydrate_global_payload_row(
+            dict(conn.execute("SELECT * FROM agent_outputs WHERE id = ?", (output_id,)).fetchone())
+        )
+        if item is None:
+            raise RuntimeError("Agent output was not readable after creation.")
+        return item
     finally:
         conn.close()
 

@@ -213,6 +213,14 @@ PRODUCT_NAVIGATION_ROUTES: list[dict[str, Any]] = [
         ],
     },
     {
+        "path": "/agent-mode",
+        "equivalentRoutes": [
+            "/api/cognix/agent-mode/blueprint",
+            "/api/cognix/agent-mode/sessions",
+            "/api/cognix/agent-runs",
+        ],
+    },
+    {
         "path": "/projects/:id/collaboration",
         "equivalentRoutes": [
             "/api/cognix/projects/{project_id}/realtime/blueprint",

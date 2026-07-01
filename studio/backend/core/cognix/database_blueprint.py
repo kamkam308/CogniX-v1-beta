@@ -64,6 +64,7 @@ GLOBAL_ROADMAP_TABLE_NAMES: tuple[str, ...] = (
     "agent_sessions",
     "agent_steps",
     "agent_tool_calls",
+    "agent_outputs",
     "favorite_models",
     "user_model_defaults",
     "project_model_defaults",

@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from auth import storage as auth_storage
 from auth.authentication import get_current_jwt_subject
+from core.cognix import agent_mode as cognix_agent_mode
 from core.cognix import admin_activity as cognix_admin_activity
 from core.cognix import admin_compliance_export as cognix_admin_compliance_export
 from core.cognix import admin_data_retention as cognix_admin_data_retention
@@ -1386,8 +1387,43 @@ class ResearchReportPlanRequest(BaseModel):
 
 
 class AgentRunRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
     goal: str = Field(..., min_length = 2, max_length = 2000)
-    mode: Literal["agent", "research", "automation"] = "agent"
+    mode: Literal["agent", "research", "automation", "repo", "course", "dataset", "documents"] = "agent"
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    allowed_tools: list[Any] | None = Field(None, alias = "allowedTools")
+    memory_policy: dict[str, Any] | None = Field(None, alias = "memoryPolicy")
+    max_steps: int = Field(8, alias = "maxSteps", ge = 1, le = 20)
+    store_session: bool = Field(True, alias = "storeSession")
+
+
+class AgentStepUpdateRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    status: Literal["planned", "waiting_approval", "running", "blocked", "complete", "failed", "skipped"]
+    result: str | None = Field(None, max_length = 4000)
+    progress_percent: int | None = Field(None, alias = "progressPercent", ge = 0, le = 100)
+
+
+class AgentToolCallPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    tool_id: str = Field(..., alias = "toolId", min_length = 1, max_length = 160)
+    action: str = Field(..., min_length = 1, max_length = 160)
+    arguments: dict[str, Any] | None = None
+    step_id: str | None = Field(None, alias = "stepId", max_length = 160)
+    approved: bool = False
+    store_call: bool = Field(True, alias = "storeCall")
+
+
+class AgentOutputRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    content: str = Field(..., min_length = 1, max_length = 12000)
+    output_type: str = Field("final_report", alias = "outputType", max_length = 120)
+    metadata: dict[str, Any] | None = None
+    store_output: bool = Field(True, alias = "storeOutput")
 
 
 class RouterClassifyRequest(BaseModel):
@@ -3178,6 +3214,8 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         out["personalizationRules"] = [_row(item) if isinstance(item, dict) else item for item in out["personalizationRules"]]
     if isinstance(out.get("outputs"), list):
         out["outputs"] = [_row(item) if isinstance(item, dict) else item for item in out["outputs"]]
+    if isinstance(out.get("toolCalls"), list):
+        out["toolCalls"] = [_row(item) if isinstance(item, dict) else item for item in out["toolCalls"]]
     if isinstance(out.get("benchmarkResults"), list):
         out["benchmarkResults"] = [_row(item) if isinstance(item, dict) else item for item in out["benchmarkResults"]]
     if isinstance(out.get("proposals"), list):
@@ -15595,13 +15633,298 @@ async def create_agent_run(
     current_subject: str = Depends(get_current_jwt_subject),
 ) -> dict[str, Any]:
     goal = payload.goal.strip()
-    plan = _agent_plan(goal, payload.mode)
-    result = (
-        "Plan prepare. CogniX Orchestrateur peut maintenant suivre les etapes, "
-        "demander les permissions necessaires et produire un compte rendu."
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_agent_mode.build_agent_session_plan(
+        username = current_subject,
+        goal = goal,
+        mode = payload.mode,
+        project_id = payload.project_id,
+        allowed_tools = payload.allowed_tools,
+        memory_policy = payload.memory_policy,
+        max_steps = payload.max_steps,
     )
-    run = cognix_db.create_agent_run(current_subject, goal, payload.mode, plan, result)
-    return {"run": _row(run)}
+    if not plan.get("valid"):
+        raise HTTPException(status_code = 400, detail = "Agent goal is required")
+    session = cognix_db.create_agent_mode_session(current_subject, plan = plan)
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "agent_mode_session_planned",
+        resource_type = "agent_session",
+        resource_id = str(session.get("id") or ""),
+        severity = "notice",
+        metadata = {
+            "mode": payload.mode,
+            "projectId": payload.project_id,
+            "stepCount": len(plan.get("steps") or []),
+            "sideEffects": {
+                **plan.get("sideEffects", {}),
+                "sessionWrite": True,
+                "stepWrite": True,
+                "auditWrite": True,
+            },
+        },
+    )
+    legacy_run = next(
+        (item for item in cognix_db.list_agent_runs(current_subject) if item.get("id") == session.get("id")),
+        session,
+    )
+    return {
+        "run": _row(legacy_run),
+        "agentSession": _row(session),
+        "plan": {
+            **plan,
+            "sideEffects": {
+                **plan.get("sideEffects", {}),
+                "sessionWrite": True,
+                "stepWrite": True,
+                "auditWrite": True,
+            },
+        },
+        "auditLog": _row(audit),
+    }
+
+
+@router.get("/agent-mode/blueprint")
+async def agent_mode_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    return {
+        "username": current_subject,
+        "blueprint": cognix_agent_mode.build_agent_mode_blueprint(),
+    }
+
+
+@router.get("/agent-mode/sessions")
+async def agent_mode_sessions(
+    project_id: str | None = None,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if project_id:
+        _require_owned_project(project_id, current_subject)
+    return {
+        "sessions": _rows(
+            cognix_db.list_agent_mode_sessions(
+                current_subject,
+                project_id = project_id,
+            )
+        )
+    }
+
+
+@router.post("/agent-mode/sessions")
+async def create_agent_mode_session(
+    payload: AgentRunRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_agent_mode.build_agent_session_plan(
+        username = current_subject,
+        goal = payload.goal,
+        mode = payload.mode,
+        project_id = payload.project_id,
+        allowed_tools = payload.allowed_tools,
+        memory_policy = payload.memory_policy,
+        max_steps = payload.max_steps,
+    )
+    if not plan.get("valid"):
+        raise HTTPException(status_code = 400, detail = "Agent goal is required")
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "sessionWrite": bool(payload.store_session),
+        "stepWrite": bool(payload.store_session),
+        "auditWrite": True,
+    }
+    session = cognix_db.create_agent_mode_session(current_subject, plan = plan) if payload.store_session else None
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "agent_mode_session_planned",
+        resource_type = "agent_session",
+        resource_id = str((session or {}).get("id") or ""),
+        severity = "notice",
+        metadata = {
+            "mode": payload.mode,
+            "projectId": payload.project_id,
+            "stepCount": len(plan.get("steps") or []),
+            "stored": bool(session),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "plan": {**plan, "sideEffects": side_effects},
+        "agentSession": _row(session) if session else None,
+        "auditLog": _row(audit),
+    }
+
+
+@router.get("/agent-mode/sessions/{session_id}")
+async def get_agent_mode_session(
+    session_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    session = cognix_db.get_agent_mode_session(session_id, username = current_subject)
+    if session is None:
+        raise HTTPException(status_code = 404, detail = "Agent session not found")
+    return {"agentSession": _row(session)}
+
+
+@router.post("/agent-mode/sessions/{session_id}/steps/{step_id}")
+async def update_agent_mode_step(
+    session_id: str,
+    step_id: str,
+    payload: AgentStepUpdateRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    session = cognix_db.get_agent_mode_session(session_id, username = current_subject)
+    if session is None:
+        raise HTTPException(status_code = 404, detail = "Agent session not found")
+    plan = cognix_agent_mode.build_agent_step_update_plan(
+        username = current_subject,
+        session = session,
+        step_id = step_id,
+        status = payload.status,
+        result = payload.result,
+        progress_percent = payload.progress_percent,
+    )
+    updated = cognix_db.update_agent_mode_step(
+        current_subject,
+        session_id = session_id,
+        step_id = step_id,
+        plan = plan,
+    )
+    if updated is None:
+        raise HTTPException(status_code = 404, detail = "Agent step not found")
+    side_effects = {**plan.get("sideEffects", {}), "stepWrite": True, "auditWrite": True}
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "agent_mode_step_updated",
+        resource_type = "agent_step",
+        resource_id = str(updated.get("id") or step_id),
+        severity = "notice",
+        metadata = {
+            "sessionId": session_id,
+            "stepId": step_id,
+            "status": payload.status,
+            "progressPercent": payload.progress_percent,
+            "sideEffects": side_effects,
+        },
+    )
+    return {"stepPlan": {**plan, "sideEffects": side_effects}, "step": _row(updated), "auditLog": _row(audit)}
+
+
+@router.post("/agent-mode/sessions/{session_id}/tool-call-plan")
+async def create_agent_mode_tool_call_plan(
+    session_id: str,
+    payload: AgentToolCallPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    session = cognix_db.get_agent_mode_session(session_id, username = current_subject)
+    if session is None:
+        raise HTTPException(status_code = 404, detail = "Agent session not found")
+    plan = cognix_agent_mode.build_agent_tool_call_plan(
+        username = current_subject,
+        session = session,
+        tool_id = payload.tool_id,
+        action = payload.action,
+        arguments = payload.arguments,
+        step_id = payload.step_id,
+        approved = payload.approved,
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "toolCallWrite": bool(payload.store_call),
+        "auditWrite": True,
+    }
+    stored = (
+        cognix_db.create_agent_tool_call_plan(
+            current_subject,
+            session_id = session_id,
+            plan = plan,
+        )
+        if payload.store_call
+        else None
+    )
+    tool_call = plan.get("toolCall") if isinstance(plan.get("toolCall"), dict) else {}
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "agent_mode_tool_call_planned",
+        resource_type = "agent_tool_call",
+        resource_id = str((stored or {}).get("id") or tool_call.get("id") or ""),
+        severity = "warning" if tool_call.get("requiresApproval") else "notice",
+        metadata = {
+            "sessionId": session_id,
+            "stepId": payload.step_id,
+            "toolId": payload.tool_id,
+            "action": payload.action,
+            "requiresApproval": bool(tool_call.get("requiresApproval")),
+            "willExecuteNow": False,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "toolCallPlan": {**plan, "sideEffects": side_effects},
+        "toolCall": _row(stored) if stored else None,
+        "requiresApproval": bool(tool_call.get("requiresApproval")),
+        "willExecuteNow": False,
+        "auditLog": _row(audit),
+    }
+
+
+@router.post("/agent-mode/sessions/{session_id}/outputs")
+async def create_agent_mode_output(
+    session_id: str,
+    payload: AgentOutputRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    session = cognix_db.get_agent_mode_session(session_id, username = current_subject)
+    if session is None:
+        raise HTTPException(status_code = 404, detail = "Agent session not found")
+    plan = cognix_agent_mode.build_agent_output_plan(
+        username = current_subject,
+        session = session,
+        content = payload.content,
+        output_type = payload.output_type,
+        metadata = payload.metadata,
+    )
+    if not plan.get("valid"):
+        raise HTTPException(status_code = 400, detail = "Agent output content is required")
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "outputWrite": bool(payload.store_output),
+        "auditWrite": True,
+    }
+    stored = (
+        cognix_db.create_agent_output(
+            current_subject,
+            session_id = session_id,
+            plan = plan,
+        )
+        if payload.store_output
+        else None
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "agent_mode_output_created",
+        resource_type = "agent_output",
+        resource_id = str((stored or {}).get("id") or ""),
+        severity = "notice",
+        metadata = {
+            "sessionId": session_id,
+            "outputType": payload.output_type,
+            "stored": bool(stored),
+            "memoryWriteNow": False,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "outputPlan": {**plan, "sideEffects": side_effects},
+        "output": _row(stored) if stored else None,
+        "auditLog": _row(audit),
+    }
 
 
 @router.get("/games")
