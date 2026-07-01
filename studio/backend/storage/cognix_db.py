@@ -17063,6 +17063,310 @@ def accept_project_share(token: str, collaborator_username: str) -> dict[str, An
         conn.close()
 
 
+def _hydrate_global_payload_row(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    item = dict(row)
+    item["payload"] = _json_or_default(item.get("payload_json"), {})
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def _hydrate_global_payload_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [item for item in (_hydrate_global_payload_row(row) for row in rows) if item is not None]
+
+
+def _enterprise_chat_member_exists(conn: sqlite3.Connection, chat_id: str, username: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM enterprise_chat_members
+        WHERE scope_id = ? AND username = ? AND status = 'active'
+        LIMIT 1
+        """,
+        (chat_id, username),
+    ).fetchone()
+    return row is not None
+
+
+def create_enterprise_chat(username: str, *, plan: dict[str, Any]) -> dict[str, Any]:
+    now = _now()
+    chat_id = _new_id("echat")
+    organization_id = str(plan.get("organizationId") or "local")[:160]
+    project_id = plan.get("projectId")
+    chat_payload = {**plan, "chatId": chat_id}
+    chat_record = plan.get("chat") if isinstance(plan.get("chat"), dict) else {}
+    status = str(chat_record.get("status") or "ready")[:80]
+    metadata = {
+        "mode": chat_record.get("mode") or "e2ee",
+        "participantCount": chat_record.get("participantCount") or 0,
+        "serverCanDecrypt": False,
+        "plaintextStored": False,
+        "createdBy": username,
+    }
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO enterprise_chats
+                (id, organization_id, username, project_id, scope_type, scope_id, status,
+                 payload_json, metadata_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'enterprise_chat', ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                chat_id,
+                organization_id,
+                username,
+                project_id,
+                chat_id,
+                status,
+                json.dumps(chat_payload, ensure_ascii = False),
+                json.dumps(metadata, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        for participant in plan.get("participants") or []:
+            if not isinstance(participant, dict):
+                continue
+            member_username = str(participant.get("username") or "").strip()
+            if not member_username:
+                continue
+            conn.execute(
+                """
+                INSERT INTO enterprise_chat_members
+                    (id, organization_id, username, project_id, scope_type, scope_id, status,
+                     payload_json, metadata_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 'enterprise_chat_member', ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _new_id("echatm"),
+                    organization_id,
+                    member_username,
+                    project_id,
+                    chat_id,
+                    str(participant.get("status") or "active")[:80],
+                    json.dumps({**participant, "chatId": chat_id}, ensure_ascii = False),
+                    json.dumps({"chatId": chat_id, "role": participant.get("role")}, ensure_ascii = False),
+                    now,
+                    now,
+                ),
+            )
+        conn.execute(
+            """
+            INSERT INTO chat_key_metadata
+                (id, organization_id, username, project_id, scope_type, scope_id, status,
+                 payload_json, metadata_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'enterprise_chat_key_metadata', ?, 'active', ?, ?, ?, ?)
+            """,
+            (
+                _new_id("ekey"),
+                organization_id,
+                username,
+                project_id,
+                chat_id,
+                json.dumps({**(plan.get("keyPlan") or {}), "chatId": chat_id}, ensure_ascii = False),
+                json.dumps({"chatId": chat_id, "serverStoresKeyMaterial": False}, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO chat_policies
+                (id, organization_id, username, project_id, scope_type, scope_id, status,
+                 payload_json, metadata_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'enterprise_chat_policy', ?, 'active', ?, ?, ?, ?)
+            """,
+            (
+                _new_id("epol"),
+                organization_id,
+                username,
+                project_id,
+                chat_id,
+                json.dumps({**(plan.get("policy") or {}), "chatId": chat_id}, ensure_ascii = False),
+                json.dumps({"chatId": chat_id, "policyMode": (plan.get("policy") or {}).get("mode")}, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        stored = get_enterprise_chat(chat_id, username = username)
+        if stored is None:
+            raise RuntimeError("Enterprise chat was not readable after creation.")
+        return stored
+    finally:
+        conn.close()
+
+
+def get_enterprise_chat(chat_id: str, *, username: str | None = None) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT * FROM enterprise_chats WHERE id = ?", (chat_id,)).fetchone()
+        if row is None:
+            return None
+        chat = _hydrate_global_payload_row(dict(row))
+        if chat is None:
+            return None
+        if username and chat.get("username") != username and not _enterprise_chat_member_exists(conn, chat_id, username):
+            return None
+        members = _rows_to_dicts(
+            conn.execute(
+                """
+                SELECT * FROM enterprise_chat_members
+                WHERE scope_id = ?
+                ORDER BY created_at ASC
+                """,
+                (chat_id,),
+            ).fetchall()
+        )
+        key_metadata = _rows_to_dicts(
+            conn.execute(
+                """
+                SELECT * FROM chat_key_metadata
+                WHERE scope_id = ?
+                ORDER BY created_at DESC
+                """,
+                (chat_id,),
+            ).fetchall()
+        )
+        policies = _rows_to_dicts(
+            conn.execute(
+                """
+                SELECT * FROM chat_policies
+                WHERE scope_id = ?
+                ORDER BY created_at DESC
+                """,
+                (chat_id,),
+            ).fetchall()
+        )
+        chat["members"] = _hydrate_global_payload_rows(members)
+        chat["keyMetadata"] = _hydrate_global_payload_rows(key_metadata)
+        chat["policies"] = _hydrate_global_payload_rows(policies)
+        return chat
+    finally:
+        conn.close()
+
+
+def list_enterprise_chats(username: str, *, organization_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        params: list[Any] = [username, username]
+        org_clause = ""
+        if organization_id:
+            org_clause = "AND organization_id = ?"
+            params.append(organization_id)
+        params.append(max(1, min(int(limit or 100), 300)))
+        rows = _rows_to_dicts(
+            conn.execute(
+                f"""
+                SELECT *
+                FROM enterprise_chats
+                WHERE (username = ? OR id IN (
+                    SELECT scope_id
+                    FROM enterprise_chat_members
+                    WHERE username = ? AND status = 'active'
+                ))
+                {org_clause}
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        )
+        chats: list[dict[str, Any]] = []
+        for row in rows:
+            if not row.get("id"):
+                continue
+            chat = get_enterprise_chat(str(row["id"]), username = username)
+            if chat is not None:
+                chats.append(chat)
+        return chats
+    finally:
+        conn.close()
+
+
+def create_enterprise_encrypted_message(
+    username: str,
+    *,
+    chat_id: str,
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    chat = get_enterprise_chat(chat_id, username = username)
+    if chat is None:
+        raise ValueError("Enterprise chat not found or not accessible.")
+    now = _now()
+    message_id = _new_id("emsg")
+    payload = {**plan, "messageId": message_id}
+    metadata = {
+        "chatId": chat_id,
+        "senderUsername": username,
+        "plaintextStored": False,
+        "serverCanDecrypt": False,
+        "ciphertextFingerprint": (plan.get("message") or {}).get("ciphertextFingerprint"),
+    }
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO encrypted_messages
+                (id, organization_id, username, project_id, scope_type, scope_id, status,
+                 payload_json, metadata_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'enterprise_encrypted_message', ?, 'active', ?, ?, ?, ?)
+            """,
+            (
+                message_id,
+                chat.get("organization_id") or chat.get("organizationId") or "local",
+                username,
+                chat.get("project_id"),
+                chat_id,
+                json.dumps(payload, ensure_ascii = False),
+                json.dumps(metadata, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            "UPDATE enterprise_chats SET updated_at = ? WHERE id = ?",
+            (now, chat_id),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM encrypted_messages WHERE id = ?", (message_id,)).fetchone()
+        item = _hydrate_global_payload_row(dict(row) if row else None)
+        if item is None:
+            raise RuntimeError("Encrypted message was not readable after creation.")
+        return item
+    finally:
+        conn.close()
+
+
+def list_enterprise_encrypted_messages(
+    chat_id: str,
+    *,
+    username: str,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    if get_enterprise_chat(chat_id, username = username) is None:
+        return []
+    conn = get_connection()
+    try:
+        rows = _rows_to_dicts(
+            conn.execute(
+                """
+                SELECT *
+                FROM encrypted_messages
+                WHERE scope_id = ?
+                ORDER BY created_at ASC
+                LIMIT ?
+                """,
+                (chat_id, max(1, min(int(limit or 100), 300))),
+            ).fetchall()
+        )
+        return _hydrate_global_payload_rows(rows)
+    finally:
+        conn.close()
+
+
 def revoke_project_share(owner_username: str, share_id: str) -> dict[str, Any] | None:
     now = _now()
     conn = get_connection()

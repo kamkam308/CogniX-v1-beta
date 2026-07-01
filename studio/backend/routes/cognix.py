@@ -58,6 +58,7 @@ from core.cognix import draft_generation as cognix_draft_generation
 from core.cognix import decision_engine as cognix_decision_engine
 from core.cognix import decision_explainer as cognix_decision_explainer
 from core.cognix import dynamic_ui as cognix_dynamic_ui
+from core.cognix import enterprise_chat as cognix_enterprise_chat
 from core.cognix import evolution_engine as cognix_evolution_engine
 from core.cognix import fine_tuning_planner as cognix_fine_tuning_planner
 from core.cognix import governance_manager as cognix_governance_manager
@@ -1244,6 +1245,33 @@ class ProjectDNARequest(BaseModel):
 class ProjectShareCreateRequest(BaseModel):
     project_id: str = Field(..., min_length = 1, max_length = 160)
     permission: Literal["view", "edit"] = "view"
+
+
+class EnterpriseChatCreateRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    title: str | None = Field(None, max_length = 180)
+    organization_id: str = Field("local", alias = "organizationId", max_length = 160)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    chat_mode: Literal["compliance", "e2ee"] = Field("e2ee", alias = "chatMode")
+    participants: list[Any] | None = None
+    policy: dict[str, Any] | None = None
+    store_chat: bool = Field(True, alias = "storeChat")
+
+
+class EnterpriseEncryptedMessageRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    encrypted_payload: dict[str, Any] | None = Field(None, alias = "encryptedPayload")
+    metadata: dict[str, Any] | None = None
+    store_message: bool = Field(True, alias = "storeMessage")
+
+
+class EnterpriseKeyRotationRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    reason: str | None = Field(None, max_length = 500)
+    revoked_member: str | None = Field(None, alias = "revokedMember", max_length = 160)
 
 
 class ImageRequest(BaseModel):
@@ -2690,6 +2718,9 @@ def _row(row: dict[str, Any]) -> dict[str, Any]:
         "updated_by": "updatedBy",
         "size_bytes": "sizeBytes",
         "metadata_json": "metadataJson",
+        "payload_json": "payloadJson",
+        "scope_type": "scopeType",
+        "scope_id": "scopeId",
         "evidence_json": "evidenceJson",
         "files_json": "filesJson",
         "recommended_solution": "recommendedSolution",
@@ -13075,6 +13106,210 @@ async def context_graph_blueprint(current_subject: str = Depends(get_current_jwt
         "username": current_subject,
         "contextGraphBlueprint": blueprint,
         "sideEffects": blueprint.get("sideEffects", {}),
+    }
+
+
+@router.get("/chat/enterprise/blueprint")
+async def enterprise_chat_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_enterprise_chat.build_enterprise_chat_blueprint()
+    return {
+        "username": current_subject,
+        "enterpriseChatBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_enterprise_chat.COGNIX_ENTERPRISE_CHAT_SERVICE_VERSION,
+    }
+
+
+@router.post("/chat/enterprise/chats")
+async def create_enterprise_chat(
+    payload: EnterpriseChatCreateRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if payload.project_id:
+        _require_owned_project(payload.project_id, current_subject)
+    plan = cognix_enterprise_chat.build_enterprise_chat_creation_plan(
+        username = current_subject,
+        title = payload.title,
+        organization_id = payload.organization_id,
+        project_id = payload.project_id,
+        chat_mode = payload.chat_mode,
+        participants = payload.participants,
+        policy = payload.policy,
+    )
+    stored_chat = cognix_db.create_enterprise_chat(current_subject, plan = plan) if payload.store_chat else None
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "chatWrite": stored_chat is not None,
+        "memberWrite": stored_chat is not None,
+        "keyMetadataWrite": stored_chat is not None,
+        "policyWrite": stored_chat is not None,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "enterprise_chat_creation_planned",
+        resource_type = "enterprise_chat",
+        resource_id = str((stored_chat or {}).get("id") or plan.get("chat", {}).get("title") or "enterprise_chat"),
+        severity = "notice" if plan.get("chat", {}).get("groupReady") else "warning",
+        metadata = {
+            "enterpriseChatServiceVersion": plan.get("enterpriseChatServiceVersion"),
+            "chatMode": plan.get("chat", {}).get("mode"),
+            "participantCount": plan.get("chat", {}).get("participantCount"),
+            "storedChat": stored_chat is not None,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "enterpriseChatPlan": plan,
+        "enterpriseChat": _row(stored_chat) if stored_chat else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_enterprise_chat.COGNIX_ENTERPRISE_CHAT_SERVICE_VERSION,
+    }
+
+
+@router.get("/chat/enterprise/chats")
+async def list_enterprise_chats(
+    organization_id: str | None = None,
+    limit: int = 100,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    chats = cognix_db.list_enterprise_chats(current_subject, organization_id = organization_id, limit = limit)
+    return {
+        "username": current_subject,
+        "enterpriseChats": _rows([item for item in chats if item]),
+        "count": len([item for item in chats if item]),
+        "sideEffects": {
+            "chatWrite": False,
+            "memberWrite": False,
+            "encryptedMessageWrite": False,
+            "keyMetadataWrite": False,
+            "policyWrite": False,
+            "plaintextRead": False,
+            "serverDecryption": False,
+            "serverIndexing": False,
+        },
+        "plannerVersion": cognix_enterprise_chat.COGNIX_ENTERPRISE_CHAT_SERVICE_VERSION,
+    }
+
+
+@router.get("/chat/enterprise/chats/{chat_id}")
+async def get_enterprise_chat(
+    chat_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    chat = cognix_db.get_enterprise_chat(chat_id, username = current_subject)
+    if chat is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Enterprise chat not found.")
+    messages = cognix_db.list_enterprise_encrypted_messages(chat_id, username = current_subject, limit = 200)
+    return {
+        "username": current_subject,
+        "enterpriseChat": _row(chat),
+        "encryptedMessages": _rows(messages),
+        "sideEffects": {
+            "chatWrite": False,
+            "memberWrite": False,
+            "encryptedMessageWrite": False,
+            "keyMetadataWrite": False,
+            "policyWrite": False,
+            "plaintextRead": False,
+            "serverDecryption": False,
+            "serverIndexing": False,
+        },
+        "plannerVersion": cognix_enterprise_chat.COGNIX_ENTERPRISE_CHAT_SERVICE_VERSION,
+    }
+
+
+@router.post("/chat/enterprise/chats/{chat_id}/messages")
+async def create_enterprise_encrypted_message(
+    chat_id: str,
+    payload: EnterpriseEncryptedMessageRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    chat = cognix_db.get_enterprise_chat(chat_id, username = current_subject)
+    if chat is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Enterprise chat not found.")
+    plan = cognix_enterprise_chat.build_encrypted_message_plan(
+        username = current_subject,
+        chat = chat,
+        encrypted_payload = payload.encrypted_payload,
+        metadata = payload.metadata,
+    )
+    if not plan.get("valid"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Encrypted payload, nonce and keyId are required.")
+    stored_message = (
+        cognix_db.create_enterprise_encrypted_message(current_subject, chat_id = chat_id, plan = plan)
+        if payload.store_message
+        else None
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "encryptedMessageWrite": stored_message is not None,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "enterprise_encrypted_message_planned",
+        resource_type = "encrypted_message",
+        resource_id = str((stored_message or {}).get("id") or chat_id),
+        severity = "notice",
+        metadata = {
+            "messageEncryptionServiceVersion": plan.get("messageEncryptionServiceVersion"),
+            "chatId": chat_id,
+            "ciphertextFingerprint": plan.get("message", {}).get("ciphertextFingerprint"),
+            "storedMessage": stored_message is not None,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "encryptedMessagePlan": plan,
+        "encryptedMessage": _row(stored_message) if stored_message else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_enterprise_chat.COGNIX_MESSAGE_ENCRYPTION_SERVICE_VERSION,
+    }
+
+
+@router.post("/chat/enterprise/chats/{chat_id}/key-rotation-plan")
+async def enterprise_chat_key_rotation_plan(
+    chat_id: str,
+    payload: EnterpriseKeyRotationRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    chat = cognix_db.get_enterprise_chat(chat_id, username = current_subject)
+    if chat is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Enterprise chat not found.")
+    plan = cognix_enterprise_chat.build_key_rotation_plan(
+        username = current_subject,
+        chat = chat,
+        reason = payload.reason,
+        revoked_member = payload.revoked_member,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "enterprise_chat_key_rotation_planned",
+        resource_type = "chat_key_metadata",
+        resource_id = chat_id,
+        severity = "warning" if payload.revoked_member else "notice",
+        metadata = {
+            "e2eeKeyManagerVersion": plan.get("e2eeKeyManagerVersion"),
+            "chatId": chat_id,
+            "clientActionRequired": plan.get("clientActionRequired"),
+            "serverStoresKeyMaterial": plan.get("serverStoresKeyMaterial"),
+            "sideEffects": {**plan.get("sideEffects", {}), "auditWrite": True},
+        },
+    )
+    return {
+        "username": current_subject,
+        "keyRotationPlan": plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": {**plan.get("sideEffects", {}), "auditWrite": True},
+        "plannerVersion": cognix_enterprise_chat.COGNIX_E2EE_KEY_MANAGER_VERSION,
     }
 
 
