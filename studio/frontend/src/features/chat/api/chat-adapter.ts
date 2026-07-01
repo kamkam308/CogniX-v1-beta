@@ -251,6 +251,20 @@ export function isContextLimitError(message: string): boolean {
   );
 }
 
+function isHuggingFaceAuthFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("invalid username or password") ||
+    (message.includes("hugging face") &&
+      (message.includes("token") ||
+        message.includes("auth") ||
+        message.includes("credential") ||
+        message.includes("unauthorized") ||
+        message.includes("forbidden")))
+  );
+}
+
 async function updateStoredChatThreadEventually(
   threadId: string,
   patch: Parameters<typeof updateStoredChatThread>[1],
@@ -2802,6 +2816,7 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
         };
 
         let retriedWithRefreshedKey = false;
+        let retriedWithCogniXOllamaFallback = false;
         while (true) {
           try {
             let requestPayload: OpenAIChatCompletionsRequest;
@@ -3407,6 +3422,24 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
             }
             break;
           } catch (streamError) {
+            if (
+              isExternalRequest &&
+              externalProvider?.providerType === "huggingface" &&
+              !retriedWithCogniXOllamaFallback &&
+              waitingFirstChunk &&
+              cumulativeText.length === 0 &&
+              toolCallParts.length === 0 &&
+              isHuggingFaceAuthFailure(streamError) &&
+              switchToCogniXOllamaFallback()
+            ) {
+              retriedWithCogniXOllamaFallback = true;
+              toast("CogniX Auto", {
+                description:
+                  "Hugging Face rejected the saved token. Using Ollama Qwen 4B instead.",
+                duration: 3500,
+              });
+              continue;
+            }
             if (
               isExternalRequest &&
               !retriedWithRefreshedKey &&
