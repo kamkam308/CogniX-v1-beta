@@ -1146,7 +1146,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-realtime-collaboration",
         "displayName": "CogniX Realtime Collaboration",
         "editionTargets": ["business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "project_presence",
             "cursor_metadata",
@@ -1524,7 +1524,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-plugin-marketplace",
         "displayName": "CogniX Plugin Marketplace",
         "editionTargets": ["developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "plugin_catalog",
             "plugin_manifest_validation",
@@ -1550,7 +1550,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-skill-marketplace",
         "displayName": "CogniX Skills Marketplace interne",
         "editionTargets": ["business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "shared_skill_catalog",
             "skill_approval_service",
@@ -1576,7 +1576,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-project-skills-directives",
         "displayName": "CogniX Project Skills & Directives",
         "editionTargets": ["free", "local", "developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "project_skill_config",
             "model_skill_binding",
@@ -1605,7 +1605,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-enterprise-encrypted-chat",
         "displayName": "CogniX Enterprise Encrypted Chat",
         "editionTargets": ["business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "enterprise_compliance_chat",
             "true_e2ee_chat",
@@ -1662,7 +1662,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-enterprise-foundation",
         "displayName": "CogniX Enterprise Foundation",
         "editionTargets": ["business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": ["organizations", "rbac", "sso_planning", "education_spaces", "audit_logs", "deployment_targets"],
         "routes": [
             "/api/cognix/admin/audit-logs",
@@ -2212,7 +2212,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-deployment-manager",
         "displayName": "CogniX Deployment Manager",
         "editionTargets": ["business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "deployment_targets",
             "gpu_scheduler_planning",

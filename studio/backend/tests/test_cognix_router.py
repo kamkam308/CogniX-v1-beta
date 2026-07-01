@@ -45,6 +45,7 @@ from core.cognix import draft_generation as cognix_draft_generation
 from core.cognix import decision_engine as cognix_decision_engine
 from core.cognix import decision_explainer as cognix_decision_explainer
 from core.cognix import dynamic_ui as cognix_dynamic_ui
+from core.cognix import enterprise_chat as cognix_enterprise_chat
 from core.cognix import evolution_engine as cognix_evolution_engine
 from core.cognix import fine_tuning_planner as cognix_fine_tuning_planner
 from core.cognix import governance_manager as cognix_governance_manager
@@ -72,12 +73,14 @@ from core.cognix import plugin_marketplace as cognix_plugin_marketplace
 from core.cognix import preload_planner as cognix_preload_planner
 from core.cognix import project_dna as cognix_project_dna
 from core.cognix import project_experts as cognix_project_experts
+from core.cognix import project_skills_directives as cognix_project_skills_directives
 from core.cognix import pulse as cognix_pulse
 from core.cognix import prompt_cache as cognix_prompt_cache
 from core.cognix import prompt_compression as cognix_prompt_compression
 from core.cognix import quantization_advisor as cognix_quantization_advisor
 from core.cognix import rag_compression as cognix_rag_compression
 from core.cognix import rag_planner as cognix_rag_planner
+from core.cognix import realtime_collaboration as cognix_realtime_collaboration
 from core.cognix import research_watch as cognix_research_watch
 from core.cognix import response_reflection as cognix_response_reflection
 from core.cognix import runtime_adapter as cognix_runtime_adapter
@@ -86,6 +89,7 @@ from core.cognix import scheduled as cognix_scheduled
 from core.cognix import security_policy as cognix_security_policy
 from core.cognix import semantic_cache as cognix_semantic_cache
 from core.cognix import skill_memory as cognix_skill_memory
+from core.cognix import skill_marketplace as cognix_skill_marketplace
 from core.cognix import simulation as cognix_simulation
 from core.cognix import speculative_decoding as cognix_speculative_decoding
 from core.cognix import thinking_status as cognix_thinking_status
@@ -138,6 +142,21 @@ def seed_accounts() -> None:
         username = "alice",
         email = "alice@example.com",
         password = "alice-password-123",
+    )
+
+
+def seed_chat_project(project_id: str = "project-native", owner_username: str = "alice") -> dict[str, object]:
+    now = int(time.time() * 1000)
+    return studio_db_storage.upsert_chat_project(
+        {
+            "id": project_id,
+            "name": f"CogniX {project_id}",
+            "instructions": "Keep CogniX changes native, audited and reversible.",
+            "archived": False,
+            "createdAt": now,
+            "updatedAt": now,
+        },
+        owner_username = owner_username,
     )
 
 
@@ -4975,6 +4994,334 @@ def test_plugin_install_plan_endpoint_stores_permissions_and_audit():
     assert log["metadata"]["sideEffects"]["pluginInstall"] is False
 
 
+def test_skill_marketplace_publish_approval_and_usage_are_audited():
+    seed_accounts()
+    blueprint = cognix_skill_marketplace.build_skill_marketplace_blueprint()
+    assert blueprint["policies"]["adminApprovalRequired"] is True
+    assert blueprint["policies"]["frontendCannotActivateUnapprovedSkill"] is True
+    assert blueprint["sideEffects"]["skillExecution"] is False
+
+    body = run_async(
+        cognix_routes.publish_shared_skill(
+            cognix_routes.SkillMarketplacePublishRequest(
+                displayName = "CogniX Native Review",
+                description = "Reviews CogniX native source changes.",
+                category = "code",
+                version = "1.0.0",
+                instructions = "Check that changes are implemented directly in the source tree.",
+                allowedRoles = ["user", "admin"],
+                storeSkill = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    skill = body["sharedSkill"]
+
+    assert body["plannerVersion"] == "cognix_skill_marketplace_service_v1"
+    assert body["skillPublishPlan"]["status"] == "pending_approval"
+    assert skill["status"] == "pending_approval"
+    assert body["sideEffects"]["skillWrite"] is True
+    assert body["sideEffects"]["approvalWrite"] is True
+    assert body["sideEffects"]["skillExecution"] is False
+    assert body["sideEffects"]["networkCall"] is False
+
+    with pytest.raises(HTTPException) as user_approval:
+        run_async(
+            cognix_routes.decide_shared_skill_approval(
+                skill["id"],
+                cognix_routes.SkillMarketplaceApprovalRequest(status = "approved"),
+                current_subject = "alice",
+            )
+        )
+    assert user_approval.value.status_code == 403
+
+    approved = run_async(
+        cognix_routes.decide_shared_skill_approval(
+            skill["id"],
+            cognix_routes.SkillMarketplaceApprovalRequest(
+                status = "approved",
+                adminNote = "Validated native CogniX skill.",
+            ),
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+    assert approved["plannerVersion"] == "cognix_skill_approval_service_v1"
+    assert approved["sharedSkill"]["status"] == "approved"
+    assert approved["skillApprovalPlan"]["willEnableUsage"] is True
+    assert approved["sideEffects"]["approvalWrite"] is True
+    assert approved["sideEffects"]["skillExecution"] is False
+
+    usage = run_async(
+        cognix_routes.record_shared_skill_usage(
+            cognix_routes.SkillMarketplaceUsageRequest(
+                skillId = skill["id"],
+                action = "use",
+                metadata = {"surface": "chat"},
+            ),
+            current_subject = "alice",
+        )
+    )
+    assert usage["skillUsagePlan"]["allowed"] is True
+    assert usage["usageLog"]["skillId"] == skill["id"]
+    assert usage["sideEffects"]["usageLogWrite"] is True
+    assert usage["sideEffects"]["skillExecution"] is False
+    assert usage["sideEffects"]["generation"] is False
+
+    catalog = run_async(cognix_routes.skill_marketplace_catalog(current_subject = storage.DEFAULT_ADMIN_USERNAME))
+    assert catalog["skillMarketplaceCatalog"]["summary"]["skillCount"] >= 1
+    assert catalog["skillMarketplaceCatalog"]["summary"]["usageLogCount"] >= 1
+
+    actions = {
+        item["action"]
+        for item in run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))["logs"]
+    }
+    assert {
+        "shared_skill_publish_planned",
+        "shared_skill_approval_decided",
+        "shared_skill_usage_logged",
+        "skill_marketplace_catalog_built",
+    }.issubset(actions)
+
+
+def test_project_skills_and_directives_bind_to_owned_project_without_execution():
+    seed_accounts()
+    project = seed_chat_project("project-native")
+    skill_blueprint = cognix_project_skills_directives.build_project_skill_blueprint()
+    directive_blueprint = cognix_project_skills_directives.build_project_directive_blueprint()
+    assert skill_blueprint["policies"]["toolPermissionsCannotEscalate"] is True
+    assert skill_blueprint["sideEffects"]["permissionGrant"] is False
+    assert directive_blueprint["policies"]["compiledServerSide"] is True
+    assert directive_blueprint["sideEffects"]["promptPolicyMutation"] is False
+
+    skill = run_async(
+        cognix_routes.create_project_skill(
+            project["id"],
+            cognix_routes.ProjectSkillRequest(
+                displayName = "Native Guard",
+                objective = "Preserve CogniX native source edits.",
+                instructions = "Only accept source-level changes with tests.",
+                allowedTools = ["github", "terminal"],
+                storeSkill = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    assert skill["projectSkill"]["projectId"] == project["id"]
+    assert skill["projectSkillPlan"]["binding"]["permissionEscalationBlocked"] is True
+    assert skill["projectSkillPlan"]["binding"]["blockedTools"] == ["github", "terminal"]
+    assert skill["sideEffects"]["skillWrite"] is True
+    assert skill["sideEffects"]["toolExecution"] is False
+    assert skill["sideEffects"]["generation"] is False
+
+    injection = run_async(
+        cognix_routes.project_skill_injection_plan(
+            project["id"],
+            cognix_routes.ProjectSkillInjectionRequest(),
+            current_subject = "alice",
+        )
+    )
+    assert injection["skillInjectionPlan"]["summary"]["selectedSkillCount"] == 1
+    assert injection["skillInjectionPlan"]["summary"]["permissionEscalationAllowed"] is False
+    assert injection["sideEffects"]["contextInjection"] is False
+    assert injection["sideEffects"]["toolExecution"] is False
+
+    directive = run_async(
+        cognix_routes.create_project_directive(
+            project["id"],
+            cognix_routes.ProjectDirectiveRequest(
+                content = "Always keep CogniX changes native and audited.",
+                directiveType = "engineering",
+                priority = 80,
+                storeDirective = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    assert directive["projectDirective"]["projectId"] == project["id"]
+    assert directive["projectDirectivePlan"]["directive"]["sourceLevel"] == "project"
+    assert directive["sideEffects"]["directiveWrite"] is True
+    assert directive["sideEffects"]["promptPolicyMutation"] is False
+
+    compiled = run_async(
+        cognix_routes.compile_project_directives(
+            project["id"],
+            cognix_routes.ProjectDirectiveCompileRequest(),
+            current_subject = "alice",
+        )
+    )
+    assert compiled["directiveCompilePlan"]["summary"]["compiledDirectiveCount"] == 1
+    assert compiled["sideEffects"]["promptPolicyMutation"] is False
+    assert compiled["sideEffects"]["generation"] is False
+
+    actions = {
+        item["action"]
+        for item in run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))["logs"]
+    }
+    assert {
+        "project_skill_binding_planned",
+        "project_skill_injection_plan_built",
+        "project_directive_planned",
+        "project_directives_compiled",
+    }.issubset(actions)
+
+
+def test_realtime_collaboration_records_presence_comments_and_conflicts_without_generation():
+    seed_accounts()
+    project = seed_chat_project("project-collab")
+    blueprint = cognix_realtime_collaboration.build_realtime_collaboration_blueprint()
+    assert blueprint["transportContract"]["hiddenPresenceAllowed"] is False
+    assert blueprint["transportContract"]["frontendDirectModelCallAllowed"] is False
+    assert blueprint["sideEffects"]["projectFileWrite"] is False
+    assert blueprint["sideEffects"]["generation"] is False
+
+    presence = run_async(
+        cognix_routes.update_project_presence(
+            project["id"],
+            cognix_routes.RealtimePresenceRequest(
+                clientId = "browser-1",
+                status = "editing",
+                activity = "Reviewing native code",
+            ),
+            current_subject = "alice",
+        )
+    )
+    assert presence["presence"]["projectId"] == project["id"]
+    assert presence["sideEffects"]["presenceWrite"] is True
+    assert presence["sideEffects"]["eventWrite"] is True
+    assert presence["sideEffects"]["generation"] is False
+
+    listed_presence = run_async(cognix_routes.list_project_presence(project["id"], current_subject = "alice"))
+    assert listed_presence["count"] == 1
+    assert listed_presence["presenceSessions"][0]["payload"]["presence"]["status"] == "editing"
+
+    comment = run_async(
+        cognix_routes.create_project_comment(
+            project["id"],
+            cognix_routes.ProjectCommentRequest(
+                body = "Keep this implementation native.",
+                target = {"type": "file", "path": "studio/backend/core/cognix/module_registry.py"},
+                storeComment = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    comment_id = comment["projectComment"]["id"]
+    assert comment["sideEffects"]["commentWrite"] is True
+    assert comment["sideEffects"]["eventWrite"] is True
+    assert comment["sideEffects"]["generation"] is False
+
+    resolved = run_async(
+        cognix_routes.resolve_project_comment(
+            project["id"],
+            comment_id,
+            cognix_routes.ProjectCommentResolutionRequest(status = "resolved", note = "Handled natively."),
+            current_subject = "alice",
+        )
+    )
+    assert resolved["projectComment"]["status"] == "resolved"
+    assert resolved["sideEffects"]["commentStatusWrite"] is True
+    assert resolved["sideEffects"]["projectFileWrite"] is False
+
+    conflict = run_async(
+        cognix_routes.project_collaboration_conflict_plan(
+            project["id"],
+            cognix_routes.ConflictResolutionRequest(
+                resourceId = "module-registry",
+                strategy = "manual_review",
+            ),
+            current_subject = "alice",
+        )
+    )
+    assert conflict["conflictResolutionPlan"]["resolutionPolicy"]["requiresHumanReview"] is True
+    assert conflict["sideEffects"]["projectFileWrite"] is False
+    assert conflict["sideEffects"]["generation"] is False
+
+    events = run_async(cognix_routes.list_project_collaboration_events(project["id"], current_subject = "alice"))
+    assert events["count"] >= 4
+
+    actions = {
+        item["action"]
+        for item in run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))["logs"]
+    }
+    assert {
+        "project_presence_updated",
+        "project_comment_created",
+        "project_comment_resolution_planned",
+        "project_conflict_resolution_planned",
+    }.issubset(actions)
+
+
+def test_enterprise_encrypted_chat_stores_only_encrypted_metadata():
+    seed_accounts()
+    storage.create_user(
+        username = "bob",
+        email = "bob@example.com",
+        password = "bob-password-123",
+    )
+    blueprint = cognix_enterprise_chat.build_enterprise_chat_blueprint()
+    assert blueprint["policyDefaults"]["strictE2eeDefault"] is True
+    assert blueprint["policyDefaults"]["plaintextPersistenceAllowed"] is False
+    assert blueprint["policyDefaults"]["metadataOnlyAuditForE2ee"] is True
+    assert blueprint["sideEffects"]["plaintextRead"] is False
+
+    chat = run_async(
+        cognix_routes.create_enterprise_chat(
+            cognix_routes.EnterpriseChatCreateRequest(
+                title = "CogniX secure native work",
+                participants = ["alice", "bob"],
+                chatMode = "e2ee",
+                storeChat = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    chat_id = chat["enterpriseChat"]["id"]
+    assert chat["enterpriseChatPlan"]["policy"]["serverContentReadable"] is False
+    assert chat["enterpriseChatPlan"]["policy"]["clientSideKeysRequired"] is True
+    assert chat["sideEffects"]["chatWrite"] is True
+    assert chat["sideEffects"]["serverDecryption"] is False
+    assert chat["sideEffects"]["plaintextRead"] is False
+    assert all(member["payload"]["serverCanReadContent"] is False for member in chat["enterpriseChat"]["members"])
+
+    message = run_async(
+        cognix_routes.create_enterprise_encrypted_message(
+            chat_id,
+            cognix_routes.EnterpriseEncryptedMessageRequest(
+                encryptedPayload = {
+                    "ciphertext": "sealed-native-message",
+                    "nonce": "nonce-001",
+                    "keyId": "key-1",
+                },
+                metadata = {"surface": "chat"},
+                storeMessage = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    plan = message["encryptedMessagePlan"]
+    assert plan["messageEncryptionServiceVersion"] == "cognix_message_encryption_service_v1"
+    assert plan["message"]["plaintextStored"] is False
+    assert plan["message"]["serverCanDecrypt"] is False
+    assert plan["message"]["serverCanIndexContent"] is False
+    assert message["encryptedMessage"]["scopeId"] == chat_id
+    assert message["sideEffects"]["encryptedMessageWrite"] is True
+    assert message["sideEffects"]["serverDecryption"] is False
+    assert message["sideEffects"]["plaintextRead"] is False
+    assert message["sideEffects"]["serverIndexing"] is False
+
+    loaded = run_async(cognix_routes.get_enterprise_chat(chat_id, current_subject = "alice"))
+    assert loaded["enterpriseChat"]["id"] == chat_id
+    assert loaded["encryptedMessages"][0]["payload"]["message"]["plaintextStored"] is False
+    assert loaded["sideEffects"]["serverDecryption"] is False
+    assert loaded["sideEffects"]["plaintextRead"] is False
+
+    actions = {
+        item["action"]
+        for item in run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))["logs"]
+    }
+    assert {"enterprise_chat_creation_planned", "enterprise_encrypted_message_planned"}.issubset(actions)
+
+
 def test_thinking_status_redacts_technical_model_details():
     lifecycle = {
         "installPlan": {"required": False},
@@ -9678,12 +10025,15 @@ def test_mvp_readiness_contract_maps_roadmap_phases_without_mutation():
     assert contract["mode"] == "mvp_readiness_read_only"
     assert contract["sourceOfTruth"] == "roadmap_section_31"
     assert contract["summary"]["phaseCount"] == 9
+    assert contract["summary"]["readyPhaseCount"] == 9
+    assert contract["summary"]["readyForMvpIteration"] is True
     assert contract["summary"]["coreMvpBlocked"] is False
     phases = {item["id"]: item for item in contract["phases"]}
     assert phases["phase_1_core_local"]["status"] == "ready"
-    assert phases["phase_3_orchestrator"]["status"] == "partial"
-    assert phases["phase_9_native_codex_secure"]["status"] == "partial"
+    assert phases["phase_3_orchestrator"]["status"] == "ready"
+    assert phases["phase_9_native_codex_secure"]["status"] == "ready"
     assert phases["phase_1_core_local"]["missingRequirements"] == []
+    assert phases["phase_9_native_codex_secure"]["missingRequirements"] == []
     assert contract["policies"]["moduleActivationAllowedHere"] is False
     assert contract["policies"]["databaseMigrationAllowedHere"] is False
     assert contract["sideEffects"]["routeRegistration"] is False
@@ -9857,6 +10207,7 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-background-agents",
         "cognix-agent-mode",
         "cognix-cowork-mode",
+        "cognix-realtime-collaboration",
         "cognix-ai-timeline",
         "cognix-thinking-status",
         "cognix-response-reflection",
@@ -9878,6 +10229,9 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-ai-evolution-engine",
         "cognix-integrations",
         "cognix-plugin-marketplace",
+        "cognix-skill-marketplace",
+        "cognix-project-skills-directives",
+        "cognix-enterprise-encrypted-chat",
         "cognix-codex-secure-agent",
         "cognix-enterprise-foundation",
         "cognix-admin-operations",
@@ -9944,6 +10298,22 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "direct_project_expert_session" in modules["cognix-projects"]["capabilities"]
     assert "/api/cognix/projects/{project_id}/dna" in modules["cognix-projects"]["routes"]
     assert "/api/cognix/projects/{project_id}/dna/injection-plan" in modules["cognix-projects"]["routes"]
+    assert modules["cognix-realtime-collaboration"]["status"] == "enabled"
+    assert modules["cognix-realtime-collaboration"]["activationState"] == "ready"
+    assert modules["cognix-realtime-collaboration"]["dependencyState"]["ready"] is True
+    assert "project_presence" in modules["cognix-realtime-collaboration"]["capabilities"]
+    assert "project_comments" in modules["cognix-realtime-collaboration"]["capabilities"]
+    assert "conflict_resolution_plan" in modules["cognix-realtime-collaboration"]["capabilities"]
+    assert "/api/cognix/projects/{project_id}/realtime/presence" in modules["cognix-realtime-collaboration"]["routes"]
+    assert "/api/cognix/projects/{project_id}/collaboration/conflict-plan" in modules["cognix-realtime-collaboration"]["routes"]
+    assert modules["cognix-project-skills-directives"]["status"] == "enabled"
+    assert modules["cognix-project-skills-directives"]["activationState"] == "ready"
+    assert modules["cognix-project-skills-directives"]["dependencyState"]["ready"] is True
+    assert "project_skill_config" in modules["cognix-project-skills-directives"]["capabilities"]
+    assert "project_directives" in modules["cognix-project-skills-directives"]["capabilities"]
+    assert "prompt_policy_compiler" in modules["cognix-project-skills-directives"]["capabilities"]
+    assert "/api/cognix/projects/{project_id}/skills" in modules["cognix-project-skills-directives"]["routes"]
+    assert "/api/cognix/projects/{project_id}/directives/compile" in modules["cognix-project-skills-directives"]["routes"]
     assert modules["cognix-model-lifecycle"]["activationState"] == "ready"
     assert "load_unload_planning" in modules["cognix-model-lifecycle"]["capabilities"]
     assert "cache_load_planning" in modules["cognix-model-lifecycle"]["capabilities"]
@@ -10357,12 +10727,31 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/tools/calculator/evaluate" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/tools/physics/solve" in modules["cognix-integrations"]["routes"]
     assert "/api/cognix/tools/execution-handoff" in modules["cognix-integrations"]["routes"]
+    assert modules["cognix-plugin-marketplace"]["status"] == "enabled"
+    assert modules["cognix-plugin-marketplace"]["activationState"] == "ready"
     assert modules["cognix-plugin-marketplace"]["dependencyState"]["ready"] is True
     assert "plugin_manifest_validation" in modules["cognix-plugin-marketplace"]["capabilities"]
     assert "plugin_permission_scanning" in modules["cognix-plugin-marketplace"]["capabilities"]
     assert "plugin_install_planning" in modules["cognix-plugin-marketplace"]["capabilities"]
     assert "/api/cognix/plugins/marketplace" in modules["cognix-plugin-marketplace"]["routes"]
     assert "/api/cognix/plugins/install-plan" in modules["cognix-plugin-marketplace"]["routes"]
+    assert modules["cognix-skill-marketplace"]["status"] == "enabled"
+    assert modules["cognix-skill-marketplace"]["activationState"] == "ready"
+    assert modules["cognix-skill-marketplace"]["dependencyState"]["ready"] is True
+    assert "shared_skill_catalog" in modules["cognix-skill-marketplace"]["capabilities"]
+    assert "skill_approval_service" in modules["cognix-skill-marketplace"]["capabilities"]
+    assert "skill_usage_logs" in modules["cognix-skill-marketplace"]["capabilities"]
+    assert "/api/cognix/skills/marketplace/skills" in modules["cognix-skill-marketplace"]["routes"]
+    assert "/api/cognix/skills/marketplace/usage" in modules["cognix-skill-marketplace"]["routes"]
+    assert modules["cognix-enterprise-encrypted-chat"]["status"] == "enabled"
+    assert modules["cognix-enterprise-encrypted-chat"]["activationState"] == "ready"
+    assert modules["cognix-enterprise-encrypted-chat"]["dependencyState"]["ready"] is True
+    assert "true_e2ee_chat" in modules["cognix-enterprise-encrypted-chat"]["capabilities"]
+    assert "metadata_only_admin_visibility" in modules["cognix-enterprise-encrypted-chat"]["capabilities"]
+    assert "/api/cognix/chat/enterprise/chats/{chat_id}/messages" in modules["cognix-enterprise-encrypted-chat"]["routes"]
+    assert modules["cognix-enterprise-foundation"]["status"] == "enabled"
+    assert modules["cognix-enterprise-foundation"]["activationState"] == "ready"
+    assert modules["cognix-enterprise-foundation"]["dependencyState"]["ready"] is True
     assert "sso_planning" in modules["cognix-enterprise-foundation"]["capabilities"]
     assert "/api/cognix/governance/plan" in modules["cognix-enterprise-foundation"]["routes"]
     assert modules["cognix-admin-operations"]["status"] == "enabled"
@@ -10448,6 +10837,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/codex/night-report-contract" in modules["cognix-codex-secure-agent"]["routes"]
     assert "/api/cognix/codex/preview-contract" in modules["cognix-codex-secure-agent"]["routes"]
     assert "/api/cognix/codex/approval-gate" in modules["cognix-codex-secure-agent"]["routes"]
+    assert modules["cognix-deployment-manager"]["status"] == "enabled"
+    assert modules["cognix-deployment-manager"]["activationState"] == "ready"
     assert modules["cognix-deployment-manager"]["dependencyState"]["ready"] is True
     assert "gpu_scheduler_contract" in modules["cognix-deployment-manager"]["capabilities"]
     assert "gpu_pool_admission_control" in modules["cognix-deployment-manager"]["capabilities"]
@@ -10600,7 +10991,9 @@ def test_module_plan_endpoint_writes_sanitized_audit_log():
     assert body["auditLogId"].startswith("aud_")
     assert body["moduleRegistryVersion"] == "cognix_module_registry_v1"
     assert body["moduleId"] == "cognix-rag"
-    assert body["allowedToActivate"] is True
+    assert body["allowedToActivate"] is False
+    assert body["module"]["status"] == "enabled"
+    assert body["status"] == "ready"
     assert body["sideEffects"]["moduleActivation"] is False
     assert body["sideEffects"]["routeRegistration"] is False
     assert body["sideEffects"]["permissionWrite"] is False
