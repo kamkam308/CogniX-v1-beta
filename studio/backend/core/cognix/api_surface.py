@@ -126,7 +126,7 @@ RECOMMENDED_ENDPOINTS: list[dict[str, Any]] = [
 
 PRODUCT_NAVIGATION_ROUTES: list[dict[str, Any]] = [
     {"path": "/pulse", "equivalentRoutes": ["/api/cognix/pulse"]},
-    {"path": "/library", "equivalentRoutes": ["/api/cognix/library"]},
+    {"path": "/library", "equivalentRoutes": ["/api/cognix/library", "/api/cognix/knowledge/shared/bases"]},
     {"path": "/codex", "equivalentRoutes": ["/api/cognix/codex/pipeline-plan"]},
     {"path": "/scheduled", "equivalentRoutes": ["/api/cognix/scheduled-tasks"]},
     {"path": "/images", "equivalentRoutes": ["/api/cognix/images"]},

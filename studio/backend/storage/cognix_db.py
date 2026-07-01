@@ -173,6 +173,12 @@ ADMIN_SECURE_MODEL_REGISTRY_TABLE_NAMES = (
     "blocked_models",
     "model_security_metadata",
 )
+SHARED_KNOWLEDGE_TABLE_NAMES = (
+    "knowledge_bases",
+    "knowledge_documents",
+    "knowledge_chunks",
+    "knowledge_permissions",
+)
 ADMIN_COMPLIANCE_EXPORT_TABLE_NAMES = (
     "compliance_exports",
     "export_jobs",
@@ -2706,6 +2712,7 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
     _ensure_admin_organization_settings_columns(conn)
     _ensure_admin_local_only_columns(conn)
     _ensure_admin_secure_model_registry_columns(conn)
+    _ensure_shared_knowledge_columns(conn)
     _ensure_admin_compliance_export_columns(conn)
     _ensure_admin_risk_scoring_columns(conn)
     _ensure_admin_data_retention_columns(conn)
@@ -3235,6 +3242,92 @@ def _ensure_admin_secure_model_registry_columns(conn: sqlite3.Connection) -> Non
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_model_security_metadata_org_model
             ON model_security_metadata(organization_id, model_id)
+        """
+    )
+
+
+def _ensure_shared_knowledge_columns(conn: sqlite3.Connection) -> None:
+    for table_name in SHARED_KNOWLEDGE_TABLE_NAMES:
+        quoted_table = _quote_roadmap_table_name(table_name)
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {quoted_table} (
+                id TEXT PRIMARY KEY,
+                organization_id TEXT NOT NULL DEFAULT 'default',
+                username TEXT,
+                project_id TEXT,
+                scope_type TEXT NOT NULL DEFAULT 'organization',
+                scope_id TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'active',
+                payload_json TEXT NOT NULL DEFAULT '{{}}',
+                metadata_json TEXT NOT NULL DEFAULT '{{}}',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+    _ensure_columns(
+        conn,
+        "knowledge_bases",
+        {
+            "name": "TEXT NOT NULL DEFAULT ''",
+            "description": "TEXT NOT NULL DEFAULT ''",
+            "owner_username": "TEXT NOT NULL DEFAULT ''",
+            "visibility": "TEXT NOT NULL DEFAULT 'restricted'",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "knowledge_documents",
+        {
+            "knowledge_base_id": "TEXT NOT NULL DEFAULT ''",
+            "title": "TEXT NOT NULL DEFAULT ''",
+            "source_type": "TEXT NOT NULL DEFAULT 'text'",
+            "source_uri": "TEXT NOT NULL DEFAULT ''",
+            "content_text": "TEXT NOT NULL DEFAULT ''",
+            "created_by": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "knowledge_chunks",
+        {
+            "knowledge_base_id": "TEXT NOT NULL DEFAULT ''",
+            "document_id": "TEXT NOT NULL DEFAULT ''",
+            "chunk_index": "INTEGER NOT NULL DEFAULT 0",
+            "text": "TEXT NOT NULL DEFAULT ''",
+            "token_count_estimate": "INTEGER NOT NULL DEFAULT 0",
+            "embedding_status": "TEXT NOT NULL DEFAULT 'planned'",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "knowledge_permissions",
+        {
+            "knowledge_base_id": "TEXT NOT NULL DEFAULT ''",
+            "document_id": "TEXT NOT NULL DEFAULT ''",
+            "subject_type": "TEXT NOT NULL DEFAULT 'user'",
+            "subject_id": "TEXT NOT NULL DEFAULT ''",
+            "permission": "TEXT NOT NULL DEFAULT 'read'",
+            "granted_by": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_knowledge_documents_kb_status
+            ON knowledge_documents(knowledge_base_id, status, updated_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_kb_doc
+            ON knowledge_chunks(knowledge_base_id, document_id, chunk_index)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_knowledge_permissions_subject_scope
+            ON knowledge_permissions(subject_type, subject_id, knowledge_base_id, document_id)
         """
     )
 
@@ -9524,6 +9617,364 @@ def list_model_security_metadata(*, organization_id: str = "default") -> list[di
             ((organization_id or "default").strip() or "default",),
         ).fetchall()
         return [_hydrate_model_security_metadata(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_knowledge_base(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["organizationId"] = item.get("organization_id")
+    item["projectId"] = item.get("project_id")
+    item["ownerUsername"] = item.get("owner_username")
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def create_knowledge_base(
+    *,
+    name: str,
+    description: str = "",
+    owner_username: str,
+    visibility: str = "restricted",
+    project_id: str | None = None,
+    organization_id: str = "default",
+) -> dict[str, Any]:
+    now = _now()
+    kb_id = _new_id("kb")
+    payload = {
+        "name": name,
+        "description": description,
+        "visibility": visibility,
+        "projectId": project_id,
+    }
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO knowledge_bases
+                (
+                    id, organization_id, username, project_id, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    name, description, owner_username, visibility
+                )
+            VALUES (?, ?, ?, ?, 'knowledge_base', ?, 'active', ?, '{}', ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                kb_id,
+                (organization_id or "default").strip()[:160] or "default",
+                owner_username,
+                project_id,
+                kb_id,
+                json.dumps(payload, ensure_ascii = False),
+                now,
+                now,
+                name[:240],
+                description[:1000],
+                owner_username[:160],
+                visibility[:80],
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM knowledge_bases WHERE id = ?", (kb_id,)).fetchone()
+        return _hydrate_knowledge_base(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_knowledge_bases(*, project_id: str | None = None, include_archived: bool = False) -> list[dict[str, Any]]:
+    clauses = []
+    params: list[Any] = []
+    if project_id:
+        clauses.append("project_id = ?")
+        params.append(project_id)
+    if not include_archived:
+        clauses.append("status != 'archived'")
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM knowledge_bases
+            {where}
+            ORDER BY updated_at DESC
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_knowledge_base(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def get_knowledge_base(kb_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT * FROM knowledge_bases WHERE id = ?", (kb_id,)).fetchone()
+        return _hydrate_knowledge_base(row_to_dict(row) or {}) if row else None
+    finally:
+        conn.close()
+
+
+def _hydrate_knowledge_document(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["knowledgeBaseId"] = item.get("knowledge_base_id")
+    item["sourceType"] = item.get("source_type")
+    item["sourceUri"] = item.get("source_uri")
+    item["contentText"] = item.get("content_text")
+    item["createdBy"] = item.get("created_by")
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def create_knowledge_document(
+    *,
+    knowledge_base_id: str,
+    title: str,
+    content_text: str,
+    created_by: str,
+    source_type: str = "text",
+    source_uri: str = "",
+) -> dict[str, Any]:
+    now = _now()
+    document_id = _new_id("kbdoc")
+    payload = {
+        "knowledgeBaseId": knowledge_base_id,
+        "title": title,
+        "sourceType": source_type,
+        "sourceUri": source_uri,
+    }
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO knowledge_documents
+                (
+                    id, organization_id, username, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    knowledge_base_id, title, source_type, source_uri, content_text, created_by
+                )
+            VALUES (?, 'default', ?, 'knowledge_document', ?, 'active', ?, '{}', ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                document_id,
+                created_by,
+                knowledge_base_id,
+                json.dumps(payload, ensure_ascii = False),
+                now,
+                now,
+                knowledge_base_id,
+                title[:240],
+                source_type[:80],
+                source_uri[:1000],
+                content_text,
+                created_by[:160],
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM knowledge_documents WHERE id = ?", (document_id,)).fetchone()
+        return _hydrate_knowledge_document(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_knowledge_documents(*, knowledge_base_id: str | None = None) -> list[dict[str, Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if knowledge_base_id:
+        clauses.append("knowledge_base_id = ?")
+        params.append(knowledge_base_id)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM knowledge_documents
+            {where}
+            ORDER BY updated_at DESC
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_knowledge_document(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_knowledge_chunk(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["knowledgeBaseId"] = item.get("knowledge_base_id")
+    item["documentId"] = item.get("document_id")
+    item["chunkIndex"] = item.get("chunk_index")
+    item["tokenCountEstimate"] = item.get("token_count_estimate")
+    item["embeddingStatus"] = item.get("embedding_status")
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def replace_knowledge_chunks(
+    *,
+    knowledge_base_id: str,
+    document_id: str,
+    chunks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    now = _now()
+    conn = get_connection()
+    try:
+        conn.execute(
+            "DELETE FROM knowledge_chunks WHERE knowledge_base_id = ? AND document_id = ?",
+            (knowledge_base_id, document_id),
+        )
+        for chunk in chunks:
+            chunk_id = _new_id("kbchunk")
+            conn.execute(
+                """
+                INSERT INTO knowledge_chunks
+                    (
+                        id, organization_id, username, scope_type, scope_id, status,
+                        payload_json, metadata_json, created_at, updated_at,
+                        knowledge_base_id, document_id, chunk_index, text,
+                        token_count_estimate, embedding_status
+                    )
+                VALUES (?, 'default', NULL, 'knowledge_chunk', ?, 'active', ?, '{}', ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    chunk_id,
+                    document_id,
+                    json.dumps(chunk, ensure_ascii = False),
+                    now,
+                    now,
+                    knowledge_base_id,
+                    document_id,
+                    int(chunk.get("chunkIndex") or 0),
+                    str(chunk.get("text") or ""),
+                    int(chunk.get("tokenCountEstimate") or 0),
+                    str(chunk.get("embeddingStatus") or "planned")[:80],
+                ),
+            )
+        conn.commit()
+        rows = conn.execute(
+            """
+            SELECT * FROM knowledge_chunks
+            WHERE knowledge_base_id = ? AND document_id = ?
+            ORDER BY chunk_index ASC
+            """,
+            (knowledge_base_id, document_id),
+        ).fetchall()
+        return [_hydrate_knowledge_chunk(row) for row in _rows_to_dicts(rows)]
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def list_knowledge_chunks(*, knowledge_base_id: str | None = None, document_id: str | None = None) -> list[dict[str, Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if knowledge_base_id:
+        clauses.append("knowledge_base_id = ?")
+        params.append(knowledge_base_id)
+    if document_id:
+        clauses.append("document_id = ?")
+        params.append(document_id)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM knowledge_chunks
+            {where}
+            ORDER BY chunk_index ASC
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_knowledge_chunk(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_knowledge_permission(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["knowledgeBaseId"] = item.get("knowledge_base_id")
+    item["documentId"] = item.get("document_id")
+    item["subjectType"] = item.get("subject_type")
+    item["subjectId"] = item.get("subject_id")
+    item["grantedBy"] = item.get("granted_by")
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def grant_knowledge_permission(
+    *,
+    knowledge_base_id: str,
+    subject_type: str,
+    subject_id: str,
+    permission: str = "read",
+    granted_by: str = "",
+    document_id: str = "",
+) -> dict[str, Any]:
+    now = _now()
+    permission_id = _new_id("kbperm")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO knowledge_permissions
+                (
+                    id, organization_id, username, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    knowledge_base_id, document_id, subject_type, subject_id,
+                    permission, granted_by
+                )
+            VALUES (?, 'default', ?, 'knowledge_permission', ?, 'active', ?, '{}', ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                permission_id,
+                subject_id if subject_type == "user" else granted_by,
+                document_id or knowledge_base_id,
+                json.dumps(
+                    {
+                        "knowledgeBaseId": knowledge_base_id,
+                        "documentId": document_id,
+                        "subjectType": subject_type,
+                        "subjectId": subject_id,
+                        "permission": permission,
+                    },
+                    ensure_ascii = False,
+                ),
+                now,
+                now,
+                knowledge_base_id,
+                document_id,
+                subject_type[:80],
+                subject_id[:160],
+                permission[:80],
+                granted_by[:160],
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM knowledge_permissions WHERE id = ?", (permission_id,)).fetchone()
+        return _hydrate_knowledge_permission(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_knowledge_permissions(*, knowledge_base_id: str | None = None) -> list[dict[str, Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if knowledge_base_id:
+        clauses.append("knowledge_base_id = ?")
+        params.append(knowledge_base_id)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM knowledge_permissions
+            {where}
+            ORDER BY created_at DESC
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_knowledge_permission(row) for row in _rows_to_dicts(rows)]
     finally:
         conn.close()
 

@@ -98,6 +98,7 @@ from core.cognix import sandbox as cognix_sandbox
 from core.cognix import scheduled as cognix_scheduled
 from core.cognix import security_policy as cognix_security_policy
 from core.cognix import semantic_cache as cognix_semantic_cache
+from core.cognix import shared_knowledge_base as cognix_shared_knowledge_base
 from core.cognix import skill_memory as cognix_skill_memory
 from core.cognix import skill_marketplace as cognix_skill_marketplace
 from core.cognix import simulation as cognix_simulation
@@ -295,6 +296,43 @@ class AdminSecureModelDecisionRequest(BaseModel):
     role: str | None = Field("user", max_length = 80)
     quantization: str | None = Field("", max_length = 80)
     local_only_active: bool = Field(False, alias = "localOnlyActive")
+
+
+class SharedKnowledgeBaseRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    name: str = Field(..., min_length = 1, max_length = 240)
+    description: str | None = Field("", max_length = 1000)
+    visibility: Literal["restricted", "organization", "project"] = "restricted"
+    project_id: str | None = Field(None, alias = "projectId", max_length = 240)
+
+
+class SharedKnowledgeDocumentRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    title: str = Field(..., min_length = 1, max_length = 240)
+    content: str = Field(..., min_length = 1, max_length = 300000)
+    source_type: str = Field("text", alias = "sourceType", max_length = 80)
+    source_uri: str | None = Field("", alias = "sourceUri", max_length = 1000)
+    chunk_size: int = Field(120, alias = "chunkSize", ge = 20, le = 500)
+    overlap: int = Field(20, ge = 0, le = 100)
+
+
+class SharedKnowledgePermissionRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    subject_type: Literal["user", "role", "everyone"] = Field(..., alias = "subjectType")
+    subject_id: str = Field("", alias = "subjectId", max_length = 160)
+    permission: Literal["read", "write", "admin"] = "read"
+    document_id: str | None = Field("", alias = "documentId", max_length = 240)
+
+
+class SharedKnowledgeQueryRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    query: str = Field(..., min_length = 1, max_length = 4000)
+    role: str = Field("user", max_length = 80)
+    limit: int = Field(5, ge = 1, le = 20)
 
 
 class AdminPolicyEnforcementRequest(BaseModel):
@@ -2383,6 +2421,23 @@ def _sync_allowed_models_setting(
         "setting": setting,
         "policy": policy,
         "changeLog": change_log,
+    }
+
+
+def _build_shared_knowledge_bundle(knowledge_base_id: str | None = None) -> dict[str, Any]:
+    bases = cognix_db.list_knowledge_bases()
+    documents = cognix_db.list_knowledge_documents(knowledge_base_id = knowledge_base_id) if knowledge_base_id else []
+    chunks = cognix_db.list_knowledge_chunks(knowledge_base_id = knowledge_base_id) if knowledge_base_id else []
+    permissions = (
+        cognix_db.list_knowledge_permissions(knowledge_base_id = knowledge_base_id)
+        if knowledge_base_id
+        else []
+    )
+    return {
+        "knowledgeBases": bases,
+        "documents": documents,
+        "chunks": chunks,
+        "permissions": permissions,
     }
 
 
@@ -15840,6 +15895,232 @@ async def admin_secure_model_security_metadata(
         "modelSecurityMetadata": _rows(metadata),
         "sideEffects": cognix_admin_secure_model_registry.build_secure_model_registry_blueprint()["sideEffects"],
         "plannerVersion": cognix_admin_secure_model_registry.COGNIX_MODEL_LICENSE_CHECKER_VERSION,
+    }
+
+
+@router.get("/knowledge/shared/blueprint")
+async def shared_knowledge_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_shared_knowledge_base.build_shared_knowledge_blueprint()
+    return {
+        "username": current_subject,
+        "sharedKnowledgeBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_shared_knowledge_base.COGNIX_SHARED_KNOWLEDGE_BASE_VERSION,
+    }
+
+
+@router.get("/knowledge/shared/bases")
+async def shared_knowledge_bases(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    bundle = _build_shared_knowledge_bundle()
+    return {
+        "username": current_subject,
+        "knowledgeBases": _rows(bundle["knowledgeBases"]),
+        "sideEffects": cognix_shared_knowledge_base.build_shared_knowledge_blueprint()["sideEffects"],
+        "plannerVersion": cognix_shared_knowledge_base.COGNIX_SHARED_KNOWLEDGE_BASE_VERSION,
+    }
+
+
+@router.post("/knowledge/shared/bases")
+async def create_shared_knowledge_base(
+    payload: SharedKnowledgeBaseRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    knowledge_base = cognix_db.create_knowledge_base(
+        name = payload.name,
+        description = payload.description or "",
+        owner_username = current_subject,
+        visibility = payload.visibility,
+        project_id = payload.project_id,
+    )
+    side_effects = {
+        **cognix_shared_knowledge_base.build_shared_knowledge_blueprint()["sideEffects"],
+        "databaseWrite": True,
+        "knowledgeBaseWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = None,
+        actor_username = current_subject,
+        action = "shared_knowledge_base_created",
+        resource_type = "knowledge_base",
+        resource_id = str(knowledge_base.get("id") or ""),
+        severity = "notice",
+        metadata = {
+            "name": payload.name,
+            "visibility": payload.visibility,
+            "projectId": payload.project_id,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "knowledgeBase": _row(knowledge_base),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_shared_knowledge_base.COGNIX_SHARED_KNOWLEDGE_BASE_VERSION,
+    }
+
+
+@router.get("/knowledge/shared/bases/{knowledge_base_id}/documents")
+async def shared_knowledge_documents(
+    knowledge_base_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    knowledge_base = cognix_db.get_knowledge_base(knowledge_base_id)
+    if knowledge_base is None:
+        raise HTTPException(status_code = 404, detail = "Knowledge base not found")
+    bundle = _build_shared_knowledge_bundle(knowledge_base_id)
+    return {
+        "username": current_subject,
+        "knowledgeBase": _row(knowledge_base),
+        "documents": _rows(bundle["documents"]),
+        "chunks": _rows(bundle["chunks"]),
+        "permissions": _rows(bundle["permissions"]),
+        "sideEffects": cognix_shared_knowledge_base.build_shared_knowledge_blueprint()["sideEffects"],
+        "plannerVersion": cognix_shared_knowledge_base.COGNIX_SHARED_KNOWLEDGE_BASE_VERSION,
+    }
+
+
+@router.post("/knowledge/shared/bases/{knowledge_base_id}/documents")
+async def add_shared_knowledge_document(
+    knowledge_base_id: str,
+    payload: SharedKnowledgeDocumentRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    knowledge_base = cognix_db.get_knowledge_base(knowledge_base_id)
+    if knowledge_base is None:
+        raise HTTPException(status_code = 404, detail = "Knowledge base not found")
+    document = cognix_db.create_knowledge_document(
+        knowledge_base_id = knowledge_base_id,
+        title = payload.title,
+        content_text = payload.content,
+        source_type = payload.source_type,
+        source_uri = payload.source_uri or "",
+        created_by = current_subject,
+    )
+    index_plan = cognix_shared_knowledge_base.build_document_index_plan(
+        knowledge_base_id = knowledge_base_id,
+        document_id = str(document.get("id") or ""),
+        title = payload.title,
+        content = payload.content,
+        chunk_size = payload.chunk_size,
+        overlap = payload.overlap,
+    )
+    chunks = cognix_db.replace_knowledge_chunks(
+        knowledge_base_id = knowledge_base_id,
+        document_id = str(document.get("id") or ""),
+        chunks = index_plan["chunks"],
+    )
+    side_effects = {
+        **index_plan.get("sideEffects", {}),
+        "databaseWrite": True,
+        "documentWrite": True,
+        "chunkWrite": True,
+        "auditWrite": True,
+        "embeddingCall": False,
+    }
+    audit = cognix_db.create_audit_log(
+        username = None,
+        actor_username = current_subject,
+        action = "shared_knowledge_document_indexed",
+        resource_type = "knowledge_document",
+        resource_id = str(document.get("id") or ""),
+        severity = "notice",
+        metadata = {
+            "knowledgeBaseId": knowledge_base_id,
+            "chunkCount": len(chunks),
+            "embeddingCall": False,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "knowledgeBase": _row(knowledge_base),
+        "document": _row(document),
+        "indexPlan": index_plan,
+        "chunks": _rows(chunks),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_shared_knowledge_base.COGNIX_ORGANIZATION_RAG_SERVICE_VERSION,
+    }
+
+
+@router.post("/knowledge/shared/bases/{knowledge_base_id}/permissions")
+async def grant_shared_knowledge_permission(
+    knowledge_base_id: str,
+    payload: SharedKnowledgePermissionRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    knowledge_base = cognix_db.get_knowledge_base(knowledge_base_id)
+    if knowledge_base is None:
+        raise HTTPException(status_code = 404, detail = "Knowledge base not found")
+    permission = cognix_db.grant_knowledge_permission(
+        knowledge_base_id = knowledge_base_id,
+        document_id = payload.document_id or "",
+        subject_type = payload.subject_type,
+        subject_id = payload.subject_id,
+        permission = payload.permission,
+        granted_by = current_subject,
+    )
+    side_effects = {
+        **cognix_shared_knowledge_base.build_shared_knowledge_blueprint()["sideEffects"],
+        "databaseWrite": True,
+        "permissionWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = payload.subject_id if payload.subject_type == "user" else None,
+        actor_username = current_subject,
+        action = "shared_knowledge_permission_granted",
+        resource_type = "knowledge_permission",
+        resource_id = str(permission.get("id") or ""),
+        severity = "notice",
+        metadata = {
+            "knowledgeBaseId": knowledge_base_id,
+            "subjectType": payload.subject_type,
+            "subjectId": payload.subject_id,
+            "permission": payload.permission,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "permission": _row(permission),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_shared_knowledge_base.COGNIX_DOCUMENT_PERMISSION_FILTER_VERSION,
+    }
+
+
+@router.post("/knowledge/shared/bases/{knowledge_base_id}/query")
+async def query_shared_knowledge_base(
+    knowledge_base_id: str,
+    payload: SharedKnowledgeQueryRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    knowledge_base = cognix_db.get_knowledge_base(knowledge_base_id)
+    if knowledge_base is None:
+        raise HTTPException(status_code = 404, detail = "Knowledge base not found")
+    bundle = _build_shared_knowledge_bundle(knowledge_base_id)
+    role = "admin" if auth_storage.is_admin(current_subject) else payload.role
+    result = cognix_shared_knowledge_base.build_retrieval_result(
+        query = payload.query,
+        chunks = bundle["chunks"],
+        documents = bundle["documents"],
+        permissions = bundle["permissions"],
+        username = current_subject,
+        role = role,
+        limit = payload.limit,
+    )
+    return {
+        "username": current_subject,
+        "knowledgeBase": _row(knowledge_base),
+        "retrieval": result,
+        "sideEffects": result.get("sideEffects", {}),
+        "plannerVersion": cognix_shared_knowledge_base.COGNIX_ORGANIZATION_RAG_SERVICE_VERSION,
     }
 
 
