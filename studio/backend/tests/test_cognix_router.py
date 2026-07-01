@@ -9877,6 +9877,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "knowledge_strategy_contract" in modules["cognix-explain-decisions"]["capabilities"]
     assert "/api/cognix/decisions/explain" in modules["cognix-explain-decisions"]["routes"]
     assert "/api/cognix/decisions/{decision_id}" in modules["cognix-explain-decisions"]["routes"]
+    assert modules["cognix-prompt-compression"]["status"] == "enabled"
+    assert modules["cognix-prompt-compression"]["activationState"] == "ready"
     assert modules["cognix-prompt-compression"]["dependencyState"]["ready"] is True
     assert "prompt_compression" in modules["cognix-prompt-compression"]["capabilities"]
     assert "importance_ranking" in modules["cognix-prompt-compression"]["capabilities"]
@@ -9887,6 +9889,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/prompt-compression/plan" in modules["cognix-prompt-compression"]["routes"]
     assert "/api/cognix/prompt-compression/conversation-summary-plan" in modules["cognix-prompt-compression"]["routes"]
     assert "/api/cognix/prompt-compression/contexts" in modules["cognix-prompt-compression"]["routes"]
+    assert modules["cognix-context-heatmap"]["status"] == "enabled"
+    assert modules["cognix-context-heatmap"]["activationState"] == "ready"
     assert modules["cognix-context-heatmap"]["dependencyState"]["ready"] is True
     assert "context_usage_tracking" in modules["cognix-context-heatmap"]["capabilities"]
     assert "context_heatmap" in modules["cognix-context-heatmap"]["capabilities"]

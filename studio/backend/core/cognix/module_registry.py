@@ -562,7 +562,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-prompt-compression",
         "displayName": "CogniX Prompt Compression",
         "editionTargets": ["free", "local", "developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "prompt_compression",
             "importance_ranking",
@@ -590,7 +590,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-context-heatmap",
         "displayName": "CogniX Context Heatmap",
         "editionTargets": ["free", "local", "developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "context_usage_tracking",
             "context_heatmap",
