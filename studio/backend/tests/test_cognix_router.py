@@ -9925,6 +9925,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert modules["cognix-thinking-status"]["activationState"] == "ready"
     assert "technical_redaction" in modules["cognix-thinking-status"]["capabilities"]
     assert "/api/cognix/thinking/plan" in modules["cognix-thinking-status"]["routes"]
+    assert modules["cognix-response-reflection"]["status"] == "enabled"
+    assert modules["cognix-response-reflection"]["activationState"] == "ready"
     assert modules["cognix-response-reflection"]["dependencyState"]["ready"] is True
     assert "response_quality_evaluation" in modules["cognix-response-reflection"]["capabilities"]
     assert "expert_generalist_quality_gate" in modules["cognix-response-reflection"]["capabilities"]
@@ -9932,12 +9934,16 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/reflection/evaluate" in modules["cognix-response-reflection"]["routes"]
     assert "/api/cognix/reflection/evaluations" in modules["cognix-response-reflection"]["routes"]
     assert "/api/cognix/reflection/expert-generalist-gate" in modules["cognix-response-reflection"]["routes"]
+    assert modules["cognix-multi-draft-generation"]["status"] == "enabled"
+    assert modules["cognix-multi-draft-generation"]["activationState"] == "ready"
     assert modules["cognix-multi-draft-generation"]["dependencyState"]["ready"] is True
     assert "style_profile_registry" in modules["cognix-multi-draft-generation"]["capabilities"]
     assert "response_variant_store" in modules["cognix-multi-draft-generation"]["capabilities"]
     assert "/api/cognix/drafts/styles" in modules["cognix-multi-draft-generation"]["routes"]
     assert "/api/cognix/drafts/plan" in modules["cognix-multi-draft-generation"]["routes"]
     assert "/api/cognix/drafts/variants" in modules["cognix-multi-draft-generation"]["routes"]
+    assert modules["cognix-ai-debate"]["status"] == "enabled"
+    assert modules["cognix-ai-debate"]["activationState"] == "ready"
     assert modules["cognix-ai-debate"]["dependencyState"]["ready"] is True
     assert "debate_role_registry" in modules["cognix-ai-debate"]["capabilities"]
     assert "judge_synthesis_planning" in modules["cognix-ai-debate"]["capabilities"]

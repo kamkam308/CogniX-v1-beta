@@ -803,7 +803,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-response-reflection",
         "displayName": "CogniX Response Reflection",
         "editionTargets": ["free", "local", "developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "response_quality_evaluation",
             "expert_generalist_quality_gate",
@@ -827,7 +827,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-multi-draft-generation",
         "displayName": "CogniX Multi-Draft Generation",
         "editionTargets": ["free", "local", "developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "style_profile_registry",
             "multi_draft_planning",
@@ -850,7 +850,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-ai-debate",
         "displayName": "CogniX AI Debate",
         "editionTargets": ["developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "debate_role_registry",
             "bounded_debate_planning",
