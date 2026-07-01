@@ -36,6 +36,8 @@ export function notifyChatHistoryUpdated(): void {
 
 function parseErrorText(status: number, body: unknown): string {
   if (body && typeof body === "object") {
+    const providerError = parseProviderErrorText(body);
+    if (providerError) return providerError;
     const detail = (body as { detail?: unknown }).detail;
     const formatted = formatFastApiDetail(detail);
     if (formatted) return formatted;
@@ -43,6 +45,34 @@ function parseErrorText(status: number, body: unknown): string {
     if (typeof message === "string" && message) return message;
   }
   return `Request failed (${status})`;
+}
+
+function parseProviderErrorText(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as {
+    detail?: unknown;
+    error?: unknown;
+    message?: unknown;
+  };
+  if (typeof record.message === "string" && record.message.trim()) {
+    return record.message.trim();
+  }
+  if (typeof record.error === "string" && record.error.trim()) {
+    return record.error.trim();
+  }
+  if (record.error && typeof record.error === "object") {
+    const nested = record.error as { message?: unknown; detail?: unknown };
+    if (typeof nested.message === "string" && nested.message.trim()) {
+      return nested.message.trim();
+    }
+    if (typeof nested.detail === "string" && nested.detail.trim()) {
+      return nested.detail.trim();
+    }
+  }
+  if (record.detail && typeof record.detail === "object") {
+    return parseProviderErrorText(record.detail);
+  }
+  return null;
 }
 
 async function parseJsonOrThrow<T>(response: Response): Promise<T> {
@@ -1204,9 +1234,9 @@ export async function* streamChatCompletions(
 
       const parsed = JSON.parse(dataText) as
         | OpenAIChatChunk
-        | { type?: string; content?: string; error?: { message?: string } };
+        | { type?: string; content?: string; error?: unknown };
       if ("error" in parsed && parsed.error) {
-        throw new Error(parsed.error.message || "Stream error");
+        throw new Error(parseProviderErrorText(parsed) || "Stream error");
       }
       // Tool status events are custom SSE payloads, not OpenAI chunks
       if ("type" in parsed && parsed.type === "tool_status") {

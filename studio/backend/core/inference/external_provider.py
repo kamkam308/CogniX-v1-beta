@@ -1195,18 +1195,33 @@ class ExternalProviderClient:
                                 except Exception:
                                     parsed = None
                                 if isinstance(parsed, dict):
-                                    # Mid-stream provider error event. OpenRouter
-                                    # in particular returns 200 then surfaces the
-                                    # failure as an SSE error event.
+                                    # Mid-stream provider error event. Some
+                                    # routers return 200 then surface the
+                                    # failure as an SSE error payload.
                                     if "error" in parsed:
                                         event_counts["error"] = event_counts.get("error", 0) + 1
+                                        error_message = _provider_error_message_from_payload(parsed)
                                         logger.warning(
                                             "%s SSE error event: %s",
                                             self.provider_type,
-                                            parsed.get("error"),
+                                            error_message or parsed.get("error"),
                                         )
-                                    else:
-                                        event_counts["delta"] = event_counts.get("delta", 0) + 1
+                                        error_status = _provider_stream_error_status(
+                                            self.provider_type,
+                                            error_message,
+                                        )
+                                        yield _error_sse_line(
+                                            error_status,
+                                            _friendly_provider_error_text(
+                                                self.provider_type,
+                                                error_status,
+                                                error_message or "Provider stream error",
+                                                model = model,
+                                            ),
+                                            self.provider_type,
+                                        )
+                                        return
+                                    event_counts["delta"] = event_counts.get("delta", 0) + 1
                                     # OpenRouter (and most OAI-compat providers)
                                     # report the handling model in every chunk's
                                     # `model` field. Latch the first non-empty
@@ -6238,6 +6253,39 @@ def _friendly_provider_error_text(
                     "then retry."
                 )
     return raw_message
+
+
+def _provider_error_message_from_payload(payload: dict[str, Any]) -> str | None:
+    error = payload.get("error")
+    if isinstance(error, str) and error.strip():
+        return error.strip()
+    if isinstance(error, dict):
+        for key in ("message", "detail", "error", "code"):
+            value = error.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        try:
+            return _json.dumps(error, ensure_ascii = False)
+        except Exception:
+            return str(error)
+    for key in ("message", "detail"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _provider_stream_error_status(provider_type: str, message: str | None) -> int:
+    lowered = (message or "").lower()
+    if provider_type == "huggingface" and (
+        "invalid username" in lowered
+        or "invalid password" in lowered
+        or "unauthorized" in lowered
+        or "authentication" in lowered
+        or "token" in lowered
+    ):
+        return 401
+    return 502
 
 
 def _error_sse_line(status_code: int, message: str, provider_type: str) -> str:

@@ -273,6 +273,38 @@ def test_huggingface_401_stream_uses_actionable_error(monkeypatch):
     assert "Invalid username or password" not in joined
 
 
+def test_huggingface_200_sse_error_is_normalized(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers.get("authorization") == "Bearer hf_testtoken123"
+        return httpx.Response(
+            200,
+            content = b'data: {"error":"Invalid username or password."}\n\n',
+            headers = {"content-type": "text/event-stream"},
+        )
+
+    _mock_http_client(monkeypatch, handler)
+
+    async def run():
+        client = _make_huggingface_client()
+        lines = await _collect(
+            client.stream_chat_completion(
+                messages = [{"role": "user", "content": "ping"}],
+                model = "deepseek-ai/DeepSeek-V4-Pro",
+                temperature = 0.7,
+                top_p = 0.95,
+                max_tokens = 64,
+            )
+        )
+        await client.close()
+        return lines
+
+    lines = _drive(run())
+    joined = "\n".join(lines)
+    assert "Hugging Face rejected the saved token" in joined
+    assert "deepseek-ai/DeepSeek-V4-Pro" in joined
+    assert "Invalid username or password" not in joined
+
+
 def test_huggingface_friendly_error_for_auth_failures():
     text = _friendly_provider_error_text(
         "huggingface",
