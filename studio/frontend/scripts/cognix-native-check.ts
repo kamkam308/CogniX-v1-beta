@@ -3636,8 +3636,16 @@ const checks: Check[] = [
       "logUsage: true",
       "metaKey",
       "ctrlKey",
+      "capture: true",
       "ROUTE_MAP",
       "CommandDialog",
+    ],
+  },
+  {
+    file: "src/features/chat/components/chat-search-dialog.tsx",
+    includes: [
+      "e.defaultPrevented",
+      'e.key.toLowerCase() !== "k"',
     ],
   },
   {

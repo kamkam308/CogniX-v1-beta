@@ -68,6 +68,7 @@ export function ChatSearchDialog() {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== "k") return;
       const el = document.activeElement as HTMLElement | null;
       const tag = el?.tagName;
