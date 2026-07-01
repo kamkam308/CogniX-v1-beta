@@ -425,7 +425,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-model-translator",
         "displayName": "CogniX Universal Model Translator",
         "editionTargets": ["developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "model_conversion_planning",
             "compatibility_checking",
@@ -873,7 +873,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-tool-discovery",
         "displayName": "CogniX Automatic Tool Discovery",
         "editionTargets": ["free", "local", "developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "project_tool_need_detection",
             "tool_capability_registry",
@@ -1188,7 +1188,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-rag",
         "displayName": "CogniX RAG",
         "editionTargets": ["free", "developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "document_memory",
             "rag_source_registry",
@@ -1255,7 +1255,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-fine-tuning",
         "displayName": "CogniX Fine-tuning",
         "editionTargets": ["developer", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "dataset_validation",
             "dataset_validation_plan",
@@ -1364,7 +1364,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-worker-queue",
         "displayName": "CogniX Worker Queue",
         "editionTargets": ["developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "worker_queue_registry",
             "long_running_job_planning",
@@ -1455,7 +1455,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-integrations",
         "displayName": "CogniX Integrations",
         "editionTargets": ["developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "tool_registry",
             "integration_status",

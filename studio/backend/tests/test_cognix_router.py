@@ -9827,6 +9827,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "user_best_response_selection" in modules["cognix-live-model-comparison"]["capabilities"]
     assert "/api/cognix/models/comparison/plan" in modules["cognix-live-model-comparison"]["routes"]
     assert "/api/cognix/models/comparisons/{comparison_id}/preference" in modules["cognix-live-model-comparison"]["routes"]
+    assert modules["cognix-model-translator"]["status"] == "enabled"
+    assert modules["cognix-model-translator"]["activationState"] == "ready"
     assert modules["cognix-model-translator"]["dependencyState"]["ready"] is True
     assert "model_conversion_planning" in modules["cognix-model-translator"]["capabilities"]
     assert "compatibility_checking" in modules["cognix-model-translator"]["capabilities"]
@@ -9961,6 +9963,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/debate/roles" in modules["cognix-ai-debate"]["routes"]
     assert "/api/cognix/debate/plan" in modules["cognix-ai-debate"]["routes"]
     assert "/api/cognix/debate/sessions" in modules["cognix-ai-debate"]["routes"]
+    assert modules["cognix-tool-discovery"]["status"] == "enabled"
+    assert modules["cognix-tool-discovery"]["activationState"] == "ready"
     assert modules["cognix-tool-discovery"]["dependencyState"]["ready"] is True
     assert "project_tool_need_detection" in modules["cognix-tool-discovery"]["capabilities"]
     assert "tool_recommendation_store" in modules["cognix-tool-discovery"]["capabilities"]
@@ -10045,6 +10049,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/workflows/record" in modules["cognix-ai-workflow-recorder"]["routes"]
     assert "/api/cognix/workflows/{workflow_id}/run-plan" in modules["cognix-ai-workflow-recorder"]["routes"]
     assert modules["cognix-onboarding"]["activationState"] == "ready"
+    assert modules["cognix-rag"]["status"] == "enabled"
+    assert modules["cognix-rag"]["activationState"] == "ready"
     assert modules["cognix-rag"]["dependencyState"]["ready"] is True
     assert "rag_source_registry" in modules["cognix-rag"]["capabilities"]
     assert "rag_indexing_planning" in modules["cognix-rag"]["capabilities"]
@@ -10059,6 +10065,9 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/rag/compression-plan" in modules["cognix-rag"]["routes"]
     assert "/api/cognix/rag/retrieval-packet" in modules["cognix-rag"]["routes"]
     assert "cognix-integrations" in modules["cognix-rag"]["dependencies"]
+    assert modules["cognix-fine-tuning"]["status"] == "enabled"
+    assert modules["cognix-fine-tuning"]["activationState"] == "ready"
+    assert modules["cognix-fine-tuning"]["dependencyState"]["ready"] is True
     assert "cloud_training_targets" in modules["cognix-fine-tuning"]["capabilities"]
     assert "cloud_training_handoff" in modules["cognix-fine-tuning"]["capabilities"]
     assert "dataset_validation_plan" in modules["cognix-fine-tuning"]["capabilities"]
@@ -10093,6 +10102,9 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "creator_permission_ceiling" in modules["cognix-gpts"]["capabilities"]
     assert "/api/cognix/gpts/plan" in modules["cognix-gpts"]["routes"]
     assert "/api/cognix/gpts/{gpt_id}/runtime-plan" in modules["cognix-gpts"]["routes"]
+    assert modules["cognix-worker-queue"]["status"] == "enabled"
+    assert modules["cognix-worker-queue"]["activationState"] == "ready"
+    assert modules["cognix-worker-queue"]["dependencyState"]["ready"] is True
     assert "worker_job_specs" in modules["cognix-worker-queue"]["capabilities"]
     assert "worker_enqueue_contract" in modules["cognix-worker-queue"]["capabilities"]
     assert "worker_retry_policy" in modules["cognix-worker-queue"]["capabilities"]
@@ -10135,6 +10147,9 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/evolution/items/plan" in modules["cognix-ai-evolution-engine"]["routes"]
     assert "/api/cognix/evolution/experiments/plan" in modules["cognix-ai-evolution-engine"]["routes"]
     assert "/api/cognix/evolution/proposals" in modules["cognix-ai-evolution-engine"]["routes"]
+    assert modules["cognix-integrations"]["status"] == "enabled"
+    assert modules["cognix-integrations"]["activationState"] == "ready"
+    assert modules["cognix-integrations"]["dependencyState"]["ready"] is True
     assert "tool_permission_matrix" in modules["cognix-integrations"]["capabilities"]
     assert "tool_execution_contract" in modules["cognix-integrations"]["capabilities"]
     assert "tool_execution_boundary_contract" in modules["cognix-integrations"]["capabilities"]
