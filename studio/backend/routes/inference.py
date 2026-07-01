@@ -4042,6 +4042,24 @@ def _is_huggingface_api_key_candidate(api_key: str | None) -> bool:
     return token.startswith("hf_") and len(token) >= 11 and token.replace("_", "").isalnum()
 
 
+def _is_huggingface_router_base_url(base_url: str | None) -> bool:
+    if not base_url:
+        return False
+    try:
+        from urllib.parse import urlparse as _urlparse
+
+        host = (_urlparse(base_url).hostname or "").lower()
+    except Exception:
+        return False
+    return host == "router.huggingface.co" or host.endswith(".huggingface.co")
+
+
+def _effective_external_provider_type(provider_type: str, base_url: str | None) -> str:
+    if provider_type == "huggingface" or _is_huggingface_router_base_url(base_url):
+        return "huggingface"
+    return provider_type
+
+
 def _build_external_messages(
     messages: list,
     supports_vision: bool,
@@ -4410,7 +4428,9 @@ async def _proxy_to_external_provider(
                 detail = "Failed to decrypt API key. The server key may have changed — try refreshing the page.",
             )
 
-    if provider_type == "huggingface" and not _is_huggingface_api_key_candidate(api_key):
+    effective_provider_type = _effective_external_provider_type(provider_type, base_url)
+
+    if effective_provider_type == "huggingface" and not _is_huggingface_api_key_candidate(api_key):
         raise HTTPException(
             status_code = 401,
             detail = openai_error_body(
@@ -4434,12 +4454,12 @@ async def _proxy_to_external_provider(
     # Build messages, preserving multimodal content for vision providers
     from core.inference.providers import get_provider_info as _get_provider_info
 
-    _pinfo = _get_provider_info(provider_type) or {}
+    _pinfo = _get_provider_info(effective_provider_type) or {}
     _supports_vision = _pinfo.get("supports_vision", False)
     chat_messages = _build_external_messages(
         payload.messages,
         _supports_vision,
-        provider_type = provider_type,
+        provider_type = effective_provider_type,
         base_url = base_url,
     )
     monitor_id = None
@@ -4454,7 +4474,7 @@ async def _proxy_to_external_provider(
         )
 
     client = ExternalProviderClient(
-        provider_type = provider_type,
+        provider_type = effective_provider_type,
         base_url = base_url,
         api_key = api_key,
     )

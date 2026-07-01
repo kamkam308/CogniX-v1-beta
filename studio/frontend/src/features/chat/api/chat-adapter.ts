@@ -14,6 +14,7 @@ import {
   getExternalProviderApiKey,
   buildExternalModelId,
   isCustomProviderType,
+  isHuggingFaceProviderConnection,
   isPromptCacheTtl,
   loadExternalProviders,
   parseExternalModelId,
@@ -1919,7 +1920,7 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
 
       if (
         isExternalRequest &&
-        externalProvider?.providerType === "huggingface"
+        isHuggingFaceProviderConnection(externalProvider)
       ) {
         const keyStatus = externalProviderApiKeyStatus(
           externalProvider,
@@ -2551,9 +2552,11 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
           supportsPreserveThinking,
           preserveThinking,
         } = runtime;
-        const externalBackendProviderType = toExternalBackendProviderType(
-          externalProvider?.providerType,
-        );
+        const externalBackendProviderType = isHuggingFaceProviderConnection(
+          externalProvider,
+        )
+          ? "huggingface"
+          : toExternalBackendProviderType(externalProvider?.providerType);
         const externalCapabilities = getProviderCapabilities(
           externalProvider?.providerType,
         );
@@ -3316,7 +3319,7 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
               if (
                 delta &&
                 isExternalRequest &&
-                externalProvider?.providerType === "huggingface"
+                isHuggingFaceProviderConnection(externalProvider)
               ) {
                 const contentError = huggingFaceAuthErrorFromStreamContent(
                   `${cumulativeText}${delta}`,
@@ -3549,7 +3552,7 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
           } catch (streamError) {
             if (
               isExternalRequest &&
-              externalProvider?.providerType === "huggingface" &&
+              isHuggingFaceProviderConnection(externalProvider) &&
               !retriedWithCogniXOllamaFallback &&
               !hasSubstantiveAssistantContent() &&
               isHuggingFaceAuthFailure(streamError) &&

@@ -196,6 +196,26 @@ export function isHuggingFaceTokenCandidate(value: string | null | undefined): b
   return /^hf_[A-Za-z0-9_]{8,}$/.test(token);
 }
 
+export function isHuggingFaceProviderConnection(
+  provider:
+    | (Pick<ExternalProviderConfig, "providerType" | "baseUrl"> &
+        Partial<Pick<ExternalProviderConfig, "name">>)
+    | null
+    | undefined,
+): boolean {
+  if (!provider) return false;
+  const providerType = provider.providerType.trim().toLowerCase();
+  if (providerType === "huggingface") return true;
+  const name = (provider.name ?? "").trim().toLowerCase().replace(/[\s_-]+/g, "");
+  if (name === "huggingface") return true;
+  try {
+    const host = new URL(provider.baseUrl).hostname.toLowerCase();
+    return host === "router.huggingface.co" || host.endsWith(".huggingface.co");
+  } catch {
+    return false;
+  }
+}
+
 export function externalProviderAllowsMissingApiKey(
   provider: Pick<ExternalProviderConfig, "providerType" | "baseUrl"> | null | undefined,
 ): boolean {
@@ -218,7 +238,7 @@ export function externalProviderApiKeyStatus(
   if (externalProviderAllowsMissingApiKey(provider)) return "not_required";
   const key = (apiKey ?? "").trim();
   if (!key) return "missing";
-  if (provider.providerType === "huggingface" && !isHuggingFaceTokenCandidate(key)) {
+  if (isHuggingFaceProviderConnection(provider) && !isHuggingFaceTokenCandidate(key)) {
     return "invalid";
   }
   return "usable";
