@@ -4037,6 +4037,11 @@ def _extract_content_parts(messages: list) -> tuple[str, list[dict], "Optional[s
 _INPUT_DOCUMENT_PROVIDERS = frozenset({"anthropic", "openai"})
 
 
+def _is_huggingface_api_key_candidate(api_key: str | None) -> bool:
+    token = (api_key or "").strip()
+    return token.startswith("hf_") and len(token) >= 11 and token.replace("_", "").isalnum()
+
+
 def _build_external_messages(
     messages: list,
     supports_vision: bool,
@@ -4404,6 +4409,20 @@ async def _proxy_to_external_provider(
                 status_code = 400,
                 detail = "Failed to decrypt API key. The server key may have changed — try refreshing the page.",
             )
+
+    if provider_type == "huggingface" and not _is_huggingface_api_key_candidate(api_key):
+        raise HTTPException(
+            status_code = 401,
+            detail = openai_error_body(
+                (
+                    "Hugging Face requires a valid hf_ token for router chat completions. "
+                    "Set the Hugging Face token in Connections or switch to the native "
+                    "Ollama Qwen model."
+                ),
+                status = 401,
+                code = "invalid_api_key",
+            ),
+        )
 
     model = payload.external_model or payload.model
     if model == "default":

@@ -7,7 +7,10 @@ import { toast } from "@/lib/toast";
 import { create } from "zustand";
 import {
   COGNIX_DEFAULT_EXTERNAL_CHECKPOINT,
+  externalProviderCanSendWithoutFallback,
+  getExternalProviderApiKey,
   isExternalModelId,
+  loadExternalProviders,
   parseExternalModelId,
 } from "../external-providers";
 import {
@@ -157,7 +160,24 @@ function loadLastExternalCheckpoint(): string | null {
   if (typeof window === "undefined") return null;
   try {
     const value = window.localStorage.getItem(LAST_EXTERNAL_CHECKPOINT_KEY);
-    return isExternalModelId(value) ? value : null;
+    if (!isExternalModelId(value)) return null;
+    const selection = parseExternalModelId(value);
+    if (!selection) return null;
+    const provider = loadExternalProviders().find(
+      (item) => item.id === selection.providerId,
+    );
+    if (!provider) return null;
+    if (
+      provider.providerType === "huggingface" &&
+      !externalProviderCanSendWithoutFallback(
+        provider,
+        getExternalProviderApiKey(provider.id),
+      )
+    ) {
+      window.localStorage.removeItem(LAST_EXTERNAL_CHECKPOINT_KEY);
+      return null;
+    }
+    return value;
   } catch {
     return null;
   }

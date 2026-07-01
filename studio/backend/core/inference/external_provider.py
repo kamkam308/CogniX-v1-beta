@@ -6216,6 +6216,11 @@ def _friendly_provider_error_text(
     model: str | None = None,
 ) -> str:
     """Rewrite common provider errors into actionable Studio copy."""
+    if provider_type == "huggingface" and status_code in (401, 403):
+        return (
+            "Hugging Face rejected the saved token for"
+            f" '{model}'." if model else "Hugging Face rejected the saved token."
+        ) + " Set a valid hf_ token in Connections or switch to Ollama Qwen 4B."
     if status_code == 404 and model:
         lowered = raw_message.lower()
         if "not found" in lowered or "not_found" in lowered:

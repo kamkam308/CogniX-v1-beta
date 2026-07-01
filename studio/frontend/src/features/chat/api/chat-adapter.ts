@@ -9,6 +9,8 @@ import { toast } from "@/lib/toast";
 import type { MessageTiming, ToolCallMessagePart } from "@assistant-ui/core";
 import type { ChatModelAdapter } from "@assistant-ui/react";
 import {
+  COGNIX_DEFAULT_EXTERNAL_CHECKPOINT,
+  externalProviderApiKeyStatus,
   getExternalProviderApiKey,
   buildExternalModelId,
   isCustomProviderType,
@@ -1770,8 +1772,8 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
       const projectRagEnabled = ragProjectId
         ? await projectHasSources(ragProjectId)
         : false;
-      const externalSelection = parseExternalModelId(params.checkpoint);
-      const isExternalRequest = externalSelection !== null;
+      let externalSelection = parseExternalModelId(params.checkpoint);
+      let isExternalRequest = externalSelection !== null;
       if (
         isExternalRequest &&
         !useExternalProvidersStore.getState().connectionsEnabled
@@ -1781,16 +1783,59 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
             "Turn on Enable connections in Settings → Connections to use hosted models.",
         });
         clearSelectedImageEditReference();
-        throw new Error("Connections disabled.");
+          throw new Error("Connections disabled.");
       }
-      const externalProvider = isExternalRequest
-        ? loadExternalProviders().find(
-            (provider) => provider.id === externalSelection.providerId,
+      const externalProviders = loadExternalProviders();
+      let externalProvider = isExternalRequest
+        ? externalProviders.find(
+            (provider) => provider.id === externalSelection?.providerId,
           )
         : null;
-      const externalApiKey = externalProvider
+      let externalApiKey = externalProvider
         ? getExternalProviderApiKey(externalProvider.id).trim()
         : "";
+
+      const switchToCogniXOllamaFallback = (): boolean => {
+        const fallbackSelection = parseExternalModelId(
+          COGNIX_DEFAULT_EXTERNAL_CHECKPOINT,
+        );
+        if (!fallbackSelection) return false;
+        const fallbackProvider = externalProviders.find(
+          (provider) => provider.id === fallbackSelection.providerId,
+        );
+        if (!fallbackProvider) return false;
+        useChatRuntimeStore
+          .getState()
+          .setCheckpoint(COGNIX_DEFAULT_EXTERNAL_CHECKPOINT);
+        runtime = useChatRuntimeStore.getState();
+        params = runtime.params;
+        externalSelection = fallbackSelection;
+        isExternalRequest = true;
+        externalProvider = fallbackProvider;
+        externalApiKey = getExternalProviderApiKey(fallbackProvider.id).trim();
+        return true;
+      };
+
+      if (
+        isExternalRequest &&
+        externalProvider?.providerType === "huggingface"
+      ) {
+        const keyStatus = externalProviderApiKeyStatus(
+          externalProvider,
+          externalApiKey,
+        );
+        if (keyStatus === "missing" || keyStatus === "invalid") {
+          if (switchToCogniXOllamaFallback()) {
+            toast("CogniX Auto", {
+              description:
+                keyStatus === "missing"
+                  ? "Hugging Face has no saved token. Using Ollama Qwen 4B instead."
+                  : "Hugging Face token is not valid. Using Ollama Qwen 4B instead.",
+              duration: 3500,
+            });
+          }
+        }
+      }
 
       if (isExternalRequest && !externalProvider) {
         toast.error("Connection not found.", {

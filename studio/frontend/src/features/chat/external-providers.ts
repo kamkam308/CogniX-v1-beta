@@ -191,6 +191,47 @@ export function customPresetSkipsApiKeyField(
   return providerType === "ollama" || providerType === "llama_cpp";
 }
 
+export function isHuggingFaceTokenCandidate(value: string | null | undefined): boolean {
+  const token = (value ?? "").trim();
+  return /^hf_[A-Za-z0-9_]{8,}$/.test(token);
+}
+
+export function externalProviderAllowsMissingApiKey(
+  provider: Pick<ExternalProviderConfig, "providerType" | "baseUrl"> | null | undefined,
+): boolean {
+  if (!provider) return false;
+  if (isCustomProviderType(provider.providerType)) return true;
+  if (provider.providerType !== "gemini") return false;
+  try {
+    const host = new URL(provider.baseUrl).hostname.toLowerCase();
+    return host !== "generativelanguage.googleapis.com";
+  } catch {
+    return false;
+  }
+}
+
+export function externalProviderApiKeyStatus(
+  provider: Pick<ExternalProviderConfig, "providerType" | "baseUrl"> | null | undefined,
+  apiKey: string | null | undefined,
+): "not_required" | "usable" | "missing" | "invalid" {
+  if (!provider) return "missing";
+  if (externalProviderAllowsMissingApiKey(provider)) return "not_required";
+  const key = (apiKey ?? "").trim();
+  if (!key) return "missing";
+  if (provider.providerType === "huggingface" && !isHuggingFaceTokenCandidate(key)) {
+    return "invalid";
+  }
+  return "usable";
+}
+
+export function externalProviderCanSendWithoutFallback(
+  provider: Pick<ExternalProviderConfig, "providerType" | "baseUrl"> | null | undefined,
+  apiKey: string | null | undefined,
+): boolean {
+  const status = externalProviderApiKeyStatus(provider, apiKey);
+  return status === "usable" || status === "not_required";
+}
+
 /** Catalog load plus optional manual model IDs. */
 export function allowsManualModelIdsWithCatalog(
   providerType: string | null | undefined,
