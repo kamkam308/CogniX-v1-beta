@@ -11,6 +11,7 @@ if str(_BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(_BACKEND_ROOT))
 
 from auth import storage
+from core.cognix import favorite_models
 from routes import auth as auth_routes
 from routes import cognix as cognix_routes
 from storage import cognix_db, providers_db
@@ -140,6 +141,106 @@ def test_project_default_model_can_be_set_listed_read_and_deleted(client):
     )
     assert empty_response.status_code == 200
     assert empty_response.json()["defaultModel"] is None
+
+
+def test_favorite_models_blueprint_declares_native_services_and_no_model_execution():
+    blueprint = favorite_models.build_favorite_models_blueprint()
+
+    assert blueprint["favoriteModelServiceVersion"] == "cognix_favorite_model_service_v1"
+    assert {
+        "FavoriteModelService",
+        "ModelQuickSwitcher",
+        "UserModelPreferenceService",
+    }.issubset(set(blueprint["services"]))
+    assert blueprint["tables"] == ["favorite_models", "user_model_defaults", "project_model_defaults"]
+    assert blueprint["sideEffects"]["modelLoad"] is False
+    assert blueprint["sideEffects"]["generation"] is False
+    assert blueprint["sideEffects"]["frontendDirectModelCall"] is False
+
+
+def test_favorite_model_user_default_and_quick_switcher_are_native_and_audited(client):
+    seed_accounts()
+    seed_project()
+    headers = login_headers(client, "alice", "alice-password-123")
+
+    blueprint_response = client.get("/api/cognix/models/favorites/blueprint", headers = headers)
+    assert blueprint_response.status_code == 200
+    assert blueprint_response.json()["favoriteModelsBlueprint"]["uiContract"]["chatQuickSwitcher"] is True
+
+    favorite_response = client.post(
+        "/api/cognix/models/favorites",
+        headers = headers,
+        json = {
+            "modelId": "huihui_ai/qwen3-vl-abliterated:4b-instruct",
+            "label": "Ollama Qwen 4B",
+            "providerType": "ollama",
+            "providerId": "b6878df754d543b1",
+            "quickSwitcher": True,
+            "sortOrder": 10,
+        },
+    )
+    assert favorite_response.status_code == 200
+    favorite_body = favorite_response.json()
+    assert favorite_body["sideEffects"]["favoriteWrite"] is True
+    assert favorite_body["favoriteModel"]["payload"]["model"]["modelId"] == "huihui_ai/qwen3-vl-abliterated:4b-instruct"
+    assert favorite_body["favoriteModelPlan"]["sideEffects"]["modelLoad"] is False
+    assert favorite_body["auditLogId"]
+
+    default_response = client.put(
+        "/api/cognix/models/default",
+        headers = headers,
+        json = {
+            "modelId": "huihui_ai/qwen3-vl-abliterated:4b-instruct",
+            "label": "Ollama Qwen 4B",
+            "providerType": "ollama",
+            "providerId": "b6878df754d543b1",
+        },
+    )
+    assert default_response.status_code == 200
+    assert default_response.json()["defaultModel"]["payload"]["defaultModel"]["scope"] == "user"
+
+    quick_response = client.get("/api/cognix/models/quick-switcher", headers = headers)
+    assert quick_response.status_code == 200
+    quick = quick_response.json()["quickSwitcher"]
+    assert quick["summary"]["favoriteCount"] == 1
+    assert quick["summary"]["hasUserDefault"] is True
+    assert quick["selectedDefaultModel"]["modelId"] == "huihui_ai/qwen3-vl-abliterated:4b-instruct"
+
+    legacy_response = client.get("/api/cognix/model-pins", headers = headers)
+    assert legacy_response.status_code == 200
+    assert legacy_response.json()["pins"][0]["modelId"] == "huihui_ai/qwen3-vl-abliterated:4b-instruct"
+
+    stored_favorites = cognix_db.list_favorite_models("alice")
+    assert stored_favorites[0]["payload"]["favorite"]["quickSwitcher"] is True
+    assert cognix_db.get_user_model_default("alice") is not None
+
+
+def test_project_default_model_updates_roadmap_table_and_quick_switcher(client):
+    seed_accounts()
+    seed_project()
+    headers = login_headers(client, "alice", "alice-password-123")
+
+    response = client.put(
+        "/api/cognix/projects/project-alice-1/default-model",
+        headers = headers,
+        json = {
+            "modelId": "cognix-code-4b-q4",
+            "label": "CogniX Code 4B",
+            "providerType": "local_gguf",
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["projectDefaultModelPlan"]["defaultModel"]["scope"] == "project"
+    assert body["sideEffects"]["projectDefaultWrite"] is True
+    assert body["auditLogId"]
+
+    switcher = client.get(
+        "/api/cognix/models/quick-switcher?project_id=project-alice-1",
+        headers = headers,
+    )
+    assert switcher.status_code == 200
+    assert switcher.json()["quickSwitcher"]["projectDefaultModel"]["modelId"] == "cognix-code-4b-q4"
 
 
 def test_project_default_model_is_limited_to_project_owner(client):

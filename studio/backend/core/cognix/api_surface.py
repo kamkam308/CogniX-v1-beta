@@ -68,6 +68,27 @@ RECOMMENDED_ENDPOINTS: list[dict[str, Any]] = [
     },
     {
         "method": "GET",
+        "path": "/api/models/favorites",
+        "ownerService": "FavoriteModelService",
+        "purpose": "favorite_models",
+        "equivalentRoutes": ["/api/cognix/models/favorites", "/api/cognix/model-pins"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/models/default",
+        "ownerService": "UserModelPreferenceService",
+        "purpose": "user_default_model",
+        "equivalentRoutes": ["/api/cognix/models/default"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/models/quick-switcher",
+        "ownerService": "ModelQuickSwitcher",
+        "purpose": "chat_model_quick_switcher",
+        "equivalentRoutes": ["/api/cognix/models/quick-switcher"],
+    },
+    {
+        "method": "GET",
         "path": "/api/hardware/profile",
         "ownerService": "Orchestrator Service",
         "purpose": "hardware_profile",
@@ -132,6 +153,15 @@ PRODUCT_NAVIGATION_ROUTES: list[dict[str, Any]] = [
     {"path": "/images", "equivalentRoutes": ["/api/cognix/images"]},
     {"path": "/apps", "equivalentRoutes": ["/api/cognix/apps"]},
     {"path": "/gpts", "equivalentRoutes": ["/api/cognix/gpts"]},
+    {
+        "path": "/models/favorites",
+        "equivalentRoutes": [
+            "/api/cognix/models/favorites",
+            "/api/cognix/models/default",
+            "/api/cognix/models/quick-switcher",
+            "/api/cognix/model-pins",
+        ],
+    },
     {"path": "/notifications", "equivalentRoutes": ["/api/cognix/notifications", "/api/cognix/notifications/preferences"]},
     {"path": "/admin", "equivalentRoutes": ["/api/cognix/admin/dashboard"]},
     {"path": "/admin/users", "equivalentRoutes": ["/api/cognix/admin/users"]},

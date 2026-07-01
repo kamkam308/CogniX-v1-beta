@@ -2377,9 +2377,19 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
             username TEXT NOT NULL,
             model_id TEXT NOT NULL,
             label TEXT NOT NULL,
+            provider_type TEXT,
+            provider_id TEXT,
+            source TEXT NOT NULL DEFAULT 'user',
+            quick_switcher INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT '',
             PRIMARY KEY(username, model_id)
         );
+
+        CREATE INDEX IF NOT EXISTS idx_cognix_model_pins_username_sort
+            ON cognix_model_pins(username, quick_switcher, sort_order DESC, created_at DESC);
 
         CREATE TABLE IF NOT EXISTS cognix_project_model_defaults (
             project_id TEXT PRIMARY KEY,
@@ -2714,6 +2724,7 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
             ON cognix_game_sessions(username, created_at DESC);
         """
     )
+    _ensure_model_pin_columns(conn)
     _ensure_approval_request_columns(conn)
     _ensure_token_usage_columns(conn)
     _ensure_global_roadmap_tables(conn)
@@ -2729,6 +2740,35 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
     _ensure_admin_risk_scoring_columns(conn)
     _ensure_admin_system_health_columns(conn)
     _ensure_admin_data_retention_columns(conn)
+
+
+def _ensure_model_pin_columns(conn: sqlite3.Connection) -> None:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(cognix_model_pins)").fetchall()}
+    additions = {
+        "provider_type": "TEXT",
+        "provider_id": "TEXT",
+        "source": "TEXT NOT NULL DEFAULT 'user'",
+        "quick_switcher": "INTEGER NOT NULL DEFAULT 1",
+        "sort_order": "INTEGER NOT NULL DEFAULT 0",
+        "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+        "updated_at": "TEXT NOT NULL DEFAULT ''",
+    }
+    for column, definition in additions.items():
+        if column not in columns:
+            conn.execute(f"ALTER TABLE cognix_model_pins ADD COLUMN {column} {definition}")
+    conn.execute(
+        """
+        UPDATE cognix_model_pins
+        SET updated_at = created_at
+        WHERE updated_at IS NULL OR updated_at = ''
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_cognix_model_pins_username_sort
+            ON cognix_model_pins(username, quick_switcher, sort_order DESC, created_at DESC)
+        """
+    )
 
 
 def _ensure_approval_request_columns(conn: sqlite3.Connection) -> None:
@@ -16385,36 +16425,83 @@ def create_social_message(username: str, display_name: str, role: str, content: 
 def list_model_pins(username: str) -> list[dict[str, Any]]:
     conn = get_connection()
     try:
-        return _rows_to_dicts(
+        rows = _rows_to_dicts(
             conn.execute(
-                "SELECT * FROM cognix_model_pins WHERE username = ? ORDER BY created_at DESC",
+                """
+                SELECT * FROM cognix_model_pins
+                WHERE username = ?
+                ORDER BY quick_switcher DESC, sort_order DESC, updated_at DESC, created_at DESC
+                """,
                 (username,),
             ).fetchall()
         )
+        for row in rows:
+            row["quickSwitcher"] = bool(row.get("quick_switcher"))
+            row["metadata"] = _json_or_default(row.get("metadata_json"), {})
+        return rows
     finally:
         conn.close()
 
 
-def set_model_pin(username: str, model_id: str, label: str) -> dict[str, Any]:
-    created_at = _now()
+def set_model_pin(
+    username: str,
+    model_id: str,
+    label: str,
+    *,
+    provider_type: str | None = None,
+    provider_id: str | None = None,
+    source: str | None = None,
+    quick_switcher: bool = True,
+    sort_order: int = 0,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    now = _now()
+    normalized_model_id = model_id.strip()
+    normalized_label = (label or normalized_model_id).strip() or normalized_model_id
     conn = get_connection()
     try:
         conn.execute(
             """
-            INSERT INTO cognix_model_pins (username, model_id, label, created_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO cognix_model_pins
+                (
+                    username, model_id, label, provider_type, provider_id, source,
+                    quick_switcher, sort_order, metadata_json, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(username, model_id) DO UPDATE SET
-                label = excluded.label
+                label = excluded.label,
+                provider_type = excluded.provider_type,
+                provider_id = excluded.provider_id,
+                source = excluded.source,
+                quick_switcher = excluded.quick_switcher,
+                sort_order = excluded.sort_order,
+                metadata_json = excluded.metadata_json,
+                updated_at = excluded.updated_at
             """,
-            (username, model_id, label or model_id, created_at),
+            (
+                username,
+                normalized_model_id,
+                normalized_label,
+                (provider_type or "").strip() or None,
+                (provider_id or "").strip() or None,
+                (source or "user").strip() or "user",
+                1 if quick_switcher else 0,
+                int(sort_order or 0),
+                json.dumps(metadata or {}, ensure_ascii = False),
+                now,
+                now,
+            ),
         )
         conn.commit()
-        return row_to_dict(
+        row = row_to_dict(
             conn.execute(
                 "SELECT * FROM cognix_model_pins WHERE username = ? AND model_id = ?",
-                (username, model_id),
+                (username, normalized_model_id),
             ).fetchone()
         ) or {}
+        row["quickSwitcher"] = bool(row.get("quick_switcher"))
+        row["metadata"] = _json_or_default(row.get("metadata_json"), {})
+        return row
     finally:
         conn.close()
 
@@ -16427,6 +16514,286 @@ def delete_model_pin(username: str, model_id: str) -> None:
             (username, model_id),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def upsert_favorite_model(username: str, *, plan: dict[str, Any]) -> dict[str, Any]:
+    model = plan.get("model") if isinstance(plan.get("model"), dict) else {}
+    favorite = plan.get("favorite") if isinstance(plan.get("favorite"), dict) else {}
+    metadata = plan.get("metadata") if isinstance(plan.get("metadata"), dict) else {}
+    model_id = str(model.get("modelId") or "").strip()
+    if not model_id:
+        raise ValueError("Model id is required")
+    now = _now()
+    payload = {**plan, "username": username}
+    row_metadata = {
+        "modelId": model_id,
+        "providerType": model.get("providerType") or "local",
+        "providerId": model.get("providerId"),
+        "quickSwitcher": bool(favorite.get("quickSwitcher", True)),
+        "sortOrder": int(favorite.get("sortOrder") or 0),
+        **metadata,
+    }
+    conn = get_connection()
+    try:
+        existing = conn.execute(
+            """
+            SELECT id
+            FROM favorite_models
+            WHERE username = ? AND scope_type = 'favorite_model' AND scope_id = ?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (username, model_id),
+        ).fetchone()
+        if existing:
+            favorite_id = str(existing["id"])
+            payload["favoriteId"] = favorite_id
+            conn.execute(
+                """
+                UPDATE favorite_models
+                SET status = 'active', payload_json = ?, metadata_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    json.dumps(payload, ensure_ascii = False),
+                    json.dumps(row_metadata, ensure_ascii = False),
+                    now,
+                    favorite_id,
+                ),
+            )
+        else:
+            favorite_id = _new_id("favm")
+            payload["favoriteId"] = favorite_id
+            conn.execute(
+                """
+                INSERT INTO favorite_models
+                    (id, organization_id, username, project_id, scope_type, scope_id, status,
+                     payload_json, metadata_json, created_at, updated_at)
+                VALUES (?, 'local', ?, NULL, 'favorite_model', ?, 'active', ?, ?, ?, ?)
+                """,
+                (
+                    favorite_id,
+                    username,
+                    model_id,
+                    json.dumps(payload, ensure_ascii = False),
+                    json.dumps(row_metadata, ensure_ascii = False),
+                    now,
+                    now,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    set_model_pin(
+        username,
+        model_id,
+        str(model.get("label") or model_id),
+        provider_type = model.get("providerType"),
+        provider_id = model.get("providerId"),
+        source = model.get("source"),
+        quick_switcher = bool(favorite.get("quickSwitcher", True)),
+        sort_order = int(favorite.get("sortOrder") or 0),
+        metadata = metadata,
+    )
+    stored = get_favorite_model(username, model_id)
+    if stored is None:
+        raise RuntimeError("Favorite model was not readable after upsert.")
+    return stored
+
+
+def get_favorite_model(username: str, model_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM favorite_models
+            WHERE username = ? AND scope_type = 'favorite_model' AND scope_id = ? AND status = 'active'
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (username, model_id),
+        ).fetchone()
+        return _hydrate_global_payload_row(dict(row) if row else None)
+    finally:
+        conn.close()
+
+
+def list_favorite_models(username: str, *, include_removed: bool = False) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        status_clause = "" if include_removed else "AND status = 'active'"
+        rows = _rows_to_dicts(
+            conn.execute(
+                f"""
+                SELECT *
+                FROM favorite_models
+                WHERE username = ? AND scope_type = 'favorite_model'
+                {status_clause}
+                ORDER BY updated_at DESC
+                """,
+                (username,),
+            ).fetchall()
+        )
+        items = _hydrate_global_payload_rows(rows)
+        if items:
+            return items
+        legacy = list_model_pins(username)
+        converted: list[dict[str, Any]] = []
+        for row in legacy:
+            model_id = str(row.get("model_id") or "")
+            if not model_id:
+                continue
+            converted.append(
+                {
+                    **row,
+                    "scope_id": model_id,
+                    "scopeId": model_id,
+                    "status": "active",
+                    "payload": {
+                        "model": {
+                            "modelId": model_id,
+                            "label": row.get("label") or model_id,
+                            "providerType": row.get("provider_type") or "local",
+                            "providerId": row.get("provider_id"),
+                            "source": row.get("source") or "legacy_pin",
+                        },
+                        "favorite": {
+                            "quickSwitcher": bool(row.get("quick_switcher", 1)),
+                            "sortOrder": int(row.get("sort_order") or 0),
+                            "projectIds": [],
+                            "status": "active",
+                        },
+                    },
+                    "metadata": row.get("metadata") or {},
+                }
+            )
+        return converted
+    finally:
+        conn.close()
+
+
+def delete_favorite_model(username: str, model_id: str) -> bool:
+    now = _now()
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            """
+            UPDATE favorite_models
+            SET status = 'removed', updated_at = ?
+            WHERE username = ? AND scope_type = 'favorite_model' AND scope_id = ? AND status = 'active'
+            """,
+            (now, username, model_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    delete_model_pin(username, model_id)
+    return cursor.rowcount > 0
+
+
+def set_user_model_default(username: str, *, plan: dict[str, Any]) -> dict[str, Any]:
+    default_model = plan.get("defaultModel") if isinstance(plan.get("defaultModel"), dict) else {}
+    model_id = str(default_model.get("modelId") or "").strip()
+    if not model_id:
+        raise ValueError("Model id is required")
+    now = _now()
+    payload = {**plan, "username": username}
+    metadata = {
+        "modelId": model_id,
+        "providerType": default_model.get("providerType") or "local",
+        "providerId": default_model.get("providerId"),
+    }
+    conn = get_connection()
+    try:
+        existing = conn.execute(
+            """
+            SELECT id
+            FROM user_model_defaults
+            WHERE username = ? AND scope_type = 'user_model_default' AND scope_id = 'default'
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (username,),
+        ).fetchone()
+        if existing:
+            default_id = str(existing["id"])
+            payload["defaultId"] = default_id
+            conn.execute(
+                """
+                UPDATE user_model_defaults
+                SET status = 'active', payload_json = ?, metadata_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    json.dumps(payload, ensure_ascii = False),
+                    json.dumps(metadata, ensure_ascii = False),
+                    now,
+                    default_id,
+                ),
+            )
+        else:
+            default_id = _new_id("umod")
+            payload["defaultId"] = default_id
+            conn.execute(
+                """
+                INSERT INTO user_model_defaults
+                    (id, organization_id, username, project_id, scope_type, scope_id, status,
+                     payload_json, metadata_json, created_at, updated_at)
+                VALUES (?, 'local', ?, NULL, 'user_model_default', 'default', 'active', ?, ?, ?, ?)
+                """,
+                (
+                    default_id,
+                    username,
+                    json.dumps(payload, ensure_ascii = False),
+                    json.dumps(metadata, ensure_ascii = False),
+                    now,
+                    now,
+                ),
+            )
+        conn.commit()
+        stored = get_user_model_default(username)
+        if stored is None:
+            raise RuntimeError("User model default was not readable after upsert.")
+        return stored
+    finally:
+        conn.close()
+
+
+def get_user_model_default(username: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM user_model_defaults
+            WHERE username = ? AND scope_type = 'user_model_default' AND scope_id = 'default' AND status = 'active'
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (username,),
+        ).fetchone()
+        return _hydrate_global_payload_row(dict(row) if row else None)
+    finally:
+        conn.close()
+
+
+def delete_user_model_default(username: str) -> bool:
+    now = _now()
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            """
+            UPDATE user_model_defaults
+            SET status = 'removed', updated_at = ?
+            WHERE username = ? AND scope_type = 'user_model_default' AND scope_id = 'default' AND status = 'active'
+            """,
+            (now, username),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
     finally:
         conn.close()
 
@@ -16691,6 +17058,87 @@ def get_project_model_default(project_id: str, owner_username: str | None = None
         conn.close()
 
 
+def _upsert_project_model_default_record(
+    conn: sqlite3.Connection,
+    *,
+    owner_username: str,
+    project_id: str,
+    model_id: str,
+    label: str,
+    provider_type: str | None = None,
+    provider_id: str | None = None,
+    now: str,
+) -> None:
+    payload = {
+        "favoriteModelServiceVersion": "cognix_favorite_model_service_v1",
+        "userModelPreferenceServiceVersion": "cognix_user_model_preference_service_v1",
+        "mode": "native_project_default_model_record",
+        "username": owner_username,
+        "projectId": project_id,
+        "defaultModel": {
+            "modelId": model_id,
+            "label": label,
+            "providerType": provider_type or "local",
+            "providerId": provider_id,
+            "scope": "project",
+            "status": "active",
+        },
+    }
+    metadata = {
+        "projectId": project_id,
+        "modelId": model_id,
+        "providerType": provider_type or "local",
+        "providerId": provider_id,
+    }
+    existing = conn.execute(
+        """
+        SELECT id
+        FROM project_model_defaults
+        WHERE username = ? AND project_id = ? AND scope_type = 'project_model_default' AND scope_id = ?
+        ORDER BY updated_at DESC
+        LIMIT 1
+        """,
+        (owner_username, project_id, project_id),
+    ).fetchone()
+    if existing:
+        default_id = str(existing["id"])
+        payload["defaultId"] = default_id
+        conn.execute(
+            """
+            UPDATE project_model_defaults
+            SET status = 'active', payload_json = ?, metadata_json = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                json.dumps(payload, ensure_ascii = False),
+                json.dumps(metadata, ensure_ascii = False),
+                now,
+                default_id,
+            ),
+        )
+    else:
+        default_id = _new_id("pmod")
+        payload["defaultId"] = default_id
+        conn.execute(
+            """
+            INSERT INTO project_model_defaults
+                (id, organization_id, username, project_id, scope_type, scope_id, status,
+                 payload_json, metadata_json, created_at, updated_at)
+            VALUES (?, 'local', ?, ?, 'project_model_default', ?, 'active', ?, ?, ?, ?)
+            """,
+            (
+                default_id,
+                owner_username,
+                project_id,
+                project_id,
+                json.dumps(payload, ensure_ascii = False),
+                json.dumps(metadata, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+
+
 def set_project_model_default(
     owner_username: str,
     project_id: str,
@@ -16744,6 +17192,16 @@ def set_project_model_default(
                 now,
             ),
         )
+        _upsert_project_model_default_record(
+            conn,
+            owner_username = owner_username,
+            project_id = normalized_project_id,
+            model_id = normalized_model_id,
+            label = normalized_label,
+            provider_type = (provider_type or "").strip() or None,
+            provider_id = (provider_id or "").strip() or None,
+            now = now,
+        )
         conn.commit()
         return row_to_dict(
             conn.execute(
@@ -16756,6 +17214,7 @@ def set_project_model_default(
 
 
 def delete_project_model_default(owner_username: str, project_id: str) -> bool:
+    now = _now()
     conn = get_connection()
     try:
         cursor = conn.execute(
@@ -16764,6 +17223,14 @@ def delete_project_model_default(owner_username: str, project_id: str) -> bool:
             WHERE project_id = ? AND owner_username = ?
             """,
             (project_id, owner_username),
+        )
+        conn.execute(
+            """
+            UPDATE project_model_defaults
+            SET status = 'removed', updated_at = ?
+            WHERE project_id = ? AND username = ? AND scope_type = 'project_model_default' AND scope_id = ?
+            """,
+            (now, project_id, owner_username, project_id),
         )
         conn.commit()
         return cursor.rowcount > 0

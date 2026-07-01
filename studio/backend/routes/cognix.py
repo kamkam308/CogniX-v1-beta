@@ -60,6 +60,7 @@ from core.cognix import decision_explainer as cognix_decision_explainer
 from core.cognix import dynamic_ui as cognix_dynamic_ui
 from core.cognix import enterprise_chat as cognix_enterprise_chat
 from core.cognix import evolution_engine as cognix_evolution_engine
+from core.cognix import favorite_models as cognix_favorite_models
 from core.cognix import fine_tuning_planner as cognix_fine_tuning_planner
 from core.cognix import governance_manager as cognix_governance_manager
 from core.cognix import gpts as cognix_gpts
@@ -946,8 +947,28 @@ class SocialAgentRequest(BaseModel):
 
 
 class ModelPinRequest(BaseModel):
-    model_id: str = Field(..., min_length = 1, max_length = 240)
+    model_config = ConfigDict(populate_by_name = True)
+
+    model_id: str = Field(..., alias = "modelId", min_length = 1, max_length = 240)
     label: str = Field(..., min_length = 1, max_length = 240)
+    provider_type: str | None = Field(None, alias = "providerType", max_length = 80)
+    provider_id: str | None = Field(None, alias = "providerId", max_length = 160)
+    source: str | None = Field(None, max_length = 80)
+    project_ids: list[Any] | None = Field(None, alias = "projectIds")
+    quick_switcher: bool = Field(True, alias = "quickSwitcher")
+    sort_order: int = Field(0, alias = "sortOrder", ge = -10000, le = 10000)
+    metadata: dict[str, Any] | None = None
+
+
+class UserDefaultModelRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    model_id: str = Field(..., alias = "modelId", min_length = 1, max_length = 240)
+    label: str = Field(..., min_length = 1, max_length = 240)
+    provider_type: str | None = Field(None, alias = "providerType", max_length = 80)
+    provider_id: str | None = Field(None, alias = "providerId", max_length = 160)
+    source: str | None = Field(None, max_length = 80)
+    metadata: dict[str, Any] | None = None
 
 
 class ModelLifecyclePlanRequest(BaseModel):
@@ -14797,19 +14818,106 @@ async def my_model_pins(current_subject: str = Depends(get_current_jwt_subject))
     return {"pins": _rows(cognix_db.list_model_pins(current_subject))}
 
 
+@router.get("/models/favorites/blueprint")
+async def favorite_models_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_favorite_models.build_favorite_models_blueprint()
+    return {
+        "username": current_subject,
+        "favoriteModelsBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_favorite_models.COGNIX_FAVORITE_MODEL_SERVICE_VERSION,
+    }
+
+
+@router.get("/models/favorites")
+async def list_favorite_models(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    favorites = cognix_db.list_favorite_models(current_subject)
+    user_default = cognix_db.get_user_model_default(current_subject)
+    project_defaults = cognix_db.list_project_model_defaults(current_subject)
+    snapshot = cognix_favorite_models.build_quick_switcher_snapshot(
+        username = current_subject,
+        favorites = favorites,
+        user_default = user_default,
+        project_defaults = project_defaults,
+    )
+    return {
+        "username": current_subject,
+        "favoriteModels": _rows(favorites),
+        "userDefaultModel": _row(user_default) if user_default else None,
+        "projectDefaults": _rows(project_defaults),
+        "quickSwitcher": snapshot,
+        "count": len(favorites),
+        "sideEffects": snapshot.get("sideEffects", {}),
+        "plannerVersion": cognix_favorite_models.COGNIX_FAVORITE_MODEL_SERVICE_VERSION,
+    }
+
+
 @router.post("/model-pins")
 async def pin_model(
     payload: ModelPinRequest,
     current_subject: str = Depends(get_current_jwt_subject),
 ) -> dict[str, Any]:
+    return await favorite_model_upsert(payload, current_subject)
+
+
+@router.post("/models/favorites")
+async def favorite_model_upsert(
+    payload: ModelPinRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    plan = cognix_favorite_models.build_favorite_model_plan(
+        username = current_subject,
+        model_id = payload.model_id,
+        label = payload.label,
+        provider_type = payload.provider_type,
+        provider_id = payload.provider_id,
+        source = payload.source,
+        project_ids = payload.project_ids,
+        quick_switcher = payload.quick_switcher,
+        sort_order = payload.sort_order,
+        metadata = payload.metadata,
+    )
+    if not plan.get("valid"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Model id is required.")
+    favorite = cognix_db.upsert_favorite_model(current_subject, plan = plan)
+    pin = cognix_db.set_model_pin(
+        current_subject,
+        payload.model_id,
+        payload.label,
+        provider_type = payload.provider_type,
+        provider_id = payload.provider_id,
+        source = payload.source,
+        quick_switcher = payload.quick_switcher,
+        sort_order = payload.sort_order,
+        metadata = payload.metadata,
+    )
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "favoriteWrite": True,
+        "quickSwitcherWrite": payload.quick_switcher,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "favorite_model_upserted",
+        resource_type = "favorite_model",
+        resource_id = payload.model_id,
+        severity = "notice",
+        metadata = {
+            "favoriteModelServiceVersion": plan.get("favoriteModelServiceVersion"),
+            "modelQuickSwitcherVersion": plan.get("modelQuickSwitcherVersion"),
+            "quickSwitcher": payload.quick_switcher,
+            "sideEffects": side_effects,
+        },
+    )
     return {
-        "pin": _row(
-            cognix_db.set_model_pin(
-                current_subject,
-                payload.model_id,
-                payload.label,
-            )
-        )
+        "pin": _row(pin),
+        "favoriteModel": _row(favorite),
+        "favoriteModelPlan": plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_favorite_models.COGNIX_FAVORITE_MODEL_SERVICE_VERSION,
     }
 
 
@@ -14818,8 +14926,153 @@ async def unpin_model(
     model_id: str,
     current_subject: str = Depends(get_current_jwt_subject),
 ) -> dict[str, Any]:
-    cognix_db.delete_model_pin(current_subject, model_id)
-    return {"ok": True}
+    return await delete_favorite_model(model_id, current_subject)
+
+
+@router.delete("/models/favorites/{model_id:path}")
+async def delete_favorite_model(
+    model_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    removed = cognix_db.delete_favorite_model(current_subject, model_id)
+    side_effects = {
+        **cognix_favorite_models.build_favorite_models_blueprint().get("sideEffects", {}),
+        "favoriteDelete": removed,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "favorite_model_deleted",
+        resource_type = "favorite_model",
+        resource_id = model_id,
+        severity = "notice" if removed else "warning",
+        metadata = {
+            "favoriteModelServiceVersion": cognix_favorite_models.COGNIX_FAVORITE_MODEL_SERVICE_VERSION,
+            "removed": removed,
+            "sideEffects": side_effects,
+        },
+    )
+    return {"ok": True, "removed": removed, "auditLogId": audit.get("id"), "sideEffects": side_effects}
+
+
+@router.get("/models/default")
+async def get_user_default_model(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    default_model = cognix_db.get_user_model_default(current_subject)
+    return {
+        "username": current_subject,
+        "defaultModel": _row(default_model) if default_model else None,
+        "sideEffects": {"userDefaultWrite": False, "modelLoad": False, "generation": False},
+        "plannerVersion": cognix_favorite_models.COGNIX_USER_MODEL_PREFERENCE_SERVICE_VERSION,
+    }
+
+
+@router.put("/models/default")
+async def set_user_default_model(
+    payload: UserDefaultModelRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    plan = cognix_favorite_models.build_user_default_model_plan(
+        username = current_subject,
+        model_id = payload.model_id,
+        label = payload.label,
+        provider_type = payload.provider_type,
+        provider_id = payload.provider_id,
+        source = payload.source,
+        metadata = payload.metadata,
+    )
+    if not plan.get("valid"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Model id is required.")
+    default_model = cognix_db.set_user_model_default(current_subject, plan = plan)
+    favorite_plan = cognix_favorite_models.build_favorite_model_plan(
+        username = current_subject,
+        model_id = payload.model_id,
+        label = payload.label,
+        provider_type = payload.provider_type,
+        provider_id = payload.provider_id,
+        source = payload.source or "user_default",
+        quick_switcher = True,
+        metadata = payload.metadata,
+    )
+    favorite = cognix_db.upsert_favorite_model(current_subject, plan = favorite_plan)
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "userDefaultWrite": True,
+        "favoriteWrite": True,
+        "quickSwitcherWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "user_default_model_set",
+        resource_type = "user_model_default",
+        resource_id = payload.model_id,
+        severity = "notice",
+        metadata = {
+            "userModelPreferenceServiceVersion": plan.get("userModelPreferenceServiceVersion"),
+            "modelId": payload.model_id,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "defaultModel": _row(default_model),
+        "favoriteModel": _row(favorite),
+        "userDefaultModelPlan": plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_favorite_models.COGNIX_USER_MODEL_PREFERENCE_SERVICE_VERSION,
+    }
+
+
+@router.delete("/models/default")
+async def delete_user_default_model(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    removed = cognix_db.delete_user_model_default(current_subject)
+    side_effects = {
+        **cognix_favorite_models.build_favorite_models_blueprint().get("sideEffects", {}),
+        "userDefaultWrite": removed,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "user_default_model_deleted",
+        resource_type = "user_model_default",
+        resource_id = current_subject,
+        severity = "notice" if removed else "warning",
+        metadata = {
+            "userModelPreferenceServiceVersion": cognix_favorite_models.COGNIX_USER_MODEL_PREFERENCE_SERVICE_VERSION,
+            "removed": removed,
+            "sideEffects": side_effects,
+        },
+    )
+    return {"ok": True, "removed": removed, "auditLogId": audit.get("id"), "sideEffects": side_effects}
+
+
+@router.get("/models/quick-switcher")
+async def model_quick_switcher(
+    project_id: str | None = None,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    if project_id:
+        _require_owned_project(project_id, current_subject)
+    favorites = cognix_db.list_favorite_models(current_subject)
+    user_default = cognix_db.get_user_model_default(current_subject)
+    project_defaults = cognix_db.list_project_model_defaults(current_subject)
+    snapshot = cognix_favorite_models.build_quick_switcher_snapshot(
+        username = current_subject,
+        favorites = favorites,
+        user_default = user_default,
+        project_defaults = project_defaults,
+        active_project_id = project_id,
+    )
+    return {
+        "username": current_subject,
+        "quickSwitcher": snapshot,
+        "sideEffects": snapshot.get("sideEffects", {}),
+        "plannerVersion": cognix_favorite_models.COGNIX_MODEL_QUICK_SWITCHER_VERSION,
+    }
 
 
 @router.get("/project-model-defaults")
@@ -14852,6 +15105,17 @@ async def set_project_default_model(
     current_subject: str = Depends(get_current_jwt_subject),
 ) -> dict[str, Any]:
     _require_owned_project(project_id, current_subject)
+    plan = cognix_favorite_models.build_project_default_model_plan(
+        username = current_subject,
+        project_id = project_id,
+        model_id = payload.model_id,
+        label = payload.label,
+        provider_type = payload.provider_type,
+        provider_id = payload.provider_id,
+        source = "project_default",
+    )
+    if not plan.get("valid"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Project id and model id are required.")
     try:
         default_model = cognix_db.set_project_model_default(
             current_subject,
@@ -14863,7 +15127,46 @@ async def set_project_default_model(
         )
     except ValueError as exc:
         raise HTTPException(status_code = 400, detail = str(exc)) from exc
-    return {"defaultModel": _row(default_model)}
+    favorite_plan = cognix_favorite_models.build_favorite_model_plan(
+        username = current_subject,
+        model_id = payload.model_id,
+        label = payload.label,
+        provider_type = payload.provider_type,
+        provider_id = payload.provider_id,
+        source = "project_default",
+        project_ids = [project_id],
+        quick_switcher = True,
+    )
+    favorite = cognix_db.upsert_favorite_model(current_subject, plan = favorite_plan)
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "projectDefaultWrite": True,
+        "favoriteWrite": True,
+        "quickSwitcherWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "project_default_model_set",
+        resource_type = "project_model_default",
+        resource_id = project_id,
+        severity = "notice",
+        metadata = {
+            "favoriteModelServiceVersion": plan.get("favoriteModelServiceVersion"),
+            "userModelPreferenceServiceVersion": plan.get("userModelPreferenceServiceVersion"),
+            "projectId": project_id,
+            "modelId": payload.model_id,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "defaultModel": _row(default_model),
+        "favoriteModel": _row(favorite),
+        "projectDefaultModelPlan": plan,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+    }
 
 
 @router.delete("/projects/{project_id}/default-model")
@@ -14872,8 +15175,27 @@ async def delete_project_default_model(
     current_subject: str = Depends(get_current_jwt_subject),
 ) -> dict[str, Any]:
     _require_owned_project(project_id, current_subject)
-    cognix_db.delete_project_model_default(current_subject, project_id)
-    return {"ok": True}
+    removed = cognix_db.delete_project_model_default(current_subject, project_id)
+    side_effects = {
+        **cognix_favorite_models.build_favorite_models_blueprint().get("sideEffects", {}),
+        "projectDefaultWrite": removed,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "project_default_model_deleted",
+        resource_type = "project_model_default",
+        resource_id = project_id,
+        severity = "notice" if removed else "warning",
+        metadata = {
+            "favoriteModelServiceVersion": cognix_favorite_models.COGNIX_FAVORITE_MODEL_SERVICE_VERSION,
+            "projectId": project_id,
+            "removed": removed,
+            "sideEffects": side_effects,
+        },
+    )
+    return {"ok": True, "removed": removed, "auditLogId": audit.get("id"), "sideEffects": side_effects}
 
 
 @router.get("/projects/{project_id}/dna/blueprint")

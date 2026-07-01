@@ -9371,6 +9371,9 @@ def test_api_surface_contract_maps_roadmap_endpoints_without_route_mutation():
         {"path": "/api/inference/load", "methods": ["POST"]},
         {"path": "/api/inference/unload", "methods": ["POST"]},
         {"path": "/api/models/list", "methods": ["GET"]},
+        {"path": "/api/cognix/models/favorites", "methods": ["GET"]},
+        {"path": "/api/cognix/models/default", "methods": ["GET"]},
+        {"path": "/api/cognix/models/quick-switcher", "methods": ["GET"]},
         {"path": "/api/cognix/hardware/profile", "methods": ["GET"]},
         {"path": "/api/cognix/benchmark/run", "methods": ["POST"]},
         {"path": "/api/cognix/rag/indexing-plan", "methods": ["POST"]},
@@ -9386,7 +9389,7 @@ def test_api_surface_contract_maps_roadmap_endpoints_without_route_mutation():
     assert contract["apiSurfaceContractVersion"] == "cognix_api_surface_contract_v1"
     assert contract["mode"] == "api_surface_contract_read_only"
     assert contract["sourceOfTruth"] == "roadmap_section_28"
-    assert contract["summary"]["recommendedEndpointCount"] == 15
+    assert contract["summary"]["recommendedEndpointCount"] == len(cognix_api_surface.RECOMMENDED_ENDPOINTS)
     assert contract["summary"]["plannedEndpointCount"] == 0
     assert contract["summary"]["readyForMvpApi"] is True
     endpoints = {item["path"]: item for item in contract["endpoints"]}
@@ -9440,9 +9443,12 @@ def test_api_surface_contract_endpoint_is_admin_only_and_read_only():
             ("POST", "/api/cognix/router/classify"),
             ("POST", "/api/cognix/models/install-contract"),
             ("POST", "/api/inference/load"),
-            ("POST", "/api/inference/unload"),
-            ("GET", "/api/models/list"),
-            ("GET", "/api/cognix/hardware/profile"),
+                ("POST", "/api/inference/unload"),
+                ("GET", "/api/models/list"),
+                ("GET", "/api/cognix/models/favorites"),
+                ("GET", "/api/cognix/models/default"),
+                ("GET", "/api/cognix/models/quick-switcher"),
+                ("GET", "/api/cognix/hardware/profile"),
             ("POST", "/api/cognix/benchmark/run"),
             ("POST", "/api/cognix/rag/indexing-plan"),
             ("POST", "/api/train/start"),
@@ -9467,7 +9473,7 @@ def test_api_surface_contract_endpoint_is_admin_only_and_read_only():
 
     contract = body["apiSurfaceContract"]
     assert body["plannerVersion"] == "cognix_api_surface_contract_v1"
-    assert contract["summary"]["recommendedEndpointCount"] == 15
+    assert contract["summary"]["recommendedEndpointCount"] == len(cognix_api_surface.RECOMMENDED_ENDPOINTS)
     assert contract["coverage"]["missingEndpoints"] == []
     assert body["sideEffects"]["routeRegistration"] is False
     assert body["sideEffects"]["apiMutation"] is False

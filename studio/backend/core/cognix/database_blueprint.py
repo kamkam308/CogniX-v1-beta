@@ -185,7 +185,13 @@ ROADMAP_TABLES: list[dict[str, Any]] = [
         "domain": "models",
         "ownerService": "Model Runtime Adapter",
         "canonicalTables": ["cognix_installed_models"],
-        "supportingTables": ["cognix_model_pins", "cognix_project_model_defaults"],
+        "supportingTables": [
+            "cognix_model_pins",
+            "cognix_project_model_defaults",
+            "favorite_models",
+            "user_model_defaults",
+            "project_model_defaults",
+        ],
         "dataClass": "configuration",
     },
     {
