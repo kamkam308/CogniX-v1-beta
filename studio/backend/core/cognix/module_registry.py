@@ -1021,6 +1021,8 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
             "chat_project_bridge",
             "message_to_task_service",
             "project_mention_service",
+            "chat_answer_share_service",
+            "discussion_project_service",
             "chat_approval_request_bridge",
         ],
         "routes": [
@@ -1035,6 +1037,8 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
             "/api/cognix/chat-project-bridge/blueprint",
             "/api/cognix/chat-project-bridge/links",
             "/api/cognix/chat-project-bridge/message-tasks",
+            "/api/cognix/chat-project-bridge/answer-shares",
+            "/api/cognix/chat-project-bridge/projects-from-discussion",
             "/api/cognix/chat-project-bridge/mentions",
         ],
         "permissions": ["authenticated"],

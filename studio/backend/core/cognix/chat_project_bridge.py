@@ -17,6 +17,8 @@ from typing import Any
 COGNIX_CHAT_PROJECT_BRIDGE_VERSION = "cognix_chat_project_bridge_v1"
 COGNIX_MESSAGE_TO_TASK_VERSION = "cognix_message_to_task_service_v1"
 COGNIX_PROJECT_MENTION_VERSION = "cognix_project_mention_service_v1"
+COGNIX_CHAT_ANSWER_SHARE_VERSION = "cognix_chat_answer_share_v1"
+COGNIX_DISCUSSION_PROJECT_VERSION = "cognix_discussion_project_service_v1"
 
 LINK_TYPES = {"conversation", "answer_share", "approval_context"}
 TASK_PRIORITIES = {"low", "medium", "high", "critical"}
@@ -100,11 +102,104 @@ def build_chat_project_bridge_blueprint() -> dict[str, Any]:
         "sideEffects": {
             "chatProjectLinkWrite": False,
             "messageTaskWrite": False,
+            "chatMessageWrite": False,
+            "projectWrite": False,
             "approvalRequestWrite": False,
             "auditWrite": False,
             "modelCall": False,
             "networkCall": False,
             "toolExecution": False,
+        },
+    }
+
+
+def build_answer_share_plan(
+    *,
+    username: str,
+    project: dict[str, Any],
+    thread: dict[str, Any],
+    answer_text: str,
+    title: str | None = None,
+    parent_message_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    normalized_answer = _normalize(answer_text, limit = 12000, multiline = True)
+    return {
+        "chatProjectBridgeVersion": COGNIX_CHAT_PROJECT_BRIDGE_VERSION,
+        "answerShareVersion": COGNIX_CHAT_ANSWER_SHARE_VERSION,
+        "mode": "native_cognix_answer_share_plan",
+        "service": "ChatProjectBridge",
+        "username": _normalize(username, limit = 160),
+        "project": _project_summary(project),
+        "thread": _thread_summary(thread),
+        "answer": {
+            "title": _normalize(title, limit = 180) or "CogniX answer",
+            "text": normalized_answer,
+            "parentMessageId": _normalize(parent_message_id, limit = 160) or None,
+            "metadata": metadata or {},
+        },
+        "link": {
+            "projectId": _normalize(project.get("id"), limit = 160),
+            "threadId": _normalize(thread.get("id"), limit = 160),
+            "linkType": "answer_share",
+            "source": "project",
+            "status": "active",
+        },
+        "permissionPlan": {
+            "requiredPermissions": ["authenticated"],
+            "projectOwnershipRequired": True,
+            "threadOwnershipRequired": True,
+            "approvalRequired": False,
+        },
+        "sideEffects": {
+            **build_chat_project_bridge_blueprint()["sideEffects"],
+            "chatMessageWrite": False,
+            "chatProjectLinkWrite": False,
+        },
+    }
+
+
+def build_discussion_project_plan(
+    *,
+    username: str,
+    thread: dict[str, Any],
+    project_id: str,
+    project_name: str,
+    discussion_summary: str,
+    instructions: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "chatProjectBridgeVersion": COGNIX_CHAT_PROJECT_BRIDGE_VERSION,
+        "discussionProjectVersion": COGNIX_DISCUSSION_PROJECT_VERSION,
+        "mode": "native_project_from_discussion_plan",
+        "service": "ChatProjectBridge",
+        "username": _normalize(username, limit = 160),
+        "thread": _thread_summary(thread),
+        "project": {
+            "id": _normalize(project_id, limit = 160),
+            "name": _normalize(project_name, limit = 240) or "Project from discussion",
+            "instructions": _normalize(instructions or discussion_summary, limit = 4000, multiline = True),
+            "discussionSummary": _normalize(discussion_summary, limit = 4000, multiline = True),
+            "metadata": metadata or {},
+        },
+        "link": {
+            "projectId": _normalize(project_id, limit = 160),
+            "threadId": _normalize(thread.get("id"), limit = 160),
+            "linkType": "conversation",
+            "source": "discussion",
+            "status": "active",
+        },
+        "permissionPlan": {
+            "requiredPermissions": ["authenticated"],
+            "threadOwnershipRequired": True,
+            "projectOwnershipRequired": False,
+            "approvalRequired": False,
+        },
+        "sideEffects": {
+            **build_chat_project_bridge_blueprint()["sideEffects"],
+            "projectWrite": False,
+            "chatProjectLinkWrite": False,
         },
     }
 

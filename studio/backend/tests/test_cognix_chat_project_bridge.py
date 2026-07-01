@@ -180,6 +180,60 @@ def test_chat_project_bridge_endpoint_creates_link_task_and_approval(client: Tes
     assert bridge_body["summary"]["taskCount"] == 1
 
 
+def test_chat_project_bridge_creates_project_from_discussion_and_shares_answer(client: TestClient):
+    seed_accounts()
+    headers = login_headers(client, "alice", "alice-password-123")
+    seed_thread(owner_username = "alice", thread_id = "thread-discussion-1", project_id = None)
+
+    project_response = client.post(
+        "/api/cognix/chat-project-bridge/projects-from-discussion",
+        json = {
+            "threadId": "thread-discussion-1",
+            "projectId": "project-from-discussion-1",
+            "projectName": "Discussion Project",
+            "discussionSummary": "The team agreed to turn this chat into a tracked CogniX project.",
+            "instructions": "Track decisions and next tasks from the discussion.",
+        },
+        headers = headers,
+    )
+    assert project_response.status_code == 200
+    project_body = project_response.json()
+    assert project_body["project"]["id"] == "project-from-discussion-1"
+    assert project_body["link"]["threadId"] == "thread-discussion-1"
+    assert project_body["sideEffects"]["projectWrite"] is True
+    assert project_body["sideEffects"]["chatProjectLinkWrite"] is True
+
+    share_response = client.post(
+        "/api/cognix/chat-project-bridge/answer-shares",
+        json = {
+            "projectId": "project-from-discussion-1",
+            "threadId": "thread-discussion-1",
+            "messageId": "answer-share-1",
+            "answerText": "CogniX summary: create the bridge project and keep the task list attached.",
+            "title": "Bridge summary",
+        },
+        headers = headers,
+    )
+    assert share_response.status_code == 200
+    share_body = share_response.json()
+    assert share_body["message"]["id"] == "answer-share-1"
+    assert share_body["message"]["role"] == "assistant"
+    assert share_body["link"]["linkType"] == "answer_share"
+    assert share_body["sideEffects"]["chatMessageWrite"] is True
+
+    stored_message = studio_db_storage.get_chat_message("thread-discussion-1", "answer-share-1")
+    assert stored_message is not None
+    assert stored_message["metadata"]["sharedFromProjectId"] == "project-from-discussion-1"
+
+    bridge_response = client.get(
+        "/api/cognix/chat-project-bridge?project_id=project-from-discussion-1",
+        headers = headers,
+    )
+    assert bridge_response.status_code == 200
+    bridge_body = bridge_response.json()
+    assert bridge_body["summary"]["linkCount"] == 2
+
+
 def test_chat_project_bridge_rejects_cross_user_thread(client: TestClient):
     seed_accounts()
     headers = login_headers(client, "alice", "alice-password-123")

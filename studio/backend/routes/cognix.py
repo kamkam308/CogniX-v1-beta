@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import re
 import shutil
+import time
 import urllib.parse
 import urllib.request
+import uuid
 import xml.etree.ElementTree as ET
 from datetime import timezone
 from email.utils import parsedate_to_datetime
@@ -122,6 +124,8 @@ from storage.studio_db import (
     list_chat_messages_for_threads,
     list_chat_projects,
     list_chat_threads,
+    upsert_chat_message,
+    upsert_chat_project,
 )
 
 
@@ -891,6 +895,31 @@ class MessageTaskCreateRequest(BaseModel):
     require_approval: bool = Field(False, alias = "requireApproval")
     metadata: dict[str, Any] | None = None
     store_task: bool = Field(True, alias = "storeTask")
+
+
+class AnswerShareRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    project_id: str = Field(..., alias = "projectId", min_length = 1, max_length = 160)
+    thread_id: str = Field(..., alias = "threadId", min_length = 1, max_length = 160)
+    answer_text: str = Field(..., alias = "answerText", min_length = 1, max_length = 12000)
+    title: str | None = Field(None, max_length = 180)
+    parent_message_id: str | None = Field(None, alias = "parentMessageId", max_length = 160)
+    message_id: str | None = Field(None, alias = "messageId", max_length = 160)
+    metadata: dict[str, Any] | None = None
+    store_share: bool = Field(True, alias = "storeShare")
+
+
+class DiscussionProjectCreateRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    thread_id: str = Field(..., alias = "threadId", min_length = 1, max_length = 160)
+    project_id: str | None = Field(None, alias = "projectId", max_length = 160)
+    project_name: str = Field(..., alias = "projectName", min_length = 1, max_length = 240)
+    discussion_summary: str = Field(..., alias = "discussionSummary", min_length = 1, max_length = 4000)
+    instructions: str | None = Field(None, max_length = 4000)
+    metadata: dict[str, Any] | None = None
+    store_project: bool = Field(True, alias = "storeProject")
 
 
 class ProjectMentionRequest(BaseModel):
@@ -13488,6 +13517,171 @@ async def create_message_task(
         "task": _row(task),
         "messageTaskPlan": {**plan, "sideEffects": side_effects},
         "approvalRequest": _row(approval) if approval else None,
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+    }
+
+
+@router.post("/chat-project-bridge/answer-shares")
+async def share_cognix_answer_to_chat(
+    payload: AnswerShareRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    project = _require_owned_project(payload.project_id, current_subject)
+    thread = _require_owned_thread(payload.thread_id, current_subject)
+    if payload.parent_message_id:
+        _get_owned_message(payload.thread_id, payload.parent_message_id, current_subject)
+    plan = cognix_chat_project_bridge.build_answer_share_plan(
+        username = current_subject,
+        project = project,
+        thread = thread,
+        answer_text = payload.answer_text,
+        title = payload.title,
+        parent_message_id = payload.parent_message_id,
+        metadata = payload.metadata,
+    )
+    if not payload.store_share:
+        return {
+            "message": None,
+            "link": None,
+            "answerSharePlan": plan,
+            "sideEffects": plan["sideEffects"],
+        }
+    message_id = payload.message_id or f"ans_{uuid.uuid4().hex}"
+    message = upsert_chat_message(
+        {
+            "id": message_id,
+            "threadId": payload.thread_id,
+            "parentId": payload.parent_message_id,
+            "role": "assistant",
+            "content": [{"type": "text", "text": plan["answer"]["text"]}],
+            "metadata": {
+                **(payload.metadata or {}),
+                "sharedFromProjectId": payload.project_id,
+                "chatProjectBridgeVersion": plan["chatProjectBridgeVersion"],
+                "answerShareVersion": plan["answerShareVersion"],
+                "title": plan["answer"]["title"],
+            },
+            "createdAt": int(time.time() * 1000),
+        }
+    )
+    link = cognix_db.create_chat_project_link(
+        current_subject,
+        project_id = payload.project_id,
+        thread_id = payload.thread_id,
+        link_type = "answer_share",
+        source = "project",
+        metadata = {
+            **(payload.metadata or {}),
+            "messageId": message_id,
+            "answerShareVersion": plan["answerShareVersion"],
+            "chatProjectBridgeVersion": plan["chatProjectBridgeVersion"],
+        },
+    )
+    side_effects = {
+        **plan["sideEffects"],
+        "chatMessageWrite": True,
+        "chatProjectLinkWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "cognix_answer_shared_to_chat",
+        resource_type = "chat_message",
+        resource_id = message_id,
+        severity = "notice",
+        metadata = {
+            "projectId": payload.project_id,
+            "threadId": payload.thread_id,
+            "messageId": message_id,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "message": _row(message),
+        "link": _row(link),
+        "answerSharePlan": {**plan, "sideEffects": side_effects},
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+    }
+
+
+@router.post("/chat-project-bridge/projects-from-discussion")
+async def create_project_from_discussion(
+    payload: DiscussionProjectCreateRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    thread = _require_owned_thread(payload.thread_id, current_subject)
+    base_slug = re.sub(r"[^a-z0-9]+", "-", payload.project_name.lower()).strip("-")[:48] or "discussion"
+    project_id = payload.project_id or f"project-{base_slug}-{uuid.uuid4().hex[:8]}"
+    existing_project = get_chat_project(project_id)
+    if existing_project is not None and payload.store_project:
+        raise HTTPException(status_code = 409, detail = "Project already exists")
+    plan = cognix_chat_project_bridge.build_discussion_project_plan(
+        username = current_subject,
+        thread = thread,
+        project_id = project_id,
+        project_name = payload.project_name,
+        discussion_summary = payload.discussion_summary,
+        instructions = payload.instructions,
+        metadata = payload.metadata,
+    )
+    if not payload.store_project:
+        return {
+            "project": None,
+            "link": None,
+            "discussionProjectPlan": plan,
+            "sideEffects": plan["sideEffects"],
+        }
+    now_ms = int(time.time() * 1000)
+    project = upsert_chat_project(
+        {
+            "id": project_id,
+            "name": plan["project"]["name"],
+            "instructions": plan["project"]["instructions"],
+            "archived": False,
+            "createdAt": now_ms,
+            "updatedAt": now_ms,
+        },
+        owner_username = current_subject,
+    )
+    link = cognix_db.create_chat_project_link(
+        current_subject,
+        project_id = project_id,
+        thread_id = payload.thread_id,
+        link_type = "conversation",
+        source = "discussion",
+        metadata = {
+            **(payload.metadata or {}),
+            "discussionSummary": plan["project"]["discussionSummary"],
+            "discussionProjectVersion": plan["discussionProjectVersion"],
+            "chatProjectBridgeVersion": plan["chatProjectBridgeVersion"],
+        },
+    )
+    side_effects = {
+        **plan["sideEffects"],
+        "projectWrite": True,
+        "chatProjectLinkWrite": True,
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "project_created_from_discussion",
+        resource_type = "chat_project",
+        resource_id = project_id,
+        severity = "notice",
+        metadata = {
+            "projectId": project_id,
+            "threadId": payload.thread_id,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "project": _row(project),
+        "link": _row(link),
+        "discussionProjectPlan": {**plan, "sideEffects": side_effects},
         "auditLogId": audit.get("id"),
         "sideEffects": side_effects,
     }

@@ -174,7 +174,15 @@ PRODUCT_NAVIGATION_ROUTES: list[dict[str, Any]] = [
     },
     {"path": "/chat", "equivalentRoutes": ["/api/inference/chat/completions", "/v1/chat/completions"]},
     {"path": "/chat/enterprise", "equivalentRoutes": ["/api/cognix/admin/chats/policy", "/api/cognix/admin/chats"]},
-    {"path": "/projects/:id/collaboration", "equivalentRoutes": ["/api/cognix/chat-project-bridge/links", "/api/projects/{project_id}"]},
+    {
+        "path": "/projects/:id/collaboration",
+        "equivalentRoutes": [
+            "/api/cognix/chat-project-bridge/links",
+            "/api/cognix/chat-project-bridge/answer-shares",
+            "/api/cognix/chat-project-bridge/projects-from-discussion",
+            "/api/projects/{project_id}",
+        ],
+    },
     {"path": "/projects/:id/skills", "equivalentRoutes": ["/api/cognix/projects/{project_id}/skills", "/api/cognix/skills/marketplace", "/api/cognix/memory/skills"]},
     {"path": "/projects/:id/directives", "equivalentRoutes": ["/api/cognix/projects/{project_id}/directives"]},
     {"path": "/cowork", "equivalentRoutes": ["/api/cognix/admin/approvals", "/api/cognix/command-palette/plan"]},
