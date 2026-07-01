@@ -99,6 +99,7 @@ from core.cognix import sandbox as cognix_sandbox
 from core.cognix import scheduled as cognix_scheduled
 from core.cognix import security_policy as cognix_security_policy
 from core.cognix import semantic_cache as cognix_semantic_cache
+from core.cognix import sensitive_audit as cognix_sensitive_audit
 from core.cognix import shared_knowledge_base as cognix_shared_knowledge_base
 from core.cognix import skill_memory as cognix_skill_memory
 from core.cognix import skill_marketplace as cognix_skill_marketplace
@@ -17853,6 +17854,48 @@ async def admin_benchmark_runs(current_subject: str = Depends(get_current_jwt_su
 async def admin_audit_logs(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
     _require_admin(current_subject)
     return {"logs": _rows(cognix_db.list_audit_logs(limit = 500))}
+
+
+@router.get("/admin/sensitive-audit/blueprint")
+async def admin_sensitive_audit_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    logs = cognix_db.list_audit_logs(limit = 500)
+    sensitive_logs = cognix_db.list_sensitive_action_logs(limit = 500)
+    blueprint = cognix_sensitive_audit.build_sensitive_audit_blueprint(
+        audit_logs = logs,
+        sensitive_action_logs = sensitive_logs,
+    )
+    return {
+        "sensitiveAuditBlueprint": blueprint,
+        "plannerVersion": cognix_sensitive_audit.COGNIX_SENSITIVE_AUDIT_VERSION,
+        "sideEffects": blueprint.get("sideEffects", {}),
+    }
+
+
+@router.get("/admin/sensitive-action-logs")
+async def admin_sensitive_action_logs(
+    username: str | None = None,
+    actor_username: str | None = None,
+    sensitive_category: str | None = None,
+    query: str | None = None,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    logs = cognix_db.list_sensitive_action_logs(
+        username = username,
+        actor_username = actor_username,
+        sensitive_category = sensitive_category,
+        query = query,
+        limit = 500,
+    )
+    blueprint = cognix_sensitive_audit.build_sensitive_audit_blueprint(sensitive_action_logs = logs)
+    return {
+        "sensitiveActionLogs": _rows(logs),
+        "summary": blueprint["summary"],
+        "immutabilityPolicy": blueprint["immutabilityPolicy"],
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_sensitive_audit.COGNIX_AUDIT_SEARCH_SERVICE_VERSION,
+    }
 
 
 @router.get("/admin/audit-governance-contract")

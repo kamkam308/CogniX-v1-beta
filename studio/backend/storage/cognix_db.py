@@ -14,6 +14,7 @@ from hashlib import sha256
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from core.cognix import sensitive_audit as cognix_sensitive_audit
 from utils.paths import studio_db_path
 
 _schema_lock = threading.Lock()
@@ -142,6 +143,7 @@ GLOBAL_ROADMAP_TABLE_NAMES = (
     "organization_policies",
     "risk_scores",
     "audit_logs",
+    "sensitive_action_logs",
     "notifications",
 )
 PROJECT_SKILL_DIRECTIVE_TABLE_NAMES = (
@@ -2711,6 +2713,7 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
     _ensure_approval_request_columns(conn)
     _ensure_token_usage_columns(conn)
     _ensure_global_roadmap_tables(conn)
+    _ensure_sensitive_action_log_columns(conn)
     _ensure_project_skill_directive_columns(conn)
     _ensure_admin_project_oversight_columns(conn)
     _ensure_admin_organization_settings_columns(conn)
@@ -2828,6 +2831,53 @@ def _ensure_columns(conn: sqlite3.Connection, table_name: str, additions: dict[s
     for column_name, definition in additions.items():
         if column_name not in columns:
             conn.execute(f"ALTER TABLE {quoted_table} ADD COLUMN {column_name} {definition}")
+
+
+def _ensure_sensitive_action_log_columns(conn: sqlite3.Connection) -> None:
+    if "sensitive_action_logs" not in GLOBAL_ROADMAP_TABLE_NAMES:
+        raise RuntimeError("sensitive_action_logs must be declared as a roadmap table")
+    _ensure_columns(
+        conn,
+        "sensitive_action_logs",
+        {
+            "audit_log_id": "TEXT NOT NULL DEFAULT ''",
+            "action": "TEXT NOT NULL DEFAULT ''",
+            "sensitive_category": "TEXT NOT NULL DEFAULT ''",
+            "actor_username": "TEXT",
+            "target_username": "TEXT",
+            "resource_type": "TEXT NOT NULL DEFAULT ''",
+            "resource_id": "TEXT",
+            "severity": "TEXT NOT NULL DEFAULT 'warning'",
+            "matched_keywords_json": "TEXT NOT NULL DEFAULT '[]'",
+            "search_text": "TEXT NOT NULL DEFAULT ''",
+            "immutable_by_standard_admin": "INTEGER NOT NULL DEFAULT 1",
+            "redacted_metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+        },
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_sensitive_action_logs_created
+            ON sensitive_action_logs(created_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_sensitive_action_logs_category_created
+            ON sensitive_action_logs(sensitive_category, created_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_sensitive_action_logs_actor_created
+            ON sensitive_action_logs(actor_username, created_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_sensitive_action_logs_audit
+            ON sensitive_action_logs(audit_log_id)
+        """
+    )
 
 
 def _ensure_project_skill_directive_columns(conn: sqlite3.Connection) -> None:
@@ -6501,6 +6551,103 @@ def build_audit_governance_contract(
     }
 
 
+def _hydrate_sensitive_action_log(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["organizationId"] = item.get("organization_id")
+    item["projectId"] = item.get("project_id")
+    item["auditLogId"] = item.get("audit_log_id")
+    item["sensitiveCategory"] = item.get("sensitive_category")
+    item["actorUsername"] = item.get("actor_username")
+    item["targetUsername"] = item.get("target_username")
+    item["resourceType"] = item.get("resource_type")
+    item["resourceId"] = item.get("resource_id")
+    item["matchedKeywords"] = _json_or_default(item.get("matched_keywords_json"), [])
+    item["immutableByStandardAdmin"] = bool(item.get("immutable_by_standard_admin"))
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    item["redactedMetadata"] = _json_or_default(item.get("redacted_metadata_json"), {})
+    return item
+
+
+def _insert_sensitive_action_log(
+    conn: sqlite3.Connection,
+    *,
+    audit_log_id: str,
+    username: str | None,
+    actor_username: str | None,
+    action: str,
+    resource_type: str,
+    resource_id: str | None,
+    severity: str,
+    metadata: dict[str, Any],
+    classification: dict[str, Any],
+    created_at: str,
+) -> dict[str, Any] | None:
+    if not classification.get("sensitive"):
+        return None
+    log_id = _new_id("sens")
+    category = str(classification.get("category") or "sensitive_action")
+    matched_keywords = classification.get("matchedKeywords") or []
+    effective_severity = str(classification.get("severity") or severity or "warning")
+    search_text = " ".join(
+        [
+            action,
+            resource_type,
+            resource_id or "",
+            username or "",
+            actor_username or "",
+            category,
+            " ".join(str(item) for item in matched_keywords),
+        ]
+    ).lower()
+    conn.execute(
+        """
+        INSERT INTO sensitive_action_logs
+            (
+                id, organization_id, username, project_id, scope_type, scope_id, status,
+                payload_json, metadata_json, created_at, updated_at,
+                audit_log_id, action, sensitive_category, actor_username, target_username,
+                resource_type, resource_id, severity, matched_keywords_json, search_text,
+                immutable_by_standard_admin, redacted_metadata_json
+            )
+        VALUES (?, 'default', ?, NULL, 'sensitive_action', ?, 'active', ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        """,
+        (
+            log_id,
+            username,
+            audit_log_id,
+            json.dumps(
+                {
+                    "auditLogId": audit_log_id,
+                    "action": action,
+                    "sensitiveCategory": category,
+                    "severity": effective_severity,
+                    "matchedKeywords": matched_keywords,
+                },
+                ensure_ascii = False,
+            ),
+            json.dumps(metadata, ensure_ascii = False),
+            created_at,
+            created_at,
+            audit_log_id,
+            action.strip()[:160],
+            category[:120],
+            actor_username,
+            username,
+            resource_type.strip()[:120],
+            resource_id,
+            effective_severity[:40],
+            json.dumps(matched_keywords, ensure_ascii = False),
+            search_text[:1000],
+            json.dumps(metadata, ensure_ascii = False),
+        ),
+    )
+    return _hydrate_sensitive_action_log(
+        row_to_dict(conn.execute("SELECT * FROM sensitive_action_logs WHERE id = ?", (log_id,)).fetchone())
+        or {}
+    )
+
+
 def create_audit_log(
     *,
     username: str | None,
@@ -6517,6 +6664,11 @@ def create_audit_log(
     if normalized_severity not in {"info", "notice", "warning", "critical"}:
         normalized_severity = "info"
     safe_metadata = redact_audit_metadata(metadata or {})
+    classification = cognix_sensitive_audit.classify_sensitive_action(
+        action,
+        resource_type = resource_type,
+        metadata = safe_metadata if isinstance(safe_metadata, dict) else {},
+    )
     conn = get_connection()
     try:
         conn.execute(
@@ -6547,11 +6699,31 @@ def create_audit_log(
                 created_at,
             ),
         )
+        sensitive_log = _insert_sensitive_action_log(
+            conn,
+            audit_log_id = audit_id,
+            username = username,
+            actor_username = actor_username,
+            action = action,
+            resource_type = resource_type,
+            resource_id = resource_id,
+            severity = normalized_severity,
+            metadata = safe_metadata if isinstance(safe_metadata, dict) else {},
+            classification = classification,
+            created_at = created_at,
+        )
         _prune_audit_logs(conn, AUDIT_LOG_RETENTION_LIMIT)
         conn.commit()
-        return row_to_dict(
+        audit_log = row_to_dict(
             conn.execute("SELECT * FROM cognix_audit_logs WHERE id = ?", (audit_id,)).fetchone()
         ) or {}
+        audit_log["metadata"] = safe_metadata
+        audit_log["sensitiveAudit"] = {
+            "sensitive": bool(classification.get("sensitive")),
+            "category": classification.get("category"),
+            "sensitiveActionLogId": sensitive_log.get("id") if sensitive_log else None,
+        }
+        return audit_log
     finally:
         conn.close()
 
@@ -6587,6 +6759,46 @@ def list_audit_logs(
         for log in logs:
             log["metadata"] = _json_or_default(log.get("metadata_json"), {})
         return logs
+    finally:
+        conn.close()
+
+
+def list_sensitive_action_logs(
+    *,
+    username: str | None = None,
+    actor_username: str | None = None,
+    sensitive_category: str | None = None,
+    query: str | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        normalized_limit = max(1, min(int(limit), 500))
+        clauses: list[str] = []
+        values: list[Any] = []
+        if username:
+            clauses.append("target_username = ?")
+            values.append(username)
+        if actor_username:
+            clauses.append("actor_username = ?")
+            values.append(actor_username)
+        if sensitive_category:
+            clauses.append("sensitive_category = ?")
+            values.append(sensitive_category)
+        if query:
+            clauses.append("search_text LIKE ?")
+            values.append(f"%{str(query).strip().lower()[:160]}%")
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        rows = conn.execute(
+            f"""
+            SELECT * FROM sensitive_action_logs
+            {where}
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (*values, normalized_limit),
+        ).fetchall()
+        return [_hydrate_sensitive_action_log(row) for row in _rows_to_dicts(rows)]
     finally:
         conn.close()
 

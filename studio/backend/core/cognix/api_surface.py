@@ -141,6 +141,14 @@ PRODUCT_NAVIGATION_ROUTES: list[dict[str, Any]] = [
     {"path": "/admin/approvals", "equivalentRoutes": ["/api/cognix/admin/approvals"]},
     {"path": "/admin/banned", "equivalentRoutes": ["/api/cognix/admin/banned", "/api/cognix/admin/bans"]},
     {"path": "/admin/security-threats", "equivalentRoutes": ["/api/cognix/admin/security-threats"]},
+    {
+        "path": "/admin/audit",
+        "equivalentRoutes": [
+            "/api/cognix/admin/audit-logs",
+            "/api/cognix/admin/sensitive-action-logs",
+            "/api/cognix/admin/sensitive-audit/blueprint",
+        ],
+    },
     {"path": "/admin/token-usage", "equivalentRoutes": ["/api/cognix/admin/usage"]},
     {"path": "/admin/model-usage", "equivalentRoutes": ["/api/cognix/admin/usage"]},
     {"path": "/admin/projects", "equivalentRoutes": ["/api/cognix/admin/projects", "/api/projects", "/api/cognix/admin/database-blueprint"]},
