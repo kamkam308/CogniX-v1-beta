@@ -2154,7 +2154,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-admin-security-center",
         "displayName": "CogniX Admin Security Center",
         "editionTargets": ["business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "security_threat_reports",
             "security_threat_service",

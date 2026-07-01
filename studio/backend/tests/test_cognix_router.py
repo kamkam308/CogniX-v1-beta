@@ -10191,6 +10191,9 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "admin_chat_access_audit" in modules["cognix-admin-chat-access"]["capabilities"]
     assert "/api/cognix/admin/chats" in modules["cognix-admin-chat-access"]["routes"]
     assert "/api/cognix/admin/chats/{thread_id}/export-plan" in modules["cognix-admin-chat-access"]["routes"]
+    assert modules["cognix-admin-security-center"]["status"] == "enabled"
+    assert modules["cognix-admin-security-center"]["activationState"] == "ready"
+    assert modules["cognix-admin-security-center"]["dependencyState"]["ready"] is True
     assert "security_threat_service" in modules["cognix-admin-security-center"]["capabilities"]
     assert "vulnerability_scanner_adapter" in modules["cognix-admin-security-center"]["capabilities"]
     assert "vulnerability_scanner_contract" in modules["cognix-admin-security-center"]["capabilities"]
