@@ -23,6 +23,7 @@ from core.cognix import admin_chat as cognix_admin_chat
 from core.cognix import admin_limits as cognix_admin_limits
 from core.cognix import admin_permissions as cognix_admin_permissions
 from core.cognix import admin_users as cognix_admin_users
+from core.cognix import agent_mode as cognix_agent_mode
 from core.cognix import api_surface as cognix_api_surface
 from core.cognix import apps as cognix_apps
 from core.cognix import background_agents as cognix_background_agents
@@ -34,6 +35,7 @@ from core.cognix import context_graph as cognix_context_graph
 from core.cognix import context_heatmap as cognix_context_heatmap
 from core.cognix import context_manager as cognix_context_manager
 from core.cognix import cost_optimizer as cognix_cost_optimizer
+from core.cognix import cowork as cognix_cowork
 from core.cognix import database_blueprint as cognix_database_blueprint
 from core.cognix import dataset_builder as cognix_dataset_builder
 from core.cognix import debate_orchestrator as cognix_debate_orchestrator
@@ -7468,6 +7470,149 @@ def test_sandbox_endpoint_stores_report_and_is_user_scoped():
     assert logs[0]["metadata"]["sideEffects"]["experimentRun"] is False
 
 
+def test_agent_mode_endpoint_plans_guarded_session_without_execution():
+    seed_accounts()
+    blueprint = cognix_agent_mode.build_agent_mode_blueprint()
+    assert blueprint["securityPolicy"]["directToolExecutionAllowed"] is False
+    assert blueprint["securityPolicy"]["humanConfirmationForSensitiveTools"] is True
+
+    body = run_async(
+        cognix_routes.create_agent_mode_session(
+            cognix_routes.AgentRunRequest(
+                goal = "Auditer le projet CogniX et preparer un rapport de corrections natives.",
+                mode = "repo",
+                allowedTools = ["github", "terminal"],
+                maxSteps = 4,
+                storeSession = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    session_id = body["agentSession"]["id"]
+    step_id = body["plan"]["steps"][0]["id"]
+
+    updated = run_async(
+        cognix_routes.update_agent_mode_step(
+            session_id,
+            step_id,
+            cognix_routes.AgentStepUpdateRequest(
+                status = "complete",
+                result = "Analyse terminee sans execution directe.",
+                progressPercent = 25,
+            ),
+            current_subject = "alice",
+        )
+    )
+    tool = run_async(
+        cognix_routes.create_agent_mode_tool_call_plan(
+            session_id,
+            cognix_routes.AgentToolCallPlanRequest(
+                toolId = "terminal",
+                action = "write_file",
+                arguments = {"path": "studio/backend/core/cognix/example.py"},
+                stepId = step_id,
+                storeCall = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    output = run_async(
+        cognix_routes.create_agent_mode_output(
+            session_id,
+            cognix_routes.AgentOutputRequest(
+                content = "Rapport final: garder les changements natifs, testes et audites.",
+                outputType = "final_report",
+                storeOutput = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    listed = run_async(cognix_routes.agent_mode_sessions(current_subject = "alice"))
+
+    assert body["plan"]["sideEffects"]["sessionWrite"] is True
+    assert body["plan"]["sideEffects"]["toolExecution"] is False
+    assert body["agentSession"]["metadata"]["stepCount"] >= 1
+    assert len(body["agentSession"]["steps"]) >= 1
+    assert updated["stepPlan"]["step"]["progressPercent"] == 25
+    assert updated["stepPlan"]["sideEffects"]["stepWrite"] is True
+    assert tool["requiresApproval"] is True
+    assert tool["willExecuteNow"] is False
+    assert tool["toolCallPlan"]["sideEffects"]["toolExecution"] is False
+    assert "sensitive_tool_without_confirmation" in tool["toolCallPlan"]["blockedActions"]
+    assert output["outputPlan"]["output"]["memoryWriteNow"] is False
+    assert output["outputPlan"]["sideEffects"]["memoryWrite"] is False
+    assert listed["sessions"][0]["id"] == session_id
+
+    actions = {
+        item["action"]
+        for item in run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))["logs"]
+    }
+    assert {
+        "agent_mode_session_planned",
+        "agent_mode_step_updated",
+        "agent_mode_tool_call_planned",
+        "agent_mode_output_created",
+    }.issubset(actions)
+
+
+def test_cowork_mode_endpoint_keeps_visible_approval_gated_control():
+    seed_accounts()
+    blueprint = cognix_cowork.build_cowork_blueprint()
+    assert blueprint["securityPolicy"]["neverStealth"] is True
+    assert blueprint["securityPolicy"]["directExecutionAllowed"] is False
+
+    body = run_async(
+        cognix_routes.create_cowork_session(
+            cognix_routes.CoworkSessionRequest(
+                level = "full_dev_project",
+                objective = "Travailler sur CogniX avec controles visibles et approbation humaine.",
+                storeSession = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    session_id = body["coworkSession"]["id"]
+    action = run_async(
+        cognix_routes.create_cowork_action(
+            session_id,
+            cognix_routes.CoworkActionRequest(
+                actionType = "run_command",
+                command = "npm run build",
+                description = "Verifier CogniX sans executer automatiquement.",
+                storeAction = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    status = run_async(
+        cognix_routes.update_cowork_session_status(
+            session_id,
+            cognix_routes.CoworkStatusRequest(status = "paused"),
+            current_subject = "alice",
+        )
+    )
+    listed_actions = run_async(cognix_routes.cowork_actions(session_id, current_subject = "alice"))
+
+    assert body["requiresApproval"] is True
+    assert body["plan"]["cowork"]["visibleToUser"] is True
+    assert body["plan"]["cowork"]["neverStealth"] is True
+    assert body["plan"]["sideEffects"]["commandExecution"] is False
+    assert action["requiresApproval"] is True
+    assert action["willExecuteNow"] is False
+    assert action["actionPlan"]["action"]["status"] == "approval_required"
+    assert action["actionPlan"]["sideEffects"]["commandExecution"] is False
+    assert status["coworkSession"]["status"] == "paused"
+    assert status["statusPlan"]["visibleToUser"] is True
+    assert listed_actions["actions"][0]["scopeId"] == session_id
+    assert listed_actions["actions"][0]["metadata"]["sessionId"] == session_id
+
+    actions = {
+        item["action"]
+        for item in run_async(cognix_routes.admin_audit_logs(current_subject = storage.DEFAULT_ADMIN_USERNAME))["logs"]
+    }
+    assert {"cowork_session_planned", "cowork_action_planned", "cowork_status_updated"}.issubset(actions)
+
+
 def test_codex_pipeline_plans_required_gates_without_modifying_code():
     plan = cognix_codex_pipeline.build_codex_pipeline_plan(
         objective = "Ajoute un module CogniX Chemistry dans le code source",
@@ -9710,6 +9855,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-intent-prediction",
         "cognix-dynamic-ui",
         "cognix-background-agents",
+        "cognix-agent-mode",
+        "cognix-cowork-mode",
         "cognix-ai-timeline",
         "cognix-thinking-status",
         "cognix-response-reflection",
@@ -9927,6 +10074,22 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "agent_queue_contract" in modules["cognix-background-agents"]["capabilities"]
     assert "progress_tracking" in modules["cognix-background-agents"]["capabilities"]
     assert "/api/cognix/background-agents/job-plan" in modules["cognix-background-agents"]["routes"]
+    assert modules["cognix-agent-mode"]["status"] == "enabled"
+    assert modules["cognix-agent-mode"]["activationState"] == "ready"
+    assert modules["cognix-agent-mode"]["dependencyState"]["ready"] is True
+    assert "task_decomposition" in modules["cognix-agent-mode"]["capabilities"]
+    assert "guarded_tool_call_planning" in modules["cognix-agent-mode"]["capabilities"]
+    assert "progress_streaming_contract" in modules["cognix-agent-mode"]["capabilities"]
+    assert "/api/cognix/agent-mode/sessions" in modules["cognix-agent-mode"]["routes"]
+    assert "/api/cognix/agent-mode/sessions/{session_id}/tool-call-plan" in modules["cognix-agent-mode"]["routes"]
+    assert modules["cognix-cowork-mode"]["status"] == "enabled"
+    assert modules["cognix-cowork-mode"]["activationState"] == "ready"
+    assert modules["cognix-cowork-mode"]["dependencyState"]["ready"] is True
+    assert "visible_cowork_session" in modules["cognix-cowork-mode"]["capabilities"]
+    assert "human_approval_gate" in modules["cognix-cowork-mode"]["capabilities"]
+    assert "never_stealth_policy" in modules["cognix-cowork-mode"]["capabilities"]
+    assert "/api/cognix/cowork/sessions" in modules["cognix-cowork-mode"]["routes"]
+    assert "/api/cognix/cowork/sessions/{session_id}/actions" in modules["cognix-cowork-mode"]["routes"]
     assert modules["cognix-ai-timeline"]["status"] == "enabled"
     assert modules["cognix-ai-timeline"]["activationState"] == "ready"
     assert modules["cognix-ai-timeline"]["dependencyState"]["ready"] is True
@@ -10271,6 +10434,9 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/admin/vulnerability-scanner-contract" in modules["cognix-admin-security-center"]["routes"]
     assert "/api/cognix/admin/risk-scores" in modules["cognix-admin-security-center"]["routes"]
     assert "/api/cognix/admin/system-health" in modules["cognix-admin-security-center"]["routes"]
+    assert modules["cognix-codex-secure-agent"]["status"] == "enabled"
+    assert modules["cognix-codex-secure-agent"]["activationState"] == "ready"
+    assert modules["cognix-codex-secure-agent"]["dependencyState"]["ready"] is True
     assert "codex_run_contract" in modules["cognix-codex-secure-agent"]["capabilities"]
     assert "codex_night_mode_contract" in modules["cognix-codex-secure-agent"]["capabilities"]
     assert "codex_night_report_contract" in modules["cognix-codex-secure-agent"]["capabilities"]

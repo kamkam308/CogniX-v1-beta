@@ -702,7 +702,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-agent-mode",
         "displayName": "CogniX Agent Mode",
         "editionTargets": ["developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "task_decomposition",
             "agent_step_tracking",
@@ -735,7 +735,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-cowork-mode",
         "displayName": "CogniX Cowork Mode",
         "editionTargets": ["developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "visible_cowork_session",
             "remote_control_policy_engine",
@@ -1632,7 +1632,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-codex-secure-agent",
         "displayName": "CogniX Codex Secure Agent",
         "editionTargets": ["developer", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "feature_request",
             "branch_pipeline",
