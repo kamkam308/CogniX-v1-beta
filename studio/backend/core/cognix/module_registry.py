@@ -896,7 +896,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-context-graph",
         "displayName": "CogniX Live Context Graph",
         "editionTargets": ["free", "local", "developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "context_graph_snapshot",
             "entity_extraction",
@@ -940,7 +940,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-long-term-skill-memory",
         "displayName": "CogniX Long Term Skill Memory",
         "editionTargets": ["free", "local", "developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "skill_memory_candidates",
             "preference_extraction",
@@ -965,7 +965,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-personal-ai-twin",
         "displayName": "CogniX Personal AI Twin",
         "editionTargets": ["free", "local", "developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "personal_ai_profile",
             "style_profiler",
@@ -994,7 +994,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-live-memory-editing",
         "displayName": "CogniX Live Memory Editing",
         "editionTargets": ["free", "local", "developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "live_memory_editor",
             "memory_versioning",

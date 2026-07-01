@@ -9958,6 +9958,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/tools/discovery/capabilities" in modules["cognix-tool-discovery"]["routes"]
     assert "/api/cognix/tools/discovery/analyze" in modules["cognix-tool-discovery"]["routes"]
     assert "/api/cognix/tools/recommendations" in modules["cognix-tool-discovery"]["routes"]
+    assert modules["cognix-context-graph"]["status"] == "enabled"
+    assert modules["cognix-context-graph"]["activationState"] == "ready"
     assert modules["cognix-context-graph"]["dependencyState"]["ready"] is True
     assert "context_graph_snapshot" in modules["cognix-context-graph"]["capabilities"]
     assert "entity_extraction" in modules["cognix-context-graph"]["capabilities"]
@@ -9972,6 +9974,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "context_boundary_contract" in modules["cognix-memory-manager"]["capabilities"]
     assert "raw_history_boundary" in modules["cognix-memory-manager"]["capabilities"]
     assert "/api/cognix/memory/plan" in modules["cognix-memory-manager"]["routes"]
+    assert modules["cognix-long-term-skill-memory"]["status"] == "enabled"
+    assert modules["cognix-long-term-skill-memory"]["activationState"] == "ready"
     assert modules["cognix-long-term-skill-memory"]["dependencyState"]["ready"] is True
     assert "skill_memory_candidates" in modules["cognix-long-term-skill-memory"]["capabilities"]
     assert "memory_approval_flow" in modules["cognix-long-term-skill-memory"]["capabilities"]
@@ -9979,6 +9983,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/memory/skills/candidates" in modules["cognix-long-term-skill-memory"]["routes"]
     assert "/api/cognix/memory/skills/export" in modules["cognix-long-term-skill-memory"]["routes"]
     assert "/api/cognix/memory/skills/injection-plan" in modules["cognix-long-term-skill-memory"]["routes"]
+    assert modules["cognix-personal-ai-twin"]["status"] == "enabled"
+    assert modules["cognix-personal-ai-twin"]["activationState"] == "ready"
     assert modules["cognix-personal-ai-twin"]["dependencyState"]["ready"] is True
     assert "personal_ai_profile" in modules["cognix-personal-ai-twin"]["capabilities"]
     assert "style_profiler" in modules["cognix-personal-ai-twin"]["capabilities"]
@@ -9988,6 +9994,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/personal-twin/profile/plan" in modules["cognix-personal-ai-twin"]["routes"]
     assert "/api/cognix/personal-twin/export" in modules["cognix-personal-ai-twin"]["routes"]
     assert "/api/cognix/personal-twin/injection-plan" in modules["cognix-personal-ai-twin"]["routes"]
+    assert modules["cognix-live-memory-editing"]["status"] == "enabled"
+    assert modules["cognix-live-memory-editing"]["activationState"] == "ready"
     assert modules["cognix-live-memory-editing"]["dependencyState"]["ready"] is True
     assert "live_memory_editor" in modules["cognix-live-memory-editing"]["capabilities"]
     assert "memory_versioning" in modules["cognix-live-memory-editing"]["capabilities"]
