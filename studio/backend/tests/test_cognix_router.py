@@ -10020,6 +10020,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/memory/editor/items" in modules["cognix-live-memory-editing"]["routes"]
     assert "/api/cognix/memory/editor/merge" in modules["cognix-live-memory-editing"]["routes"]
     assert "/api/cognix/memory/editor/export" in modules["cognix-live-memory-editing"]["routes"]
+    assert modules["cognix-ai-simulation"]["status"] == "enabled"
+    assert modules["cognix-ai-simulation"]["activationState"] == "ready"
     assert modules["cognix-ai-simulation"]["dependencyState"]["ready"] is True
     assert "simulation_engine" in modules["cognix-ai-simulation"]["capabilities"]
     assert "synthetic_user_generation" in modules["cognix-ai-simulation"]["capabilities"]
@@ -10030,6 +10032,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/simulations/blueprint" in modules["cognix-ai-simulation"]["routes"]
     assert "/api/cognix/simulations/runs" in modules["cognix-ai-simulation"]["routes"]
     assert "/api/cognix/simulations/runs/{run_id}" in modules["cognix-ai-simulation"]["routes"]
+    assert modules["cognix-ai-sandbox"]["status"] == "enabled"
+    assert modules["cognix-ai-sandbox"]["activationState"] == "ready"
     assert modules["cognix-ai-sandbox"]["dependencyState"]["ready"] is True
     assert "sandbox_manager" in modules["cognix-ai-sandbox"]["capabilities"]
     assert "isolated_runtime" in modules["cognix-ai-sandbox"]["capabilities"]
@@ -10131,6 +10135,9 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/quantization/variants" in modules["cognix-optimization-engine"]["routes"]
     assert "/api/cognix/costs/plan" in modules["cognix-optimization-engine"]["routes"]
     assert "/api/cognix/costs/providers" in modules["cognix-optimization-engine"]["routes"]
+    assert modules["cognix-research-watch"]["status"] == "enabled"
+    assert modules["cognix-research-watch"]["activationState"] == "ready"
+    assert modules["cognix-research-watch"]["dependencyState"]["ready"] is True
     assert "technology_watch" in modules["cognix-research-watch"]["capabilities"]
     assert "benchmark_gate" in modules["cognix-research-watch"]["capabilities"]
     assert "research_topics" in modules["cognix-research-watch"]["capabilities"]
@@ -10138,6 +10145,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/research/integration-plan" in modules["cognix-research-watch"]["routes"]
     assert "/api/cognix/research/assistant/topics" in modules["cognix-research-watch"]["routes"]
     assert "/api/cognix/research/assistant/reports/plan" in modules["cognix-research-watch"]["routes"]
+    assert modules["cognix-ai-evolution-engine"]["status"] == "enabled"
+    assert modules["cognix-ai-evolution-engine"]["activationState"] == "ready"
     assert modules["cognix-ai-evolution-engine"]["dependencyState"]["ready"] is True
     assert "evolution_lab" in modules["cognix-ai-evolution-engine"]["capabilities"]
     assert "technique_classifier" in modules["cognix-ai-evolution-engine"]["capabilities"]

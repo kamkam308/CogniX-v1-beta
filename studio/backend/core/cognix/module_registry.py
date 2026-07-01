@@ -1020,7 +1020,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-ai-simulation",
         "displayName": "CogniX AI Simulation",
         "editionTargets": ["developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "simulation_engine",
             "synthetic_user_generation",
@@ -1045,7 +1045,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-ai-sandbox",
         "displayName": "CogniX AI Sandbox",
         "editionTargets": ["developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "sandbox_manager",
             "isolated_runtime",
@@ -1396,7 +1396,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-research-watch",
         "displayName": "CogniX Research Watch",
         "editionTargets": ["developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "technology_watch",
             "research_triage",
@@ -1426,7 +1426,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-ai-evolution-engine",
         "displayName": "CogniX AI Evolution Engine",
         "editionTargets": ["developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "evolution_lab",
             "research_watcher_pipeline",
