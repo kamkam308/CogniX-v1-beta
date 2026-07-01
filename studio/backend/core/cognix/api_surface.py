@@ -132,6 +132,7 @@ PRODUCT_NAVIGATION_ROUTES: list[dict[str, Any]] = [
     {"path": "/images", "equivalentRoutes": ["/api/cognix/images"]},
     {"path": "/apps", "equivalentRoutes": ["/api/cognix/apps"]},
     {"path": "/gpts", "equivalentRoutes": ["/api/cognix/gpts"]},
+    {"path": "/notifications", "equivalentRoutes": ["/api/cognix/notifications", "/api/cognix/notifications/preferences"]},
     {"path": "/admin", "equivalentRoutes": ["/api/cognix/admin/dashboard"]},
     {"path": "/admin/users", "equivalentRoutes": ["/api/cognix/admin/users"]},
     {"path": "/admin/chats", "equivalentRoutes": ["/api/cognix/admin/chats"]},
@@ -139,6 +140,7 @@ PRODUCT_NAVIGATION_ROUTES: list[dict[str, Any]] = [
     {"path": "/admin/limits", "equivalentRoutes": ["/api/cognix/admin/limits"]},
     {"path": "/admin/permissions", "equivalentRoutes": ["/api/cognix/admin/permissions/matrix"]},
     {"path": "/admin/approvals", "equivalentRoutes": ["/api/cognix/admin/approvals"]},
+    {"path": "/admin/alerts", "equivalentRoutes": ["/api/cognix/admin/alerts", "/api/cognix/admin/notifications/blueprint"]},
     {"path": "/admin/banned", "equivalentRoutes": ["/api/cognix/admin/banned", "/api/cognix/admin/bans"]},
     {"path": "/admin/security-threats", "equivalentRoutes": ["/api/cognix/admin/security-threats"]},
     {

@@ -14,6 +14,7 @@ from hashlib import sha256
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from core.cognix import notifications as cognix_notifications
 from core.cognix import sensitive_audit as cognix_sensitive_audit
 from utils.paths import studio_db_path
 
@@ -145,6 +146,8 @@ GLOBAL_ROADMAP_TABLE_NAMES = (
     "audit_logs",
     "sensitive_action_logs",
     "notifications",
+    "notification_preferences",
+    "admin_alerts",
 )
 PROJECT_SKILL_DIRECTIVE_TABLE_NAMES = (
     "skills",
@@ -2714,6 +2717,7 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
     _ensure_token_usage_columns(conn)
     _ensure_global_roadmap_tables(conn)
     _ensure_sensitive_action_log_columns(conn)
+    _ensure_notification_columns(conn)
     _ensure_project_skill_directive_columns(conn)
     _ensure_admin_project_oversight_columns(conn)
     _ensure_admin_organization_settings_columns(conn)
@@ -2876,6 +2880,72 @@ def _ensure_sensitive_action_log_columns(conn: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_sensitive_action_logs_audit
             ON sensitive_action_logs(audit_log_id)
+        """
+    )
+
+
+def _ensure_notification_columns(conn: sqlite3.Connection) -> None:
+    for table_name in ("notifications", "notification_preferences", "admin_alerts"):
+        if table_name not in GLOBAL_ROADMAP_TABLE_NAMES:
+            raise RuntimeError(f"{table_name} must be declared as a roadmap table")
+    _ensure_columns(
+        conn,
+        "notifications",
+        {
+            "notification_type": "TEXT NOT NULL DEFAULT 'codex_report_available'",
+            "title": "TEXT NOT NULL DEFAULT ''",
+            "message": "TEXT NOT NULL DEFAULT ''",
+            "priority": "TEXT NOT NULL DEFAULT 'normal'",
+            "source_type": "TEXT NOT NULL DEFAULT ''",
+            "source_id": "TEXT",
+            "action_url": "TEXT",
+            "read_at": "TEXT",
+            "delivered_via_json": "TEXT NOT NULL DEFAULT '[]'",
+            "notification_json": "TEXT NOT NULL DEFAULT '{}'",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "notification_preferences",
+        {
+            "notification_type": "TEXT NOT NULL DEFAULT 'all'",
+            "enabled": "INTEGER NOT NULL DEFAULT 1",
+            "channels_json": "TEXT NOT NULL DEFAULT '[\"in_app\"]'",
+            "quiet_hours_json": "TEXT NOT NULL DEFAULT '{}'",
+            "updated_by": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "admin_alerts",
+        {
+            "alert_type": "TEXT NOT NULL DEFAULT 'notice'",
+            "severity": "TEXT NOT NULL DEFAULT 'notice'",
+            "title": "TEXT NOT NULL DEFAULT ''",
+            "message": "TEXT NOT NULL DEFAULT ''",
+            "source_type": "TEXT NOT NULL DEFAULT ''",
+            "source_id": "TEXT",
+            "alert_json": "TEXT NOT NULL DEFAULT '{}'",
+            "acknowledged_by": "TEXT",
+            "acknowledged_at": "TEXT",
+        },
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_preferences_user_type
+            ON notification_preferences(username, notification_type)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_notifications_user_read_created
+            ON notifications(username, read_at, created_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_admin_alerts_status_severity_created
+            ON admin_alerts(status, severity, created_at DESC)
         """
     )
 
@@ -4026,6 +4096,362 @@ def list_approval_comments(request_id: str | None = None) -> list[dict[str, Any]
                 "SELECT * FROM cognix_approval_comments ORDER BY created_at ASC"
             ).fetchall()
         return _rows_to_dicts(rows)
+    finally:
+        conn.close()
+
+
+def _hydrate_notification(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["organizationId"] = item.get("organization_id")
+    item["projectId"] = item.get("project_id")
+    item["notificationType"] = item.get("notification_type")
+    item["sourceType"] = item.get("source_type")
+    item["sourceId"] = item.get("source_id")
+    item["actionUrl"] = item.get("action_url")
+    item["readAt"] = item.get("read_at")
+    item["deliveredVia"] = _json_or_default(item.get("delivered_via_json"), [])
+    item["notification"] = _json_or_default(item.get("notification_json"), {})
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def create_notification(
+    *,
+    username: str,
+    notification_type: str,
+    title: str,
+    message: str,
+    priority: str = "normal",
+    source_type: str = "",
+    source_id: str | None = None,
+    action_url: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    delivered_via: list[str] | None = None,
+) -> dict[str, Any]:
+    created_at = _now()
+    notification_id = _new_id("ntf")
+    normalized_type = cognix_notifications.normalize_notification_type(notification_type)
+    normalized_priority = priority if priority in {"low", "normal", "high", "critical"} else "normal"
+    payload = {
+        "notificationType": normalized_type,
+        "title": str(title or "")[:240],
+        "message": str(message or "")[:2000],
+        "priority": normalized_priority,
+        "sourceType": str(source_type or "")[:120],
+        "sourceId": str(source_id or "")[:240],
+    }
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO notifications
+                (
+                    id, organization_id, username, project_id, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    notification_type, title, message, priority, source_type, source_id,
+                    action_url, read_at, delivered_via_json, notification_json
+                )
+            VALUES (?, 'default', ?, NULL, 'user_notification', ?, 'unread', ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+            """,
+            (
+                notification_id,
+                username,
+                str(source_id or notification_id)[:240],
+                json.dumps(payload, ensure_ascii = False),
+                json.dumps(redact_audit_metadata(metadata or {}), ensure_ascii = False),
+                created_at,
+                created_at,
+                normalized_type,
+                str(title or "")[:240],
+                str(message or "")[:2000],
+                normalized_priority,
+                str(source_type or "")[:120],
+                str(source_id or "")[:240] or None,
+                action_url[:1000] if action_url else None,
+                json.dumps(delivered_via or ["in_app"], ensure_ascii = False),
+                json.dumps(payload, ensure_ascii = False),
+            ),
+        )
+        conn.commit()
+        return _hydrate_notification(
+            row_to_dict(conn.execute("SELECT * FROM notifications WHERE id = ?", (notification_id,)).fetchone())
+            or {}
+        )
+    finally:
+        conn.close()
+
+
+def list_notifications(
+    username: str | None = None,
+    *,
+    unread_only: bool = False,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(int(limit or 200), 500))
+    clauses: list[str] = []
+    params: list[Any] = []
+    if username:
+        clauses.append("username = ?")
+        params.append(username)
+    if unread_only:
+        clauses.append("read_at IS NULL")
+    params.append(safe_limit)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM notifications
+            {where}
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_notification(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def mark_notification_read(notification_id: str, *, username: str | None = None) -> dict[str, Any] | None:
+    read_at = _now()
+    clauses = ["id = ?"]
+    params: list[Any] = [notification_id]
+    if username:
+        clauses.append("username = ?")
+        params.append(username)
+    conn = get_connection()
+    try:
+        cur = conn.execute(
+            f"""
+            UPDATE notifications
+            SET status = 'read', read_at = ?, updated_at = ?
+            WHERE {" AND ".join(clauses)}
+            """,
+            (read_at, read_at, *params),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            return None
+        return _hydrate_notification(
+            row_to_dict(conn.execute("SELECT * FROM notifications WHERE id = ?", (notification_id,)).fetchone())
+            or {}
+        )
+    finally:
+        conn.close()
+
+
+def _hydrate_notification_preference(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["organizationId"] = item.get("organization_id")
+    item["notificationType"] = item.get("notification_type")
+    item["enabled"] = bool(item.get("enabled"))
+    item["channels"] = _json_or_default(item.get("channels_json"), ["in_app"])
+    item["quietHours"] = _json_or_default(item.get("quiet_hours_json"), {})
+    item["updatedBy"] = item.get("updated_by")
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def upsert_notification_preference(
+    *,
+    username: str,
+    notification_type: str,
+    enabled: bool = True,
+    channels: list[str] | None = None,
+    quiet_hours: dict[str, Any] | None = None,
+    updated_by: str = "",
+) -> dict[str, Any]:
+    updated_at = _now()
+    preference_id = _new_id("npf")
+    normalized_type = cognix_notifications.normalize_notification_type(notification_type)
+    safe_channels = [str(item)[:40] for item in (channels or ["in_app"]) if str(item).strip()] or ["in_app"]
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO notification_preferences
+                (
+                    id, organization_id, username, project_id, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    notification_type, enabled, channels_json, quiet_hours_json, updated_by
+                )
+            VALUES (?, 'default', ?, NULL, 'notification_preference', ?, 'active', ?, '{}', ?, ?,
+                ?, ?, ?, ?, ?)
+            ON CONFLICT(username, notification_type) DO UPDATE SET
+                enabled = excluded.enabled,
+                channels_json = excluded.channels_json,
+                quiet_hours_json = excluded.quiet_hours_json,
+                payload_json = excluded.payload_json,
+                updated_by = excluded.updated_by,
+                updated_at = excluded.updated_at
+            """,
+            (
+                preference_id,
+                username,
+                normalized_type,
+                json.dumps(
+                    {"notificationType": normalized_type, "enabled": bool(enabled), "channels": safe_channels},
+                    ensure_ascii = False,
+                ),
+                updated_at,
+                updated_at,
+                normalized_type,
+                1 if enabled else 0,
+                json.dumps(safe_channels, ensure_ascii = False),
+                json.dumps(quiet_hours or {}, ensure_ascii = False),
+                updated_by[:160],
+            ),
+        )
+        conn.commit()
+        return _hydrate_notification_preference(
+            row_to_dict(
+                conn.execute(
+                    """
+                    SELECT * FROM notification_preferences
+                    WHERE username = ? AND notification_type = ?
+                    """,
+                    (username, normalized_type),
+                ).fetchone()
+            )
+            or {}
+        )
+    finally:
+        conn.close()
+
+
+def list_notification_preferences(username: str) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM notification_preferences
+            WHERE username = ?
+            ORDER BY notification_type ASC
+            """,
+            (username,),
+        ).fetchall()
+        return [_hydrate_notification_preference(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_admin_alert(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["organizationId"] = item.get("organization_id")
+    item["alertType"] = item.get("alert_type")
+    item["sourceType"] = item.get("source_type")
+    item["sourceId"] = item.get("source_id")
+    item["alert"] = _json_or_default(item.get("alert_json"), {})
+    item["acknowledgedBy"] = item.get("acknowledged_by")
+    item["acknowledgedAt"] = item.get("acknowledged_at")
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def create_admin_alert(
+    *,
+    alert_type: str,
+    title: str,
+    message: str,
+    severity: str = "notice",
+    source_type: str = "",
+    source_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    created_at = _now()
+    alert_id = _new_id("alt")
+    normalized_severity = severity if severity in {"notice", "warning", "critical"} else "notice"
+    payload = {
+        "alertType": str(alert_type or "notice")[:120],
+        "title": str(title or "")[:240],
+        "message": str(message or "")[:2000],
+        "severity": normalized_severity,
+        "sourceType": str(source_type or "")[:120],
+        "sourceId": str(source_id or "")[:240],
+    }
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO admin_alerts
+                (
+                    id, organization_id, username, project_id, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    alert_type, severity, title, message, source_type, source_id,
+                    alert_json, acknowledged_by, acknowledged_at
+                )
+            VALUES (?, 'default', NULL, NULL, 'admin_alert', ?, 'open', ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+            """,
+            (
+                alert_id,
+                str(source_id or alert_id)[:240],
+                json.dumps(payload, ensure_ascii = False),
+                json.dumps(redact_audit_metadata(metadata or {}), ensure_ascii = False),
+                created_at,
+                created_at,
+                str(alert_type or "notice")[:120],
+                normalized_severity,
+                str(title or "")[:240],
+                str(message or "")[:2000],
+                str(source_type or "")[:120],
+                str(source_id or "")[:240] or None,
+                json.dumps(payload, ensure_ascii = False),
+            ),
+        )
+        conn.commit()
+        return _hydrate_admin_alert(
+            row_to_dict(conn.execute("SELECT * FROM admin_alerts WHERE id = ?", (alert_id,)).fetchone()) or {}
+        )
+    finally:
+        conn.close()
+
+
+def list_admin_alerts(*, status: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(int(limit or 200), 500))
+    clauses: list[str] = []
+    params: list[Any] = []
+    if status:
+        clauses.append("status = ?")
+        params.append(status)
+    params.append(safe_limit)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM admin_alerts
+            {where}
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_admin_alert(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def acknowledge_admin_alert(alert_id: str, *, acknowledged_by: str) -> dict[str, Any] | None:
+    acknowledged_at = _now()
+    conn = get_connection()
+    try:
+        cur = conn.execute(
+            """
+            UPDATE admin_alerts
+            SET status = 'acknowledged', acknowledged_by = ?, acknowledged_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (acknowledged_by, acknowledged_at, acknowledged_at, alert_id),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            return None
+        return _hydrate_admin_alert(
+            row_to_dict(conn.execute("SELECT * FROM admin_alerts WHERE id = ?", (alert_id,)).fetchone()) or {}
+        )
     finally:
         conn.close()
 

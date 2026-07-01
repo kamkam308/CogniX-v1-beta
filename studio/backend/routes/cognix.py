@@ -77,6 +77,7 @@ from core.cognix import native_tools as cognix_native_tools
 from core.cognix import onboarding as cognix_onboarding
 from core.cognix import optimization_planner as cognix_optimization_planner
 from core.cognix import orchestrator as cognix_orchestrator
+from core.cognix import notifications as cognix_notifications
 from core.cognix import persona_manager as cognix_persona_manager
 from core.cognix import personal_twin as cognix_personal_twin
 from core.cognix import performance_monitor as cognix_performance_monitor
@@ -159,6 +160,14 @@ class ApprovalPolicyRequest(BaseModel):
     requester_role: str = Field("user", alias = "requesterRole", max_length = 80)
     risk_level: Literal["low", "medium", "high", "critical"] | None = Field(None, alias = "riskLevel")
     has_permission: bool = Field(False, alias = "hasPermission")
+
+
+class NotificationPreferenceRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    enabled: bool = True
+    channels: list[str] | None = None
+    quiet_hours: dict[str, Any] | None = Field(None, alias = "quietHours")
 
 
 class AdminPermissionGrantRequest(BaseModel):
@@ -2120,6 +2129,43 @@ def _build_admin_approvals_bundle() -> dict[str, Any]:
         "comments": comments,
         "queue": queue,
     }
+
+
+def _emit_approval_notifications(
+    request: dict[str, Any],
+    *,
+    event: str,
+    actor_username: str | None = None,
+) -> dict[str, Any]:
+    payload = cognix_notifications.build_approval_notification_payload(
+        request = request,
+        event = event,
+        actor_username = actor_username,
+    )
+    notification = cognix_db.create_notification(
+        username = str(request.get("username") or payload.get("username") or ""),
+        notification_type = str(payload.get("notificationType") or event),
+        title = str(payload.get("title") or "Approval"),
+        message = str(payload.get("message") or ""),
+        priority = str(payload.get("priority") or "normal"),
+        source_type = str(payload.get("sourceType") or "cognix_approval_request"),
+        source_id = str(payload.get("sourceId") or request.get("id") or ""),
+        metadata = payload,
+    )
+    alert = cognix_db.create_admin_alert(
+        alert_type = str(payload.get("notificationType") or event),
+        title = str(payload.get("title") or "Approval"),
+        message = str(payload.get("message") or ""),
+        severity = "critical"
+        if request.get("risk_level") == "critical"
+        else "warning"
+        if str(payload.get("priority") or "") in {"high", "critical"}
+        else "notice",
+        source_type = str(payload.get("sourceType") or "cognix_approval_request"),
+        source_id = str(payload.get("sourceId") or request.get("id") or ""),
+        metadata = payload,
+    )
+    return {"notification": notification, "adminAlert": alert, "payload": payload}
 
 
 def _refresh_conversation_audit_metadata(
@@ -9754,6 +9800,100 @@ async def my_permissions(current_subject: str = Depends(get_current_jwt_subject)
     }
 
 
+@router.get("/notifications/blueprint")
+async def notifications_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    notifications = cognix_db.list_notifications(current_subject, limit = 200)
+    preferences = cognix_db.list_notification_preferences(current_subject)
+    blueprint = cognix_notifications.build_notification_blueprint(
+        notifications = notifications,
+        preferences = preferences,
+    )
+    return {
+        "notificationsBlueprint": blueprint,
+        "plannerVersion": cognix_notifications.COGNIX_NOTIFICATION_SERVICE_VERSION,
+        "sideEffects": blueprint.get("sideEffects", {}),
+    }
+
+
+@router.get("/notifications")
+async def my_notifications(
+    unread_only: bool = False,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    notifications = cognix_db.list_notifications(current_subject, unread_only = unread_only, limit = 200)
+    preferences = cognix_db.list_notification_preferences(current_subject)
+    blueprint = cognix_notifications.build_notification_blueprint(
+        notifications = notifications,
+        preferences = preferences,
+    )
+    return {
+        "notifications": _rows(notifications),
+        "preferences": _rows(preferences),
+        "summary": blueprint["summary"],
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_notifications.COGNIX_NOTIFICATION_SERVICE_VERSION,
+    }
+
+
+@router.patch("/notifications/{notification_id}/read")
+async def mark_my_notification_read(
+    notification_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    notification = cognix_db.mark_notification_read(notification_id, username = current_subject)
+    if notification is None:
+        raise HTTPException(status_code = 404, detail = "Notification not found")
+    return {
+        "notification": _row(notification),
+        "sideEffects": {"notificationWrite": True},
+        "plannerVersion": cognix_notifications.COGNIX_NOTIFICATION_SERVICE_VERSION,
+    }
+
+
+@router.get("/notifications/preferences")
+async def my_notification_preferences(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    preferences = cognix_db.list_notification_preferences(current_subject)
+    return {
+        "preferences": _rows(preferences),
+        "plannerVersion": cognix_notifications.COGNIX_USER_NOTIFICATION_PREFERENCES_VERSION,
+    }
+
+
+@router.put("/notifications/preferences/{notification_type}")
+async def update_my_notification_preference(
+    notification_type: str,
+    payload: NotificationPreferenceRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    preference = cognix_db.upsert_notification_preference(
+        username = current_subject,
+        notification_type = notification_type,
+        enabled = payload.enabled,
+        channels = payload.channels,
+        quiet_hours = payload.quiet_hours,
+        updated_by = current_subject,
+    )
+    audit = cognix_db.create_audit_log(
+        username = current_subject,
+        actor_username = current_subject,
+        action = "notification_preference_updated",
+        resource_type = "notification_preference",
+        resource_id = str(preference.get("id") or notification_type),
+        severity = "notice",
+        metadata = {
+            "notificationType": preference.get("notificationType"),
+            "enabled": preference.get("enabled"),
+            "channels": preference.get("channels"),
+        },
+    )
+    return {
+        "preference": _row(preference),
+        "auditLogId": audit.get("id"),
+        "sideEffects": {"preferenceWrite": True, "auditWrite": True},
+        "plannerVersion": cognix_notifications.COGNIX_USER_NOTIFICATION_PREFERENCES_VERSION,
+    }
+
+
 @router.post("/approvals/developer-mode")
 async def request_developer_mode(
     payload: ApprovalCreateRequest,
@@ -9793,7 +9933,13 @@ async def request_developer_mode(
         resource_id = cognix_db.DEVELOPER_MODE_PERMISSION,
         metadata = {"approvalPolicy": "developer_mode_requires_admin"},
     )
-    return {"request": _row(request)}
+    emitted = _emit_approval_notifications(request, event = "approval_requested", actor_username = current_subject)
+    return {
+        "request": _row(request),
+        "notification": _row(emitted["notification"]),
+        "adminAlert": _row(emitted["adminAlert"]),
+        "sideEffects": {"requestWrite": True, "notificationWrite": True, "adminAlertWrite": True},
+    }
 
 
 @router.post("/approvals")
@@ -9834,11 +9980,19 @@ async def create_approval_request(
             "requiresApproval": policy.get("requiresApproval"),
         },
     )
+    emitted = _emit_approval_notifications(request, event = "approval_requested", actor_username = current_subject)
     return {
         "request": _row(request),
         "policy": policy,
+        "notification": _row(emitted["notification"]),
+        "adminAlert": _row(emitted["adminAlert"]),
         "auditLogId": audit.get("id"),
-        "sideEffects": {"requestWrite": True, "auditWrite": True},
+        "sideEffects": {
+            "requestWrite": True,
+            "notificationWrite": True,
+            "adminAlertWrite": True,
+            "auditWrite": True,
+        },
     }
 
 
@@ -16946,6 +17100,64 @@ async def admin_approvals(current_subject: str = Depends(get_current_jwt_subject
     }
 
 
+@router.get("/admin/notifications/blueprint")
+async def admin_notifications_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    alerts = cognix_db.list_admin_alerts(limit = 200)
+    notifications = cognix_db.list_notifications(limit = 200)
+    blueprint = cognix_notifications.build_notification_blueprint(
+        notifications = notifications,
+        admin_alerts = alerts,
+    )
+    return {
+        "notificationsBlueprint": blueprint,
+        "plannerVersion": cognix_notifications.COGNIX_ADMIN_ALERT_SERVICE_VERSION,
+        "sideEffects": blueprint.get("sideEffects", {}),
+    }
+
+
+@router.get("/admin/alerts")
+async def admin_alerts(
+    status_filter: str | None = None,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    alerts = cognix_db.list_admin_alerts(status = status_filter, limit = 500)
+    blueprint = cognix_notifications.build_notification_blueprint(admin_alerts = alerts)
+    return {
+        "alerts": _rows(alerts),
+        "summary": blueprint["summary"],
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_notifications.COGNIX_ADMIN_ALERT_SERVICE_VERSION,
+    }
+
+
+@router.patch("/admin/alerts/{alert_id}/acknowledge")
+async def admin_acknowledge_alert(
+    alert_id: str,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    alert = cognix_db.acknowledge_admin_alert(alert_id, acknowledged_by = current_subject)
+    if alert is None:
+        raise HTTPException(status_code = 404, detail = "Admin alert not found")
+    audit = cognix_db.create_audit_log(
+        username = None,
+        actor_username = current_subject,
+        action = "admin_alert_acknowledged",
+        resource_type = "admin_alert",
+        resource_id = alert_id,
+        severity = "notice",
+        metadata = {"alertType": alert.get("alertType"), "sourceId": alert.get("sourceId")},
+    )
+    return {
+        "alert": _row(alert),
+        "auditLogId": audit.get("id"),
+        "sideEffects": {"adminAlertWrite": True, "auditWrite": True},
+        "plannerVersion": cognix_notifications.COGNIX_ADMIN_ALERT_SERVICE_VERSION,
+    }
+
+
 @router.get("/admin/approvals/blueprint")
 async def admin_approvals_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
     _require_admin(current_subject)
@@ -17072,13 +17284,22 @@ async def admin_decide_approval(
             "policySnapshot": policy_snapshot,
         },
     )
+    emitted = _emit_approval_notifications(
+        request,
+        event = "approval_approved" if payload.status == "approved" else "approval_denied",
+        actor_username = current_subject,
+    )
     return {
         "request": _row(request),
         "decisions": _rows(cognix_db.list_approval_decisions(request_id)),
+        "notification": _row(emitted["notification"]),
+        "adminAlert": _row(emitted["adminAlert"]),
         "auditLogId": audit.get("id"),
         "sideEffects": {
             "decisionWrite": True,
             "legacyPermissionWrite": request.get("request_type") == cognix_db.DEVELOPER_MODE_PERMISSION,
+            "notificationWrite": True,
+            "adminAlertWrite": True,
             "auditWrite": True,
         },
     }
