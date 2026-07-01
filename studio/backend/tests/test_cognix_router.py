@@ -9831,6 +9831,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "model_export_planning" in modules["cognix-model-translator"]["capabilities"]
     assert "/api/cognix/models/translator/plan" in modules["cognix-model-translator"]["routes"]
     assert "/api/cognix/models/conversions" in modules["cognix-model-translator"]["routes"]
+    assert modules["cognix-optimization-engine"]["status"] == "enabled"
+    assert modules["cognix-optimization-engine"]["activationState"] == "ready"
     assert modules["cognix-optimization-engine"]["dependencyState"]["ready"] is True
     assert "optimization_capability_registry" in modules["cognix-optimization-engine"]["capabilities"]
     assert "benchmark_gated_experiments" in modules["cognix-optimization-engine"]["capabilities"]

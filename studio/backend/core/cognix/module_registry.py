@@ -448,7 +448,7 @@ MODULE_MANIFESTS: list[dict[str, Any]] = [
         "id": "cognix-optimization-engine",
         "displayName": "CogniX Optimization Engine",
         "editionTargets": ["free", "local", "developer", "business", "university", "enterprise"],
-        "status": "planned",
+        "status": "enabled",
         "capabilities": [
             "optimization_capability_registry",
             "benchmark_gated_experiments",
