@@ -61,6 +61,7 @@ from core.cognix import decision_engine as cognix_decision_engine
 from core.cognix import decision_explainer as cognix_decision_explainer
 from core.cognix import dynamic_ui as cognix_dynamic_ui
 from core.cognix import education_spaces as cognix_education_spaces
+from core.cognix import edition_billing as cognix_edition_billing
 from core.cognix import enterprise_chat as cognix_enterprise_chat
 from core.cognix import evolution_engine as cognix_evolution_engine
 from core.cognix import favorite_models as cognix_favorite_models
@@ -412,6 +413,38 @@ class EducationExamAccessRequest(BaseModel):
     role: Literal["teacher", "student", "admin", "guardian"] = "student"
     action: str = Field("view", max_length = 120)
     tool_id: str | None = Field(None, alias = "toolId", max_length = 120)
+
+
+class EntitlementDecisionRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    plan_key: str | None = Field(None, alias = "planKey", max_length = 120)
+    role: str = Field("user", max_length = 80)
+    module_id: str | None = Field(None, alias = "moduleId", max_length = 160)
+    action: str | None = Field("read", max_length = 120)
+
+
+class BillingEventPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    event_type: str = Field("usage_metered", alias = "eventType", max_length = 120)
+    plan_key: str | None = Field(None, alias = "planKey", max_length = 120)
+    amount_cents: int | None = Field(0, alias = "amountCents", ge = 0, le = 100000000)
+    currency: str = Field("USD", max_length = 12)
+    reason: str | None = Field("", max_length = 1000)
+    approval_id: str | None = Field(None, alias = "approvalId", max_length = 160)
+    metadata: dict[str, Any] = Field(default_factory = dict)
+    store_event: bool = Field(True, alias = "storeEvent")
+
+
+class WorkspaceProvisioningPlanRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name = True)
+
+    organization_name: str = Field(..., alias = "organizationName", min_length = 1, max_length = 240)
+    workspace_name: str = Field("Main Workspace", alias = "workspaceName", max_length = 240)
+    organization_type: str = Field("business", alias = "organizationType", max_length = 120)
+    plan_key: str | None = Field("free", alias = "planKey", max_length = 120)
+    store_workspace: bool = Field(True, alias = "storeWorkspace")
 
 
 class AdminPolicyEnforcementRequest(BaseModel):
@@ -2812,6 +2845,11 @@ def _build_education_bundle(space_id: str | None = None, class_id: str | None = 
         "assignments": assignments,
         "examPolicies": exam_policies,
     }
+
+
+def _sync_plan_catalog_records() -> list[dict[str, Any]]:
+    catalog = cognix_edition_billing.build_plan_catalog()
+    return [cognix_db.upsert_plan_record(plan) for plan in catalog["plans"]]
 
 
 def _build_admin_compliance_export_bundle() -> dict[str, Any]:
@@ -18513,6 +18551,178 @@ async def education_exam_access_decision(
         "decision": decision,
         "sideEffects": decision.get("sideEffects", {}),
         "plannerVersion": cognix_education_spaces.COGNIX_EXAM_GUARD_VERSION,
+    }
+
+
+@router.get("/editions/blueprint")
+async def editions_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    blueprint = cognix_edition_billing.build_edition_billing_blueprint()
+    return {
+        "username": current_subject,
+        "editionBillingBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_edition_billing.COGNIX_PLAN_CATALOG_VERSION,
+    }
+
+
+@router.get("/editions/plans")
+async def edition_plans(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    plan_records = _sync_plan_catalog_records()
+    catalog = cognix_edition_billing.build_plan_catalog()
+    side_effects = {
+        **catalog.get("sideEffects", {}),
+        "databaseWrite": True,
+        "planWrite": True,
+    }
+    return {
+        "username": current_subject,
+        "planCatalog": {**catalog, "sideEffects": side_effects},
+        "planRecords": _rows(plan_records),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_edition_billing.COGNIX_PLAN_CATALOG_VERSION,
+    }
+
+
+@router.post("/editions/entitlements/decision")
+async def edition_entitlement_decision(
+    payload: EntitlementDecisionRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    profile = auth_storage.get_user_profile(current_subject) or {}
+    plan_key = payload.plan_key or str(profile.get("plan") or "free")
+    role = payload.role or str(profile.get("role") or "user")
+    decision = cognix_edition_billing.build_entitlement_decision(
+        plan_key = plan_key,
+        role = role,
+        module_id = payload.module_id,
+        action = payload.action,
+    )
+    return {
+        "username": current_subject,
+        "entitlementDecision": decision,
+        "sideEffects": decision.get("sideEffects", {}),
+        "plannerVersion": cognix_edition_billing.COGNIX_ENTITLEMENT_POLICY_ENGINE_VERSION,
+    }
+
+
+@router.post("/admin/workspaces/provision-plan")
+async def admin_workspace_provision_plan(
+    payload: WorkspaceProvisioningPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    _sync_plan_catalog_records()
+    plan = cognix_edition_billing.build_workspace_provisioning_plan(
+        organization_name = payload.organization_name,
+        workspace_name = payload.workspace_name,
+        plan_key = payload.plan_key,
+        owner_username = current_subject,
+        organization_type = payload.organization_type,
+    )
+    stored = cognix_db.create_workspace_from_plan(plan = plan) if payload.store_workspace else None
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "databaseWrite": bool(payload.store_workspace),
+        "workspaceWrite": bool(payload.store_workspace),
+        "organizationWrite": bool(payload.store_workspace),
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = None,
+        actor_username = current_subject,
+        action = "workspace_provisioning_planned",
+        resource_type = "cognix_workspace",
+        resource_id = str((stored or {}).get("workspace", {}).get("id") or plan.get("provisioningPlanId") or ""),
+        severity = "notice",
+        metadata = {
+            "workspaceProvisioningPlannerVersion": plan.get("workspaceProvisioningPlannerVersion"),
+            "planKey": payload.plan_key,
+            "stored": bool(stored),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "workspaceProvisioningPlan": {**plan, "sideEffects": side_effects},
+        "stored": _row(stored or {}),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_edition_billing.COGNIX_WORKSPACE_PROVISIONING_PLANNER_VERSION,
+    }
+
+
+@router.get("/admin/workspaces")
+async def admin_workspaces(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    return {
+        "username": current_subject,
+        "organizations": _rows(cognix_db.list_organizations()),
+        "workspaces": _rows(cognix_db.list_workspaces()),
+        "sideEffects": cognix_edition_billing.build_edition_billing_blueprint()["sideEffects"],
+        "plannerVersion": cognix_edition_billing.COGNIX_WORKSPACE_PROVISIONING_PLANNER_VERSION,
+    }
+
+
+@router.post("/admin/billing/events/plan")
+async def admin_billing_event_plan(
+    payload: BillingEventPlanRequest,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    plan = cognix_edition_billing.build_billing_event_plan(
+        actor_username = current_subject,
+        event_type = payload.event_type,
+        plan_key = payload.plan_key,
+        amount_cents = payload.amount_cents,
+        currency = payload.currency,
+        reason = payload.reason,
+        approval_id = payload.approval_id,
+        metadata = payload.metadata,
+    )
+    event = cognix_db.create_billing_event(plan = plan) if payload.store_event else None
+    side_effects = {
+        **plan.get("sideEffects", {}),
+        "databaseWrite": bool(payload.store_event),
+        "billingEventWrite": bool(payload.store_event),
+        "auditWrite": True,
+        "billingMutation": False,
+        "paymentProcessorCall": False,
+    }
+    planned_event = plan.get("event") if isinstance(plan.get("event"), dict) else {}
+    audit = cognix_db.create_audit_log(
+        username = None,
+        actor_username = current_subject,
+        action = "billing_event_planned",
+        resource_type = "cognix_billing_event",
+        resource_id = str((event or {}).get("id") or plan.get("billingEventPlanId") or ""),
+        severity = "warning" if planned_event.get("requiresApproval") else "notice",
+        metadata = {
+            "billingEventLedgerVersion": plan.get("billingEventLedgerVersion"),
+            "eventType": planned_event.get("eventType"),
+            "requiresApproval": bool(planned_event.get("requiresApproval")),
+            "willMutateBillingNow": False,
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "billingEventPlan": {**plan, "sideEffects": side_effects},
+        "billingEvent": _row(event) if event else None,
+        "requiresApproval": bool(planned_event.get("requiresApproval")),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_edition_billing.COGNIX_BILLING_EVENT_LEDGER_VERSION,
+    }
+
+
+@router.get("/admin/billing/events")
+async def admin_billing_events(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    return {
+        "username": current_subject,
+        "billingEvents": _rows(cognix_db.list_billing_events(limit = 500)),
+        "sideEffects": cognix_edition_billing.build_edition_billing_blueprint()["sideEffects"],
+        "plannerVersion": cognix_edition_billing.COGNIX_BILLING_EVENT_LEDGER_VERSION,
     }
 
 

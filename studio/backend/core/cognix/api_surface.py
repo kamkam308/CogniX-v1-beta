@@ -174,6 +174,14 @@ PRODUCT_NAVIGATION_ROUTES: list[dict[str, Any]] = [
         ],
     },
     {"path": "/notifications", "equivalentRoutes": ["/api/cognix/notifications", "/api/cognix/notifications/preferences"]},
+    {
+        "path": "/editions",
+        "equivalentRoutes": [
+            "/api/cognix/editions/blueprint",
+            "/api/cognix/editions/plans",
+            "/api/cognix/editions/entitlements/decision",
+        ],
+    },
     {"path": "/admin", "equivalentRoutes": ["/api/cognix/admin/dashboard"]},
     {"path": "/admin/users", "equivalentRoutes": ["/api/cognix/admin/users"]},
     {"path": "/admin/chats", "equivalentRoutes": ["/api/cognix/admin/chats"]},
@@ -202,7 +210,16 @@ PRODUCT_NAVIGATION_ROUTES: list[dict[str, Any]] = [
             "/api/cognix/admin/local-only",
             "/api/cognix/admin/models/secure-registry",
             "/api/cognix/admin/data-retention",
+            "/api/cognix/admin/workspaces",
             "/api/cognix/admin/api-surface-contract",
+        ],
+    },
+    {
+        "path": "/admin/billing",
+        "equivalentRoutes": [
+            "/api/cognix/admin/billing/events",
+            "/api/cognix/admin/billing/events/plan",
+            "/api/cognix/editions/plans",
         ],
     },
     {

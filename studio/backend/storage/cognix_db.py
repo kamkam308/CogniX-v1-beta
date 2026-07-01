@@ -201,6 +201,12 @@ EDUCATION_SPACE_TABLE_NAMES = (
     "education_assignments",
     "education_exam_policies",
 )
+EDITION_BILLING_TABLE_NAMES = (
+    "cognix_workspaces",
+    "cognix_organizations",
+    "cognix_plans",
+    "cognix_billing_events",
+)
 ADMIN_COMPLIANCE_EXPORT_TABLE_NAMES = (
     "compliance_exports",
     "export_jobs",
@@ -2753,6 +2759,7 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
     _ensure_admin_secure_model_registry_columns(conn)
     _ensure_shared_knowledge_columns(conn)
     _ensure_education_space_columns(conn)
+    _ensure_edition_billing_columns(conn)
     _ensure_admin_compliance_export_columns(conn)
     _ensure_admin_risk_scoring_columns(conn)
     _ensure_admin_system_health_columns(conn)
@@ -3643,6 +3650,106 @@ def _ensure_education_space_columns(conn: sqlite3.Connection) -> None:
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_education_exam_policies_assignment
             ON education_exam_policies(assignment_id)
+        """
+    )
+
+
+def _ensure_edition_billing_columns(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cognix_organizations (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL DEFAULT '',
+            organization_type TEXT NOT NULL DEFAULT 'business',
+            owner_username TEXT NOT NULL DEFAULT '',
+            plan_key TEXT NOT NULL DEFAULT 'free',
+            status TEXT NOT NULL DEFAULT 'active',
+            settings_json TEXT NOT NULL DEFAULT '{}',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cognix_workspaces (
+            id TEXT PRIMARY KEY,
+            organization_id TEXT NOT NULL DEFAULT '',
+            name TEXT NOT NULL DEFAULT '',
+            owner_username TEXT NOT NULL DEFAULT '',
+            plan_key TEXT NOT NULL DEFAULT 'free',
+            status TEXT NOT NULL DEFAULT 'active',
+            settings_json TEXT NOT NULL DEFAULT '{}',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cognix_plans (
+            id TEXT PRIMARY KEY,
+            plan_key TEXT NOT NULL DEFAULT '',
+            display_name TEXT NOT NULL DEFAULT '',
+            edition_target TEXT NOT NULL DEFAULT 'free',
+            monthly_price_cents INTEGER NOT NULL DEFAULT 0,
+            allowed_modules_json TEXT NOT NULL DEFAULT '[]',
+            limits_json TEXT NOT NULL DEFAULT '{}',
+            features_json TEXT NOT NULL DEFAULT '[]',
+            cloud_allowed INTEGER NOT NULL DEFAULT 0,
+            enterprise_controls INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'active',
+            plan_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cognix_billing_events (
+            id TEXT PRIMARY KEY,
+            actor_username TEXT NOT NULL DEFAULT '',
+            event_type TEXT NOT NULL DEFAULT 'usage_metered',
+            plan_key TEXT NOT NULL DEFAULT 'free',
+            amount_cents INTEGER NOT NULL DEFAULT 0,
+            currency TEXT NOT NULL DEFAULT 'USD',
+            risk_level TEXT NOT NULL DEFAULT 'low',
+            approval_required INTEGER NOT NULL DEFAULT 0,
+            approval_id TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL DEFAULT '',
+            event_json TEXT NOT NULL DEFAULT '{}',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'planned',
+            created_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_cognix_plans_plan_key
+            ON cognix_plans(plan_key)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_cognix_organizations_owner_status
+            ON cognix_organizations(owner_username, status, updated_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_cognix_workspaces_org_status
+            ON cognix_workspaces(organization_id, status, updated_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_cognix_billing_events_actor_created
+            ON cognix_billing_events(actor_username, created_at DESC)
         """
     )
 
@@ -11392,6 +11499,292 @@ def list_education_exam_policies(*, class_id: str | None = None) -> list[dict[st
             tuple(params),
         ).fetchall()
         return [_hydrate_education_exam_policy(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_plan_record(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["planKey"] = item.get("plan_key")
+    item["displayName"] = item.get("display_name")
+    item["editionTarget"] = item.get("edition_target")
+    item["monthlyPriceCents"] = item.get("monthly_price_cents")
+    item["allowedModules"] = _json_or_default(item.get("allowed_modules_json"), [])
+    item["limits"] = _json_or_default(item.get("limits_json"), {})
+    item["features"] = _json_or_default(item.get("features_json"), [])
+    item["cloudAllowed"] = bool(item.get("cloud_allowed"))
+    item["enterpriseControls"] = bool(item.get("enterprise_controls"))
+    item["plan"] = _json_or_default(item.get("plan_json"), {})
+    return item
+
+
+def upsert_plan_record(plan: dict[str, Any]) -> dict[str, Any]:
+    now = _now()
+    plan_key = str(plan.get("planKey") or "free")[:120]
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_plans
+                (
+                    id, plan_key, display_name, edition_target, monthly_price_cents,
+                    allowed_modules_json, limits_json, features_json,
+                    cloud_allowed, enterprise_controls, status, plan_json,
+                    created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+            ON CONFLICT(plan_key) DO UPDATE SET
+                display_name = excluded.display_name,
+                edition_target = excluded.edition_target,
+                monthly_price_cents = excluded.monthly_price_cents,
+                allowed_modules_json = excluded.allowed_modules_json,
+                limits_json = excluded.limits_json,
+                features_json = excluded.features_json,
+                cloud_allowed = excluded.cloud_allowed,
+                enterprise_controls = excluded.enterprise_controls,
+                status = excluded.status,
+                plan_json = excluded.plan_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                _new_id("plan"),
+                plan_key,
+                str(plan.get("displayName") or plan_key)[:240],
+                str(plan.get("editionTarget") or plan_key)[:80],
+                int(plan.get("monthlyPriceCents") or 0),
+                json.dumps(plan.get("allowedModules") or [], ensure_ascii = False),
+                json.dumps(plan.get("limits") or {}, ensure_ascii = False),
+                json.dumps(plan.get("features") or [], ensure_ascii = False),
+                1 if plan.get("cloudAllowed") else 0,
+                1 if plan.get("enterpriseControls") else 0,
+                json.dumps(plan, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM cognix_plans WHERE plan_key = ?", (plan_key,)).fetchone()
+        return _hydrate_plan_record(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_plan_records() -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM cognix_plans
+            ORDER BY monthly_price_cents ASC, plan_key ASC
+            """
+        ).fetchall()
+        return [_hydrate_plan_record(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_organization(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["organizationType"] = item.get("organization_type")
+    item["ownerUsername"] = item.get("owner_username")
+    item["planKey"] = item.get("plan_key")
+    item["settings"] = _json_or_default(item.get("settings_json"), {})
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def _hydrate_workspace(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["organizationId"] = item.get("organization_id")
+    item["ownerUsername"] = item.get("owner_username")
+    item["planKey"] = item.get("plan_key")
+    item["settings"] = _json_or_default(item.get("settings_json"), {})
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def create_workspace_from_plan(*, plan: dict[str, Any]) -> dict[str, Any]:
+    now = _now()
+    organization = plan.get("organization") if isinstance(plan.get("organization"), dict) else {}
+    workspace = plan.get("workspace") if isinstance(plan.get("workspace"), dict) else {}
+    organization_id = _new_id("org")
+    workspace_id = _new_id("workspace")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_organizations
+                (
+                    id, name, organization_type, owner_username, plan_key, status,
+                    settings_json, metadata_json, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, 'active', '{}', ?, ?, ?)
+            """,
+            (
+                organization_id,
+                str(organization.get("name") or "CogniX Organization")[:240],
+                str(organization.get("organizationType") or "business")[:80],
+                str(organization.get("ownerUsername") or "")[:160],
+                str(organization.get("planKey") or "free")[:120],
+                json.dumps({"provisioningPlanId": plan.get("provisioningPlanId")}, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO cognix_workspaces
+                (
+                    id, organization_id, name, owner_username, plan_key, status,
+                    settings_json, metadata_json, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, 'active', '{}', ?, ?, ?)
+            """,
+            (
+                workspace_id,
+                organization_id,
+                str(workspace.get("name") or "Main Workspace")[:240],
+                str(workspace.get("ownerUsername") or "")[:160],
+                str(workspace.get("planKey") or "free")[:120],
+                json.dumps({"provisioningPlanId": plan.get("provisioningPlanId")}, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        org_row = conn.execute("SELECT * FROM cognix_organizations WHERE id = ?", (organization_id,)).fetchone()
+        ws_row = conn.execute("SELECT * FROM cognix_workspaces WHERE id = ?", (workspace_id,)).fetchone()
+        return {
+            "organization": _hydrate_organization(row_to_dict(org_row) or {}),
+            "workspace": _hydrate_workspace(row_to_dict(ws_row) or {}),
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def list_organizations(*, owner_username: str | None = None) -> list[dict[str, Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if owner_username:
+        clauses.append("owner_username = ?")
+        params.append(owner_username)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM cognix_organizations
+            {where}
+            ORDER BY updated_at DESC
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_organization(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def list_workspaces(*, organization_id: str | None = None, owner_username: str | None = None) -> list[dict[str, Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if organization_id:
+        clauses.append("organization_id = ?")
+        params.append(organization_id)
+    if owner_username:
+        clauses.append("owner_username = ?")
+        params.append(owner_username)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM cognix_workspaces
+            {where}
+            ORDER BY updated_at DESC
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_workspace(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_billing_event(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["actorUsername"] = item.get("actor_username")
+    item["eventType"] = item.get("event_type")
+    item["planKey"] = item.get("plan_key")
+    item["amountCents"] = item.get("amount_cents")
+    item["riskLevel"] = item.get("risk_level")
+    item["approvalRequired"] = bool(item.get("approval_required"))
+    item["approvalId"] = item.get("approval_id")
+    item["event"] = _json_or_default(item.get("event_json"), {})
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def create_billing_event(*, plan: dict[str, Any]) -> dict[str, Any]:
+    now = _now()
+    event = plan.get("event") if isinstance(plan.get("event"), dict) else {}
+    event_id = _new_id("billing")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO cognix_billing_events
+                (
+                    id, actor_username, event_type, plan_key, amount_cents, currency,
+                    risk_level, approval_required, approval_id, reason, event_json,
+                    metadata_json, status, created_at, updated_at
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned_no_payment_mutation', ?, ?)
+            """,
+            (
+                event_id,
+                str(event.get("actorUsername") or "")[:160],
+                str(event.get("eventType") or "usage_metered")[:120],
+                str(event.get("planKey") or "free")[:120],
+                int(event.get("amountCents") or 0),
+                str(event.get("currency") or "USD")[:12],
+                str(event.get("riskLevel") or "low")[:80],
+                1 if event.get("requiresApproval") else 0,
+                str(event.get("approvalId") or "")[:160],
+                str(event.get("reason") or "")[:1000],
+                json.dumps(event, ensure_ascii = False),
+                json.dumps(event.get("metadata") or {}, ensure_ascii = False),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM cognix_billing_events WHERE id = ?", (event_id,)).fetchone()
+        return _hydrate_billing_event(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_billing_events(*, actor_username: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if actor_username:
+        clauses.append("actor_username = ?")
+        params.append(actor_username)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM cognix_billing_events
+            {where}
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (*params, max(1, min(int(limit or 200), 1000))),
+        ).fetchall()
+        return [_hydrate_billing_event(row) for row in _rows_to_dicts(rows)]
     finally:
         conn.close()
 
