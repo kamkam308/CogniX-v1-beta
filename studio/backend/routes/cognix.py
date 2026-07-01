@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -1858,6 +1859,29 @@ def _effective_training_plan(current_subject: str, profile: dict[str, Any] | Non
     return str(profile.get("plan") or "")
 
 
+def _admin_storage_metrics() -> dict[str, Any]:
+    usage = shutil.disk_usage("/")
+    total_gb = round(usage.total / (1024**3), 2)
+    free_gb = round(usage.free / (1024**3), 2)
+    used_percent = round(((usage.total - usage.free) / usage.total) * 100, 2) if usage.total else 0.0
+    return {
+        "path": "/",
+        "totalGb": total_gb,
+        "freeGb": free_gb,
+        "usedPercent": used_percent,
+    }
+
+
+def _admin_background_jobs() -> list[dict[str, Any]]:
+    jobs: list[dict[str, Any]] = []
+    for profile in auth_storage.list_user_profiles():
+        username = str(profile.get("username") or "")
+        if not username:
+            continue
+        jobs.extend(cognix_db.list_background_jobs(username, limit = 100))
+    return jobs
+
+
 def _build_admin_security_bundle() -> dict[str, Any]:
     security_events = cognix_db.list_security_events(limit = 500)
     audit_logs = cognix_db.list_audit_logs(limit = 500)
@@ -1867,6 +1891,12 @@ def _build_admin_security_bundle() -> dict[str, Any]:
     security_reports = cognix_db.list_security_reports(limit = 500)
     vulnerability_findings = cognix_db.list_vulnerability_findings(limit = 500)
     remediation_tasks = cognix_db.list_security_remediation_tasks(limit = 500)
+    token_events = cognix_db.list_token_usage_events(limit = 1000)
+    router_logs = cognix_db.list_router_logs(limit = 500)
+    orchestrator_logs = cognix_db.list_orchestrator_logs(limit = 500)
+    background_jobs = _admin_background_jobs()
+    service_health_events = cognix_db.list_service_health_events(limit = 200)
+    system_health_snapshots = cognix_db.list_system_health_snapshots(limit = 100)
     threat_report = cognix_admin_security.build_security_threat_report(
         security_events = security_events,
         audit_logs = audit_logs,
@@ -1884,6 +1914,12 @@ def _build_admin_security_bundle() -> dict[str, Any]:
         security_report = threat_report,
         risk_scoring = risk_scoring,
         audit_logs = audit_logs,
+        background_jobs = background_jobs,
+        token_events = token_events,
+        router_logs = router_logs,
+        orchestrator_logs = orchestrator_logs,
+        service_events = service_health_events,
+        storage = _admin_storage_metrics(),
     )
     security_threat_center = cognix_admin_security.build_security_threat_center(
         security_events = security_events,
@@ -1904,6 +1940,12 @@ def _build_admin_security_bundle() -> dict[str, Any]:
         "securityReports": security_reports,
         "vulnerabilityFindings": vulnerability_findings,
         "remediationTasks": remediation_tasks,
+        "tokenEvents": token_events,
+        "routerLogs": router_logs,
+        "orchestratorLogs": orchestrator_logs,
+        "backgroundJobs": background_jobs,
+        "serviceHealthEvents": service_health_events,
+        "systemHealthSnapshots": system_health_snapshots,
         "threatReport": threat_report,
         "securityThreatCenter": security_threat_center,
         "riskScoring": risk_scoring,
@@ -17684,6 +17726,18 @@ async def admin_risk_scores_aggregate(current_subject: str = Depends(get_current
     }
 
 
+@router.get("/admin/system-health/blueprint")
+async def admin_system_health_blueprint(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    blueprint = cognix_admin_security.build_system_health_blueprint()
+    return {
+        "username": current_subject,
+        "systemHealthBlueprint": blueprint,
+        "sideEffects": blueprint.get("sideEffects", {}),
+        "plannerVersion": cognix_admin_security.COGNIX_SYSTEM_HEALTH_VERSION,
+    }
+
+
 @router.get("/admin/system-health")
 async def admin_system_health(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
     _require_admin(current_subject)
@@ -17692,7 +17746,88 @@ async def admin_system_health(current_subject: str = Depends(get_current_jwt_sub
         "systemHealth": bundle["systemHealth"],
         "threatSummary": bundle["threatReport"]["summary"],
         "riskSummary": bundle["riskScoring"]["summary"],
+        "snapshots": _rows(bundle["systemHealthSnapshots"]),
+        "serviceHealthEvents": _rows(bundle["serviceHealthEvents"]),
         "sideEffects": bundle["systemHealth"]["sideEffects"],
+    }
+
+
+@router.post("/admin/system-health/snapshot")
+async def admin_system_health_snapshot(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    bundle = _build_admin_security_bundle()
+    health = bundle["systemHealth"]
+    snapshot = cognix_db.create_system_health_snapshot(
+        health = health,
+        recorded_by = current_subject,
+    )
+    service_events = [
+        cognix_db.create_service_health_event(
+            service_id = str(service.get("id") or ""),
+            service_label = str(service.get("label") or service.get("id") or ""),
+            status = str(service.get("status") or "green"),
+            event_type = "snapshot",
+            severity = "critical" if service.get("status") == "red" else "warning" if service.get("status") == "yellow" else "notice",
+            message = str(service.get("detail") or ""),
+            event = service,
+            recorded_by = current_subject,
+        )
+        for service in health.get("services", [])
+        if service.get("status") in {"red", "yellow"}
+    ]
+    side_effects = {
+        **health.get("sideEffects", {}),
+        "databaseWrite": True,
+        "snapshotWrite": True,
+        "serviceEventWrite": bool(service_events),
+        "auditWrite": True,
+    }
+    audit = cognix_db.create_audit_log(
+        username = None,
+        actor_username = current_subject,
+        action = "admin_system_health_snapshot_created",
+        resource_type = "system_health_snapshot",
+        resource_id = str(snapshot.get("id") or ""),
+        severity = "warning" if health.get("overallStatus") != "green" else "notice",
+        metadata = {
+            "overallStatus": health.get("overallStatus"),
+            "alertCount": len(health.get("alerts") or []),
+            "serviceEventCount": len(service_events),
+            "sideEffects": side_effects,
+        },
+    )
+    return {
+        "username": current_subject,
+        "systemHealth": health,
+        "snapshot": _row(snapshot),
+        "serviceHealthEvents": _rows(service_events),
+        "auditLogId": audit.get("id"),
+        "sideEffects": side_effects,
+        "plannerVersion": cognix_admin_security.COGNIX_SYSTEM_HEALTH_VERSION,
+    }
+
+
+@router.get("/admin/system-health/snapshots")
+async def admin_system_health_snapshots(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    snapshots = cognix_db.list_system_health_snapshots(limit = 500)
+    return {
+        "username": current_subject,
+        "snapshots": _rows(snapshots),
+        "sideEffects": cognix_admin_security.build_system_health_blueprint()["sideEffects"],
+        "plannerVersion": cognix_admin_security.COGNIX_SYSTEM_HEALTH_VERSION,
+    }
+
+
+@router.get("/admin/system-health/service-events")
+async def admin_system_health_service_events(current_subject: str = Depends(get_current_jwt_subject)) -> dict[str, Any]:
+    _require_admin(current_subject)
+    events = cognix_db.list_service_health_events(limit = 500)
+    return {
+        "username": current_subject,
+        "serviceHealthEvents": _rows(events),
+        "sideEffects": cognix_admin_security.build_system_health_blueprint()["sideEffects"],
+        "plannerVersion": cognix_admin_security.COGNIX_RUNTIME_HEALTH_CHECKER_VERSION,
     }
 
 

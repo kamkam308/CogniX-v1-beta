@@ -188,6 +188,10 @@ ADMIN_RISK_SCORING_TABLE_NAMES = (
     "risk_events",
     "risk_recommendations",
 )
+ADMIN_SYSTEM_HEALTH_TABLE_NAMES = (
+    "system_health_snapshots",
+    "service_health_events",
+)
 ADMIN_DATA_RETENTION_TABLE_NAMES = (
     "retention_policies",
     "deletion_jobs",
@@ -2715,6 +2719,7 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
     _ensure_shared_knowledge_columns(conn)
     _ensure_admin_compliance_export_columns(conn)
     _ensure_admin_risk_scoring_columns(conn)
+    _ensure_admin_system_health_columns(conn)
     _ensure_admin_data_retention_columns(conn)
 
 
@@ -3465,6 +3470,71 @@ def _ensure_admin_risk_scoring_columns(conn: sqlite3.Connection) -> None:
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_risk_recommendations_entity
             ON risk_recommendations(entity_type, entity_id)
+        """
+    )
+
+
+def _ensure_admin_system_health_columns(conn: sqlite3.Connection) -> None:
+    for table_name in ADMIN_SYSTEM_HEALTH_TABLE_NAMES:
+        quoted_table = _quote_roadmap_table_name(table_name)
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {quoted_table} (
+                id TEXT PRIMARY KEY,
+                organization_id TEXT NOT NULL DEFAULT 'default',
+                username TEXT,
+                project_id TEXT,
+                scope_type TEXT NOT NULL DEFAULT 'system_health',
+                scope_id TEXT NOT NULL DEFAULT 'default',
+                status TEXT NOT NULL DEFAULT 'active',
+                payload_json TEXT NOT NULL DEFAULT '{{}}',
+                metadata_json TEXT NOT NULL DEFAULT '{{}}',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+    _ensure_columns(
+        conn,
+        "system_health_snapshots",
+        {
+            "overall_status": "TEXT NOT NULL DEFAULT 'green'",
+            "cpu_json": "TEXT NOT NULL DEFAULT '{}'",
+            "memory_json": "TEXT NOT NULL DEFAULT '{}'",
+            "gpu_json": "TEXT NOT NULL DEFAULT '{}'",
+            "vram_json": "TEXT NOT NULL DEFAULT '{}'",
+            "queue_json": "TEXT NOT NULL DEFAULT '{}'",
+            "latency_json": "TEXT NOT NULL DEFAULT '{}'",
+            "storage_json": "TEXT NOT NULL DEFAULT '{}'",
+            "services_json": "TEXT NOT NULL DEFAULT '[]'",
+            "alerts_json": "TEXT NOT NULL DEFAULT '[]'",
+            "health_json": "TEXT NOT NULL DEFAULT '{}'",
+            "recorded_by": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    _ensure_columns(
+        conn,
+        "service_health_events",
+        {
+            "service_id": "TEXT NOT NULL DEFAULT ''",
+            "service_label": "TEXT NOT NULL DEFAULT ''",
+            "event_type": "TEXT NOT NULL DEFAULT 'status'",
+            "severity": "TEXT NOT NULL DEFAULT 'notice'",
+            "message": "TEXT NOT NULL DEFAULT ''",
+            "event_json": "TEXT NOT NULL DEFAULT '{}'",
+            "recorded_by": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_system_health_snapshots_created
+            ON system_health_snapshots(created_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_service_health_events_service_created
+            ON service_health_events(service_id, created_at DESC)
         """
     )
 
@@ -10549,6 +10619,182 @@ def persist_risk_scoring(
         "events": persisted_events,
         "recommendations": persisted_recommendations,
     }
+
+
+def _hydrate_system_health_snapshot(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["organizationId"] = item.get("organization_id")
+    item["overallStatus"] = item.get("overall_status")
+    item["cpu"] = _json_or_default(item.get("cpu_json"), {})
+    item["memory"] = _json_or_default(item.get("memory_json"), {})
+    item["gpu"] = _json_or_default(item.get("gpu_json"), {})
+    item["vram"] = _json_or_default(item.get("vram_json"), {})
+    item["queue"] = _json_or_default(item.get("queue_json"), {})
+    item["latency"] = _json_or_default(item.get("latency_json"), {})
+    item["storage"] = _json_or_default(item.get("storage_json"), {})
+    item["services"] = _json_or_default(item.get("services_json"), [])
+    item["alerts"] = _json_or_default(item.get("alerts_json"), [])
+    item["health"] = _json_or_default(item.get("health_json"), {})
+    item["recordedBy"] = item.get("recorded_by")
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def create_system_health_snapshot(
+    *,
+    health: dict[str, Any],
+    recorded_by: str = "",
+    organization_id: str = "default",
+) -> dict[str, Any]:
+    now = _now()
+    snapshot_id = _new_id("health")
+    metrics = health.get("metrics") if isinstance(health.get("metrics"), dict) else {}
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO system_health_snapshots
+                (
+                    id, organization_id, username, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    overall_status, cpu_json, memory_json, gpu_json, vram_json,
+                    queue_json, latency_json, storage_json, services_json,
+                    alerts_json, health_json, recorded_by
+                )
+            VALUES (?, ?, ?, 'system_health', 'default', 'active', ?, '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                snapshot_id,
+                (organization_id or "default").strip()[:160] or "default",
+                recorded_by or None,
+                json.dumps(health, ensure_ascii = False),
+                now,
+                now,
+                str(health.get("overallStatus") or "green")[:40],
+                json.dumps(metrics.get("cpu") or {}, ensure_ascii = False),
+                json.dumps(metrics.get("memory") or {}, ensure_ascii = False),
+                json.dumps(metrics.get("gpu") or {}, ensure_ascii = False),
+                json.dumps(metrics.get("vram") or {}, ensure_ascii = False),
+                json.dumps(metrics.get("queue") or {}, ensure_ascii = False),
+                json.dumps(metrics.get("latency") or {}, ensure_ascii = False),
+                json.dumps(metrics.get("storage") or {}, ensure_ascii = False),
+                json.dumps(health.get("services") or [], ensure_ascii = False),
+                json.dumps(health.get("alerts") or [], ensure_ascii = False),
+                json.dumps(health, ensure_ascii = False),
+                recorded_by[:160],
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM system_health_snapshots WHERE id = ?", (snapshot_id,)).fetchone()
+        return _hydrate_system_health_snapshot(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_system_health_snapshots(*, limit: int = 200) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 200), 1), 1000)
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM system_health_snapshots
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (safe_limit,),
+        ).fetchall()
+        return [_hydrate_system_health_snapshot(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
+
+
+def _hydrate_service_health_event(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["organizationId"] = item.get("organization_id")
+    item["serviceId"] = item.get("service_id")
+    item["serviceLabel"] = item.get("service_label")
+    item["eventType"] = item.get("event_type")
+    item["event"] = _json_or_default(item.get("event_json"), {})
+    item["recordedBy"] = item.get("recorded_by")
+    item["metadata"] = _json_or_default(item.get("metadata_json"), {})
+    return item
+
+
+def create_service_health_event(
+    *,
+    service_id: str,
+    service_label: str,
+    status: str,
+    event_type: str = "status",
+    severity: str = "notice",
+    message: str = "",
+    event: dict[str, Any] | None = None,
+    recorded_by: str = "",
+) -> dict[str, Any]:
+    now = _now()
+    event_id = _new_id("svc health".replace(" ", ""))
+    payload = dict(event or {})
+    payload.setdefault("status", status)
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO service_health_events
+                (
+                    id, organization_id, username, scope_type, scope_id, status,
+                    payload_json, metadata_json, created_at, updated_at,
+                    service_id, service_label, event_type, severity,
+                    message, event_json, recorded_by
+                )
+            VALUES (?, 'default', ?, 'service_health', ?, ?, ?, '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                recorded_by or None,
+                service_id[:160],
+                status[:40],
+                json.dumps(payload, ensure_ascii = False),
+                now,
+                now,
+                service_id[:160],
+                service_label[:240],
+                event_type[:80],
+                severity[:80],
+                message[:1000],
+                json.dumps(payload, ensure_ascii = False),
+                recorded_by[:160],
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM service_health_events WHERE id = ?", (event_id,)).fetchone()
+        return _hydrate_service_health_event(row_to_dict(row) or {})
+    finally:
+        conn.close()
+
+
+def list_service_health_events(*, service_id: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+    safe_limit = min(max(int(limit or 200), 1), 1000)
+    clauses: list[str] = []
+    params: list[Any] = []
+    if service_id:
+        clauses.append("service_id = ?")
+        params.append(service_id)
+    params.append(safe_limit)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM service_health_events
+            {where}
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [_hydrate_service_health_event(row) for row in _rows_to_dicts(rows)]
+    finally:
+        conn.close()
 
 
 def _hydrate_retention_policy(row: dict[str, Any]) -> dict[str, Any]:

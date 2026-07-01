@@ -17,6 +17,8 @@ COGNIX_RISK_SCORING_VERSION = "cognix_risk_scoring_v1"
 COGNIX_RISK_FEATURE_EXTRACTOR_VERSION = "cognix_risk_feature_extractor_v1"
 COGNIX_RISK_RECOMMENDATION_SERVICE_VERSION = "cognix_risk_recommendation_service_v1"
 COGNIX_SYSTEM_HEALTH_VERSION = "cognix_system_health_v1"
+COGNIX_WORKER_MONITOR_VERSION = "cognix_worker_monitor_v1"
+COGNIX_RUNTIME_HEALTH_CHECKER_VERSION = "cognix_runtime_health_checker_v1"
 COGNIX_SECURITY_THREAT_CENTER_VERSION = "cognix_security_threat_center_v1"
 COGNIX_VULNERABILITY_SCANNER_ADAPTER_VERSION = "cognix_vulnerability_scanner_adapter_v1"
 
@@ -68,6 +70,17 @@ RISK_SCORING_TABLES = [
     "risk_recommendations",
 ]
 
+SYSTEM_HEALTH_SERVICES = [
+    "SystemHealthService",
+    "WorkerMonitor",
+    "RuntimeHealthChecker",
+]
+
+SYSTEM_HEALTH_TABLES = [
+    "system_health_snapshots",
+    "service_health_events",
+]
+
 SECURITY_THREAT_CATEGORIES = [
     {
         "id": "vulnerabilities_detected",
@@ -115,6 +128,46 @@ SECURITY_THREAT_CATEGORIES = [
         "description": "Colab, Kaggle, provider, and remote execution security risks.",
     },
 ]
+
+
+def build_system_health_blueprint() -> dict[str, Any]:
+    return {
+        "healthVersion": COGNIX_SYSTEM_HEALTH_VERSION,
+        "workerMonitorVersion": COGNIX_WORKER_MONITOR_VERSION,
+        "runtimeHealthCheckerVersion": COGNIX_RUNTIME_HEALTH_CHECKER_VERSION,
+        "mode": "native_admin_live_system_health",
+        "services": SYSTEM_HEALTH_SERVICES,
+        "tables": SYSTEM_HEALTH_TABLES,
+        "metrics": [
+            "cpu",
+            "ram",
+            "gpu",
+            "vram",
+            "queue_jobs",
+            "average_latency",
+            "model_errors",
+            "worker_status",
+            "storage",
+            "active_services",
+        ],
+        "ui": {
+            "statuses": ["green", "yellow", "red"],
+            "panels": ["admin-dashboard", "admin-system-health"],
+            "history": True,
+            "alerts": True,
+        },
+        "sideEffects": {
+            "databaseWrite": False,
+            "snapshotWrite": False,
+            "serviceEventWrite": False,
+            "auditWrite": False,
+            "networkCall": False,
+            "workerMutation": False,
+            "modelLoad": False,
+            "generation": False,
+            "toolExecution": False,
+        },
+    }
 
 VULNERABILITY_SCANNER_SOURCES = [
     {
@@ -900,21 +953,116 @@ def build_risk_scoring(
     }
 
 
+def _avg(values: list[float]) -> float:
+    return round(sum(values) / len(values), 2) if values else 0.0
+
+
+def _status_from_ratio(value: float, *, yellow: float, red: float, higher_is_worse: bool = True) -> str:
+    if higher_is_worse:
+        return "red" if value >= red else "yellow" if value >= yellow else "green"
+    return "red" if value <= red else "yellow" if value <= yellow else "green"
+
+
+def _worker_monitor(background_jobs: list[dict[str, Any]] | None) -> dict[str, Any]:
+    jobs = list(background_jobs or [])
+    queued = sum(1 for item in jobs if _norm(item.get("status")).lower() in {"queued", "planned", "pending"})
+    running = sum(1 for item in jobs if _norm(item.get("status")).lower() in {"running", "active", "in_progress"})
+    failed = sum(1 for item in jobs if _norm(item.get("status")).lower() in {"failed", "error"})
+    status = "red" if failed else "yellow" if queued > 10 or running > 5 else "green"
+    return {
+        "workerMonitorVersion": COGNIX_WORKER_MONITOR_VERSION,
+        "status": status,
+        "queueJobs": queued,
+        "runningJobs": running,
+        "failedJobs": failed,
+        "totalJobsObserved": len(jobs),
+    }
+
+
+def _latency_metrics(
+    token_events: list[dict[str, Any]] | None,
+    router_logs: list[dict[str, Any]] | None,
+    orchestrator_logs: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    latencies: list[float] = []
+    for event in token_events or []:
+        latency = event.get("latencyMs") or event.get("latency_ms") or event.get("averageLatencyMs") or event.get("average_latency_ms")
+        if isinstance(latency, (int, float)) and float(latency) > 0:
+            latencies.append(float(latency))
+    router_errors = sum(1 for item in router_logs or [] if _norm(item.get("status")).lower() in {"error", "failed"})
+    orchestrator_errors = sum(1 for item in orchestrator_logs or [] if _norm(item.get("status")).lower() in {"error", "failed"})
+    average_latency = _avg(latencies)
+    status = "red" if average_latency >= 15000 or router_errors + orchestrator_errors >= 5 else "yellow" if average_latency >= 5000 else "green"
+    return {
+        "averageLatencyMs": average_latency,
+        "sampleCount": len(latencies),
+        "routerErrors": router_errors,
+        "orchestratorErrors": orchestrator_errors,
+        "modelErrors": router_errors + orchestrator_errors,
+        "status": status,
+    }
+
+
+def _storage_metrics(storage: dict[str, Any] | None) -> dict[str, Any]:
+    record = _as_dict(storage)
+    total_gb = float(record.get("totalGb") or 0.0)
+    free_gb = float(record.get("freeGb") or record.get("availableGb") or 0.0)
+    used_percent = float(record.get("usedPercent") or 0.0)
+    if total_gb > 0 and used_percent <= 0:
+        used_percent = round(((total_gb - free_gb) / total_gb) * 100, 2)
+    status = _status_from_ratio(used_percent, yellow = 80, red = 92)
+    return {
+        "totalGb": total_gb,
+        "freeGb": free_gb,
+        "usedPercent": used_percent,
+        "status": status,
+    }
+
+
+def _vram_metrics(gpu: dict[str, Any]) -> dict[str, Any]:
+    devices = gpu.get("devices") or []
+    total = 0.0
+    free = 0.0
+    for device in devices:
+        item = _as_dict(device)
+        total += float(item.get("totalVramGb") or item.get("vramTotalGb") or item.get("memoryTotalGb") or item.get("totalGb") or 0.0)
+        free += float(item.get("freeVramGb") or item.get("vramFreeGb") or item.get("memoryFreeGb") or item.get("freeGb") or 0.0)
+    used_percent = round(((total - free) / total) * 100, 2) if total > 0 else 0.0
+    return {
+        "totalGb": round(total, 2),
+        "freeGb": round(free, 2),
+        "usedPercent": used_percent,
+        "status": _status_from_ratio(used_percent, yellow = 80, red = 92) if total > 0 else "green",
+    }
+
+
 def build_system_health(
     *,
     hardware: dict[str, Any],
     security_report: dict[str, Any],
     risk_scoring: dict[str, Any],
     audit_logs: list[dict[str, Any]],
+    background_jobs: list[dict[str, Any]] | None = None,
+    token_events: list[dict[str, Any]] | None = None,
+    router_logs: list[dict[str, Any]] | None = None,
+    orchestrator_logs: list[dict[str, Any]] | None = None,
+    service_events: list[dict[str, Any]] | None = None,
+    storage: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     memory = _as_dict(hardware.get("memory"))
     gpu = _as_dict(hardware.get("gpu"))
     total_gb = float(memory.get("totalGb") or 0.0)
     available_gb = float(memory.get("availableGb") or 0.0)
+    used_memory_percent = round(((total_gb - available_gb) / total_gb) * 100, 2) if total_gb > 0 else 0.0
     memory_pressure = "unknown"
     if total_gb > 0:
         ratio = available_gb / total_gb
         memory_pressure = "red" if ratio < 0.10 else "yellow" if ratio < 0.25 else "green"
+    worker_monitor = _worker_monitor(background_jobs)
+    latency = _latency_metrics(token_events, router_logs, orchestrator_logs)
+    storage_metrics = _storage_metrics(storage)
+    vram = _vram_metrics(gpu)
+    persisted_service_events = list(service_events or [])
 
     services = [
         {
@@ -945,7 +1093,43 @@ def build_system_health(
             "status": memory_pressure,
             "detail": f"{available_gb:.1f}GB available / {total_gb:.1f}GB total.",
         },
+        {
+            "id": "workers",
+            "label": "Workers",
+            "status": worker_monitor["status"],
+            "detail": (
+                f"{worker_monitor['runningJobs']} running, "
+                f"{worker_monitor['queueJobs']} queued, {worker_monitor['failedJobs']} failed."
+            ),
+        },
+        {
+            "id": "runtime-latency",
+            "label": "Runtime latency",
+            "status": latency["status"],
+            "detail": f"{latency['averageLatencyMs']}ms average latency across {latency['sampleCount']} sample(s).",
+        },
+        {
+            "id": "storage",
+            "label": "Storage",
+            "status": storage_metrics["status"],
+            "detail": f"{storage_metrics['freeGb']:.1f}GB free; {storage_metrics['usedPercent']:.1f}% used.",
+        },
+        {
+            "id": "vram",
+            "label": "VRAM",
+            "status": vram["status"],
+            "detail": f"{vram['freeGb']:.1f}GB free / {vram['totalGb']:.1f}GB total.",
+        },
     ]
+    services.extend(
+        {
+            "id": str(event.get("serviceId") or event.get("service_id") or event.get("id") or "service"),
+            "label": str(event.get("serviceLabel") or event.get("service_label") or event.get("service") or "Service"),
+            "status": str(event.get("status") or "green"),
+            "detail": str(event.get("message") or event.get("detail") or ""),
+        }
+        for event in persisted_service_events[:20]
+    )
 
     overall = "green"
     if any(item["status"] == "red" for item in services):
@@ -955,15 +1139,34 @@ def build_system_health(
 
     return {
         "healthVersion": COGNIX_SYSTEM_HEALTH_VERSION,
-        "mode": "native_read_only",
+        "workerMonitorVersion": COGNIX_WORKER_MONITOR_VERSION,
+        "runtimeHealthCheckerVersion": COGNIX_RUNTIME_HEALTH_CHECKER_VERSION,
+        "mode": "native_live_system_health",
+        "servicesDeclared": SYSTEM_HEALTH_SERVICES,
+        "tables": SYSTEM_HEALTH_TABLES,
         "overallStatus": overall,
         "metrics": {
             "cpu": {"count": hardware.get("cpuCount"), "backend": hardware.get("deviceBackend")},
-            "memory": {"totalGb": total_gb, "availableGb": available_gb, "pressure": memory_pressure},
+            "memory": {
+                "totalGb": total_gb,
+                "availableGb": available_gb,
+                "usedPercent": used_memory_percent,
+                "pressure": memory_pressure,
+            },
             "gpu": {
                 "available": bool(gpu.get("available")),
                 "deviceCount": len(gpu.get("devices") or []),
                 "devices": gpu.get("devices") or [],
+            },
+            "vram": vram,
+            "queue": worker_monitor,
+            "latency": latency,
+            "modelErrors": {"count": latency["modelErrors"]},
+            "workers": worker_monitor,
+            "storage": storage_metrics,
+            "activeServices": {
+                "count": len([item for item in services if item["status"] in {"green", "yellow"}]),
+                "services": [item["id"] for item in services],
             },
             "audit": {"recentEntries": len(audit_logs)},
             "security": _as_dict(security_report.get("summary")),
@@ -981,7 +1184,13 @@ def build_system_health(
         ],
         "sideEffects": {
             "databaseWrite": False,
+            "snapshotWrite": False,
+            "serviceEventWrite": False,
+            "auditWrite": False,
             "networkCall": False,
             "workerMutation": False,
+            "modelLoad": False,
+            "generation": False,
+            "toolExecution": False,
         },
     }

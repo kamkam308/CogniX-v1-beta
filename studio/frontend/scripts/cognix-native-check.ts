@@ -4033,6 +4033,68 @@ const checks: Check[] = [
     ],
   },
   {
+    file: "../backend/core/cognix/admin_security.py",
+    includes: [
+      'COGNIX_SYSTEM_HEALTH_VERSION = "cognix_system_health_v1"',
+      'COGNIX_WORKER_MONITOR_VERSION = "cognix_worker_monitor_v1"',
+      'COGNIX_RUNTIME_HEALTH_CHECKER_VERSION = "cognix_runtime_health_checker_v1"',
+      "SystemHealthService",
+      "WorkerMonitor",
+      "RuntimeHealthChecker",
+      '"system_health_snapshots"',
+      '"service_health_events"',
+      "build_system_health_blueprint",
+      "build_system_health",
+      "averageLatencyMs",
+      "modelErrors",
+      "activeServices",
+    ],
+  },
+  {
+    file: "../backend/storage/cognix_db.py",
+    includes: [
+      "ADMIN_SYSTEM_HEALTH_TABLE_NAMES",
+      "def _ensure_admin_system_health_columns",
+      "def create_system_health_snapshot",
+      "def list_system_health_snapshots",
+      "def create_service_health_event",
+      "def list_service_health_events",
+    ],
+  },
+  {
+    file: "../backend/routes/cognix.py",
+    includes: [
+      '"/admin/system-health/blueprint"',
+      '"/admin/system-health"',
+      '"/admin/system-health/snapshot"',
+      '"/admin/system-health/snapshots"',
+      '"/admin/system-health/service-events"',
+      "admin_system_health_snapshot_created",
+      "snapshotWrite",
+      "serviceEventWrite",
+    ],
+  },
+  {
+    file: "../backend/core/cognix/module_registry.py",
+    includes: [
+      '"system_health_service"',
+      '"worker_monitor"',
+      '"runtime_health_checker"',
+      '"system_health_snapshots"',
+      '"/api/cognix/admin/system-health/snapshot"',
+    ],
+  },
+  {
+    file: "../backend/tests/test_cognix_admin_system_health_persistence.py",
+    includes: [
+      "test_system_health_blueprint_schema_and_module_contract_declares_full_pipeline",
+      "test_system_health_snapshot_persists_history_and_service_events",
+      "cognix_system_health_v1",
+      "admin_system_health_snapshot_created",
+      "system_health_snapshots",
+    ],
+  },
+  {
     file: "../backend/core/cognix/admin_local_only.py",
     includes: [
       'COGNIX_LOCAL_ONLY_POLICY_ENGINE_VERSION = "cognix_local_only_policy_engine_v1"',
