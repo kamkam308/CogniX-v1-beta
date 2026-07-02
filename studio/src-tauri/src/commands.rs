@@ -533,7 +533,7 @@ pub async fn start_managed_repair(
             warn!("Managed repair update finished, but preflight is still not ready; falling back to installer");
             let _ = app.emit(
                 "repair-progress",
-                "Update finished, but Studio is still not ready. Running bundled installer...",
+                "Mise a jour terminee, mais CogniX n'est pas encore pret. Lancement de l'installateur integre...",
             );
         }
         Err(msg) => {
@@ -555,7 +555,7 @@ pub async fn start_managed_repair(
             );
             let _ = app.emit(
                 "repair-progress",
-                "Update failed. Running bundled installer...",
+                "Mise a jour echouee. Lancement de l'installateur integre...",
             );
         }
     }

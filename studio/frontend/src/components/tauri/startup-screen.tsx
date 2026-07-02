@@ -50,11 +50,13 @@ function DiagnosticsCopyActions({
         setManualMessage(null);
       } else {
         setManualReport(result.report);
-        setManualMessage(result.error ?? "Clipboard copy failed. Select and copy the diagnostics below.");
+        setManualMessage(
+          result.error ?? "Impossible de copier le diagnostic. Selectionne puis copie le rapport ci-dessous.",
+        );
       }
     } catch (error) {
       setManualReport(null);
-      setManualMessage(`Diagnostics copy failed: ${String(error)}`);
+      setManualMessage(`Copie du diagnostic impossible : ${String(error)}`);
     } finally {
       setCopying(false);
     }
@@ -67,7 +69,7 @@ function DiagnosticsCopyActions({
           variant="secondary"
           onClick={() => void handleCopyDiagnostics()}
         >
-          {copying ? "Copying..." : "Copy Diagnostics"}
+          {copying ? "Copie..." : "Copier le diagnostic"}
         </ActionButton>
         {children}
       </div>
@@ -91,13 +93,13 @@ function DiagnosticsCopyActions({
 // ---------------------------------------------------------------------------
 
 const INSTALL_STEPS = [
-  "Detecting your system",
-  "Checking dependencies",
-  "Setting up package manager",
-  "Creating Python environment",
-  "Installing ML framework",
-  "Installing CogniX",
-  "Finalizing setup",
+  "Analyse du systeme",
+  "Verification des dependances",
+  "Preparation du gestionnaire de paquets",
+  "Creation de l'environnement Python",
+  "Installation du moteur IA",
+  "Installation de CogniX",
+  "Finalisation de la configuration",
 ] as const;
 
 const EASE_OUT_QUART: [number, number, number, number] = [0.165, 0.84, 0.44, 1];
@@ -112,10 +114,10 @@ function Logo() {
       <img
         src="/cognix-logo-512.png"
         alt="CogniX"
-        className="cognix-logo-mark h-[82px] w-[82px] object-contain"
+        className="cognix-logo-mark h-[92px] w-[92px] object-contain"
       />
       <div className="flex flex-col items-center gap-1">
-        <span className="font-heading text-[32px] font-semibold leading-none text-foreground">
+        <span className="font-heading text-[34px] font-semibold leading-none text-foreground">
           CogniX
         </span>
         <span className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
@@ -159,7 +161,7 @@ function CheckingContent() {
       </div>
       <div className="mb-10 flex flex-col items-center gap-2">
         <Spinner className="size-6 text-primary" />
-        <p className="text-sm text-muted-foreground">Checking...</p>
+        <p className="text-sm text-muted-foreground">Verification...</p>
       </div>
     </div>
   );
@@ -286,13 +288,13 @@ function InstallingContent({
       </div>
       <div className="mb-10 flex flex-col items-center gap-2">
         <Spinner className="size-6 text-primary" />
-        <p className="text-sm font-bold text-foreground">Installing...</p>
+        <p className="text-sm font-bold text-foreground">Installation de CogniX...</p>
         <p className="text-sm font-bold text-muted-foreground">
-          Please wait a few mins, then you can start training.
+          Preparation de ton espace local. Le chat sera pret juste apres.
         </p>
         {currentStepIndex >= 0 && (
           <p className="mt-1 text-xs font-bold text-muted-foreground">
-            Step {stepNum} of {INSTALL_STEPS.length}: {stepLabel}
+            Etape {stepNum} sur {INSTALL_STEPS.length} : {stepLabel}
           </p>
         )}
         {progressDetail && (
@@ -319,7 +321,7 @@ function RepairingContent({
       </div>
       <div className="mb-10 flex flex-col items-center gap-2">
         <Spinner className="size-6 text-primary" />
-        <p className="text-sm font-bold text-foreground">Updating existing CogniX install...</p>
+        <p className="text-sm font-bold text-foreground">Mise a jour de l'installation CogniX...</p>
         {latest && (
           <p className="max-w-xs text-center text-xs text-muted-foreground">{latest}</p>
         )}
@@ -341,12 +343,12 @@ function InstallErrorContent({
     <>
       <Logo />
       <div className="mt-8 flex flex-col items-center gap-2">
-        <p className="text-sm font-medium text-destructive">Setup ran into a problem</p>
+        <p className="text-sm font-medium text-destructive">L'installation a rencontre un probleme</p>
         {error && (
           <p className="max-w-xs text-center text-xs text-muted-foreground">{error}</p>
         )}
         <DiagnosticsCopyActions onCopyDiagnostics={onCopyDiagnostics}>
-          <ActionButton onClick={onRetryInstall}>Try Again</ActionButton>
+          <ActionButton onClick={onRetryInstall}>Reessayer</ActionButton>
         </DiagnosticsCopyActions>
       </div>
     </>
@@ -366,12 +368,12 @@ function RepairErrorContent({
     <>
       <Logo />
       <div className="mt-8 flex flex-col items-center gap-2">
-        <p className="text-sm font-medium text-destructive">Update failed</p>
+        <p className="text-sm font-medium text-destructive">Mise a jour echouee</p>
         {error && (
           <p className="max-w-md text-center text-xs text-muted-foreground">{error}</p>
         )}
         <DiagnosticsCopyActions onCopyDiagnostics={onCopyDiagnostics}>
-          <ActionButton onClick={onRetry}>Retry</ActionButton>
+          <ActionButton onClick={onRetry}>Reessayer</ActionButton>
         </DiagnosticsCopyActions>
       </div>
     </>
@@ -391,9 +393,9 @@ function NeedsElevationContent({
     <>
       <Logo />
       <div className="mt-8 flex flex-col items-center gap-2">
-        <p className="text-sm font-medium text-foreground">Permission needed</p>
+        <p className="text-sm font-medium text-foreground">Permission requise</p>
         <p className="text-xs text-muted-foreground">
-          The following system packages need to be installed:
+          Les paquets systeme suivants doivent etre installes :
         </p>
         <div className="mt-2 w-full max-w-xs rounded-lg bg-muted p-3 font-mono text-xs">
           {elevationPackages.map((pkg) => (
@@ -401,8 +403,8 @@ function NeedsElevationContent({
           ))}
         </div>
         <div className="mt-4 flex gap-3">
-          <ActionButton variant="secondary" onClick={onRetryInstall}>Cancel</ActionButton>
-          <ActionButton onClick={onApproveElevation}>Allow</ActionButton>
+          <ActionButton variant="secondary" onClick={onRetryInstall}>Annuler</ActionButton>
+          <ActionButton onClick={onApproveElevation}>Autoriser</ActionButton>
         </div>
       </div>
     </>
@@ -417,7 +419,7 @@ function StartingContent() {
       </div>
       <div className="mb-10 flex flex-col items-center gap-2">
         <Spinner className="size-6 text-primary" />
-        <p className="text-sm text-muted-foreground">Starting server...</p>
+        <p className="text-sm text-muted-foreground">Demarrage du serveur...</p>
       </div>
     </div>
   );
@@ -428,9 +430,9 @@ function StoppedContent({ onStartServer }: { onStartServer: () => void }) {
     <>
       <Logo />
       <div className="mt-8 flex flex-col items-center gap-2">
-        <p className="text-sm font-medium text-foreground">Server stopped</p>
+        <p className="text-sm font-medium text-foreground">Serveur arrete</p>
         <div className="mt-4">
-          <ActionButton onClick={onStartServer}>Start Server</ActionButton>
+          <ActionButton onClick={onStartServer}>Demarrer le serveur</ActionButton>
         </div>
       </div>
     </>
@@ -450,12 +452,12 @@ function ErrorContent({
     <>
       <Logo />
       <div className="mt-8 flex flex-col items-center gap-2">
-        <p className="text-sm font-medium text-destructive">Something went wrong</p>
+        <p className="text-sm font-medium text-destructive">Un probleme est survenu</p>
         {error && (
           <p className="max-w-md text-center text-xs text-muted-foreground">{error}</p>
         )}
         <DiagnosticsCopyActions onCopyDiagnostics={onCopyDiagnostics}>
-          <ActionButton onClick={onRetry}>Retry</ActionButton>
+          <ActionButton onClick={onRetry}>Reessayer</ActionButton>
         </DiagnosticsCopyActions>
       </div>
     </>

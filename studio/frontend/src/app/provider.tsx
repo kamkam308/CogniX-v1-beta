@@ -4,10 +4,6 @@
 import { StartupScreen } from "@/components/tauri/startup-screen";
 import { UpdateBanner } from "@/components/tauri/update-banner";
 import { UpdateScreen } from "@/components/tauri/update-screen";
-import {
-  WindowTitlebar,
-  shouldUseCustomWindowTitlebar,
-} from "@/components/tauri/window-titlebar";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { WebUpdateBanner } from "@/components/web/update-banner";
@@ -305,32 +301,9 @@ function TauriWrapper({ children }: { children: ReactNode }) {
     />
   );
 
-  if (!shouldUseCustomWindowTitlebar()) {
-    // macOS desktop uses the native titlebar and returns here before the
-    // custom-titlebar branch, so mount the updater banner on this path too.
-    return (
-      <>
-        {content}
-        <div className="pointer-events-none fixed bottom-4 right-4 z-[9998] flex w-[calc(100vw-2rem)] max-w-[400px] flex-col items-stretch gap-2">
-          <LlamaUpdateBanner
-            positioned={false}
-            enabled={showApp && !HIDDEN_TITLEBAR_SIDEBAR_ROUTES.has(pathname)}
-          />
-          {showApp ? <DownloadManagerPanel positioned={false} /> : null}
-        </div>
-      </>
-    );
-  }
-
-  const showSidebarSurface =
-    showApp && !HIDDEN_TITLEBAR_SIDEBAR_ROUTES.has(pathname);
-
   return (
-    <div className="flex h-dvh min-h-0 flex-col overflow-hidden bg-background [--studio-titlebar-height:34px]">
-      <WindowTitlebar showSidebarSurface={showSidebarSurface} />
-      <div className="min-h-0 flex-1 overflow-hidden">
-        {content}
-      </div>
+    <>
+      {content}
       <div className="pointer-events-none fixed bottom-4 right-4 z-[9998] flex w-[calc(100vw-2rem)] max-w-[400px] flex-col items-stretch gap-2">
         <LlamaUpdateBanner
           positioned={false}
@@ -338,7 +311,7 @@ function TauriWrapper({ children }: { children: ReactNode }) {
         />
         {showApp ? <DownloadManagerPanel positioned={false} /> : null}
       </div>
-    </div>
+    </>
   );
 }
 

@@ -1,10 +1,10 @@
 # CogniX V1 Beta Snapshot
 
-This repository preserves the working CogniX V1 beta Unsloth Studio snapshot restored on Linux.
+This repository preserves the working CogniX V1 beta snapshot restored on Linux.
 
 ## What is included
 
-- Modified Unsloth Studio backend and frontend code.
+- Modified CogniX backend and frontend code.
 - Built frontend assets used by the working local CogniX interface.
 - CogniX authentication UI code with username/password login support.
 - CogniX branding assets.
@@ -40,4 +40,4 @@ https://cognix.local:4321/login
 
 ## Restore note
 
-If a future change breaks the interface, restore this snapshot into the active Unsloth Studio package, recreate a fresh local auth database, then launch with the same frontend `dist` path.
+If a future change breaks the interface, restore this snapshot into the active CogniX package, recreate a fresh local auth database, then launch with the same frontend `dist` path.

@@ -25,10 +25,10 @@ function Logo() {
       <img
         src="/cognix-logo-512.png"
         alt="CogniX"
-        className="cognix-logo-mark h-[82px] w-[82px] object-contain"
+        className="cognix-logo-mark h-[92px] w-[92px] object-contain"
       />
       <div className="flex flex-col items-center gap-1">
-        <span className="font-heading text-[32px] font-semibold leading-none text-foreground">
+        <span className="font-heading text-[34px] font-semibold leading-none text-foreground">
           CogniX
         </span>
         <span className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
@@ -42,28 +42,28 @@ function Logo() {
 function statusLabel(status: UpdateStatus): string {
   switch (status) {
     case "updating-backend":
-      return "Updating backend...";
+      return "Mise a jour du backend...";
     case "downloading":
-      return "Downloading app update...";
+      return "Telechargement de la mise a jour...";
     case "installing":
-      return "Installing update...";
+      return "Installation de la mise a jour...";
     case "error":
-      return "Update failed";
+      return "Mise a jour echouee";
     default:
-      return "Updating...";
+      return "Mise a jour...";
   }
 }
 
 function statusSubtext(status: UpdateStatus, progress: number): string {
   switch (status) {
     case "updating-backend":
-      return "This may take a few minutes. Do not close the app.";
+      return "Cette etape peut prendre quelques minutes. Garde CogniX ouvert.";
     case "downloading":
-      return `${progress}% downloaded`;
+      return `${progress}% telecharges`;
     case "installing":
-      return "The app will restart shortly.";
+      return "CogniX va redemarrer dans un instant.";
     case "error":
-      return "Something went wrong during the update.";
+      return "Un probleme est survenu pendant la mise a jour.";
     default:
       return "";
   }
@@ -117,11 +117,13 @@ export function UpdateScreen({
         setManualMessage(null);
       } else {
         setManualReport(result.report);
-        setManualMessage(result.error ?? "Clipboard copy failed. Select and copy the diagnostics below.");
+        setManualMessage(
+          result.error ?? "Impossible de copier le diagnostic. Selectionne puis copie le rapport ci-dessous.",
+        );
       }
     } catch (copyError) {
       setManualReport(null);
-      setManualMessage(`Diagnostics copy failed: ${String(copyError)}`);
+      setManualMessage(`Copie du diagnostic impossible : ${String(copyError)}`);
     } finally {
       setCopying(false);
     }
@@ -181,21 +183,21 @@ export function UpdateScreen({
               className="rounded-lg bg-muted px-5 py-2.5 text-sm font-medium text-foreground transition-colors hover:bg-muted/80"
               onClick={() => void handleCopyDiagnostics()}
             >
-              {copying ? "Copying..." : "Copy Diagnostics"}
+              {copying ? "Copie..." : "Copier le diagnostic"}
             </button>
             <button
               type="button"
               className="rounded-lg bg-primary px-5 py-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/80"
               onClick={onRetry}
             >
-              Retry
+              Reessayer
             </button>
             <button
               type="button"
               className="rounded-lg bg-muted px-5 py-2.5 text-sm font-medium text-foreground transition-colors hover:bg-muted/80"
               onClick={onSkipRestart}
             >
-              Skip & Restart
+              Ignorer et redemarrer
             </button>
           </div>
         )}

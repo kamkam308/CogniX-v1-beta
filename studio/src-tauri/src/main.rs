@@ -75,11 +75,11 @@ fn setup_logging() {
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-fn setup_custom_titlebar(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+fn setup_native_window_frame(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let window = app.get_webview_window("main").ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "main window not found")
     })?;
-    window.set_decorations(false)?;
+    window.set_decorations(true)?;
     Ok(())
 }
 
@@ -225,7 +225,7 @@ fn main() {
         ])
         .setup(|app| {
             #[cfg(any(target_os = "windows", target_os = "linux"))]
-            setup_custom_titlebar(app)?;
+            setup_native_window_frame(app)?;
             setup_tray(app)?;
             Ok(())
         })

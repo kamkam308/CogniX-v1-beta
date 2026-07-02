@@ -32,7 +32,7 @@ function AuthPage({ mode }: { mode: AuthPageMode }) {
     : { type: "spring" as const, stiffness: 320, damping: 34, mass: 0.82 };
 
   return (
-    <div className="relative flex min-h-[calc(100dvh-var(--studio-titlebar-height,0px))] items-center justify-center overflow-hidden bg-background px-4 py-8 sm:px-6 sm:py-10 md:px-10">
+    <div className="relative flex min-h-dvh items-center justify-center overflow-hidden bg-background px-4 py-8 sm:px-6 sm:py-10 md:px-10">
       <motion.img
         layoutId="cognix-auth-logo"
         src="/cognix-logo.png"

@@ -59,11 +59,13 @@ export function UpdateBanner({
         setManualMessage(null);
       } else {
         setManualReport(result.report);
-        setManualMessage(result.error ?? "Clipboard copy failed. Select and copy the diagnostics below.");
+        setManualMessage(
+          result.error ?? "Impossible de copier le diagnostic. Selectionne puis copie le rapport ci-dessous.",
+        );
       }
     } catch (error) {
       setManualReport(null);
-      setManualMessage(`Diagnostics copy failed: ${String(error)}`);
+      setManualMessage(`Copie du diagnostic impossible : ${String(error)}`);
     } finally {
       setCopying(false);
     }
@@ -94,16 +96,16 @@ export function UpdateBanner({
               <img src="/cognix-logo.png" alt="" className="size-5" />
               <div>
                 <p className="text-sm font-semibold text-foreground">
-                  {showFailure ? "App update failed" : `New version: v${info?.version}`}
+                  {showFailure ? "Mise a jour echouee" : `Nouvelle version : v${info?.version}`}
                 </p>
                 <p className="text-xs text-muted-foreground">
                   {showFailure
-                    ? "Backend recovered. Diagnostics are still available."
+                    ? "Le backend a redemarre. Le diagnostic reste disponible."
                     : isManualLinuxPackage
-                      ? "Open the GitHub release page to install the Linux package"
+                      ? "Ouvre la release GitHub pour installer le paquet Linux"
                       : isExternalServer
-                        ? "Run the CogniX desktop update from your terminal"
-                        : "A new app update is available"}
+                        ? "Lance la mise a jour desktop CogniX depuis le terminal"
+                        : "Une nouvelle mise a jour est disponible"}
                 </p>
               </div>
             </div>
@@ -120,24 +122,24 @@ export function UpdateBanner({
                   <Button size="sm" variant="outline" className="corner-squircle" onClick={() => {
                     handleCopyDiagnostics().catch(console.error);
                   }}>
-                    {copying ? "Copying..." : "Copy Diagnostics"}
+                    {copying ? "Copie..." : "Copier le diagnostic"}
                   </Button>
                   <Button size="sm" className="corner-squircle" onClick={onInstall} disabled={installDisabled}>
-                    {isManualLinuxPackage ? "Open Release Page" : "Retry Update"}
+                    {isManualLinuxPackage ? "Ouvrir la release" : "Reessayer"}
                   </Button>
                 </>
               ) : (
                 <>
                   <Button size="sm" className="corner-squircle" onClick={onInstall} disabled={installDisabled}>
-                    {isManualLinuxPackage ? "Open Release Page" : "Update Now"}
+                    {isManualLinuxPackage ? "Ouvrir la release" : "Mettre a jour"}
                   </Button>
                   <Button size="sm" variant="outline" className="corner-squircle" disabled={true}>
-                    Release Notes
+                    Notes de version
                   </Button>
                 </>
               )}
               <Button size="sm" variant="ghost" className="corner-squircle" onClick={onDismiss}>
-                Later
+                Plus tard
               </Button>
             </div>
             {manualMessage && (

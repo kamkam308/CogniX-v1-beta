@@ -1,0 +1,1 @@
+import{_i as e,gi as t}from"./index-BNcewFzu.js";var n=(n,r)=>e.lang.round(t.parse(n)[r]);export{n as t};

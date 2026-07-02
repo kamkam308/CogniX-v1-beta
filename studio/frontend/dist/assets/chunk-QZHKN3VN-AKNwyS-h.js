@@ -1,1 +1,0 @@
-import{yi as e}from"./index-B_8xXQk4.js";var t=class{constructor(e){this.init=e,this.records=this.init()}static{e(this,`ImperativeState`)}reset(){this.records=this.init()}};export{t};

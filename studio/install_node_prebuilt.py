@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
-"""Cross-platform Node.js prebuilt installer for Unsloth Studio.
+"""Cross-platform Node.js prebuilt installer for CogniX Desktop.
 
 Downloads an official Node.js archive from nodejs.org into an isolated
 ``<UNSLOTH_HOME>/node`` and never touches the system Node/npm. Pinning Node 24+
@@ -727,7 +727,7 @@ def main(argv: list[str] | None = None) -> int:
     global _LOG_TO_STDOUT
     _LOG_TO_STDOUT = True
 
-    parser = argparse.ArgumentParser(description = "Install an isolated Node.js for Unsloth Studio")
+    parser = argparse.ArgumentParser(description = "Install an isolated Node.js for CogniX Desktop")
     parser.add_argument(
         "--install-dir", required = True, help = "isolated Node directory, e.g. <UNSLOTH_HOME>/node"
     )
