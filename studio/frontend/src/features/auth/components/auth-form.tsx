@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { Eye, EyeOff } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement, SyntheticEvent } from "react";
 import { refreshSession } from "../api";
 
@@ -115,6 +115,7 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
   const identifierRef = useRef<HTMLInputElement | null>(null);
   const signupUsernameRef = useRef<HTMLInputElement | null>(null);
   const newPasswordRef = useRef<HTMLInputElement | null>(null);
+  const previousModeRef = useRef<AuthMode>(mode);
   const [showPassword, setShowPassword] = useState(false);
   const [showNewPassword, setShowNewPassword] = useState(false);
   const [identifier, setIdentifier] = useState(DEFAULT_LOGIN_IDENTIFIER);
@@ -129,6 +130,17 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
   const [initialized, setInitialized] = useState<boolean | null>(null);
   const [requiresPasswordChange, setRequiresPasswordChange] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useLayoutEffect(() => {
+    if (previousModeRef.current === mode) return;
+    previousModeRef.current = mode;
+    setError(null);
+    setLoading(false);
+    setShowPassword(false);
+    setShowNewPassword(false);
+    setPassword("");
+    setConfirmPassword("");
+  }, [mode]);
 
   useEffect(() => {
     let canceled = false;
@@ -208,7 +220,7 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
 
   useEffect(() => {
     if (statusLoading) return;
-    const delay = reduced ? 0 : 180;
+    const delay = reduced ? 0 : 220;
     const timeout = window.setTimeout(() => {
       const target = isLoginMode
         ? identifierRef.current
@@ -242,6 +254,7 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
   }, [isLoginMode, isSignupMode]);
 
   const activeAuthMode = isLoginMode ? "login" : "signup";
+  const authDirection = isSignupMode ? 1 : -1;
   const authModeTransition = reduced
     ? { duration: 0 }
     : { type: "spring" as const, stiffness: 420, damping: 34, mass: 0.55 };
@@ -251,6 +264,55 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
   const layoutTransition = reduced
     ? { duration: 0 }
     : { type: "spring" as const, stiffness: 340, damping: 36, mass: 0.85 };
+  const copyVariants = useMemo(
+    () => ({
+      initial: (direction: number) => ({
+        opacity: 0,
+        x: reduced ? 0 : direction * 8,
+        y: reduced ? 0 : 5,
+        scale: reduced ? 1 : 0.99,
+        filter: reduced ? "none" : "blur(2px)",
+      }),
+      animate: {
+        opacity: 1,
+        x: 0,
+        y: 0,
+        scale: 1,
+        filter: "blur(0px)",
+      },
+      exit: (direction: number) => ({
+        opacity: 0,
+        x: reduced ? 0 : direction * -8,
+        y: reduced ? 0 : -4,
+        scale: reduced ? 1 : 0.995,
+        filter: reduced ? "none" : "blur(1px)",
+      }),
+    }),
+    [reduced],
+  );
+  const fieldVariants = useMemo(
+    () => ({
+      initial: (direction: number) => ({
+        opacity: 0,
+        x: reduced ? 0 : direction * 18,
+        scale: reduced ? 1 : 0.99,
+        filter: reduced ? "none" : "blur(2px)",
+      }),
+      animate: {
+        opacity: 1,
+        x: 0,
+        scale: 1,
+        filter: "blur(0px)",
+      },
+      exit: (direction: number) => ({
+        opacity: 0,
+        x: reduced ? 0 : direction * -14,
+        scale: reduced ? 1 : 0.995,
+        filter: reduced ? "none" : "blur(1px)",
+      }),
+    }),
+    [reduced],
+  );
   const blockedByState =
     initialized === false ||
     ((isLoginMode || isSignupMode) && requiresPasswordChange) ||
@@ -437,13 +499,15 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
         </div>
       )}
 
-      <AnimatePresence initial={false} mode="popLayout">
+      <AnimatePresence initial={false} mode="popLayout" custom={authDirection}>
         <motion.div
           key={`${mode}-copy`}
           layout="position"
-          initial={{ opacity: 0, y: reduced ? 0 : 8, scale: reduced ? 1 : 0.985 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: reduced ? 0 : -6, scale: reduced ? 1 : 0.995 }}
+          variants={copyVariants}
+          custom={authDirection}
+          initial="initial"
+          animate="animate"
+          exit="exit"
           transition={panelTransition}
           className="space-y-2"
         >
@@ -462,21 +526,15 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
         className="grid gap-4"
         onSubmit={handleSubmit}
       >
-        <AnimatePresence initial={false} mode="popLayout">
+        <AnimatePresence initial={false} mode="popLayout" custom={authDirection}>
           <motion.div
             key={`${mode}-fields`}
             layout="position"
-            initial={{
-              opacity: 0,
-              x: reduced ? 0 : isSignupMode ? 16 : -16,
-              scale: reduced ? 1 : 0.99,
-            }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{
-              opacity: 0,
-              x: reduced ? 0 : isSignupMode ? -10 : 10,
-              scale: reduced ? 1 : 0.995,
-            }}
+            variants={fieldVariants}
+            custom={authDirection}
+            initial="initial"
+            animate="animate"
+            exit="exit"
             transition={panelTransition}
             className="grid gap-4"
           >
@@ -489,7 +547,6 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
                     ref={identifierRef}
                     className="h-12 rounded-2xl bg-background"
                     autoComplete="username"
-                    autoFocus={isLoginMode}
                     value={identifier}
                     onChange={(event) => setIdentifier(event.target.value)}
                     minLength={3}
@@ -539,7 +596,6 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
                     ref={signupUsernameRef}
                     className="h-12 rounded-2xl bg-background"
                     autoComplete="username"
-                    autoFocus={isSignupMode}
                     value={signupUsername}
                     onChange={(event) => setSignupUsername(event.target.value)}
                     minLength={3}
@@ -625,7 +681,6 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
                       type={showNewPassword ? "text" : "password"}
                       className="h-12 rounded-2xl bg-background pr-11"
                       autoComplete="new-password"
-                      autoFocus={isPasswordSetupMode}
                       value={newPassword}
                       onChange={(event) => setNewPassword(event.target.value)}
                       minLength={8}

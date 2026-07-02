@@ -111,6 +111,7 @@ export const Route = createRootRoute({
 });
 
 const HIDDEN_NAVBAR_ROUTES = ["/onboarding", "/login", "/signup", "/change-password"];
+const AUTH_FLOW_ROUTES = new Set(["/login", "/signup"]);
 
 // Fallback when no matched route declares a `staticData.title`.
 const DEFAULT_DOCUMENT_TITLE = "CogniX";
@@ -119,6 +120,8 @@ function RootLayout() {
   const t = useT();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const hideNavbar = HIDDEN_NAVBAR_ROUTES.includes(pathname);
+  const isAuthFlowRoute = AUTH_FLOW_ROUTES.has(pathname);
+  const hiddenRouteKey = isAuthFlowRoute ? "auth-flow" : pathname;
   // Exact match: a prefix would treat /chatty as chat, hiding its not-found UI.
   const isChatRoute = pathname === "/chat";
   const { pinned, setPinned, togglePinned } = useSidebarPin();
@@ -241,9 +244,9 @@ function RootLayout() {
       <CogniXCommandPalette />
       {hideNavbar ? (
         <main className="flex-1 overflow-hidden">
-          <AnimatePresence initial={false} mode="wait">
+          <AnimatePresence initial={false} mode={isAuthFlowRoute ? "popLayout" : "wait"}>
             <motion.div
-              key={pathname}
+              key={hiddenRouteKey}
               initial={{ opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -8 }}
