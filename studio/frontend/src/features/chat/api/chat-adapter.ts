@@ -743,6 +743,8 @@ async function planLatestCogniXObjective(
       planMode: plan.mode,
       planSteps: plan.steps.map((step) => step.label),
       warnings: plan.warnings,
+      routerLogId: plan.logId,
+      orchestratorLogId: plan.orchestratorLogId ?? null,
       confidence: classification.confidence,
       needsClarification: classification.needsClarification,
       routingMode: classification.routingMode,

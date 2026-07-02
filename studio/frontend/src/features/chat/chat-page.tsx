@@ -54,6 +54,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { Tooltip as TooltipPrimitive } from "radix-ui";
 import {
   type CSSProperties,
+  type MouseEvent,
   type ReactElement,
   memo,
   useCallback,
@@ -63,7 +64,11 @@ import {
   useState,
 } from "react";
 import type { PanelImperativeHandle } from "react-resizable-panels";
-import { listLocalModels } from "./api/chat-api";
+import {
+  explainCogniXDecision,
+  listLocalModels,
+  type CogniXDecisionExplanation,
+} from "./api/chat-api";
 import { ArtifactSurface } from "./artifacts/artifact-surface";
 import {
   clearAutoOpenedArtifacts,
@@ -125,7 +130,10 @@ import {
   pendingSelectionMatches,
   useChatRuntimeStore,
 } from "./stores/chat-runtime-store";
-import type { PendingModelSelection } from "./stores/chat-runtime-store";
+import type {
+  CogniXRouteSnapshot,
+  PendingModelSelection,
+} from "./stores/chat-runtime-store";
 import { useChatPreferencesStore } from "./stores/chat-preferences-store";
 import { useExternalProvidersStore } from "./stores/external-providers-store";
 import { buildChatTourSteps } from "./tour";
@@ -216,11 +224,67 @@ function cognixReadinessTone(value: string | undefined): string {
   return "border-destructive/25 bg-destructive/10 text-destructive";
 }
 
+function cognixDecisionSource(route: CogniXRouteSnapshot | null): {
+  sourceType: "orchestrator_log" | "router_log" | "manual";
+  sourceId: string | null;
+  decision: Record<string, unknown> | null;
+} | null {
+  if (!route) return null;
+
+  if (route.orchestratorLogId) {
+    return {
+      sourceType: "orchestrator_log",
+      sourceId: String(route.orchestratorLogId),
+      decision: null,
+    };
+  }
+  if (route.routerLogId) {
+    return {
+      sourceType: "router_log",
+      sourceId: String(route.routerLogId),
+      decision: null,
+    };
+  }
+
+  return {
+    sourceType: "manual",
+    sourceId: null,
+    decision: {
+      selectedDomain: route.selectedDomain,
+      domain: route.selectedDomain,
+      modelId: route.selectedModelId ?? route.recommendedModelLabel,
+      modelLabel: route.recommendedModelLabel,
+      providerType: route.providerType ?? null,
+      status: route.executionStatus ?? "unknown",
+      confidence: route.confidence,
+      warnings: route.warnings ?? [],
+      sideEffects: {
+        modelLoad: Boolean(route.willLoadModel),
+        generation: Boolean(route.willGenerate),
+        networkModelCall:
+          Boolean(route.willGenerate) && route.providerType !== "ollama",
+      },
+    },
+  };
+}
+
 function CogniXAutoChip({ active }: { active: boolean }): ReactElement | null {
   const openSettings = useSettingsDialogStore((state) => state.openDialog);
   const latestRoute = useChatRuntimeStore((state) => state.latestCogniXRoute);
+  const activeProjectId = useChatRuntimeStore((state) => state.activeProjectId);
   const [strategy, setStrategy] = useState<CogniXAutoStrategy | null>(null);
   const [failed, setFailed] = useState(false);
+  const [decisionExplanation, setDecisionExplanation] =
+    useState<CogniXDecisionExplanation | null>(null);
+  const [decisionLoading, setDecisionLoading] = useState(false);
+  const [decisionError, setDecisionError] = useState<string | null>(null);
+  const decisionSource = useMemo(
+    () => cognixDecisionSource(latestRoute),
+    [latestRoute],
+  );
+  const decisionSourceKey = decisionSource
+    ? `${decisionSource.sourceType}:${decisionSource.sourceId ?? "manual"}:${latestRoute?.createdAt ?? ""}`
+    : "none";
 
   useEffect(() => {
     if (!active) return;
@@ -245,6 +309,45 @@ function CogniXAutoChip({ active }: { active: boolean }): ReactElement | null {
       cancelled = true;
     };
   }, [active]);
+
+  useEffect(() => {
+    setDecisionExplanation(null);
+    setDecisionError(null);
+    setDecisionLoading(false);
+  }, [decisionSourceKey]);
+
+  const explainLatestDecision = useCallback(
+    async (event: MouseEvent<HTMLButtonElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!decisionSource) {
+        setDecisionError("Aucune decision CogniX n'est disponible.");
+        return;
+      }
+      setDecisionLoading(true);
+      setDecisionError(null);
+      try {
+        const result = await explainCogniXDecision({
+          sourceType: decisionSource.sourceType,
+          sourceId: decisionSource.sourceId,
+          projectId: activeProjectId,
+          question: "Pourquoi ce modele ou cette strategie ?",
+          decision: decisionSource.decision,
+          storeDecision: true,
+        });
+        setDecisionExplanation(result.decisionExplanation);
+      } catch (err: unknown) {
+        setDecisionError(
+          err instanceof Error
+            ? err.message
+            : "Explication indisponible pour cette decision.",
+        );
+      } finally {
+        setDecisionLoading(false);
+      }
+    },
+    [activeProjectId, decisionSource],
+  );
 
   if (!active) return null;
 
@@ -296,7 +399,12 @@ function CogniXAutoChip({ active }: { active: boolean }): ReactElement | null {
           </span>
         </button>
       </TooltipPrimitive.Trigger>
-      <TooltipContent side="bottom" sideOffset={6} className="max-w-[320px]">
+      <TooltipContent
+        side="bottom"
+        sideOffset={6}
+        variant="rich"
+        className="max-w-[360px]"
+      >
         <div className="flex flex-col gap-1">
           <span className="font-medium">
             {latestRoute
@@ -317,6 +425,40 @@ function CogniXAutoChip({ active }: { active: boolean }): ReactElement | null {
           <span className="text-xs text-muted-foreground">
             {tooltipDetail}
           </span>
+          {latestRoute ? (
+            <button
+              type="button"
+              onClick={explainLatestDecision}
+              disabled={decisionLoading}
+              className="mt-1 w-fit rounded-full px-0 text-left text-xs font-semibold text-white/90 underline underline-offset-4 outline-none transition-colors hover:text-white focus-visible:ring-2 focus-visible:ring-white/60 disabled:opacity-60"
+            >
+              {decisionLoading
+                ? "Analyse de la decision..."
+                : "Pourquoi cette decision ?"}
+            </button>
+          ) : null}
+          {decisionError ? (
+            <span className="text-xs text-red-200">{decisionError}</span>
+          ) : null}
+          {decisionExplanation ? (
+            <div className="mt-2 flex flex-col gap-1 border-t border-border/40 pt-2">
+              <span className="text-xs font-semibold">
+                {decisionExplanation.title ?? "Explication de decision"}
+              </span>
+              <span className="text-xs text-muted-foreground">
+                {decisionExplanation.summary ?? decisionExplanation.answer}
+              </span>
+              {decisionExplanation.reasonCodes?.slice(0, 2).map((reason, index) => (
+                <span
+                  key={reason.code ?? reason.label ?? `reason-${index}`}
+                  className="text-[11px] leading-snug text-muted-foreground"
+                >
+                  {reason.label ? `${reason.label}: ` : ""}
+                  {reason.detail}
+                </span>
+              ))}
+            </div>
+          ) : null}
         </div>
       </TooltipContent>
     </Tooltip>

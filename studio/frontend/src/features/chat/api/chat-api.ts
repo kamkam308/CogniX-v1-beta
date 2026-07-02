@@ -166,6 +166,37 @@ export interface CogniXExecutionPlan {
     cacheMode: string;
   };
   logId: string | number | null;
+  orchestratorLogId?: string | number | null;
+}
+
+export interface CogniXDecisionReason {
+  code?: string;
+  label?: string;
+  detail?: string;
+  confidence?: number | null;
+  evidence?: Record<string, unknown>;
+}
+
+export interface CogniXDecisionExplanation {
+  title?: string;
+  summary?: string;
+  answer?: string;
+  question?: string | null;
+  sourceType?: string;
+  sourceId?: string | null;
+  decisionType?: string;
+  reasonCodes?: CogniXDecisionReason[];
+  trace?: Record<string, unknown>;
+  display?: Record<string, unknown>;
+}
+
+export interface CogniXDecisionExplainResult {
+  username: string;
+  decisionExplanation: CogniXDecisionExplanation;
+  storedDecision?: Record<string, unknown> | null;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
 }
 
 export interface CogniXContextSection {
@@ -246,6 +277,29 @@ export async function planCogniXExecution(payload: {
     }),
   });
   return parseJsonOrThrow(response);
+}
+
+export async function explainCogniXDecision(payload: {
+  sourceType?: "orchestrator_log" | "router_log" | "manual";
+  sourceId?: string | null;
+  projectId?: string | null;
+  question?: string | null;
+  decision?: Record<string, unknown> | null;
+  storeDecision?: boolean;
+}): Promise<CogniXDecisionExplainResult> {
+  const response = await authFetch("/api/cognix/decisions/explain", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sourceType: payload.sourceType ?? "manual",
+      sourceId: payload.sourceId ?? null,
+      projectId: payload.projectId ?? null,
+      question: payload.question ?? null,
+      decision: payload.decision ?? null,
+      storeDecision: payload.storeDecision ?? true,
+    }),
+  });
+  return parseJsonOrThrow<CogniXDecisionExplainResult>(response);
 }
 
 export async function loadModel(

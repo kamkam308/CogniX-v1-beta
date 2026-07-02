@@ -239,6 +239,8 @@ export type CogniXRouteSnapshot = {
   planMode?: string | null;
   planSteps?: string[];
   warnings?: string[];
+  routerLogId?: string | number | null;
+  orchestratorLogId?: string | number | null;
   confidence: number;
   needsClarification: boolean;
   routingMode: string;
