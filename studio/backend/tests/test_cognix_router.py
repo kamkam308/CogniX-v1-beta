@@ -10178,6 +10178,14 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert registry["summary"]["routeMutationAllowed"] is False
     assert registry["summary"]["serviceCount"] == 10
     assert registry["summary"]["coveredServiceCount"] == 10
+    assert registry["summary"]["governedModuleCount"] == registry["summary"]["moduleCount"]
+    assert registry["summary"]["storageDeclaredModuleCount"] == registry["summary"]["moduleCount"]
+    assert registry["summary"]["eventDeclaredModuleCount"] == registry["summary"]["moduleCount"]
+    assert registry["summary"]["auditDeclaredModuleCount"] == registry["summary"]["moduleCount"]
+    assert registry["globalPolicies"]["governanceVersion"] == "cognix_module_governance_v1"
+    assert registry["globalPolicies"]["storageTablesMustBeDeclared"] is True
+    assert registry["globalPolicies"]["eventTypesMustBeDeclared"] is True
+    assert registry["globalPolicies"]["auditActionsMustBeDeclared"] is True
     assert registry["globalPolicies"]["serviceTopologyVersion"] == "cognix_module_service_topology_v1"
     assert registry["globalPolicies"]["serviceTopologyAvailable"] is True
     assert registry["sideEffects"]["moduleActivation"] is False
@@ -10240,11 +10248,16 @@ def test_module_registry_declares_modular_cognix_capabilities():
         "cognix-deployment-manager",
     }.issubset(modules)
     assert modules["cognix-pulse"]["status"] == "enabled"
+    assert "pulse_events" in modules["cognix-pulse"]["storageTables"]
+    assert "pulse_summary_generated" in modules["cognix-pulse"]["eventTypes"]
+    assert "pulse_summary_generated" in modules["cognix-pulse"]["auditActions"]
     assert "daily_digest" in modules["cognix-pulse"]["capabilities"]
     assert "local_privacy_preserving_summary" in modules["cognix-pulse"]["capabilities"]
     assert "/api/cognix/pulse/preview" in modules["cognix-pulse"]["routes"]
     assert "/api/cognix/pulse/generate" in modules["cognix-pulse"]["routes"]
     assert modules["cognix-library"]["status"] == "enabled"
+    assert "library_assets" in modules["cognix-library"]["storageTables"]
+    assert "library_search_built" in modules["cognix-library"]["auditActions"]
     assert "library_search" in modules["cognix-library"]["capabilities"]
     assert "asset_permission_scope" in modules["cognix-library"]["capabilities"]
     assert "model_registration_gate" in modules["cognix-library"]["capabilities"]
@@ -10299,6 +10312,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/projects/{project_id}/dna" in modules["cognix-projects"]["routes"]
     assert "/api/cognix/projects/{project_id}/dna/injection-plan" in modules["cognix-projects"]["routes"]
     assert modules["cognix-realtime-collaboration"]["status"] == "enabled"
+    assert "presence_sessions" in modules["cognix-realtime-collaboration"]["storageTables"]
+    assert "conflict_detected" in modules["cognix-realtime-collaboration"]["eventTypes"]
     assert modules["cognix-realtime-collaboration"]["activationState"] == "ready"
     assert modules["cognix-realtime-collaboration"]["dependencyState"]["ready"] is True
     assert "project_presence" in modules["cognix-realtime-collaboration"]["capabilities"]
@@ -10445,6 +10460,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "progress_tracking" in modules["cognix-background-agents"]["capabilities"]
     assert "/api/cognix/background-agents/job-plan" in modules["cognix-background-agents"]["routes"]
     assert modules["cognix-agent-mode"]["status"] == "enabled"
+    assert "agent_sessions" in modules["cognix-agent-mode"]["storageTables"]
+    assert "agent_mode_tool_call_planned" in modules["cognix-agent-mode"]["auditActions"]
     assert modules["cognix-agent-mode"]["activationState"] == "ready"
     assert modules["cognix-agent-mode"]["dependencyState"]["ready"] is True
     assert "task_decomposition" in modules["cognix-agent-mode"]["capabilities"]
@@ -10824,6 +10841,8 @@ def test_module_registry_declares_modular_cognix_capabilities():
     assert "/api/cognix/admin/risk-scores" in modules["cognix-admin-security-center"]["routes"]
     assert "/api/cognix/admin/system-health" in modules["cognix-admin-security-center"]["routes"]
     assert modules["cognix-codex-secure-agent"]["status"] == "enabled"
+    assert "codex_security_reviews" in modules["cognix-codex-secure-agent"]["storageTables"]
+    assert "codex_pipeline_plan_built" in modules["cognix-codex-secure-agent"]["auditActions"]
     assert modules["cognix-codex-secure-agent"]["activationState"] == "ready"
     assert modules["cognix-codex-secure-agent"]["dependencyState"]["ready"] is True
     assert "codex_run_contract" in modules["cognix-codex-secure-agent"]["capabilities"]
@@ -10855,10 +10874,15 @@ def test_module_manifest_bundle_exports_declarative_contract_without_mutation():
     assert bundle["mode"] == "declarative_dry_run"
     assert bundle["contract"]["sourceOfTruth"] == "backend_source_manifest"
     assert bundle["contract"]["serviceTopologyVersion"] == "cognix_module_service_topology_v1"
+    assert bundle["contract"]["governanceVersion"] == "cognix_module_governance_v1"
+    assert bundle["contract"]["storageTablesMustBeDeclared"] is True
+    assert bundle["contract"]["eventTypesMustBeDeclared"] is True
+    assert bundle["contract"]["auditActionsMustBeDeclared"] is True
     assert bundle["contract"]["runtimeRouteMutationAllowed"] is False
     assert bundle["contract"]["frontendSelfRegistrationAllowed"] is False
     assert bundle["validation"]["ready"] is True
     assert bundle["summary"]["invalidManifestCount"] == 0
+    assert bundle["summary"]["governedManifestCount"] == bundle["summary"]["manifestCount"]
     assert bundle["sideEffects"]["moduleActivation"] is False
     assert bundle["sideEffects"]["routeRegistration"] is False
     assert bundle["sideEffects"]["uiMutation"] is False
@@ -10881,6 +10905,12 @@ def test_module_manifest_bundle_exports_declarative_contract_without_mutation():
         set(manifests["cognix-local-core"]["serviceIds"])
     )
     assert manifests["cognix-local-core"]["manifestValidation"]["ready"] is True
+    assert all(item["storageTables"] for item in manifests.values())
+    assert all(item["eventTypes"] for item in manifests.values())
+    assert all(item["auditActions"] for item in manifests.values())
+    assert "enterprise_chats" in manifests["cognix-enterprise-encrypted-chat"]["storageTables"]
+    assert "encrypted_message_created" in manifests["cognix-enterprise-encrypted-chat"]["eventTypes"]
+    assert "enterprise_encrypted_message_planned" in manifests["cognix-enterprise-encrypted-chat"]["auditActions"]
     assert "developer_mode" in manifests["cognix-codex-secure-agent"]["permissions"]
     assert "github" in manifests["cognix-codex-secure-agent"]["tools"]
 
@@ -10897,6 +10927,9 @@ def test_module_service_topology_maps_roadmap_services_without_mutation():
     assert topology["mode"] == "declarative_service_topology_dry_run"
     assert topology["coverage"]["ready"] is True
     assert topology["coverage"]["missingServiceIds"] == []
+    assert topology["summary"]["governanceVersion"] == "cognix_module_governance_v1"
+    assert topology["summary"]["governedModuleCount"] == topology["summary"]["moduleCount"]
+    assert topology["contract"]["governanceMetadataRequired"] is True
     assert {
         "frontend",
         "backend-api",
@@ -10916,6 +10949,9 @@ def test_module_service_topology_maps_roadmap_services_without_mutation():
     assert "cognix-tool-discovery" in services["tool-service"]["moduleIds"]
     assert "cognix-codex-secure-agent" in services["codex-agent-service"]["moduleIds"]
     assert "cognix-worker-queue" in services["worker-queue"]["moduleIds"]
+    assert services["backend-api"]["storageTableCount"] > 0
+    assert services["backend-api"]["eventTypeCount"] > 0
+    assert services["backend-api"]["auditActionCount"] > 0
     assert topology["contract"]["matchesRoadmapInternalServices"] is True
     assert topology["sideEffects"]["moduleActivation"] is False
     assert topology["sideEffects"]["routeRegistration"] is False

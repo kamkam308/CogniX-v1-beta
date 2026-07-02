@@ -17,6 +17,7 @@ COGNIX_MODULE_REGISTRY_VERSION = "cognix_module_registry_v1"
 COGNIX_MODULE_MANIFEST_SCHEMA_VERSION = "cognix_module_manifest_schema_v1"
 COGNIX_MODULE_MANIFEST_BUNDLE_VERSION = "cognix_module_manifest_bundle_v1"
 COGNIX_MODULE_SERVICE_TOPOLOGY_VERSION = "cognix_module_service_topology_v1"
+COGNIX_MODULE_GOVERNANCE_VERSION = "cognix_module_governance_v1"
 
 MANIFEST_REQUIRED_FIELDS = (
     "id",
@@ -30,6 +31,9 @@ MANIFEST_REQUIRED_FIELDS = (
     "defaultModels",
     "uiPanels",
     "dependencies",
+    "storageTables",
+    "eventTypes",
+    "auditActions",
 )
 MANIFEST_LIST_FIELDS = (
     "editionTargets",
@@ -40,6 +44,9 @@ MANIFEST_LIST_FIELDS = (
     "defaultModels",
     "uiPanels",
     "dependencies",
+    "storageTables",
+    "eventTypes",
+    "auditActions",
 )
 MANIFEST_STATUS_VALUES = {"enabled", "planned"}
 
@@ -95,6 +102,126 @@ SERVICE_DEFINITIONS: list[dict[str, Any]] = [
         "description": "Taches longues: telechargement, indexation, training, benchmark.",
     },
 ]
+
+MODULE_GOVERNANCE_OVERRIDES: dict[str, dict[str, list[str]]] = {
+    "cognix-local-core": {
+        "storageTables": [
+            "cognix_models",
+            "cognix_installed_models",
+            "cognix_model_packs",
+            "cognix_router_logs",
+            "cognix_audit_logs",
+        ],
+        "eventTypes": ["module_registry_viewed", "model_registry_viewed", "orchestrator_plan_requested"],
+        "auditActions": ["module_registry_built", "module_manifest_bundle_built", "orchestrator_plan_built"],
+    },
+    "cognix-pulse": {
+        "storageTables": ["pulse_events", "pulse_summaries", "pulse_user_preferences", "pulse_notifications"],
+        "eventTypes": ["pulse_preview_requested", "pulse_summary_generated", "pulse_notification_prepared"],
+        "auditActions": ["pulse_preview_built", "pulse_summary_generated", "pulse_preferences_updated"],
+    },
+    "cognix-library": {
+        "storageTables": [
+            "library_assets",
+            "library_collections",
+            "library_permissions",
+            "library_asset_versions",
+            "library_asset_links",
+        ],
+        "eventTypes": ["library_asset_created", "library_search_performed", "library_asset_linked"],
+        "auditActions": ["library_asset_planned", "library_search_built", "library_asset_permission_checked"],
+    },
+    "cognix-scheduled": {
+        "storageTables": ["scheduled_tasks", "scheduled_task_runs", "notifications", "cognix_audit_logs"],
+        "eventTypes": ["scheduled_task_planned", "scheduled_task_run_planned", "scheduled_report_prepared"],
+        "auditActions": ["scheduled_task_plan_built", "scheduled_run_plan_built"],
+    },
+    "cognix-images": {
+        "storageTables": ["image_assets", "image_generations", "library_assets", "cognix_audit_logs"],
+        "eventTypes": ["image_generation_planned", "image_asset_registered", "image_safety_checked"],
+        "auditActions": ["image_plan_built", "image_asset_stored", "image_safety_plan_built"],
+    },
+    "cognix-apps": {
+        "storageTables": ["apps", "installed_apps", "app_permissions", "cognix_audit_logs"],
+        "eventTypes": ["app_connection_planned", "app_permission_scanned", "app_catalog_viewed"],
+        "auditActions": ["app_plan_built", "app_connection_plan_built", "app_permission_scan_built"],
+    },
+    "cognix-gpts": {
+        "storageTables": ["gpts", "gpt_versions", "gpt_tools", "gpt_permissions", "cognix_audit_logs"],
+        "eventTypes": ["gpt_plan_created", "gpt_runtime_plan_created", "gpt_version_recorded"],
+        "auditActions": ["gpt_plan_built", "gpt_runtime_plan_built"],
+    },
+    "cognix-rag": {
+        "storageTables": ["documents", "chunks", "rag_sources", "rag_retrieval_packets", "cognix_audit_logs"],
+        "eventTypes": ["rag_source_registered", "rag_indexing_planned", "rag_retrieval_packet_built"],
+        "auditActions": ["rag_source_registered", "rag_indexing_plan_built", "rag_retrieval_packet_built"],
+    },
+    "cognix-fine-tuning": {
+        "storageTables": ["cognix_fine_tuning_jobs", "cognix_datasets", "cognix_lora_adapters", "cognix_audit_logs"],
+        "eventTypes": ["training_job_planned", "dataset_validation_planned", "cloud_training_handoff_planned"],
+        "auditActions": ["fine_tuning_dataset_validation_built", "fine_tuning_cloud_handoff_built"],
+    },
+    "cognix-worker-queue": {
+        "storageTables": ["worker_jobs", "worker_job_events", "worker_dead_letters", "cognix_audit_logs"],
+        "eventTypes": ["worker_job_spec_planned", "worker_enqueue_contract_built", "worker_retry_policy_built"],
+        "auditActions": ["worker_queue_registry_built", "worker_job_spec_plan_built"],
+    },
+    "cognix-integrations": {
+        "storageTables": ["cognix_tool_integrations", "cognix_tool_permissions", "tool_execution_logs", "cognix_audit_logs"],
+        "eventTypes": ["tool_execution_planned", "connector_preflight_built", "secret_rotation_planned"],
+        "auditActions": ["tool_execution_handoff_built", "integration_preflight_contract_built", "secret_rotation_contract_built"],
+    },
+    "cognix-plugin-marketplace": {
+        "storageTables": ["plugins", "plugin_installations", "plugin_permissions", "plugin_reviews", "cognix_audit_logs"],
+        "eventTypes": ["plugin_catalog_viewed", "plugin_install_plan_created", "plugin_review_created"],
+        "auditActions": ["plugin_marketplace_catalog_built", "plugin_install_plan_built"],
+    },
+    "cognix-skill-marketplace": {
+        "storageTables": ["shared_skills", "skill_approvals", "skill_usage_logs", "cognix_audit_logs"],
+        "eventTypes": ["shared_skill_published", "shared_skill_approval_decided", "shared_skill_usage_logged"],
+        "auditActions": ["shared_skill_publish_planned", "shared_skill_approval_decided", "shared_skill_usage_logged"],
+    },
+    "cognix-project-skills-directives": {
+        "storageTables": ["skills", "skill_versions", "project_skills", "model_skills", "directives", "project_directives", "model_directives"],
+        "eventTypes": ["project_skill_bound", "project_directive_planned", "project_directives_compiled"],
+        "auditActions": ["project_skill_binding_planned", "project_directive_planned", "project_directives_compiled"],
+    },
+    "cognix-realtime-collaboration": {
+        "storageTables": ["presence_sessions", "project_comments", "collaboration_events", "cognix_project_collaborators"],
+        "eventTypes": ["presence_updated", "comment_created", "comment_resolved", "conflict_detected"],
+        "auditActions": ["project_presence_updated", "project_comment_created", "project_conflict_resolution_planned"],
+    },
+    "cognix-agent-mode": {
+        "storageTables": ["agent_sessions", "agent_steps", "agent_tool_calls", "agent_outputs", "cognix_audit_logs"],
+        "eventTypes": ["agent_session_planned", "agent_step_updated", "agent_tool_call_planned"],
+        "auditActions": ["agent_mode_session_planned", "agent_mode_step_updated", "agent_mode_tool_call_planned"],
+    },
+    "cognix-cowork-mode": {
+        "storageTables": ["cowork_sessions", "cowork_actions", "cowork_permissions", "cowork_approvals", "cognix_audit_logs"],
+        "eventTypes": ["cowork_session_planned", "cowork_action_planned", "cowork_status_updated"],
+        "auditActions": ["cowork_session_planned", "cowork_action_planned", "cowork_status_updated"],
+    },
+    "cognix-codex-secure-agent": {
+        "storageTables": ["codex_tasks", "codex_branches", "codex_reports", "codex_changes", "codex_test_runs", "codex_security_reviews"],
+        "eventTypes": ["codex_pipeline_planned", "codex_preview_contract_built", "codex_approval_gate_planned"],
+        "auditActions": ["codex_pipeline_plan_built", "codex_preview_contract_built", "codex_approval_gate_built"],
+    },
+    "cognix-enterprise-encrypted-chat": {
+        "storageTables": ["enterprise_chats", "enterprise_chat_members", "encrypted_messages", "chat_key_metadata", "chat_policies"],
+        "eventTypes": ["enterprise_chat_created", "encrypted_message_created", "key_rotation_planned"],
+        "auditActions": ["enterprise_chat_creation_planned", "enterprise_encrypted_message_planned"],
+    },
+    "cognix-enterprise-foundation": {
+        "storageTables": ["cognix_organizations", "organization_policies", "cognix_audit_logs", "cognix_deployment_targets"],
+        "eventTypes": ["governance_plan_built", "organization_policy_planned", "sso_plan_created"],
+        "auditActions": ["governance_plan_built", "admin_permissions_viewed", "admin_audit_logs_viewed"],
+    },
+    "cognix-deployment-manager": {
+        "storageTables": ["cognix_deployment_targets", "deployment_plans", "gpu_scheduler_contracts", "cognix_audit_logs"],
+        "eventTypes": ["deployment_plan_built", "gpu_scheduler_contract_built", "deployment_target_selected"],
+        "auditActions": ["deployment_plan_built", "gpu_scheduler_contract_built"],
+    },
+}
 
 
 MODULE_MANIFESTS: list[dict[str, Any]] = [
@@ -2239,6 +2366,83 @@ def _manifest_ids() -> set[str]:
     return {str(item.get("id")) for item in MODULE_MANIFESTS}
 
 
+def _snake_key(value: Any, fallback: str = "item") -> str:
+    text = str(value or fallback).strip().lower()
+    cleaned = "".join(ch if ch.isalnum() else "_" for ch in text)
+    while "__" in cleaned:
+        cleaned = cleaned.replace("__", "_")
+    return cleaned.strip("_") or fallback
+
+
+def _stable_module_slug(module: dict[str, Any]) -> str:
+    module_id = str(module.get("id") or "cognix-module")
+    return _snake_key(module_id.removeprefix("cognix-"), "module")
+
+
+def _route_action_key(route: str) -> str:
+    parts = [
+        part
+        for part in str(route or "").split("/")
+        if part and not part.startswith("{") and not part.startswith(":") and part != "api" and part != "cognix"
+    ]
+    if not parts:
+        return "module_route"
+    return _snake_key("_".join(parts[-3:]), "module_route")
+
+
+def _unique_sorted(values: list[str]) -> list[str]:
+    return sorted({str(item).strip() for item in values if str(item).strip()})
+
+
+def _module_governance_metadata(module: dict[str, Any]) -> dict[str, Any]:
+    module_id = str(module.get("id") or "")
+    slug = _stable_module_slug(module)
+    override = deepcopy(MODULE_GOVERNANCE_OVERRIDES.get(module_id, {}))
+    route_actions = [_route_action_key(route) for route in module.get("routes") or []]
+    capability_events = [
+        f"{slug}_{_snake_key(capability)}"
+        for capability in (module.get("capabilities") or [])[:8]
+        if str(capability or "").strip()
+    ]
+
+    storage_tables = _unique_sorted(
+        override.get("storageTables", [])
+        or [
+            f"cognix_{slug}_records",
+            f"cognix_{slug}_events",
+            "cognix_audit_logs",
+        ]
+    )
+    event_types = _unique_sorted(
+        override.get("eventTypes", [])
+        or [
+            *(f"{action}_requested" for action in route_actions[:5]),
+            *(f"{event}_changed" for event in capability_events[:3]),
+            f"{slug}_activity_recorded",
+        ]
+    )
+    audit_actions = _unique_sorted(
+        override.get("auditActions", [])
+        or [
+            *(f"{action}_built" for action in route_actions[:5]),
+            f"{slug}_governance_checked",
+        ]
+    )
+    if "cognix_audit_logs" not in storage_tables and audit_actions:
+        storage_tables.append("cognix_audit_logs")
+        storage_tables = _unique_sorted(storage_tables)
+
+    return {
+        "governanceVersion": COGNIX_MODULE_GOVERNANCE_VERSION,
+        "declaredBy": "backend_source",
+        "source": "module_manifest_governance_contract",
+        "runtimeMutationAllowed": False,
+        "storageTables": storage_tables,
+        "eventTypes": event_types,
+        "auditActions": audit_actions,
+    }
+
+
 def _dependency_status(module: dict[str, Any]) -> dict[str, Any]:
     manifest_ids = _manifest_ids()
     dependencies = [
@@ -2362,6 +2566,41 @@ def _validate_module_manifest(module: dict[str, Any], manifest_ids: set[str]) ->
         )
     )
 
+    governance_fields = ("storageTables", "eventTypes", "auditActions")
+    missing_governance = [
+        field
+        for field in governance_fields
+        if not isinstance(module.get(field), list) or not module.get(field)
+    ]
+    if missing_governance:
+        errors.append("governance_metadata_missing")
+    checks.append(
+        _check_record(
+            "governance_metadata",
+            not missing_governance,
+            "Les tables, evenements et actions d'audit du module sont declares.",
+            missingFields = missing_governance,
+            governanceVersion = COGNIX_MODULE_GOVERNANCE_VERSION,
+        )
+    )
+
+    invalid_governance_values = [
+        f"{field}:{item}"
+        for field in governance_fields
+        for item in module.get(field) or []
+        if not str(item).strip() or " " in str(item)
+    ]
+    if invalid_governance_values:
+        errors.append("governance_metadata_invalid")
+    checks.append(
+        _check_record(
+            "stable_governance_keys",
+            not invalid_governance_values,
+            "Les cles de gouvernance restent stables et lisibles par les services.",
+            invalidValues = invalid_governance_values,
+        )
+    )
+
     dependencies = [str(item) for item in module.get("dependencies") or [] if item]
     missing_dependencies = [item for item in dependencies if item not in manifest_ids]
     if missing_dependencies:
@@ -2396,6 +2635,11 @@ def _validate_module_manifest(module: dict[str, Any], manifest_ids: set[str]) ->
 
 def _module_record(module: dict[str, Any]) -> dict[str, Any]:
     record = deepcopy(module)
+    governance = _module_governance_metadata(record)
+    record["governanceMetadata"] = governance
+    record["storageTables"] = governance["storageTables"]
+    record["eventTypes"] = governance["eventTypes"]
+    record["auditActions"] = governance["auditActions"]
     dependency_state = _dependency_status(record)
     record["dependencyState"] = dependency_state
     record["activationState"] = (
@@ -2435,16 +2679,28 @@ def build_module_registry() -> dict[str, Any]:
             "enabledCount": sum(1 for item in modules if item.get("status") == "enabled"),
             "plannedCount": sum(1 for item in modules if item.get("status") == "planned"),
             "blockedCount": sum(1 for item in modules if item.get("activationState") == "blocked"),
+            "governedModuleCount": sum(
+                1
+                for item in modules
+                if item.get("storageTables") and item.get("eventTypes") and item.get("auditActions")
+            ),
+            "storageDeclaredModuleCount": sum(1 for item in modules if item.get("storageTables")),
+            "eventDeclaredModuleCount": sum(1 for item in modules if item.get("eventTypes")),
+            "auditDeclaredModuleCount": sum(1 for item in modules if item.get("auditActions")),
             "uiMutationAllowed": False,
             "routeMutationAllowed": False,
         },
         "globalPolicies": {
             "declarativeManifestRequired": True,
             "manifestSchemaVersion": COGNIX_MODULE_MANIFEST_SCHEMA_VERSION,
+            "governanceVersion": COGNIX_MODULE_GOVERNANCE_VERSION,
             "serviceTopologyVersion": COGNIX_MODULE_SERVICE_TOPOLOGY_VERSION,
             "serviceTopologyAvailable": True,
             "dependenciesMustResolve": True,
             "permissionsMustBeDeclared": True,
+            "storageTablesMustBeDeclared": True,
+            "eventTypesMustBeDeclared": True,
+            "auditActionsMustBeDeclared": True,
             "activationRequiresAudit": True,
             "frontendCannotSelfRegisterModules": True,
             "runtimeRouteMutationAllowed": False,
@@ -2506,6 +2762,10 @@ def build_module_manifest_bundle(edition: str | None = None) -> dict[str, Any]:
             "serviceTopologyVersion": COGNIX_MODULE_SERVICE_TOPOLOGY_VERSION,
             "dependenciesMustResolve": True,
             "permissionsMustBeDeclared": True,
+            "storageTablesMustBeDeclared": True,
+            "eventTypesMustBeDeclared": True,
+            "auditActionsMustBeDeclared": True,
+            "governanceVersion": COGNIX_MODULE_GOVERNANCE_VERSION,
             "activationRequiresAudit": True,
             "runtimeRouteMutationAllowed": False,
             "frontendSelfRegistrationAllowed": False,
@@ -2517,6 +2777,11 @@ def build_module_manifest_bundle(edition: str | None = None) -> dict[str, Any]:
             "invalidManifestCount": len(set(invalid_ids)),
             "duplicateIdCount": len(duplicate_ids),
             "editionFilterApplied": normalized_edition is not None,
+            "governedManifestCount": sum(
+                1
+                for item in manifests
+                if item.get("storageTables") and item.get("eventTypes") and item.get("auditActions")
+            ),
         },
         "moduleIds": [str(item.get("id")) for item in manifests],
         "manifests": manifests,
@@ -2550,6 +2815,9 @@ def build_module_service_topology(edition: str | None = None) -> dict[str, Any]:
             "routeCount": 0,
             "toolCount": 0,
             "permissionCount": 0,
+            "storageTableCount": 0,
+            "eventTypeCount": 0,
+            "auditActionCount": 0,
             "riskLevels": [],
         }
         for service_id, definition in service_definitions.items()
@@ -2573,6 +2841,10 @@ def build_module_service_topology(edition: str | None = None) -> dict[str, Any]:
                 "toolCount": len(module.get("tools") or []),
                 "defaultModelCount": len(module.get("defaultModels") or []),
                 "uiPanelCount": len(module.get("uiPanels") or []),
+                "storageTableCount": len(module.get("storageTables") or []),
+                "eventTypeCount": len(module.get("eventTypes") or []),
+                "auditActionCount": len(module.get("auditActions") or []),
+                "governanceVersion": module.get("governanceMetadata", {}).get("governanceVersion"),
                 "dependencyIds": module.get("dependencies", []),
             }
         )
@@ -2582,6 +2854,9 @@ def build_module_service_topology(edition: str | None = None) -> dict[str, Any]:
             service["routeCount"] += len(module.get("routes") or [])
             service["toolCount"] += len(module.get("tools") or [])
             service["permissionCount"] += len(module.get("permissions") or [])
+            service["storageTableCount"] += len(module.get("storageTables") or [])
+            service["eventTypeCount"] += len(module.get("eventTypes") or [])
+            service["auditActionCount"] += len(module.get("auditActions") or [])
             service["riskLevels"].append(module.get("riskLevel") or "low")
         for dependency_id in module.get("dependencies") or []:
             dependency_edges.append(
@@ -2643,6 +2918,12 @@ def build_module_service_topology(edition: str | None = None) -> dict[str, Any]:
             "dependencyEdgeCount": len(dependency_edges),
             "serviceEdgeCount": len(service_edges),
             "runtimeMutationAllowed": False,
+            "governanceVersion": COGNIX_MODULE_GOVERNANCE_VERSION,
+            "governedModuleCount": sum(
+                1
+                for item in module_nodes
+                if item.get("storageTableCount") and item.get("eventTypeCount") and item.get("auditActionCount")
+            ),
         },
         "coverage": {
             "requiredServiceIds": sorted(services),
@@ -2654,6 +2935,8 @@ def build_module_service_topology(edition: str | None = None) -> dict[str, Any]:
             "sourceOfTruth": "backend_source_manifest",
             "matchesRoadmapInternalServices": True,
             "declarativeManifestRequired": True,
+            "governanceMetadataRequired": True,
+            "governanceVersion": COGNIX_MODULE_GOVERNANCE_VERSION,
             "activationRequiresModulePlan": True,
             "runtimeRouteMutationAllowed": False,
             "frontendSelfRegistrationAllowed": False,
