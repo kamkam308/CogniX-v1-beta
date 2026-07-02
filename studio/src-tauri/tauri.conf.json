@@ -48,7 +48,7 @@
     "homepage": "https://github.com/kamkam308/CogniX-v1-beta",
     "copyright": "© 2026 EBK. All rights reserved.",
     "license": "AGPL-3.0-only",
-    "targets": ["deb"],
+    "targets": ["appimage", "deb"],
     "resources": {
       "../../install.sh": "install.sh",
       "../../install.ps1": "install.ps1"

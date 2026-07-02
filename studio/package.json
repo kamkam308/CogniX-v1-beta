@@ -4,6 +4,10 @@
   "private": true,
   "description": "Lockfile holder for @tauri-apps/cli used by the CogniX desktop release workflow. Not a real npm package; `npm ci --prefix studio` resolves the pinned Tauri CLI from this directory's package-lock.json.",
   "license": "AGPL-3.0-only",
+  "scripts": {
+    "build:linux:appimage": "bash scripts/build-linux-appimage.sh",
+    "build:linux:deb": "npm exec tauri -- build --bundles deb"
+  },
   "devDependencies": {
     "@tauri-apps/cli": "2.10.1"
   }
