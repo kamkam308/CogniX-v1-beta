@@ -2429,9 +2429,6 @@ def _bootstrap_schema(conn: sqlite3.Connection) -> None:
             PRIMARY KEY(username, model_id)
         );
 
-        CREATE INDEX IF NOT EXISTS idx_cognix_model_pins_username_sort
-            ON cognix_model_pins(username, quick_switcher, sort_order DESC, created_at DESC);
-
         CREATE TABLE IF NOT EXISTS cognix_project_model_defaults (
             project_id TEXT PRIMARY KEY,
             owner_username TEXT NOT NULL,

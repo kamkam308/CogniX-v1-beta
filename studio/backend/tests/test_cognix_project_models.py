@@ -1,4 +1,5 @@
 import secrets
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from routes import auth as auth_routes
 from routes import cognix as cognix_routes
 from storage import cognix_db, providers_db
 from storage import studio_db as studio_db_storage
+from utils.paths import studio_db_path
 
 
 @pytest.fixture(autouse = True)
@@ -156,6 +158,33 @@ def test_favorite_models_blueprint_declares_native_services_and_no_model_executi
     assert blueprint["sideEffects"]["modelLoad"] is False
     assert blueprint["sideEffects"]["generation"] is False
     assert blueprint["sideEffects"]["frontendDirectModelCall"] is False
+
+
+def test_model_pins_schema_migrates_legacy_quick_switcher_index():
+    path = studio_db_path()
+    path.parent.mkdir(parents = True, exist_ok = True)
+    with sqlite3.connect(path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE cognix_model_pins (
+                username TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                label TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(username, model_id)
+            );
+            """
+        )
+
+    cognix_db.ensure_schema()
+
+    with sqlite3.connect(path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(cognix_model_pins)").fetchall()}
+        indexes = {row[1] for row in conn.execute("PRAGMA index_list(cognix_model_pins)").fetchall()}
+    assert "quick_switcher" in columns
+    assert "sort_order" in columns
+    assert "updated_at" in columns
+    assert "idx_cognix_model_pins_username_sort" in indexes
 
 
 def test_favorite_model_user_default_and_quick_switcher_are_native_and_audited(client):

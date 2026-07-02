@@ -37,6 +37,7 @@ from core.cognix import admin_security as cognix_admin_security
 from core.cognix import admin_secure_model_registry as cognix_admin_secure_model_registry
 from core.cognix import admin_usage as cognix_admin_usage
 from core.cognix import admin_users as cognix_admin_users
+from core.cognix import advanced_readiness as cognix_advanced_readiness
 from core.cognix import api_surface as cognix_api_surface
 from core.cognix import apps as cognix_apps
 from core.cognix import benchmark as cognix_benchmark
@@ -20578,6 +20579,26 @@ async def admin_mvp_readiness(
     return {
         "mvpReadiness": contract,
         "plannerVersion": cognix_mvp_readiness.COGNIX_MVP_READINESS_VERSION,
+        "sideEffects": contract.get("sideEffects", {}),
+    }
+
+
+@router.get("/admin/advanced-roadmap-readiness")
+async def admin_advanced_roadmap_readiness(
+    request: Request,
+    current_subject: str = Depends(get_current_jwt_subject),
+) -> dict[str, Any]:
+    _require_admin(current_subject)
+    database_blueprint = cognix_database_blueprint.build_database_blueprint()
+    service_topology = cognix_module_registry.build_module_service_topology()
+    contract = cognix_advanced_readiness.build_advanced_roadmap_readiness_contract(
+        registered_routes = _registered_api_routes(request),
+        database_blueprint = database_blueprint,
+        service_topology = service_topology,
+    )
+    return {
+        "advancedRoadmapReadiness": contract,
+        "plannerVersion": cognix_advanced_readiness.COGNIX_ADVANCED_ROADMAP_READINESS_VERSION,
         "sideEffects": contract.get("sideEffects", {}),
     }
 

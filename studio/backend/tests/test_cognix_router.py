@@ -23,6 +23,7 @@ from core.cognix import admin_chat as cognix_admin_chat
 from core.cognix import admin_limits as cognix_admin_limits
 from core.cognix import admin_permissions as cognix_admin_permissions
 from core.cognix import admin_users as cognix_admin_users
+from core.cognix import advanced_readiness as cognix_advanced_readiness
 from core.cognix import agent_mode as cognix_agent_mode
 from core.cognix import api_surface as cognix_api_surface
 from core.cognix import apps as cognix_apps
@@ -10156,6 +10157,93 @@ def test_mvp_readiness_endpoint_is_admin_only_and_read_only():
     assert body["sideEffects"]["migrationRun"] is False
     assert body["sideEffects"]["jobEnqueue"] is False
     assert body["sideEffects"]["modelLoad"] is False
+    assert body["sideEffects"]["codeModification"] is False
+
+
+def test_advanced_roadmap_readiness_contract_maps_30_native_features_without_mutation():
+    modules = cognix_module_registry.build_module_registry()["modules"]
+    registered_routes = [
+        {"path": route, "methods": ["GET"]}
+        for module in modules
+        for route in module.get("routes", [])
+        if isinstance(route, str) and route
+    ]
+    module_storage_tables = {
+        table
+        for module in modules
+        for table in module.get("storageTables", [])
+        if isinstance(table, str) and table
+    }
+    database_blueprint = cognix_database_blueprint.build_database_blueprint(
+        auth_tables = {"auth_user"},
+        studio_tables = module_storage_tables,
+        rag_tables = set(),
+    )
+    service_topology = cognix_module_registry.build_module_service_topology()
+
+    contract = cognix_advanced_readiness.build_advanced_roadmap_readiness_contract(
+        modules = modules,
+        registered_routes = registered_routes,
+        database_blueprint = database_blueprint,
+        service_topology = service_topology,
+    )
+
+    assert contract["advancedRoadmapReadinessVersion"] == "cognix_advanced_roadmap_readiness_v1"
+    assert contract["mode"] == "advanced_roadmap_readiness_read_only"
+    assert contract["sourceOfTruth"] == "cognix_30_advanced_native_features"
+    assert contract["summary"]["featureCount"] == 30
+    assert contract["summary"]["readyFeatureCount"] == 30
+    assert contract["summary"]["missingFeatureCount"] == 0
+    assert contract["summary"]["nativeModuleCoverageReady"] is True
+    assert contract["summary"]["allStorageReady"] is True
+    features = {item["id"]: item for item in contract["features"]}
+    assert features["automatic_tool_discovery"]["moduleId"] == "cognix-tool-discovery"
+    assert features["live_memory_editing"]["moduleId"] == "cognix-live-memory-editing"
+    assert features["ai_memory_garbage_collector"]["moduleId"] == "cognix-context-heatmap"
+    assert features["project_dna"]["moduleId"] == "cognix-projects"
+    assert features["ai_cost_optimizer"]["capabilityCoverage"]["missingCapabilities"] == []
+    assert contract["policies"]["frontendMutationAllowedHere"] is False
+    assert contract["policies"]["databaseMigrationAllowedHere"] is False
+    assert contract["sideEffects"]["routeRegistration"] is False
+    assert contract["sideEffects"]["databaseWrite"] is False
+    assert contract["sideEffects"]["modelLoad"] is False
+    assert contract["sideEffects"]["toolExecution"] is False
+    assert contract["sideEffects"]["codeModification"] is False
+
+
+def test_advanced_roadmap_readiness_endpoint_is_admin_only_and_read_only():
+    seed_accounts()
+    module_routes = [
+        SimpleNamespace(path = route, methods = {"GET"})
+        for module in cognix_module_registry.build_module_registry()["modules"]
+        for route in module.get("routes", [])
+        if isinstance(route, str) and route
+    ]
+    request = SimpleNamespace(app = SimpleNamespace(routes = module_routes))
+
+    with pytest.raises(HTTPException) as user_read:
+        run_async(cognix_routes.admin_advanced_roadmap_readiness(request, current_subject = "alice"))
+    assert user_read.value.status_code == 403
+
+    body = run_async(
+        cognix_routes.admin_advanced_roadmap_readiness(
+            request,
+            current_subject = storage.DEFAULT_ADMIN_USERNAME,
+        )
+    )
+
+    contract = body["advancedRoadmapReadiness"]
+    assert body["plannerVersion"] == "cognix_advanced_roadmap_readiness_v1"
+    assert contract["summary"]["featureCount"] == 30
+    assert contract["summary"]["missingFeatureCount"] == 0
+    assert contract["summary"]["nativeModuleCoverageReady"] is True
+    assert contract["inputContracts"]["databaseBlueprintVersion"] == "cognix_database_blueprint_v1"
+    assert contract["inputContracts"]["serviceTopologyVersion"] == "cognix_module_service_topology_v1"
+    assert body["sideEffects"]["databaseWrite"] is False
+    assert body["sideEffects"]["migrationRun"] is False
+    assert body["sideEffects"]["jobEnqueue"] is False
+    assert body["sideEffects"]["modelLoad"] is False
+    assert body["sideEffects"]["toolExecution"] is False
     assert body["sideEffects"]["codeModification"] is False
 
 
