@@ -39,6 +39,7 @@ import {
 } from "@/components/assistant-ui/use-intent-aware-autoscroll";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
+import { Badge } from "@/components/assistant-ui/badge";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -3535,6 +3536,76 @@ const DiffusionCanvas: FC = () => {
   );
 };
 
+type ResponseReflectionMetadata = {
+  confidenceScore?: number;
+  confidenceLabel?: string;
+  verificationRequired?: boolean;
+  recommendedAction?: string;
+  issueCount?: number;
+};
+
+function asResponseReflectionMetadata(
+  value: unknown,
+): ResponseReflectionMetadata | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as ResponseReflectionMetadata;
+}
+
+function reflectionBadgeVariant(
+  reflection: ResponseReflectionMetadata,
+): "success" | "warning" | "destructive" | "muted" {
+  const label = reflection.confidenceLabel?.toLowerCase();
+  if (label === "high" && !reflection.verificationRequired) return "success";
+  if (label === "low" || reflection.verificationRequired) return "destructive";
+  if (label === "medium") return "warning";
+  return "muted";
+}
+
+function reflectionBadgeText(reflection: ResponseReflectionMetadata): string {
+  const label = reflection.confidenceLabel?.toLowerCase();
+  if (label === "high") return "Reliability: high";
+  if (label === "low") return "Verification recommended";
+  if (label === "medium") return "Reliability: medium";
+  return "Reliability checked";
+}
+
+const ResponseReflectionBadge: FC = () => {
+  const reflection = useAuiState(({ message }) =>
+    asResponseReflectionMetadata(
+      (message.metadata?.custom as Record<string, unknown> | undefined)
+        ?.responseReflection,
+    ),
+  );
+  if (!reflection) return null;
+
+  const score =
+    typeof reflection.confidenceScore === "number"
+      ? `${Math.round(reflection.confidenceScore * 100)}%`
+      : "n/a";
+  const issues =
+    typeof reflection.issueCount === "number"
+      ? `${reflection.issueCount} issue${reflection.issueCount === 1 ? "" : "s"}`
+      : "issues unknown";
+  const action = reflection.recommendedAction
+    ? ` Action: ${reflection.recommendedAction}.`
+    : "";
+
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2">
+      <Badge
+        variant={reflectionBadgeVariant(reflection)}
+        size="sm"
+        title={`CogniX response self-reflection. Confidence: ${score}. ${issues}.${action}`}
+        className="rounded-full text-[11px]"
+      >
+        {reflectionBadgeText(reflection)}
+      </Badge>
+    </div>
+  );
+};
+
 /**
  * AssistantMessage handles the display and inline-editing of AI responses.
  * 
@@ -3665,6 +3736,7 @@ const AssistantMessage: FC = () => {
             <RagSourcesGroup />
             <MessageHtmlArtifacts />
             <MessageError />
+            <ResponseReflectionBadge />
           </>
         )}
       </div>

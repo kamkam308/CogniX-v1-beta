@@ -75,6 +75,7 @@ import {
   generateAudio,
   getProjectDefaultModel,
   buildCogniXContextPack,
+  evaluateResponseReflection,
   listCachedGguf,
   listCachedModels,
   listGgufVariants,
@@ -83,6 +84,7 @@ import {
   streamChatCompletions,
   validateModel,
   type ProjectDefaultModel,
+  type ResponseReflectionResult,
 } from "./chat-api";
 import {
   createOpenAIContainer,
@@ -496,6 +498,74 @@ function parseSourcesFromResult(raw: string): {
     }
   }
   return sources;
+}
+
+type ReflectionSourcePart = {
+  type: "source";
+  sourceType: string;
+  id: string;
+  url: string;
+  title: string;
+  metadata?: { description: string };
+};
+
+function sourcePartsForReflection(
+  sources: ReflectionSourcePart[],
+): Array<Record<string, unknown>> {
+  return sources.map((source) => ({
+    id: source.id,
+    type: source.sourceType,
+    url: source.url,
+    title: source.title,
+    description: source.metadata?.description ?? "",
+  }));
+}
+
+function promptLikelyRequiresSources(prompt: string): boolean {
+  const lowered = prompt.toLowerCase();
+  return [
+    "source",
+    "sources",
+    "citation",
+    "cite",
+    "recherche",
+    "actualité",
+    "actualite",
+    "dernière",
+    "derniere",
+    "latest",
+    "recent",
+    "news",
+    "aujourd'hui",
+    "today",
+  ].some((marker) => lowered.includes(marker));
+}
+
+function reflectionMetadataFromResult(
+  result: ResponseReflectionResult,
+): Record<string, unknown> | null {
+  const reflection = result.responseReflection;
+  const confidence = reflection?.confidence;
+  if (!reflection || !confidence) {
+    return null;
+  }
+  return {
+    reflectionVersion: reflection.reflectionVersion,
+    plannerVersion: result.plannerVersion,
+    recordId:
+      typeof result.record?.id === "string" ? result.record.id : undefined,
+    auditLogId: result.auditLogId ?? undefined,
+    confidenceScore: confidence.score,
+    confidenceLabel: confidence.label,
+    verificationRequired: confidence.verificationRequired,
+    recommendedAction: confidence.recommendedAction,
+    issueCount: Array.isArray(reflection.issues) ? reflection.issues.length : 0,
+    issueIds: Array.isArray(reflection.issues)
+      ? reflection.issues
+          .map((issue) => issue.id)
+          .filter((id): id is string => typeof id === "string" && id.length > 0)
+      : [],
+  };
 }
 
 function estimateTokenCount(text: string): number | undefined {
@@ -1922,6 +1992,7 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
         ragTopK,
         ragAutoInject,
         ragAutoInjectMinScore,
+        incognito,
       } = runtime;
       // Project sources auto-scope: a chat inside a project retrieves from the
       // project's indexed sources even when the Docs pill is off. The probe is
@@ -3664,6 +3735,31 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
             typeof tc.result === "string" ? tc.result : "",
           );
         });
+        const combinedSourceParts: ReflectionSourcePart[] = [
+          ...sourceParts,
+          ...documentCitationParts,
+        ];
+        let responseReflection: Record<string, unknown> | null = null;
+        if (!incognito && cumulativeText.trim()) {
+          try {
+            const prompt = findLatestUserObjective(messages);
+            const reflection = await evaluateResponseReflection({
+              prompt,
+              response: cumulativeText,
+              threadId: resolvedThreadId ?? null,
+              projectId: ragProjectId ?? null,
+              modelId: params.checkpoint,
+              taskType: cognixRoute?.selectedDomain ?? null,
+              requiresSources:
+                combinedSourceParts.length > 0 ||
+                promptLikelyRequiresSources(prompt),
+              responseSources: sourcePartsForReflection(combinedSourceParts),
+            });
+            responseReflection = reflectionMetadataFromResult(reflection);
+          } catch {
+            responseReflection = null;
+          }
+        }
 
         const meta = serverMetadata;
         const finalTokenCount =
@@ -3719,6 +3815,7 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
             timing: finalTiming,
             custom: {
               reasoningDuration,
+              responseReflection: responseReflection ?? undefined,
               // Persisted refusal flag driving the two-pass prune.
               anthropicRefusal: anthropicRefusalSeen || undefined,
               serverTimings: meta?.timings ?? undefined,

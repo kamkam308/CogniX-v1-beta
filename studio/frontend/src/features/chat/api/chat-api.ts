@@ -410,6 +410,59 @@ export interface ProjectDefaultModel {
   updatedAt: number;
 }
 
+export interface ResponseReflectionConfidence {
+  score?: number;
+  label?: "high" | "medium" | "low" | string;
+  verificationRequired?: boolean;
+  recommendedAction?: string;
+}
+
+export interface ResponseReflectionIssue {
+  id?: string;
+  severity?: string;
+  label?: string;
+  detail?: string;
+  evidence?: Record<string, unknown>;
+}
+
+export interface ResponseReflectionEvaluation {
+  reflectionVersion?: string;
+  mode?: string;
+  taskType?: string;
+  modelId?: string | null;
+  confidence?: ResponseReflectionConfidence;
+  issues?: ResponseReflectionIssue[];
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface ResponseReflectionResult {
+  username: string;
+  responseReflection: ResponseReflectionEvaluation;
+  record?: Record<string, unknown> | null;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
+export async function evaluateResponseReflection(payload: {
+  prompt: string;
+  response: string;
+  messageId?: string | null;
+  threadId?: string | null;
+  projectId?: string | null;
+  modelId?: string | null;
+  taskType?: string | null;
+  requiresSources?: boolean;
+  responseSources?: Array<Record<string, unknown>>;
+}): Promise<ResponseReflectionResult> {
+  const response = await authFetch("/api/cognix/reflection/evaluate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseJsonOrThrow<ResponseReflectionResult>(response);
+}
+
 export interface ProjectSkillRecord {
   id: string;
   skillId?: string | null;
