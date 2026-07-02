@@ -252,21 +252,47 @@ export function isContextLimitError(message: string): boolean {
   );
 }
 
-function isHuggingFaceAuthFailure(error: unknown): boolean {
+function isProviderAuthFailure(error: unknown): boolean {
   const message = (
     error instanceof Error
       ? error.message
       : providerErrorMessageFromUnknown(error) ?? String(error ?? "")
   ).toLowerCase();
+  const mentionsCredential =
+    message.includes("api key") ||
+    message.includes("apikey") ||
+    message.includes("token") ||
+    message.includes("credential") ||
+    message.includes("bearer");
+  const mentionsProvider =
+    message.includes("openai") ||
+    message.includes("hugging face") ||
+    message.includes("provider") ||
+    message.includes("api");
   return (
     message.includes("invalid username or password") ||
     message.includes("invalid username") ||
     message.includes("invalid password") ||
     message.includes("bad credentials") ||
     message.includes("invalid_api_key") ||
+    message.includes("invalid api key") ||
+    message.includes("incorrect api key") ||
     message.includes("valid hf_ token") ||
     message.includes("saved token") ||
     message.includes("rejected the saved token") ||
+    (mentionsCredential &&
+      (message.includes("invalid") ||
+        message.includes("incorrect") ||
+        message.includes("missing") ||
+        message.includes("expired") ||
+        message.includes("not valid") ||
+        message.includes("rejected") ||
+        message.includes("unauthorized"))) ||
+    ((message.includes("unauthorized") ||
+      message.includes("forbidden") ||
+      message.includes("401") ||
+      message.includes("403")) &&
+      (mentionsCredential || mentionsProvider || message.includes("auth"))) ||
     (message.includes("hugging face") &&
       (message.includes("token") ||
         message.includes("auth") ||
@@ -307,17 +333,17 @@ function providerErrorMessageFromUnknown(value: unknown): string | null {
   return null;
 }
 
-function huggingFaceAuthErrorFromStreamContent(text: string): Error | null {
+function providerAuthErrorFromStreamContent(text: string): Error | null {
   const message = providerErrorMessageFromUnknown(text);
   if (!message) return null;
   const error = new Error(message);
-  return isHuggingFaceAuthFailure(error) ? error : null;
+  return isProviderAuthFailure(error) ? error : null;
 }
 
-function isOnlyHuggingFaceAuthErrorText(text: string): boolean {
+function isOnlyProviderAuthErrorText(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return false;
-  if (!huggingFaceAuthErrorFromStreamContent(trimmed)) return false;
+  if (!providerAuthErrorFromStreamContent(trimmed)) return false;
   if (
     (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
     (trimmed.startsWith("[") && trimmed.endsWith("]"))
@@ -328,7 +354,10 @@ function isOnlyHuggingFaceAuthErrorText(text: string): boolean {
   return (
     lowered.includes("invalid username or password") ||
     lowered.includes("hugging face rejected the saved token") ||
-    lowered.includes("hugging face requires a valid hf_ token")
+    lowered.includes("hugging face requires a valid hf_ token") ||
+    lowered.includes("invalid api key") ||
+    lowered.includes("incorrect api key") ||
+    lowered.includes("invalid_api_key")
   );
 }
 
@@ -1799,6 +1828,7 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
         checkpointFromProjectDefault(projectDefaultModel);
       if (
         projectDefaultCheckpoint &&
+        !runtime.params.checkpoint &&
         projectDefaultCheckpoint !== runtime.params.checkpoint
       ) {
         useChatRuntimeStore.getState().setCheckpoint(projectDefaultCheckpoint);
@@ -1826,6 +1856,7 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
         : checkpointFromCogniXRoute(cognixRoute);
       if (
         cognixRouteCheckpoint &&
+        !runtimeBeforeRoute.params.checkpoint &&
         cognixRouteCheckpoint !== useChatRuntimeStore.getState().params.checkpoint
       ) {
         useChatRuntimeStore.getState().setCheckpoint(cognixRouteCheckpoint);
@@ -1868,6 +1899,7 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
       let params = runtime.params;
       if (
         projectDefaultCheckpoint &&
+        !params.checkpoint &&
         projectDefaultCheckpoint !== params.checkpoint
       ) {
         useChatRuntimeStore.getState().setCheckpoint(projectDefaultCheckpoint);
@@ -1908,7 +1940,7 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
             "Turn on Enable connections in Settings → Connections to use hosted models.",
         });
         clearSelectedImageEditReference();
-          throw new Error("Connections disabled.");
+        throw new Error("Connections disabled.");
       }
       const externalProviders = loadExternalProviders();
       let externalProvider = isExternalRequest
@@ -1919,26 +1951,48 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
       let externalApiKey = externalProvider
         ? getExternalProviderApiKey(externalProvider.id).trim()
         : "";
-
-      const switchToCogniXOllamaFallback = (): boolean => {
+      let externalFailureNotificationShown = false;
+      const notifyExternalProviderFailure = (
+        title: string,
+        description: string,
+        options: { allowLocalFallback?: boolean } = {},
+      ): void => {
+        externalFailureNotificationShown = true;
         const fallbackSelection = parseExternalModelId(
           COGNIX_DEFAULT_EXTERNAL_CHECKPOINT,
         );
-        if (!fallbackSelection) return false;
-        const fallbackProvider = externalProviders.find(
-          (provider) => provider.id === fallbackSelection.providerId,
+        const canSuggestLocalFallback = Boolean(
+          options.allowLocalFallback &&
+            fallbackSelection &&
+            externalProvider?.id !== fallbackSelection.providerId &&
+            externalProviders.some(
+              (provider) => provider.id === fallbackSelection.providerId,
+            ),
         );
-        if (!fallbackProvider) return false;
-        useChatRuntimeStore
-          .getState()
-          .setCheckpoint(COGNIX_DEFAULT_EXTERNAL_CHECKPOINT);
-        runtime = useChatRuntimeStore.getState();
-        params = runtime.params;
-        externalSelection = fallbackSelection;
-        isExternalRequest = true;
-        externalProvider = fallbackProvider;
-        externalApiKey = getExternalProviderApiKey(fallbackProvider.id).trim();
-        return true;
+        toast.error(title, {
+          description: canSuggestLocalFallback
+            ? `${description} You can switch to local Ollama if you choose.`
+            : description,
+          duration: 8000,
+          closeButton: true,
+          ...(canSuggestLocalFallback
+            ? {
+                action: {
+                  label: "Use Ollama",
+                  onClick: () => {
+                    useChatRuntimeStore
+                      .getState()
+                      .setCheckpoint(COGNIX_DEFAULT_EXTERNAL_CHECKPOINT);
+                    toast("CogniX Auto", {
+                      description:
+                        "Ollama Qwen 4B selected. Send your message again when Ollama is running.",
+                      duration: 3500,
+                    });
+                  },
+                },
+              }
+            : {}),
+        });
       };
 
       if (
@@ -1950,22 +2004,30 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
           externalApiKey,
         );
         if (keyStatus === "missing" || keyStatus === "invalid") {
-          if (switchToCogniXOllamaFallback()) {
-            toast("CogniX Auto", {
-              description:
-                keyStatus === "missing"
-                  ? "Hugging Face has no saved token. Using Ollama Qwen 4B instead."
-                  : "Hugging Face token is not valid. Using Ollama Qwen 4B instead.",
-              duration: 3500,
-            });
-          }
+          notifyExternalProviderFailure(
+            keyStatus === "missing"
+              ? "Hugging Face token missing"
+              : "Hugging Face token invalid",
+            keyStatus === "missing"
+              ? "The selected Hugging Face connection has no saved token."
+              : "The selected Hugging Face connection rejected the saved token.",
+            { allowLocalFallback: true },
+          );
+          clearSelectedImageEditReference();
+          throw new Error(
+            keyStatus === "missing"
+              ? "Hugging Face token missing."
+              : "Hugging Face token invalid.",
+          );
         }
       }
 
       if (isExternalRequest && !externalProvider) {
-        toast.error("Connection not found.", {
-          description: "Open Settings → Connections and add it again.",
-        });
+        notifyExternalProviderFailure(
+          "Connection not found",
+          "Open Settings → Connections and add it again.",
+          { allowLocalFallback: true },
+        );
         clearSelectedImageEditReference();
         throw new Error("Connection not found.");
       }
@@ -1984,9 +2046,11 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
         !externalProviderIsCustom &&
         !externalProviderIsGeminiCustomBase
       ) {
-        toast.error("Missing API key for selected connection.", {
-          description: "Open Settings → Connections and set the API key again.",
-        });
+        notifyExternalProviderFailure(
+          "Missing API key for selected connection",
+          "Open Settings → Connections and set the API key again.",
+          { allowLocalFallback: true },
+        );
         clearSelectedImageEditReference();
         throw new Error("Missing connection API key.");
       }
@@ -2503,20 +2567,10 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
           .replace(/<\/?think>/g, "")
           .trim();
         if (!visibleText) return false;
-        if (isOnlyHuggingFaceAuthErrorText(visibleText)) {
+        if (isOnlyProviderAuthErrorText(visibleText)) {
           return false;
         }
         return true;
-      };
-      const resetExternalRetryState = (): void => {
-        waitingFirstChunk = true;
-        firstTokenTime = undefined;
-        cumulativeText = "";
-        reasoningContentOpen = false;
-        reasoningStartAt = null;
-        reasoningDuration = 0;
-        serverMetadata = null;
-        toolCallParts.length = 0;
       };
 
       // Per-run cancellation token so a delayed stop POST can't match
@@ -2950,7 +3004,6 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
         };
 
         let retriedWithRefreshedKey = false;
-        let retriedWithCogniXOllamaFallback = false;
         while (true) {
           try {
             let requestPayload: OpenAIChatCompletionsRequest;
@@ -3339,7 +3392,7 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
                 isExternalRequest &&
                 isHuggingFaceProviderConnection(externalProvider)
               ) {
-                const contentError = huggingFaceAuthErrorFromStreamContent(
+                const contentError = providerAuthErrorFromStreamContent(
                   `${cumulativeText}${delta}`,
                 );
                 if (contentError) {
@@ -3570,20 +3623,15 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
           } catch (streamError) {
             if (
               isExternalRequest &&
-              isHuggingFaceProviderConnection(externalProvider) &&
-              !retriedWithCogniXOllamaFallback &&
               !hasSubstantiveAssistantContent() &&
-              isHuggingFaceAuthFailure(streamError) &&
-              switchToCogniXOllamaFallback()
+              isProviderAuthFailure(streamError)
             ) {
-              retriedWithCogniXOllamaFallback = true;
-              resetExternalRetryState();
-              toast("CogniX Auto", {
-                description:
-                  "Hugging Face rejected the saved token. Using Ollama Qwen 4B instead.",
-                duration: 3500,
-              });
-              continue;
+              notifyExternalProviderFailure(
+                "Connection authentication failed",
+                providerErrorMessageFromUnknown(streamError) ??
+                  "The selected provider rejected the saved credentials.",
+                { allowLocalFallback: true },
+              );
             }
             if (
               isExternalRequest &&
@@ -3705,7 +3753,7 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
                 "or start a new chat.",
               duration: 8000,
             });
-          } else {
+          } else if (!externalFailureNotificationShown) {
             toast.error("Generation failed", {
               description: msg || "Unknown error",
             });
