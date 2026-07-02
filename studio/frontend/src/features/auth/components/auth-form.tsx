@@ -375,10 +375,8 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
     }
   }
 
-  if (statusLoading && initialized === null && error === null) return null;
-
   return (
-    <div className="w-full space-y-6">
+    <div className="w-full space-y-6" aria-busy={statusLoading}>
       {!isPasswordSetupMode && (
         <div
           role="tablist"

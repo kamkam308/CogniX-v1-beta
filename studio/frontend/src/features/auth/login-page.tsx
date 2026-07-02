@@ -22,7 +22,7 @@ export function LoginPage() {
         className="opacity-35 dark:opacity-15"
       />
       <Card className="relative z-10 w-full max-w-sm rounded-[2rem] px-7 py-8 shadow-border ring-0 sm:px-8 sm:py-10">
-        <AuthForm mode="login" />
+        <AuthForm key="login" mode="login" />
       </Card>
     </div>
   );
@@ -37,7 +37,7 @@ export function SignupPage() {
         className="cognix-logo-mark absolute left-6 top-6 z-20 size-9 object-contain sm:left-8 sm:top-8"
       />
       <Card className="relative z-10 w-full max-w-sm rounded-[2rem] px-7 py-8 shadow-border ring-0 sm:px-8 sm:py-10">
-        <AuthForm mode="signup" />
+        <AuthForm key="signup" mode="signup" />
       </Card>
     </div>
   );
