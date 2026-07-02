@@ -6000,7 +6000,7 @@ class ExternalProviderClient:
             headers = self._auth_headers(),
             timeout = self._timeout,
         )
-        response.raise_for_status()
+        _raise_for_provider_status(response, self.provider_type, model = model)
         return response.json()
 
     async def list_models(self) -> list[dict[str, Any]]:
@@ -6016,7 +6016,7 @@ class ExternalProviderClient:
                 headers = self._auth_headers(),
                 timeout = self._timeout,
             )
-            response.raise_for_status()
+            _raise_for_provider_status(response, self.provider_type)
             data = response.json()
             # Some local servers (Ollama with no models) return data: null.
             models: list[dict[str, Any]] = []
@@ -6114,7 +6114,7 @@ class ExternalProviderClient:
                 timeout = self._timeout,
             ) as response:
                 if response.status_code != 200:
-                    response.raise_for_status()
+                    _raise_for_provider_status(response, self.provider_type)
                 async for _chunk in response.aiter_bytes(chunk_size = 2048):
                     break
         except httpx.HTTPError as exc:
@@ -6223,38 +6223,6 @@ def _provider_display_name(provider_type: str) -> str:
     return str(info.get("display_name") or provider_type)
 
 
-def _friendly_provider_error_text(
-    provider_type: str,
-    status_code: int,
-    raw_message: str,
-    *,
-    model: str | None = None,
-) -> str:
-    """Rewrite common provider errors into actionable Studio copy."""
-    if provider_type == "huggingface" and status_code in (401, 403):
-        return (
-            "Hugging Face rejected the saved token for"
-            f" '{model}'." if model else "Hugging Face rejected the saved token."
-        ) + " Set a valid hf_ token in Connections or switch to Ollama Qwen 4B."
-    if status_code == 404 and model:
-        lowered = raw_message.lower()
-        if "not found" in lowered or "not_found" in lowered:
-            if provider_type == "ollama":
-                label = _provider_display_name(provider_type)
-                return (
-                    f"Model '{model}' is not installed in {label}. "
-                    f"Run `ollama pull {model}` in a terminal, then retry."
-                )
-            if provider_type in ("vllm", "llama_cpp"):
-                label = _provider_display_name(provider_type)
-                return (
-                    f"Model '{model}' is not available on the {label} server. "
-                    "Check that the server is running and the model is loaded, "
-                    "then retry."
-                )
-    return raw_message
-
-
 def _provider_error_message_from_payload(payload: dict[str, Any]) -> str | None:
     error = payload.get("error")
     if isinstance(error, str) and error.strip():
@@ -6273,6 +6241,90 @@ def _provider_error_message_from_payload(payload: dict[str, Any]) -> str | None:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
+
+
+def _provider_error_message_from_raw(raw_message: str) -> str:
+    text = str(raw_message or "").strip()
+    if not text:
+        return ""
+    try:
+        payload = _json.loads(text)
+    except Exception:
+        return text
+    if isinstance(payload, dict):
+        return _provider_error_message_from_payload(payload) or text
+    return text
+
+
+def _is_huggingface_auth_error(status_code: int, message: str) -> bool:
+    lowered = message.lower()
+    has_auth_marker = any(
+        marker in lowered
+        for marker in (
+            "invalid username",
+            "invalid password",
+            "unauthorized",
+            "authentication",
+            "bad credentials",
+            "invalid token",
+            "token is invalid",
+        )
+    )
+    return has_auth_marker and (status_code in (400, 401, 403) or "token" in lowered)
+
+
+def _friendly_provider_error_text(
+    provider_type: str,
+    status_code: int,
+    raw_message: str,
+    *,
+    model: str | None = None,
+) -> str:
+    """Rewrite common provider errors into actionable Studio copy."""
+    message = _provider_error_message_from_raw(raw_message)
+    if provider_type == "huggingface" and _is_huggingface_auth_error(status_code, message):
+        return (
+            "Hugging Face rejected the saved token for"
+            f" '{model}'." if model else "Hugging Face rejected the saved token."
+        ) + " Set a valid hf_ token in Connections or switch to Ollama Qwen 4B."
+    if status_code == 404 and model:
+        lowered = message.lower()
+        if "not found" in lowered or "not_found" in lowered:
+            if provider_type == "ollama":
+                label = _provider_display_name(provider_type)
+                return (
+                    f"Model '{model}' is not installed in {label}. "
+                    f"Run `ollama pull {model}` in a terminal, then retry."
+                )
+            if provider_type in ("vllm", "llama_cpp"):
+                label = _provider_display_name(provider_type)
+                return (
+                    f"Model '{model}' is not available on the {label} server. "
+                    "Check that the server is running and the model is loaded, "
+                    "then retry."
+                )
+    return message or raw_message
+
+
+def _raise_for_provider_status(
+    response: httpx.Response,
+    provider_type: str,
+    *,
+    model: str | None = None,
+) -> None:
+    if response.status_code < 400:
+        return
+    message = _friendly_provider_error_text(
+        provider_type,
+        response.status_code,
+        response.text,
+        model = model,
+    )
+    raise httpx.HTTPStatusError(
+        message,
+        request = response.request,
+        response = response,
+    )
 
 
 def _provider_stream_error_status(provider_type: str, message: str | None) -> int:
