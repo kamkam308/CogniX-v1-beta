@@ -14,6 +14,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from core.cognix import module_registry as cognix_module_registry
 from utils.paths import auth_db_path, rag_db_path, studio_db_path
 
 
@@ -22,12 +23,21 @@ GLOBAL_ROADMAP_TABLE_SOURCE = "v2_sections_42_global_tables"
 GLOBAL_ROADMAP_TABLE_NAMES: tuple[str, ...] = (
     "pulse_events",
     "pulse_summaries",
+    "pulse_user_preferences",
+    "pulse_notifications",
     "library_assets",
     "library_collections",
     "library_permissions",
+    "library_asset_versions",
+    "library_asset_links",
+    "rag_sources",
+    "rag_retrieval_packets",
     "codex_tasks",
     "codex_reports",
     "codex_security_reviews",
+    "codex_branches",
+    "codex_changes",
+    "codex_test_runs",
     "scheduled_tasks",
     "scheduled_task_runs",
     "image_assets",
@@ -35,10 +45,18 @@ GLOBAL_ROADMAP_TABLE_NAMES: tuple[str, ...] = (
     "apps",
     "installed_apps",
     "app_permissions",
+    "plugins",
+    "plugin_installations",
+    "plugin_permissions",
+    "plugin_reviews",
     "gpts",
     "gpt_versions",
     "gpt_tools",
     "gpt_permissions",
+    "worker_jobs",
+    "worker_job_events",
+    "worker_dead_letters",
+    "tool_execution_logs",
     "admin_chat_access_logs",
     "approval_requests",
     "approval_decisions",
@@ -82,7 +100,12 @@ GLOBAL_ROADMAP_TABLE_NAMES: tuple[str, ...] = (
     "organization_policies",
     "risk_scores",
     "audit_logs",
+    "sensitive_action_logs",
     "notifications",
+    "notification_preferences",
+    "admin_alerts",
+    "deployment_plans",
+    "gpu_scheduler_contracts",
     "education_spaces",
     "education_classes",
     "education_members",
@@ -387,6 +410,35 @@ def _global_table_record(table_name: str, all_tables: set[str]) -> dict[str, Any
     }
 
 
+def _module_storage_record(module: dict[str, Any], all_tables: set[str]) -> dict[str, Any]:
+    storage_tables = sorted({str(item) for item in module.get("storageTables") or [] if str(item).strip()})
+    present_tables = sorted(table for table in storage_tables if table in all_tables)
+    planned_tables = sorted(table for table in storage_tables if table not in all_tables)
+    if not storage_tables:
+        status = "missing_declaration"
+    elif not planned_tables:
+        status = "available"
+    elif present_tables:
+        status = "partial"
+    else:
+        status = "planned"
+    return {
+        "moduleId": str(module.get("id") or ""),
+        "displayName": str(module.get("displayName") or module.get("name") or module.get("id") or ""),
+        "status": status,
+        "activationState": module.get("activationState"),
+        "storageTables": storage_tables,
+        "presentStorageTables": present_tables,
+        "plannedStorageTables": planned_tables,
+        "declaredTableCount": len(storage_tables),
+        "presentTableCount": len(present_tables),
+        "plannedTableCount": len(planned_tables),
+        "eventTypeCount": len(module.get("eventTypes") or []),
+        "auditActionCount": len(module.get("auditActions") or []),
+        "runtimeMigrationAllowed": False,
+    }
+
+
 def build_database_blueprint(
     *,
     auth_tables: set[str] | None = None,
@@ -400,11 +452,23 @@ def build_database_blueprint(
     )
     records = [_table_record(definition, schemas["all"]) for definition in ROADMAP_TABLES]
     global_records = [_global_table_record(table_name, schemas["all"]) for table_name in GLOBAL_ROADMAP_TABLE_NAMES]
+    module_registry = cognix_module_registry.build_module_registry()
+    module_storage_records = [
+        _module_storage_record(module, schemas["all"])
+        for module in module_registry.get("modules", [])
+        if isinstance(module, dict)
+    ]
     available = [item["logicalName"] for item in records if item["status"] == "available"]
     partial = [item["logicalName"] for item in records if item["status"] == "partial"]
     planned = [item["logicalName"] for item in records if item["status"] == "planned"]
     available_global = [item["tableName"] for item in global_records if item["status"] == "available"]
     planned_global = [item["tableName"] for item in global_records if item["status"] == "planned"]
+    available_module_storage = [item["moduleId"] for item in module_storage_records if item["status"] == "available"]
+    partial_module_storage = [item["moduleId"] for item in module_storage_records if item["status"] == "partial"]
+    planned_module_storage = [item["moduleId"] for item in module_storage_records if item["status"] == "planned"]
+    missing_module_storage = [
+        item["moduleId"] for item in module_storage_records if item["status"] == "missing_declaration"
+    ]
     sensitive = [
         item["logicalName"]
         for item in records
@@ -423,6 +487,11 @@ def build_database_blueprint(
             "globalRoadmapTableCount": len(global_records),
             "availableGlobalRoadmapTableCount": len(available_global),
             "plannedGlobalRoadmapTableCount": len(planned_global),
+            "moduleStorageContractCount": len(module_storage_records),
+            "availableModuleStorageContractCount": len(available_module_storage),
+            "partialModuleStorageContractCount": len(partial_module_storage),
+            "plannedModuleStorageContractCount": len(planned_module_storage),
+            "missingModuleStorageDeclarationCount": len(missing_module_storage),
             "migrationExecutionAllowed": False,
             "destructiveChangeAllowed": False,
         },
@@ -440,6 +509,19 @@ def build_database_blueprint(
             "plannedTables": planned_global,
             "readyForV2GlobalSchema": not planned_global,
         },
+        "moduleStorageCoverage": {
+            "sourceOfTruth": "module_registry_governance_metadata",
+            "governanceVersion": module_registry.get("globalPolicies", {}).get("governanceVersion"),
+            "requiredModuleIds": [item["moduleId"] for item in module_storage_records],
+            "availableModuleIds": available_module_storage,
+            "partialModuleIds": partial_module_storage,
+            "plannedModuleIds": planned_module_storage,
+            "missingDeclarationModuleIds": missing_module_storage,
+            "readyForDeclaredModuleStorage": (
+                not partial_module_storage and not planned_module_storage and not missing_module_storage
+            ),
+            "runtimeMigrationAllowed": False,
+        },
         "schemaSources": {
             "auth": sorted(schemas["auth"]),
             "studio": sorted(schemas["studio"]),
@@ -448,6 +530,7 @@ def build_database_blueprint(
         },
         "logicalTables": records,
         "globalRoadmapTables": global_records,
+        "moduleStorageTables": module_storage_records,
         "migrationPolicy": {
             "schemaChangesAllowedHere": False,
             "requiresReviewedMigration": True,

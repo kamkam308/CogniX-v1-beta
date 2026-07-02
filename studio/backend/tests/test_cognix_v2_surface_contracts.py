@@ -8,6 +8,9 @@ from storage import cognix_db
 
 
 def test_v2_global_roadmap_tables_are_bootstrapped_with_common_contract_columns():
+    assert set(cognix_db.GLOBAL_ROADMAP_TABLE_NAMES) == set(
+        cognix_database_blueprint.GLOBAL_ROADMAP_TABLE_NAMES
+    )
     conn = sqlite3.connect(":memory:")
     try:
         cognix_db._ensure_global_roadmap_tables(conn)
@@ -21,6 +24,9 @@ def test_v2_global_roadmap_tables_are_bootstrapped_with_common_contract_columns(
         table_names = {row[0] for row in rows}
 
         assert set(cognix_db.GLOBAL_ROADMAP_TABLE_NAMES).issubset(table_names)
+        assert {"pulse_user_preferences", "pulse_notifications", "codex_branches", "worker_jobs"}.issubset(
+            table_names
+        )
         columns = {row[1] for row in conn.execute("PRAGMA table_info(enterprise_chats)").fetchall()}
         assert {"id", "organization_id", "username", "project_id", "status", "payload_json", "metadata_json"}.issubset(
             columns
@@ -52,13 +58,31 @@ def test_database_blueprint_reports_v2_global_table_coverage_without_changing_le
     assert blueprint["summary"]["roadmapTableCount"] == 25
     assert blueprint["summary"]["globalRoadmapTableCount"] == len(cognix_database_blueprint.GLOBAL_ROADMAP_TABLE_NAMES)
     assert blueprint["summary"]["plannedGlobalRoadmapTableCount"] == 0
+    assert blueprint["summary"]["moduleStorageContractCount"] == 66
+    assert blueprint["summary"]["missingModuleStorageDeclarationCount"] == 0
+    assert blueprint["summary"]["plannedModuleStorageContractCount"] == 0
+    assert blueprint["summary"]["partialModuleStorageContractCount"] > 0
     assert blueprint["globalCoverage"]["sourceOfTruth"] == "v2_sections_42_global_tables"
     assert blueprint["globalCoverage"]["readyForV2GlobalSchema"] is True
     assert "enterprise_chats" in blueprint["globalCoverage"]["availableTables"]
     assert "notifications" in blueprint["globalCoverage"]["availableTables"]
+    assert "pulse_notifications" in blueprint["globalCoverage"]["availableTables"]
+    assert blueprint["moduleStorageCoverage"]["sourceOfTruth"] == "module_registry_governance_metadata"
+    assert blueprint["moduleStorageCoverage"]["governanceVersion"] == "cognix_module_governance_v1"
+    assert blueprint["moduleStorageCoverage"]["readyForDeclaredModuleStorage"] is False
+    assert "cognix-pulse" in blueprint["moduleStorageCoverage"]["availableModuleIds"]
+    assert "cognix-library" in blueprint["moduleStorageCoverage"]["availableModuleIds"]
+    assert "cognix-codex-secure-agent" in blueprint["moduleStorageCoverage"]["availableModuleIds"]
+    assert "cognix-deployment-manager" in blueprint["moduleStorageCoverage"]["partialModuleIds"]
     table_records = {item["tableName"]: item for item in blueprint["globalRoadmapTables"]}
     assert table_records["project_directives"]["schemaManagedByBootstrap"] is True
     assert table_records["project_directives"]["destructiveChangeAllowed"] is False
+    module_records = {item["moduleId"]: item for item in blueprint["moduleStorageTables"]}
+    assert module_records["cognix-pulse"]["status"] == "available"
+    assert module_records["cognix-pulse"]["plannedStorageTables"] == []
+    assert "pulse_user_preferences" in module_records["cognix-pulse"]["presentStorageTables"]
+    assert module_records["cognix-deployment-manager"]["status"] == "partial"
+    assert "cognix_deployment_targets" in module_records["cognix-deployment-manager"]["plannedStorageTables"]
     assert blueprint["sideEffects"]["databaseWrite"] is False
     assert blueprint["sideEffects"]["tableCreate"] is False
 

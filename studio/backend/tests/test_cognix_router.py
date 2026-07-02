@@ -9810,6 +9810,8 @@ def test_database_blueprint_maps_roadmap_tables_without_schema_mutation():
     assert blueprint["databaseBlueprintVersion"] == "cognix_database_blueprint_v1"
     assert blueprint["mode"] == "database_blueprint_read_only"
     assert blueprint["summary"]["roadmapTableCount"] == 25
+    assert blueprint["summary"]["moduleStorageContractCount"] == 66
+    assert blueprint["summary"]["missingModuleStorageDeclarationCount"] == 0
     assert blueprint["summary"]["migrationExecutionAllowed"] is False
     assert blueprint["summary"]["destructiveChangeAllowed"] is False
     assert blueprint["coverage"]["readyForMvpSchema"] is True
@@ -9823,6 +9825,9 @@ def test_database_blueprint_maps_roadmap_tables_without_schema_mutation():
     assert tables["documents"]["presentCanonicalTables"] == ["documents"]
     assert tables["document_chunks"]["presentCanonicalTables"] == ["chunks"]
     assert tables["billing_events"]["runtimeMigrationAllowed"] is False
+    assert blueprint["moduleStorageCoverage"]["sourceOfTruth"] == "module_registry_governance_metadata"
+    assert blueprint["moduleStorageCoverage"]["governanceVersion"] == "cognix_module_governance_v1"
+    assert blueprint["moduleStorageCoverage"]["runtimeMigrationAllowed"] is False
     assert blueprint["dataIsolationPolicy"]["authDatabaseSeparated"] is True
     assert blueprint["dataIsolationPolicy"]["ragDatabaseSeparated"] is True
     assert blueprint["migrationPolicy"]["destructiveMigrationAllowed"] is False
