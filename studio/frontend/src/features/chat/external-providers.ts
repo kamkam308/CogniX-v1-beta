@@ -339,6 +339,23 @@ export const COGNIX_OLLAMA_MODEL_ID =
 export const COGNIX_OLLAMA_PROVIDER_NAME = "Ollama Qwen 4B";
 export const COGNIX_OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1";
 const COGNIX_OLLAMA_CREATED_AT = 1790000000000;
+export const COGNIX_CODEX_MODEL_IDS = [
+  "gpt-5.5",
+  "gpt-5.5-pro",
+  "gpt-5.3-codex",
+] as const;
+export const COGNIX_CODEX_DEFAULT_MODEL_ID = COGNIX_CODEX_MODEL_IDS[0];
+
+export function isCogniXCodexModelId(
+  value: string | null | undefined,
+): value is (typeof COGNIX_CODEX_MODEL_IDS)[number] {
+  return (
+    typeof value === "string" &&
+    COGNIX_CODEX_MODEL_IDS.includes(
+      value as (typeof COGNIX_CODEX_MODEL_IDS)[number],
+    )
+  );
+}
 
 function canUseStorage(): boolean {
   return typeof window !== "undefined";

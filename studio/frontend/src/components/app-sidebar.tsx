@@ -96,7 +96,7 @@ import {
 } from "@/components/ui/tooltip";
 import { Tooltip as TooltipPrimitive } from "radix-ui";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { ChevronDown, Moon } from "lucide-react";
+import { ChevronDown, Moon, MoreHorizontal } from "lucide-react";
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   archiveChatItem,
@@ -353,18 +353,18 @@ export function AppSidebar() {
 
   const isChatRoute = pathname.startsWith("/chat");
   const isStudioRoute = pathname === "/studio" || pathname.startsWith("/studio/");
+  const isCodexRoute = pathname === "/codex";
+  const isChatSurfaceRoute = isChatRoute || isCodexRoute;
   const isCognixModuleRoute =
     pathname === "/pulse" ||
     pathname === "/library" ||
     pathname === "/scheduled" ||
     pathname === "/apps" ||
     pathname === "/gpts" ||
-    pathname === "/images" ||
-    pathname === "/codex";
+    pathname === "/images";
   const [chatOpen, setChatOpen] = useState(true);
 
   const [trainOpen, setTrainOpen] = useState(true);
-  const [cognixOpen, setCognixOpen] = useState(true);
   const [runsOpen, setRunsOpen] = useState(true);
 
   useEffect(() => {
@@ -375,11 +375,6 @@ export function AppSidebar() {
     if (!isStudioRoute) return;
     queueMicrotask(() => setRunsOpen(true));
   }, [isStudioRoute]);
-  useEffect(() => {
-    if (!isCognixModuleRoute) return;
-    queueMicrotask(() => setCognixOpen(true));
-  }, [isCognixModuleRoute]);
-
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [scrolled, setScrolled] = useState(false);
   // Bottom fade hides at the very bottom / for short lists so the last row
@@ -474,7 +469,7 @@ export function AppSidebar() {
   // back to the live chat instead of starting a new one, whenever a chat is
   // running or its thread is still active, or a training / export is in progress.
   const showReturnToChat =
-    !isChatRoute &&
+    !isChatSurfaceRoute &&
     (trainingInProgress || exportInProgress || anyChatRunning || storeThreadId != null);
   // The Train-page status poll doesn't run off-route; keep state fresh so the spinner
   // clears even if a run finishes while the user is on another tab.
@@ -494,7 +489,6 @@ export function AppSidebar() {
     projects.length,
     chatOpen,
     trainOpen,
-    cognixOpen,
     runsOpen,
     pinnedOpen,
     isStudioRoute,
@@ -1212,6 +1206,56 @@ export function AppSidebar() {
                   closeMobileIfOpen();
                 }}
               />
+              <NavItem
+                icon={AiProgrammingIcon}
+                label="Codex"
+                active={isCodexRoute}
+                onClick={() => {
+                  navigate({ to: "/codex" });
+                  closeMobileIfOpen();
+                }}
+              />
+              <SidebarMenuItem>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <SidebarMenuButton
+                      tooltip="Plus"
+                      isActive={isCognixModuleRoute}
+                      className="sidebar-nav-btn h-[33px] rounded-full gap-[8.5px] pl-3 pr-2.5 font-medium group-data-[collapsible=icon]:px-2.5 group-data-[collapsible=icon]:!w-[32px] group-data-[collapsible=icon]:mx-auto"
+                    >
+                      <MoreHorizontal className="size-icon shrink-0 group-hover/menu-button:animate-icon-pop" strokeWidth={1.75} />
+                      <span className="text-[14.5px] leading-[19px] tracking-nav">Plus</span>
+                    </SidebarMenuButton>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent
+                    side="right"
+                    align="start"
+                    sideOffset={8}
+                    className="unsloth-plus-menu w-56"
+                  >
+                    {([
+                      { icon: ActivitySparkIcon, label: "Pulse", to: "/pulse", active: pathname === "/pulse" },
+                      { icon: AiBookIcon, label: "Library", to: "/library", active: pathname === "/library" },
+                      { icon: AiSchedulingIcon, label: "Scheduled", to: "/scheduled", active: pathname === "/scheduled" },
+                      { icon: AppStoreIcon, label: "Apps", to: "/apps", active: pathname === "/apps" },
+                      { icon: AiGenerativeIcon, label: "GPTs", to: "/gpts", active: pathname === "/gpts" },
+                      { icon: AiImageIcon, label: "Images", to: "/images", active: pathname === "/images" },
+                    ] as const).map((item) => (
+                      <DropdownMenuItem
+                        key={item.to}
+                        className={item.active ? "bg-nav-surface-hover text-foreground" : undefined}
+                        onSelect={() => {
+                          navigate({ to: item.to });
+                          closeMobileIfOpen();
+                        }}
+                      >
+                        <HugeiconsIcon icon={item.icon} strokeWidth={1.75} className="size-icon" />
+                        <span>{item.label}</span>
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </SidebarMenuItem>
               {showTrainingTools && (
               <NavItem
                 icon={TestTubeOutlineIcon}
@@ -1287,86 +1331,6 @@ export function AppSidebar() {
           </SidebarGroup>
         </Collapsible>
         )}
-
-        <Collapsible open={cognixOpen} onOpenChange={setCognixOpen} asChild>
-          <SidebarGroup className="group-data-[collapsible=icon]:hidden px-0 py-0">
-            <SidebarGroupLabel className={cn("sidebar-sticky-label sidebar-sticky-label-following", scrolled && "is-scrolled")} asChild>
-              <CollapsibleTrigger className="cursor-pointer flex w-full items-center gap-1 group/sb-collap">
-                CogniX
-                <ChevronDown className="size-3.5 opacity-0 transition-[transform,opacity] duration-200 group-hover/sb-collap:opacity-100 group-focus-visible/sb-collap:opacity-100 data-[state=open]:rotate-0 [[data-state=closed]_&]:rotate-[-90deg] [[data-state=closed]_&]:opacity-100" />
-              </CollapsibleTrigger>
-            </SidebarGroupLabel>
-            <CollapsibleContent>
-              <SidebarGroupContent className="pl-1.5 pr-2">
-                <SidebarMenu>
-                  <NavItem
-                    icon={ActivitySparkIcon}
-                    label="Pulse"
-                    active={pathname === "/pulse"}
-                    onClick={() => {
-                      navigate({ to: "/pulse" });
-                      closeMobileIfOpen();
-                    }}
-                  />
-                  <NavItem
-                    icon={AiBookIcon}
-                    label="Library"
-                    active={pathname === "/library"}
-                    onClick={() => {
-                      navigate({ to: "/library" });
-                      closeMobileIfOpen();
-                    }}
-                  />
-                  <NavItem
-                    icon={AiSchedulingIcon}
-                    label="Scheduled"
-                    active={pathname === "/scheduled"}
-                    onClick={() => {
-                      navigate({ to: "/scheduled" });
-                      closeMobileIfOpen();
-                    }}
-                  />
-                  <NavItem
-                    icon={AppStoreIcon}
-                    label="Apps"
-                    active={pathname === "/apps"}
-                    onClick={() => {
-                      navigate({ to: "/apps" });
-                      closeMobileIfOpen();
-                    }}
-                  />
-                  <NavItem
-                    icon={AiGenerativeIcon}
-                    label="GPTs"
-                    active={pathname === "/gpts"}
-                    onClick={() => {
-                      navigate({ to: "/gpts" });
-                      closeMobileIfOpen();
-                    }}
-                  />
-                  <NavItem
-                    icon={AiImageIcon}
-                    label="Images"
-                    active={pathname === "/images"}
-                    onClick={() => {
-                      navigate({ to: "/images" });
-                      closeMobileIfOpen();
-                    }}
-                  />
-                  <NavItem
-                    icon={AiProgrammingIcon}
-                    label="Codex"
-                    active={pathname === "/codex"}
-                    onClick={() => {
-                      navigate({ to: "/codex" });
-                      closeMobileIfOpen();
-                    }}
-                  />
-                </SidebarMenu>
-              </SidebarGroupContent>
-            </CollapsibleContent>
-          </SidebarGroup>
-        </Collapsible>
 
         {/* Pinned chats: own section above Recents */}
         {!isStudioRoute && !showTrainingRecents && pinnedChatItems.length > 0 && (

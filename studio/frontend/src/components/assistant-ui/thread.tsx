@@ -742,7 +742,8 @@ export const Thread: FC<{
   hideComposer?: boolean;
   hideWelcome?: boolean;
   targetThreadId?: string;
-}> = ({ hideComposer, hideWelcome, targetThreadId }) => {
+  composerAccessory?: ReactNode;
+}> = ({ hideComposer, hideWelcome, targetThreadId, composerAccessory }) => {
   // Intent-aware autoscroll replaces assistant-ui's built-in autoscroll to
   // prevent the streaming-mutation race that snaps the viewport back to the
   // bottom while the user scrolls up (see the hook for the full explanation).
@@ -975,7 +976,11 @@ export const Thread: FC<{
               <AuiIf
                 condition={({ thread }) => thread.isEmpty && !thread.isLoading}
               >
-                <ThreadWelcome hideComposer={hideComposer} threadId={threadId} />
+                <ThreadWelcome
+                  hideComposer={hideComposer}
+                  threadId={threadId}
+                  composerAccessory={composerAccessory}
+                />
               </AuiIf>
             )}
 
@@ -1038,6 +1043,7 @@ export const Thread: FC<{
                 disabled={isComposerAttachPending}
                 threadId={threadId}
                 onHeightChange={setComposerHeight}
+                composerAccessory={composerAccessory}
               />
             </AuiIf>
           )}
@@ -1156,7 +1162,8 @@ const ThreadComposerDock: FC<{
   disabled?: boolean;
   threadId?: string | null;
   onHeightChange?: (height: number | null) => void;
-}> = ({ disabled, threadId, onHeightChange }) => {
+  composerAccessory?: ReactNode;
+}> = ({ disabled, threadId, onHeightChange, composerAccessory }) => {
   const { overlay } = useGeneratedImageOverlay();
   const activeThreadId = useChatRuntimeStore((s) => s.activeThreadId);
   const threadListItemId = useAuiState(
@@ -1222,6 +1229,7 @@ const ThreadComposerDock: FC<{
             disabled={disabled}
             threadId={threadId}
             menuSide="top"
+            accessory={composerAccessory}
           />
         </div>
         {showModelDisclaimer && (
@@ -1301,7 +1309,8 @@ function buildWelcome(hour: number, name: string): Welcome {
 const ThreadWelcome: FC<{
   hideComposer?: boolean;
   threadId?: string | null;
-}> = ({ hideComposer, threadId }) => {
+  composerAccessory?: ReactNode;
+}> = ({ hideComposer, threadId, composerAccessory }) => {
   const incognito = useChatRuntimeStore((s) => s.incognito);
   const { addressName } = useEffectiveProfile();
   const [welcome, setWelcome] = useState<Welcome>(DEFAULT_WELCOME);
@@ -1326,7 +1335,12 @@ const ThreadWelcome: FC<{
               disappears when you leave.
             </p>
           )}
-          {!hideComposer && <ComposerAnimated threadId={threadId} />}
+          {!hideComposer && (
+            <ComposerAnimated
+              threadId={threadId}
+              accessory={composerAccessory}
+            />
+          )}
         </div>
       </div>
     </div>
@@ -1349,11 +1363,17 @@ const ComposerAnimated: FC<{
   placeholder?: string;
   threadId?: string | null;
   menuSide?: "top" | "bottom";
-}> = ({ disabled, threadId, menuSide }) => {
+  accessory?: ReactNode;
+}> = ({ disabled, threadId, menuSide, accessory }) => {
   return (
     <div className="relative mx-auto min-w-0 w-full max-w-[46rem]">
       <div className="relative z-10 w-full">
-        <Composer disabled={disabled} threadId={threadId} menuSide={menuSide} />
+        <Composer
+          disabled={disabled}
+          threadId={threadId}
+          menuSide={menuSide}
+          accessory={accessory}
+        />
       </div>
     </div>
   );
@@ -1388,7 +1408,8 @@ const Composer: FC<{
   placeholder?: string;
   threadId?: string | null;
   menuSide?: "top" | "bottom";
-}> = ({ disabled, threadId, menuSide }) => {
+  accessory?: ReactNode;
+}> = ({ disabled, threadId, menuSide, accessory }) => {
   const aui = useAui();
   const pageDragging = useContext(PageDragContext);
   const { overlay, closeOverlay } = useGeneratedImageOverlay();
@@ -1864,6 +1885,11 @@ const Composer: FC<{
           dir="auto"
           {...inputProps}
         />
+        {accessory ? (
+          <div className="flex min-w-0 shrink-0 items-center">
+            {accessory}
+          </div>
+        ) : null}
         <ComposerRightControls
           disabled={
             disabled ||

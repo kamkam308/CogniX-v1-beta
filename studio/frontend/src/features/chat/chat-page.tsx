@@ -56,6 +56,7 @@ import {
   type CSSProperties,
   type MouseEvent,
   type ReactElement,
+  type ReactNode,
   memo,
   useCallback,
   useEffect,
@@ -82,6 +83,9 @@ import { ModelLoadInlineStatus } from "./components/model-load-status";
 import { ProjectSwitcher } from "./components/project-switcher";
 import {
   buildExternalModelId,
+  COGNIX_CODEX_DEFAULT_MODEL_ID,
+  COGNIX_CODEX_MODEL_IDS,
+  isCogniXCodexModelId,
   isExternalModelId,
   parseExternalModelId,
 } from "./external-providers";
@@ -133,6 +137,7 @@ import {
 import type {
   CogniXRouteSnapshot,
   PendingModelSelection,
+  ReasoningEffort,
 } from "./stores/chat-runtime-store";
 import { useChatPreferencesStore } from "./stores/chat-preferences-store";
 import { useExternalProvidersStore } from "./stores/external-providers-store";
@@ -160,6 +165,15 @@ const EXTERNAL_PROVIDER_DROPDOWN_ORDER: Record<string, number> = {
 
 function getExternalProviderDropdownRank(providerType: string): number {
   return EXTERNAL_PROVIDER_DROPDOWN_ORDER[providerType] ?? 2;
+}
+
+function pickStrongestReasoningEffort(
+  levels: readonly ReasoningEffort[],
+): ReasoningEffort {
+  for (const effort of ["xhigh", "max", "high", "medium", "low"] as const) {
+    if (levels.includes(effort)) return effort;
+  }
+  return levels[0] ?? "medium";
 }
 
 type CogniXAutoRecommendation = {
@@ -527,6 +541,7 @@ const SingleContent = memo(function SingleContent({
   artifact,
   artifactSurface,
   onCloseArtifact,
+  composerAccessory,
 }: {
   threadId?: string;
   newThreadNonce?: string;
@@ -534,6 +549,7 @@ const SingleContent = memo(function SingleContent({
   artifact?: ChatArtifact | null;
   artifactSurface: ChatArtifactSurface;
   onCloseArtifact: () => void;
+  composerAccessory?: ReactNode;
 }): ReactElement {
   const openArtifact = useChatArtifactsStore((state) => state.openArtifact);
   const activeThreadId = useChatRuntimeStore((state) => state.activeThreadId);
@@ -607,7 +623,11 @@ const SingleContent = memo(function SingleContent({
 
   const threadPane = (
     <div className="flex min-h-0 min-w-0 flex-1 basis-0 flex-col overflow-hidden">
-      <Thread hideWelcome={Boolean(threadId)} targetThreadId={threadId} />
+      <Thread
+        hideWelcome={Boolean(threadId)}
+        targetThreadId={threadId}
+        composerAccessory={composerAccessory}
+      />
     </div>
   );
 
@@ -1378,6 +1398,7 @@ export type ChatSearch = {
   compare?: string;
   new?: string;
   project?: string;
+  codex?: boolean;
 };
 
 export function validateChatSearch(search: Record<string, unknown>): ChatSearch {
@@ -1386,6 +1407,7 @@ export function validateChatSearch(search: Record<string, unknown>): ChatSearch 
     compare: typeof search.compare === "string" ? search.compare : undefined,
     new: typeof search.new === "string" ? search.new : undefined,
     project: typeof search.project === "string" ? search.project : undefined,
+    codex: search.codex === true || search.codex === "true" || undefined,
   };
 }
 
@@ -1398,6 +1420,7 @@ export function ChatPage({
   active,
 }: { search: ChatSearch; active: boolean }): ReactElement {
   const navigate = useNavigate();
+  const isCodexMode = search.codex === true;
 
   const settingsOpen = useChatRuntimeStore((s) => s.settingsPanelOpen);
   const setSettingsOpen = useChatRuntimeStore((s) => s.setSettingsPanelOpen);
@@ -2495,6 +2518,29 @@ export function ChatPage({
         ),
     [externalProvidersForChat, lastOpenRouterChosenModel],
   );
+  const codexOpenAIProvider = useMemo(
+    () =>
+      externalProvidersForChat.find(
+        (provider) => provider.providerType === "openai",
+      ) ?? null,
+    [externalProvidersForChat],
+  );
+  const codexExternalModels = useMemo<ExternalModelOption[]>(() => {
+    if (!codexOpenAIProvider) return [];
+    return COGNIX_CODEX_MODEL_IDS.map((model) => ({
+      id: buildExternalModelId(codexOpenAIProvider.id, model),
+      name: model,
+      providerId: codexOpenAIProvider.id,
+      providerName: "Codex",
+      providerType: codexOpenAIProvider.providerType,
+    }));
+  }, [codexOpenAIProvider]);
+  const codexDefaultCheckpoint = codexOpenAIProvider
+    ? buildExternalModelId(
+        codexOpenAIProvider.id,
+        COGNIX_CODEX_DEFAULT_MODEL_ID,
+      )
+    : null;
 
   const [localModels, setLocalModels] = useState<LoraModelOption[]>([]);
 
@@ -2559,6 +2605,62 @@ export function ChatPage({
     }));
     return [...fromLoras, ...localModels];
   }, [lorasFromStore, localModels]);
+
+  const modelSelectorModels = isCodexMode ? [] : models;
+  const modelSelectorLoraModels = isCodexMode ? [] : loraModels;
+  const modelSelectorExternalModels = isCodexMode
+    ? codexExternalModels
+    : externalModels;
+  const activeCodexSelection = parseExternalModelId(inferenceParams.checkpoint);
+  const activeCodexProviderMatches =
+    activeCodexSelection != null &&
+    activeCodexSelection.providerId === codexOpenAIProvider?.id &&
+    isCogniXCodexModelId(activeCodexSelection.modelId);
+  const codexModelSelectorValue =
+    isCodexMode && !activeCodexProviderMatches
+      ? (codexDefaultCheckpoint ?? "")
+      : inferenceParams.checkpoint;
+
+  useEffect(() => {
+    if (!active || !isCodexMode || !codexOpenAIProvider || !codexDefaultCheckpoint) {
+      return;
+    }
+    const state = useChatRuntimeStore.getState();
+    const currentSelection = parseExternalModelId(state.params.checkpoint);
+    const currentIsCodex =
+      currentSelection?.providerId === codexOpenAIProvider.id &&
+      isCogniXCodexModelId(currentSelection.modelId);
+    const targetModelId = currentIsCodex
+      ? currentSelection.modelId
+      : COGNIX_CODEX_DEFAULT_MODEL_ID;
+    if (!currentIsCodex) {
+      handleCheckpointChange(codexDefaultCheckpoint, {
+        source: "external",
+        isLora: false,
+      });
+    }
+    const reasoningCaps = getExternalReasoningCapabilities(
+      codexOpenAIProvider.providerType,
+      targetModelId,
+      {
+        isReasoningProvider: codexOpenAIProvider.isReasoningModel === true,
+        baseUrl: codexOpenAIProvider.baseUrl,
+      },
+    );
+    if (!reasoningCaps.supportsReasoning) return;
+    useChatRuntimeStore.setState({
+      reasoningEnabled: true,
+      reasoningEffort: pickStrongestReasoningEffort(
+        reasoningCaps.reasoningEffortLevels,
+      ),
+    });
+  }, [
+    active,
+    codexDefaultCheckpoint,
+    codexOpenAIProvider,
+    handleCheckpointChange,
+    isCodexMode,
+  ]);
 
   useEffect(() => {
     if (getTrainingCompareHandoff()) return;
@@ -2675,6 +2777,24 @@ export function ChatPage({
     selectedArtifact &&
       (view.mode === "compare" || artifactSurface === "overlay"),
   );
+  const codexComposerAccessory =
+    isCodexMode && view.mode !== "compare" ? (
+      <ModelSelector
+        models={modelSelectorModels}
+        loraModels={modelSelectorLoraModels}
+        externalModels={modelSelectorExternalModels}
+        value={codexModelSelectorValue}
+        onValueChange={handleCheckpointChange}
+        deleteDisabled={modelOperationInProgress}
+        variant="muted"
+        size="sm"
+        open={active && modelSelectorOpen}
+        onOpenChange={handleModelSelectorOpenChange}
+        contentDataTour="codex-model-selector-popover"
+        showCloudIndicator={true}
+        className="max-w-[38vw] sm:max-w-[13.5rem] !h-8 !pl-2.5 !pr-1.5"
+      />
+    ) : null;
 
   return (
     // Provides `active` to ChatRuntimeProvider (drops the message views/composers
@@ -2709,11 +2829,11 @@ export function ChatPage({
           )}
         >
           <div className="flex items-center gap-1">
-            {view.mode !== "compare" && (
+            {view.mode !== "compare" && !isCodexMode && (
               <ModelSelector
-                models={models}
-                loraModels={loraModels}
-                externalModels={externalModels}
+                models={modelSelectorModels}
+                loraModels={modelSelectorLoraModels}
+                externalModels={modelSelectorExternalModels}
                 value={inferenceParams.checkpoint}
                 activeGgufVariant={activeGgufVariant}
                 onValueChange={handleCheckpointChange}
@@ -2732,7 +2852,7 @@ export function ChatPage({
               />
             )}
             {view.mode !== "compare" ? (
-              <CogniXAutoChip active={active} />
+              isCodexMode ? null : <CogniXAutoChip active={active} />
             ) : null}
             {view.mode !== "compare" && currentProjectId && (
               <nav
@@ -2891,6 +3011,7 @@ export function ChatPage({
             artifact={selectedArtifact}
             artifactSurface={artifactSurface}
             onCloseArtifact={closeArtifactSurface}
+            composerAccessory={codexComposerAccessory}
           />
         ) : (
           <CompareContent
