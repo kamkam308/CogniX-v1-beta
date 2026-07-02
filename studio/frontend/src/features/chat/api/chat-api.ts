@@ -48,31 +48,32 @@ function parseErrorText(status: number, body: unknown): string {
 }
 
 function parseProviderErrorText(value: unknown): string | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    if (
+      (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+      (trimmed.startsWith("[") && trimmed.endsWith("]"))
+    ) {
+      try {
+        return parseProviderErrorText(JSON.parse(trimmed)) ?? trimmed;
+      } catch {
+        return trimmed;
+      }
+    }
+    return trimmed;
+  }
   if (!value || typeof value !== "object") return null;
   const record = value as {
     detail?: unknown;
     error?: unknown;
     message?: unknown;
   };
-  if (typeof record.message === "string" && record.message.trim()) {
-    return record.message.trim();
-  }
-  if (typeof record.error === "string" && record.error.trim()) {
-    return record.error.trim();
-  }
-  if (record.error && typeof record.error === "object") {
-    const nested = record.error as { message?: unknown; detail?: unknown };
-    if (typeof nested.message === "string" && nested.message.trim()) {
-      return nested.message.trim();
-    }
-    if (typeof nested.detail === "string" && nested.detail.trim()) {
-      return nested.detail.trim();
-    }
-  }
-  if (record.detail && typeof record.detail === "object") {
-    return parseProviderErrorText(record.detail);
-  }
-  return null;
+  return (
+    parseProviderErrorText(record.message) ??
+    parseProviderErrorText(record.error) ??
+    parseProviderErrorText(record.detail)
+  );
 }
 
 async function parseJsonOrThrow<T>(response: Response): Promise<T> {

@@ -253,12 +253,20 @@ export function isContextLimitError(message: string): boolean {
 }
 
 function isHuggingFaceAuthFailure(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  const message = error.message.toLowerCase();
+  const message = (
+    error instanceof Error
+      ? error.message
+      : providerErrorMessageFromUnknown(error) ?? String(error ?? "")
+  ).toLowerCase();
   return (
     message.includes("invalid username or password") ||
     message.includes("invalid username") ||
     message.includes("invalid password") ||
+    message.includes("bad credentials") ||
+    message.includes("invalid_api_key") ||
+    message.includes("valid hf_ token") ||
+    message.includes("saved token") ||
+    message.includes("rejected the saved token") ||
     (message.includes("hugging face") &&
       (message.includes("token") ||
         message.includes("auth") ||
@@ -269,44 +277,59 @@ function isHuggingFaceAuthFailure(error: unknown): boolean {
 }
 
 function providerErrorMessageFromUnknown(value: unknown): string | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    if (
+      (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+      (trimmed.startsWith("[") && trimmed.endsWith("]"))
+    ) {
+      try {
+        return providerErrorMessageFromUnknown(JSON.parse(trimmed)) ?? trimmed;
+      } catch {
+        return trimmed;
+      }
+    }
+    return trimmed;
+  }
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as {
     detail?: unknown;
     error?: unknown;
     message?: unknown;
   };
-  if (typeof record.message === "string" && record.message.trim()) {
-    return record.message.trim();
-  }
-  if (typeof record.error === "string" && record.error.trim()) {
-    return record.error.trim();
-  }
-  if (record.error && typeof record.error === "object") {
-    return providerErrorMessageFromUnknown(record.error);
-  }
-  if (typeof record.detail === "string" && record.detail.trim()) {
-    return record.detail.trim();
-  }
-  if (record.detail && typeof record.detail === "object") {
-    return providerErrorMessageFromUnknown(record.detail);
-  }
+  const message = providerErrorMessageFromUnknown(record.message);
+  if (message) return message;
+  const error = providerErrorMessageFromUnknown(record.error);
+  if (error) return error;
+  const detail = providerErrorMessageFromUnknown(record.detail);
+  if (detail) return detail;
   return null;
 }
 
 function huggingFaceAuthErrorFromStreamContent(text: string): Error | null {
-  const trimmed = text.trim();
-  if (!trimmed) return null;
-  let message: string | null = null;
-  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
-    try {
-      message = providerErrorMessageFromUnknown(JSON.parse(trimmed));
-    } catch {
-      message = null;
-    }
-  }
-  message ??= trimmed;
+  const message = providerErrorMessageFromUnknown(text);
+  if (!message) return null;
   const error = new Error(message);
   return isHuggingFaceAuthFailure(error) ? error : null;
+}
+
+function isOnlyHuggingFaceAuthErrorText(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (!huggingFaceAuthErrorFromStreamContent(trimmed)) return false;
+  if (
+    (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+    (trimmed.startsWith("[") && trimmed.endsWith("]"))
+  ) {
+    return true;
+  }
+  const lowered = trimmed.toLowerCase();
+  return (
+    lowered.includes("invalid username or password") ||
+    lowered.includes("hugging face rejected the saved token") ||
+    lowered.includes("hugging face requires a valid hf_ token")
+  );
 }
 
 async function updateStoredChatThreadEventually(
@@ -2480,12 +2503,7 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
           .replace(/<\/?think>/g, "")
           .trim();
         if (!visibleText) return false;
-        const lowered = visibleText.toLowerCase();
-        if (
-          visibleText.startsWith("{") &&
-          lowered.includes("error") &&
-          lowered.includes("invalid username")
-        ) {
+        if (isOnlyHuggingFaceAuthErrorText(visibleText)) {
           return false;
         }
         return true;
