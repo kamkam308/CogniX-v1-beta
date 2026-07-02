@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { Eye, EyeOff } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement, SyntheticEvent } from "react";
 import { refreshSession } from "../api";
 
@@ -112,6 +112,9 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
   const isLoginMode = mode === "login";
   const isSignupMode = mode === "signup";
   const isPasswordSetupMode = mode === "change-password";
+  const identifierRef = useRef<HTMLInputElement | null>(null);
+  const signupUsernameRef = useRef<HTMLInputElement | null>(null);
+  const newPasswordRef = useRef<HTMLInputElement | null>(null);
   const [showPassword, setShowPassword] = useState(false);
   const [showNewPassword, setShowNewPassword] = useState(false);
   const [identifier, setIdentifier] = useState(DEFAULT_LOGIN_IDENTIFIER);
@@ -203,6 +206,20 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
     }
   }, [isPasswordSetupMode, password]);
 
+  useEffect(() => {
+    if (statusLoading) return;
+    const delay = reduced ? 0 : 180;
+    const timeout = window.setTimeout(() => {
+      const target = isLoginMode
+        ? identifierRef.current
+        : isSignupMode
+          ? signupUsernameRef.current
+          : newPasswordRef.current;
+      target?.focus({ preventScroll: true });
+    }, delay);
+    return () => window.clearTimeout(timeout);
+  }, [isLoginMode, isSignupMode, isPasswordSetupMode, reduced, statusLoading]);
+
   const hasBootstrapPassword = Boolean(window.__UNSLOTH_BOOTSTRAP__?.password);
   const currentPassword = password || window.__UNSLOTH_BOOTSTRAP__?.password || "";
   const passwordHint = "Au moins 8 caracteres, avec deux types de caracteres, sans reprendre votre identifiant.";
@@ -230,7 +247,10 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
     : { type: "spring" as const, stiffness: 420, damping: 34, mass: 0.55 };
   const panelTransition = reduced
     ? { duration: 0 }
-    : { duration: 0.22, ease: [0.215, 0.61, 0.355, 1] as const };
+    : { type: "spring" as const, stiffness: 360, damping: 32, mass: 0.72 };
+  const layoutTransition = reduced
+    ? { duration: 0 }
+    : { type: "spring" as const, stiffness: 340, damping: 36, mass: 0.85 };
   const blockedByState =
     initialized === false ||
     ((isLoginMode || isSignupMode) && requiresPasswordChange) ||
@@ -376,7 +396,12 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
   }
 
   return (
-    <div className="w-full space-y-6" aria-busy={statusLoading}>
+    <motion.div
+      layout
+      transition={layoutTransition}
+      className="w-full space-y-6"
+      aria-busy={statusLoading}
+    >
       {!isPasswordSetupMode && (
         <div
           role="tablist"
@@ -412,12 +437,13 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
         </div>
       )}
 
-      <AnimatePresence initial={false} mode="wait">
+      <AnimatePresence initial={false} mode="popLayout">
         <motion.div
           key={`${mode}-copy`}
-          initial={{ opacity: 0, y: reduced ? 0 : 8 }}
+          layout="position"
+          initial={{ opacity: 0, y: reduced ? 0 : 8, scale: reduced ? 1 : 0.985 }}
           animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: reduced ? 0 : -8 }}
+          exit={{ opacity: 0, y: reduced ? 0 : -6, scale: reduced ? 1 : 0.995 }}
           transition={panelTransition}
           className="space-y-2"
         >
@@ -430,13 +456,27 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
         </motion.div>
       </AnimatePresence>
 
-      <motion.form layout className="grid gap-4" onSubmit={handleSubmit}>
-        <AnimatePresence initial={false} mode="wait">
+      <motion.form
+        layout
+        transition={layoutTransition}
+        className="grid gap-4"
+        onSubmit={handleSubmit}
+      >
+        <AnimatePresence initial={false} mode="popLayout">
           <motion.div
             key={`${mode}-fields`}
-            initial={{ opacity: 0, x: reduced ? 0 : isSignupMode ? 14 : -14 }}
+            layout="position"
+            initial={{
+              opacity: 0,
+              x: reduced ? 0 : isSignupMode ? 16 : -16,
+              scale: reduced ? 1 : 0.99,
+            }}
             animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: reduced ? 0 : isSignupMode ? -14 : 14 }}
+            exit={{
+              opacity: 0,
+              x: reduced ? 0 : isSignupMode ? -10 : 10,
+              scale: reduced ? 1 : 0.995,
+            }}
             transition={panelTransition}
             className="grid gap-4"
           >
@@ -446,8 +486,10 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
                   <Label htmlFor="identifier">Identifiant ou email</Label>
                   <Input
                     id="identifier"
+                    ref={identifierRef}
                     className="h-12 rounded-2xl bg-background"
                     autoComplete="username"
+                    autoFocus={isLoginMode}
                     value={identifier}
                     onChange={(event) => setIdentifier(event.target.value)}
                     minLength={3}
@@ -494,8 +536,10 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
                   <Label htmlFor="signup-username">Nom d'utilisateur</Label>
                   <Input
                     id="signup-username"
+                    ref={signupUsernameRef}
                     className="h-12 rounded-2xl bg-background"
                     autoComplete="username"
+                    autoFocus={isSignupMode}
                     value={signupUsername}
                     onChange={(event) => setSignupUsername(event.target.value)}
                     minLength={3}
@@ -577,9 +621,11 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
                   <div className="relative">
                     <Input
                       id="new-password"
+                      ref={newPasswordRef}
                       type={showNewPassword ? "text" : "password"}
                       className="h-12 rounded-2xl bg-background pr-11"
                       autoComplete="new-password"
+                      autoFocus={isPasswordSetupMode}
                       value={newPassword}
                       onChange={(event) => setNewPassword(event.target.value)}
                       minLength={8}
@@ -650,7 +696,7 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
             ? "Votre compte reste local a cette installation CogniX."
             : "Cette etape protege le compte admin de depart."}
       </p>
-    </div>
+    </motion.div>
   );
 }
 
