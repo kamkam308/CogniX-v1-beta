@@ -749,7 +749,7 @@ export function DatasetSection() {
                 <TooltipContent>
                   {t("studio.dataset.chooseDatasetTooltip")}{" "}
                   <a
-                    href="https://unsloth.ai/docs/get-started/fine-tuning-llms-guide/datasets-guide"
+                    href="https://github.com/kamkam308/CogniX-v1-beta"
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-primary underline"
@@ -1160,7 +1160,7 @@ export function DatasetSection() {
                       <TooltipContent>
                         {t("studio.dataset.targetFormatTooltip")}{" "}
                         <a
-                          href="https://unsloth.ai/docs/get-started/fine-tuning-llms-guide/datasets-guide"
+                          href="https://github.com/kamkam308/CogniX-v1-beta"
                           target="_blank"
                           rel="noopener noreferrer"
                           className="text-primary underline"

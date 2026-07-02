@@ -108,9 +108,20 @@ const EASE_OUT_QUART: [number, number, number, number] = [0.165, 0.84, 0.44, 1];
 
 function Logo() {
   return (
-    <div className="flex flex-col items-center gap-4">
-      <img src="/sticker.png" alt="CogniX" className="h-[72px] w-[72px] object-contain" />
-      <img src="/studio.png" alt="CogniX" className="h-auto w-[250px] object-contain dark:invert" />
+    <div className="flex flex-col items-center gap-3">
+      <img
+        src="/cognix-logo-512.png"
+        alt="CogniX"
+        className="cognix-logo-mark h-[82px] w-[82px] object-contain"
+      />
+      <div className="flex flex-col items-center gap-1">
+        <span className="font-heading text-[32px] font-semibold leading-none text-foreground">
+          CogniX
+        </span>
+        <span className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
+          Desktop
+        </span>
+      </div>
     </div>
   );
 }

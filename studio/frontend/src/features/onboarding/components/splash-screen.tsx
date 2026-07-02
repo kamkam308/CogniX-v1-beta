@@ -53,7 +53,7 @@ export function SplashScreen({
           <h1 className="text-2xl font-semibold tracking-tight">
             CogniX
           </h1>
-          <p className="text-sm text-muted-foreground">Train and run LLMs locally</p>
+          <p className="text-sm text-muted-foreground">Configure your local AI workspace</p>
         </motion.div>
 
         <motion.div
@@ -67,10 +67,10 @@ export function SplashScreen({
           }}
         >
           <Button size="lg" onClick={onStartOnboarding}>
-            Start Onboarding
+            Start setup
           </Button>
           <Button size="lg" variant="outline" onClick={onSkipOnboarding}>
-            Skip Onboarding
+            Skip setup
           </Button>
         </motion.div>
       </Card>

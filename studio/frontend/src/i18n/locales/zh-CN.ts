@@ -170,7 +170,7 @@ export const zhCN = {
       avatarShape: "头像形状",
       avatarShapeCircle: "圆形",
       avatarShapeRounded: "圆角矩形",
-      chooseSloth: "或选择 CogniX 图标",
+      chooseSloth: "或选择 CogniX 标志",
       nameSaved: "个人资料名称已保存",
       namePersistErrorTitle: "无法持久保存个人资料名称",
       namePersistErrorDescription:
@@ -371,7 +371,7 @@ export const zhCN = {
         sourceInstallDetected:
           "这看起来是源码或 VCS 包安装。请从最初使用的本地路径或 Git URL 重新安装。",
         repoCheckoutFallback:
-          "如果你仍保留 Unsloth 仓库 checkout，请从该 checkout 运行本地安装器：",
+          "如果你仍保留 CogniX 仓库 checkout，请从该 checkout 运行本地安装器：",
         restartAfterUpdate: "更新后请重启 CogniX。",
         desktopManaged:
           "桌面应用会自动更新其内置后端，有新版本时会提示。",

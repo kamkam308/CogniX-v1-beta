@@ -14,9 +14,11 @@ import { type ReactElement, useEffect, useRef, useState } from "react";
 // macOS, Linux and WSL update via the POSIX installer; only native Windows
 // (PowerShell) needs the irm one-liner. Any non-windows device_type (incl. wsl)
 // resolves to the curl command below.
-const STUDIO_INSTALL_UNIX_CMD = "curl -fsSL https://unsloth.ai/install.sh | sh";
-const STUDIO_INSTALL_WINDOWS_CMD = "irm https://unsloth.ai/install.ps1 | iex";
-const RELEASE_NOTES_URL = "https://unsloth.ai/docs/new/changelog";
+const STUDIO_INSTALL_UNIX_CMD =
+  "curl -fsSL https://raw.githubusercontent.com/kamkam308/CogniX-v1-beta/main/install.sh | sh";
+const STUDIO_INSTALL_WINDOWS_CMD =
+  "irm https://raw.githubusercontent.com/kamkam308/CogniX-v1-beta/main/install.ps1 | iex";
+const RELEASE_NOTES_URL = "https://github.com/kamkam308/CogniX-v1-beta/releases";
 const EASE_OUT_QUART: [number, number, number, number] = [0.165, 0.84, 0.44, 1];
 
 function installCommandForDevice(deviceType: DeviceType): string {
@@ -116,7 +118,7 @@ export function WebUpdateBanner({
               />
               <div className="min-w-0">
                 <p className="font-heading text-base font-medium text-foreground">
-                  New Unsloth version
+                  New CogniX version
                 </p>
                 <p className="mt-0.5 text-xs text-muted-foreground">
                   {status.currentVersion} &rarr;{" "}

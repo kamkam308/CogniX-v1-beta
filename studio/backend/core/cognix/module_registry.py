@@ -84,7 +84,7 @@ SERVICE_DEFINITIONS: list[dict[str, Any]] = [
     {
         "id": "fine-tuning-service",
         "label": "Fine-tuning Service",
-        "description": "Unsloth, LoRA, datasets, jobs et evaluations.",
+        "description": "LoRA, datasets, jobs et evaluations.",
     },
     {
         "id": "tool-service",

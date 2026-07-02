@@ -146,7 +146,12 @@ def project_workspaces_root() -> Path:
     override = (os.environ.get("UNSLOTH_STUDIO_PROJECTS_HOME") or "").strip()
     if override:
         return Path(override).expanduser()
-    return documents_root() / "Unsloth Studio" / "Projects"
+    root = documents_root()
+    cognix_projects = root / "CogniX" / "Projects"
+    legacy_projects = root / "Unsloth Studio" / "Projects"
+    if not cognix_projects.exists() and legacy_projects.exists():
+        return legacy_projects
+    return cognix_projects
 
 
 def tmp_root() -> Path:
@@ -187,7 +192,7 @@ def hf_default_cache_dir() -> Path:
     """Platform default HuggingFace hub cache (ignoring env overrides).
 
     Where HF caches when no ``HF_HUB_CACHE`` / ``HF_HOME`` is set. Scanned
-    so models downloaded *before* installing Unsloth Studio are discovered.
+    so models downloaded *before* installing CogniX are discovered.
     """
     return Path.home() / ".cache" / "huggingface" / "hub"
 

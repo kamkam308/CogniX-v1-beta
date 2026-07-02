@@ -126,8 +126,8 @@ export function AboutTab() {
         </p>
       </header>
 
-      {/* llama.cpp row lives in the shared version section so it sits with the
-          Unsloth/Package rows; the prop keeps it About-only (General passes none). */}
+      {/* llama.cpp row lives in the shared version section; the prop keeps it
+          About-only (General passes none). */}
       <StudioVersionSection llamaCppVersion={hw.llamaCpp} />
 
       <div ref={updateSectionRef} className="scroll-mt-5">
@@ -180,19 +180,19 @@ export function AboutTab() {
       <SettingsSection title={t("settings.about.help")}>
         <SettingsRow label={t("settings.about.documentation")}>
           <a
-            href="https://unsloth.ai/docs"
+            href="https://github.com/kamkam308/CogniX-v1-beta"
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground"
           >
             <HugeiconsIcon icon={Book03Icon} className="size-3.5" />
-            unsloth.ai/docs
+            CogniX GitHub
             <HugeiconsIcon icon={ArrowUpRight01Icon} className="size-3" />
           </a>
         </SettingsRow>
         <SettingsRow label={t("settings.about.releaseNotes")}>
           <a
-            href="https://unsloth.ai/docs/new/changelog"
+            href="https://github.com/kamkam308/CogniX-v1-beta/releases"
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground"
@@ -204,7 +204,7 @@ export function AboutTab() {
         </SettingsRow>
         <SettingsRow label={t("settings.about.feedback")}>
           <a
-            href="https://github.com/unslothai/unsloth/issues"
+            href="https://github.com/kamkam308/CogniX-v1-beta/issues"
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground"
@@ -225,7 +225,7 @@ export function AboutTab() {
           description={t("settings.about.license.studioDescription")}
         >
           <a
-            href="https://github.com/unslothai/unsloth/blob/main/studio/LICENSE.AGPL-3.0"
+            href="https://github.com/kamkam308/CogniX-v1-beta/blob/main/studio/LICENSE.AGPL-3.0"
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-1 font-mono text-xs font-medium text-muted-foreground hover:text-foreground"
@@ -239,7 +239,7 @@ export function AboutTab() {
           description={t("settings.about.license.libraryDescription")}
         >
           <a
-            href="https://github.com/unslothai/unsloth/blob/main/LICENSE"
+            href="https://github.com/kamkam308/CogniX-v1-beta/blob/main/LICENSE"
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-1 font-mono text-xs font-medium text-muted-foreground hover:text-foreground"

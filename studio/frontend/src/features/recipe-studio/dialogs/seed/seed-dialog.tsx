@@ -450,7 +450,7 @@ export function GithubRepoSeedForm({
       </fieldset>
 
       <p className="text-xs text-muted-foreground">
-        Backed by Unsloth's built-in <code>github_repo</code> seed reader. Large
+        Backed by CogniX's built-in <code>github_repo</code> seed reader. Large
         repos can take minutes, so start with small limits for previews.
       </p>
     </div>

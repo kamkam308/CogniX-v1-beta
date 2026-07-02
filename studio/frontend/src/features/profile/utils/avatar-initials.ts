@@ -8,7 +8,7 @@ export function initialsFromName(name: string): string {
 }
 
 /**
- * Default Unsloth-brand background for the avatar fallback (readable white text).
+ * Default CogniX-brand background for the avatar fallback (readable white text).
  *
  * Uses the shared `--primary` design token instead of a one-off hardcoded
  * shade, so the avatar always matches the app's general brand green (send

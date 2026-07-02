@@ -229,7 +229,7 @@ def test_systemexit_message_contains_actionable_fixes(tmp_path, monkeypatch):
         f"  - run the installer's binary directly: {installer_bin} studio\n"
         "  - pass --frontend <path/to/studio/frontend/dist>\n"
         "  - pass --api-only to skip serving the web UI\n"
-        "  - reinstall: curl -fsSL https://unsloth.ai/install.sh | sh"
+        "  - reinstall: curl -fsSL https://raw.githubusercontent.com/kamkam308/CogniX-v1-beta/main/install.sh | sh"
     )
     assert str(bogus) in message
     assert "--frontend" in message

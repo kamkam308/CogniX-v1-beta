@@ -318,7 +318,7 @@ export function ThreadSidebar({
       </SidebarContent>
       <SidebarFooter className="space-y-1 px-4 pb-3">
         <a
-          href="https://unsloth.ai/docs/new/studio/chat"
+          href="https://github.com/kamkam308/CogniX-v1-beta"
           target="_blank"
           rel="noopener noreferrer"
           className="flex items-center gap-2 corner-squircle rounded-md px-2 py-1.5 text-xs font-medium text-primary bg-primary/10 transition-colors hover:bg-primary/20"
@@ -327,7 +327,7 @@ export function ThreadSidebar({
           <span>Learn more in docs</span>
         </a>
         <a
-          href="https://unsloth.ai/docs/new/changelog"
+          href="https://github.com/kamkam308/CogniX-v1-beta/releases"
           target="_blank"
           rel="noopener noreferrer"
           className="flex items-center gap-2 rounded-md px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"

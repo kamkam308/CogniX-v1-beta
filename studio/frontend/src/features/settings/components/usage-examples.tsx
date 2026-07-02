@@ -83,23 +83,23 @@ const ADV = {
 const DOC_LINKS = [
   {
     label: "Claude Code",
-    href: "https://unsloth.ai/docs/basics/claude-code",
+    href: "https://github.com/kamkam308/CogniX-v1-beta",
   },
   {
     label: "Codex",
-    href: "https://unsloth.ai/docs/basics/codex",
+    href: "https://github.com/kamkam308/CogniX-v1-beta",
   },
   {
     label: "OpenClaw",
-    href: "https://unsloth.ai/docs/integrations/openclaw",
+    href: "https://github.com/kamkam308/CogniX-v1-beta",
   },
   {
     label: "OpenCode",
-    href: "https://unsloth.ai/docs/integrations/opencode",
+    href: "https://github.com/kamkam308/CogniX-v1-beta",
   },
   {
     label: "Hermes Agent",
-    href: "https://unsloth.ai/docs/integrations/hermes-agent",
+    href: "https://github.com/kamkam308/CogniX-v1-beta",
   },
 ];
 

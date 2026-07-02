@@ -847,7 +847,7 @@ export function ExportPage() {
                               Choose a saved checkpoint to export. Lower loss
                               generally means better quality.{" "}
                               <a
-                                href="https://unsloth.ai/docs/basics/inference-and-deployment"
+                                href="https://github.com/kamkam308/CogniX-v1-beta"
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 className="text-primary underline"

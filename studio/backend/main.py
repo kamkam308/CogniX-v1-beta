@@ -1550,7 +1550,7 @@ def studio_download_transport_capabilities(_current_subject: str = Depends(get_c
 
 @app.post("/api/shutdown")
 async def shutdown_server(request: Request, current_subject: str = Depends(get_current_jwt_subject)):
-    """Gracefully shut down the Unsloth Studio server.
+    """Gracefully shut down the CogniX server.
 
     Called by the frontend quit dialog so users can stop the server from the UI
     without the CLI or killing the process manually.

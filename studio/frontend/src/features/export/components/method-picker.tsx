@@ -41,7 +41,7 @@ export function MethodPicker({ value, onChange, disabledMethods = [], disabledRe
           <TooltipContent>
             How your model is packaged for deployment.{" "}
             <a
-              href="https://unsloth.ai/docs/basics/inference-and-deployment"
+              href="https://github.com/kamkam308/CogniX-v1-beta"
               target="_blank"
               rel="noopener noreferrer"
               className="text-primary underline"
@@ -108,8 +108,8 @@ export function MethodPicker({ value, onChange, disabledMethods = [], disabledRe
                       <a
                         href={
                           m.value === "gguf"
-                            ? "https://unsloth.ai/docs/basics/inference-and-deployment/saving-to-gguf"
-                            : "https://unsloth.ai/docs/basics/inference-and-deployment"
+                            ? "https://github.com/kamkam308/CogniX-v1-beta"
+                            : "https://github.com/kamkam308/CogniX-v1-beta"
                         }
                         target="_blank"
                         rel="noopener noreferrer"

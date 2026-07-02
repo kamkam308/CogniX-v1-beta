@@ -723,10 +723,14 @@ export function AuthForm({ mode }: AuthFormProps): ReactElement | null {
           </motion.div>
         </AnimatePresence>
 
-        {helperText && (
-          <p className="text-center text-sm text-amber-600">{helperText}</p>
-        )}
-        {error && <p className="text-center text-sm text-destructive">{error}</p>}
+        <div className="grid min-h-9 gap-1 pt-1" aria-live="polite">
+          {helperText && (
+            <p className="text-center text-sm leading-relaxed text-amber-600">{helperText}</p>
+          )}
+          {error && (
+            <p className="text-center text-sm leading-relaxed text-destructive">{error}</p>
+          )}
+        </div>
 
         <Button
           type="submit"
@@ -824,7 +828,7 @@ function PasswordHint({ warning, text }: { warning: boolean; text: string }) {
   return (
     <p
       className={cn(
-        "min-h-4 text-xs",
+        "min-h-4 text-xs leading-relaxed",
         warning ? "text-destructive" : "text-muted-foreground",
       )}
       aria-live="polite"

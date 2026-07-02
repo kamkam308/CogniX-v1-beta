@@ -93,7 +93,7 @@ export function ApiKeysTab() {
         <p className="text-xs text-muted-foreground">
           {t("settings.apiKeys.description")}{" "}
           <a
-            href="https://unsloth.ai/docs/basics/api"
+            href="https://github.com/kamkam308/CogniX-v1-beta"
             target="_blank"
             rel="noreferrer"
             className="font-medium text-foreground underline decoration-border underline-offset-2 transition-colors hover:decoration-foreground"

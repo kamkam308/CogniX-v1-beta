@@ -49,7 +49,7 @@ def print_studio_stop_hint() -> None:
             [
                 "",
                 style(
-                    "  To stop Unsloth Studio: press Ctrl+C in this terminal.",
+                    "  To stop CogniX: press Ctrl+C in this terminal.",
                     stop_hint_style,
                 ),
                 style("  (On macOS this is Control+C, not Command+C.)", dim),
@@ -106,7 +106,7 @@ def print_studio_access_banner(
 
     lines: list[str] = [
         "",
-        style("🦥 Unsloth Studio is running", title),
+        style("CogniX is running", title),
         style("─" * 52, dim),
         style("  On this machine -- open this in your browser:", dim),
         style(f"    {primary_url}", local_url_style),
@@ -157,7 +157,7 @@ def print_studio_access_banner(
             [
                 "",
                 style(
-                    "  Studio is only reachable on this machine (bound to 127.0.0.1).",
+                    "  CogniX is only reachable on this machine (bound to 127.0.0.1).",
                     secondary,
                 ),
                 style(
@@ -165,7 +165,7 @@ def print_studio_access_banner(
                     secondary,
                 ),
                 style(
-                    "    1. press Ctrl+C to stop Studio",
+                    "    1. press Ctrl+C to stop CogniX",
                     secondary,
                 ),
                 style(
@@ -184,7 +184,7 @@ def print_studio_access_banner(
             [
                 "",
                 style(
-                    "  To stop Unsloth Studio: press Ctrl+C in this terminal.",
+                    "  To stop CogniX: press Ctrl+C in this terminal.",
                     stop_hint_style,
                 ),
                 style("  (On macOS this is Control+C, not Command+C.)", dim),

@@ -57,7 +57,7 @@ export function ModelTypeStep(): ReactElement {
         <p className="text-sm text-muted-foreground">
           Choose a path - fine-tune LLMs, vision, embedding, audio models or just chat.{" "}
           <a
-            href="https://unsloth.ai/docs/new/studio/start"
+            href="https://github.com/kamkam308/CogniX-v1-beta"
             target="_blank"
             rel="noreferrer"
             className="text-primary underline"

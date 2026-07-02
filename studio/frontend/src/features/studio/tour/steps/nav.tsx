@@ -12,7 +12,7 @@ export const studioNavStep: TourStep = {
       Unsloth: pick base model, dataset, hyperparams, then start training. After
       you start, you’ll see a Training view with live loss/metrics. Chat is for
       testing base vs LoRA adapters. Export packages checkpoints for deployment.{" "}
-      <ReadMore href="https://unsloth.ai/docs/get-started/fine-tuning-for-beginners" />
+      <ReadMore href="https://github.com/kamkam308/CogniX-v1-beta" />
     </>
   ),
 };

@@ -1,6 +1,6 @@
 # data-designer-github-repo-seed
 
-A Data Designer seed-reader plugin for **Unsloth Studio** that scrapes real
+A Data Designer seed-reader plugin for **CogniX** that scrapes real
 GitHub data (issues, pull requests, commits) from one or more repositories
 and hands it to the recipe pipeline as a seed dataset.
 

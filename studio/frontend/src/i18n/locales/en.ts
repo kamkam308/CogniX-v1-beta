@@ -432,7 +432,7 @@ export const en = {
   },
   studio: {
     routeTitle: "Train",
-    title: "Fine-tuning Studio",
+    title: "CogniX Training",
     subtitles: {
       configure: "Configure and start training",
       trainingInProgress: "Training in progress",
