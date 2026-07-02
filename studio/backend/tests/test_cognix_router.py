@@ -5926,16 +5926,36 @@ def test_tool_discovery_capability_registry_blocks_auto_installation():
         "pytorch",
         "ollama",
         "google-drive",
+        "codex-secure-agent",
+        "kali-isolated",
     }.issubset(tools)
     assert tools["calculator"]["enabledByDefault"] is True
     assert tools["calculator"]["connectorBacked"] is False
+    assert tools["calculator"]["registeredInToolRegistry"] is True
+    assert tools["calculator"]["registryActionCount"] == 1
+    assert tools["calculator"]["runtimeBoundary"]["frontendDirectExecutionAllowed"] is False
     assert tools["physics-solver"]["enabledByDefault"] is True
     assert tools["physics-solver"]["connectorBacked"] is False
     assert tools["latex-renderer"]["enabledByDefault"] is True
     assert tools["latex-renderer"]["connectorBacked"] is False
+    assert tools["codex-secure-agent"]["registeredInToolRegistry"] is True
+    assert tools["codex-secure-agent"]["registryToolEnabled"] is True
+    assert tools["codex-secure-agent"]["connectorBacked"] is False
+    assert tools["codex-secure-agent"]["registryActionCount"] == 3
+    assert tools["codex-secure-agent"]["maxRiskLevel"] == "critical"
+    assert tools["codex-secure-agent"]["requiresAnyConfirmation"] is True
+    assert tools["codex-secure-agent"]["requiresAnySandbox"] is True
+    assert "developer_mode" in tools["codex-secure-agent"]["permissions"]
+    assert tools["kali-isolated"]["registeredInToolRegistry"] is True
+    assert tools["kali-isolated"]["registryToolEnabled"] is False
+    assert tools["kali-isolated"]["requiresAnyConfirmation"] is True
+    assert registry["summary"]["registeredToolCount"] >= len(cognix_tool_registry.TOOL_MANIFESTS)
+    assert registry["summary"]["highRiskToolCount"] >= 1
     assert registry["summary"]["automaticInstallAllowed"] is False
     assert registry["policies"]["automaticInstallationAllowed"] is False
     assert registry["policies"]["frontendDirectInstallationAllowed"] is False
+    assert registry["policies"]["frontendDirectExecutionAllowed"] is False
+    assert registry["policies"]["toolExecutionContractRequired"] is True
     assert registry["sideEffects"]["installation"] is False
     assert registry["sideEffects"]["toolExecution"] is False
     assert registry["sideEffects"]["secretRead"] is False
@@ -5961,6 +5981,26 @@ def test_tool_discovery_plan_recommends_project_tools_without_installing():
     assert plan["sideEffects"]["installation"] is False
     assert plan["sideEffects"]["toolExecution"] is False
     assert plan["sideEffects"]["networkToolCall"] is False
+
+
+def test_tool_discovery_plan_uses_registered_codex_tool_capabilities():
+    plan = cognix_tool_discovery.build_tool_discovery_plan(
+        username = "alice",
+        objective = "Analyse ce repo GitHub, cree une branche et prepare une pull request.",
+        project_type = "code",
+        file_names = ["package.json", ".gitignore"],
+    )
+    recommendations = {item["toolId"]: item for item in plan["recommendations"]}
+
+    assert {"github", "codex-secure-agent"}.issubset(recommendations)
+    assert recommendations["codex-secure-agent"]["status"] == "installed"
+    assert recommendations["codex-secure-agent"]["actions"]["primary"] == "configure"
+    assert recommendations["codex-secure-agent"]["guardrails"]["noFrontendDirectExecution"] is True
+    assert recommendations["github"]["status"] == "connector_disabled"
+    assert recommendations["github"]["actions"]["automaticInstallAllowed"] is False
+    assert plan["summary"]["automaticInstallAllowed"] is False
+    assert plan["sideEffects"]["toolExecution"] is False
+    assert plan["sideEffects"]["installation"] is False
 
 
 def test_tool_discovery_endpoint_stores_recommendations_and_ignore_is_user_scoped():

@@ -254,20 +254,134 @@ def _file_signal(file_name: str) -> str:
 
 
 def _tool_lookup() -> dict[str, dict[str, Any]]:
-    lookup = {str(tool["toolId"]): deepcopy(tool) for tool in DISCOVERABLE_TOOL_CAPABILITIES}
+    return {str(tool["toolId"]): deepcopy(tool) for tool in _capability_records()}
+
+
+def _connector_backed_from_manifest(manifest: dict[str, Any]) -> bool:
+    connector = str(manifest.get("connector") or "")
+    return not connector.startswith("local-")
+
+
+def _manifest_risk_level(actions: list[dict[str, Any]]) -> str:
+    risk_order = cognix_tool_registry.RISK_ORDER
+    risks = [str(action.get("riskLevel") or "low") for action in actions]
+    return max(risks or ["low"], key = lambda item: risk_order.get(item, 0))
+
+
+def _manifest_action_summary(action: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(action.get("id") or ""),
+        "mode": str(action.get("mode") or "read"),
+        "riskLevel": str(action.get("riskLevel") or "low"),
+        "permissions": [str(item) for item in action.get("permissions") or [] if str(item or "").strip()],
+        "requiresConfirmation": bool(action.get("requiresConfirmation")),
+        "auditRequired": bool(action.get("auditRequired")),
+        "sandboxRequired": bool(action.get("sandboxRequired")),
+        "secretsRequired": bool(action.get("secretsRequired")),
+        "rateLimitKey": str(action.get("rateLimitKey") or ""),
+    }
+
+
+def _merge_manifest_capability(base: dict[str, Any], manifest: dict[str, Any] | None) -> dict[str, Any]:
+    record = deepcopy(base)
+    if manifest is None:
+        record.update(
+            {
+                "registeredInToolRegistry": False,
+                "registryToolEnabled": bool(record.get("enabledByDefault")),
+                "connectorId": None,
+                "dataIsolation": "none" if not record.get("connectorBacked") else "user",
+                "registryActionCount": 0,
+                "actionIds": [],
+                "registryActions": [],
+                "permissions": [],
+                "maxRiskLevel": "low",
+                "requiresAnyConfirmation": False,
+                "requiresAnySandbox": False,
+                "requiresAnySecret": False,
+                "auditRequired": False,
+            }
+        )
+    else:
+        actions = [action for action in manifest.get("actions") or [] if isinstance(action, dict)]
+        action_ids = [str(action.get("id") or "") for action in actions if str(action.get("id") or "").strip()]
+        permissions = sorted(
+            {
+                str(permission)
+                for action in actions
+                for permission in action.get("permissions") or []
+                if str(permission or "").strip()
+            }
+        )
+        capabilities = list(record.get("capabilities") or [])
+        for action_id in action_ids:
+            if action_id not in capabilities:
+                capabilities.append(action_id)
+        record.update(
+            {
+                "toolId": str(manifest.get("id") or record.get("toolId") or ""),
+                "name": str(manifest.get("name") or record.get("name") or manifest.get("id") or ""),
+                "category": str(manifest.get("category") or record.get("category") or "integration"),
+                "capabilities": capabilities,
+                "registeredInToolRegistry": True,
+                "registryToolEnabled": bool(manifest.get("enabled")),
+                "connectorId": manifest.get("connector"),
+                "connectorBacked": bool(record.get("connectorBacked", _connector_backed_from_manifest(manifest))),
+                "enabledByDefault": bool(record.get("enabledByDefault") or manifest.get("enabled")),
+                "dataIsolation": str(manifest.get("dataIsolation") or "user"),
+                "registryActionCount": len(actions),
+                "actionIds": action_ids,
+                "registryActions": [_manifest_action_summary(action) for action in actions],
+                "permissions": permissions,
+                "maxRiskLevel": _manifest_risk_level(actions),
+                "requiresAnyConfirmation": any(bool(action.get("requiresConfirmation")) for action in actions),
+                "requiresAnySandbox": any(bool(action.get("sandboxRequired")) for action in actions),
+                "requiresAnySecret": any(bool(action.get("secretsRequired")) for action in actions),
+                "auditRequired": any(bool(action.get("auditRequired")) for action in actions),
+            }
+        )
+    record["runtimeBoundary"] = {
+        "frontendDirectExecutionAllowed": False,
+        "executionAllowedFromDiscovery": False,
+        "toolExecutionContractRequired": bool(record.get("registeredInToolRegistry")),
+        "secretValuesIncluded": False,
+        "rawPayloadIncluded": False,
+        "auditRequired": bool(record.get("auditRequired") or record.get("connectorBacked")),
+    }
+    return record
+
+
+def _capability_records() -> list[dict[str, Any]]:
+    manifest_lookup = {
+        str(manifest.get("id")): manifest
+        for manifest in cognix_tool_registry.TOOL_MANIFESTS
+        if str(manifest.get("id") or "").strip()
+    }
+    ordered_ids: list[str] = []
+    records: dict[str, dict[str, Any]] = {}
+    for tool in DISCOVERABLE_TOOL_CAPABILITIES:
+        tool_id = str(tool.get("toolId") or "")
+        if not tool_id:
+            continue
+        ordered_ids.append(tool_id)
+        records[tool_id] = _merge_manifest_capability(tool, manifest_lookup.get(tool_id))
     for manifest in cognix_tool_registry.TOOL_MANIFESTS:
         tool_id = str(manifest.get("id") or "")
-        if tool_id and tool_id not in lookup:
-            lookup[tool_id] = {
-                "toolId": tool_id,
-                "name": manifest.get("name") or tool_id,
-                "category": manifest.get("category") or "integration",
-                "capabilities": [str(action.get("id")) for action in manifest.get("actions") or []],
-                "installHint": "Enable the registered CogniX connector before use.",
-                "connectorBacked": True,
-                "enabledByDefault": bool(manifest.get("enabled")),
-            }
-    return lookup
+        if tool_id and tool_id not in records:
+            ordered_ids.append(tool_id)
+            records[tool_id] = _merge_manifest_capability(
+                {
+                    "toolId": tool_id,
+                    "name": manifest.get("name") or tool_id,
+                    "category": manifest.get("category") or "integration",
+                    "capabilities": [],
+                    "installHint": "Enable the registered CogniX connector before use.",
+                    "connectorBacked": _connector_backed_from_manifest(manifest),
+                    "enabledByDefault": bool(manifest.get("enabled")),
+                },
+                manifest,
+            )
+    return [records[tool_id] for tool_id in ordered_ids]
 
 
 def _enabled_registry_tool_ids() -> set[str]:
@@ -279,7 +393,7 @@ def _enabled_registry_tool_ids() -> set[str]:
 
 
 def build_tool_capability_registry() -> dict[str, Any]:
-    capabilities = deepcopy(DISCOVERABLE_TOOL_CAPABILITIES)
+    capabilities = _capability_records()
     return {
         "capabilityRegistryVersion": COGNIX_TOOL_CAPABILITY_REGISTRY_VERSION,
         "toolDiscoveryVersion": COGNIX_TOOL_DISCOVERY_VERSION,
@@ -288,12 +402,23 @@ def build_tool_capability_registry() -> dict[str, Any]:
         "summary": {
             "toolCount": len(capabilities),
             "connectorBackedCount": sum(1 for item in capabilities if item.get("connectorBacked")),
+            "registeredToolCount": sum(1 for item in capabilities if item.get("registeredInToolRegistry")),
+            "enabledRegisteredToolCount": sum(1 for item in capabilities if item.get("registryToolEnabled")),
+            "confirmationRequiredToolCount": sum(1 for item in capabilities if item.get("requiresAnyConfirmation")),
+            "secretBackedToolCount": sum(1 for item in capabilities if item.get("requiresAnySecret")),
+            "highRiskToolCount": sum(
+                1
+                for item in capabilities
+                if cognix_tool_registry.RISK_ORDER.get(str(item.get("maxRiskLevel") or "low"), 0) >= 3
+            ),
             "automaticInstallAllowed": False,
         },
         "policies": {
             "automaticInstallationAllowed": False,
             "humanConfirmationRequired": True,
             "frontendDirectInstallationAllowed": False,
+            "frontendDirectExecutionAllowed": False,
+            "toolExecutionContractRequired": True,
             "secretsMustStayServerSide": True,
             "auditRequired": True,
         },
