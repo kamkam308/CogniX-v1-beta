@@ -500,7 +500,11 @@ pub(crate) fn test_owner_state(root_id: &str, token: &str, port: u16) -> Backend
 
 fn health_verifies_metadata(health: &HealthResponse, metadata: &DesktopBackendMetadata) -> bool {
     let healthy = health.status.as_deref() == Some("healthy")
-        && health.service.as_deref() == Some("Unsloth UI Backend");
+        && health
+            .service
+            .as_deref()
+            .map(crate::backend_identity::is_supported_backend_service)
+            .unwrap_or(false);
     let Some(owner) = health.desktop_owner.as_ref() else {
         return false;
     };

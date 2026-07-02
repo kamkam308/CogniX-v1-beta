@@ -3,8 +3,15 @@
 
 import { ShimmerButton } from "@/components/ui/shimmer-button";
 import { Spinner } from "@/components/ui/spinner";
+import {
+  COGNIX_PLAN_OPTIONS,
+  RECOMMENDED_COGNIX_PLAN_ID,
+  saveCogniXPlanConfig,
+  type CogniXPlanId,
+} from "@/features/cognix-plan";
 import type { BackendStatus } from "@/hooks/use-tauri-backend";
 import type { CopySupportDiagnosticsResult } from "@/lib/tauri-diagnostics";
+import { cn } from "@/lib/utils";
 import { AnimatePresence, motion } from "motion/react";
 import { useState } from "react";
 
@@ -148,22 +155,103 @@ function CheckingContent() {
 }
 
 function NotInstalledContent({ onInstall }: { onInstall: () => void }) {
+  const [selectedPlanId, setSelectedPlanId] = useState<CogniXPlanId>(
+    RECOMMENDED_COGNIX_PLAN_ID,
+  );
+  const selectedPlan =
+    COGNIX_PLAN_OPTIONS.find((plan) => plan.id === selectedPlanId) ??
+    COGNIX_PLAN_OPTIONS[0];
+
+  function handleInstall() {
+    saveCogniXPlanConfig(selectedPlanId);
+    onInstall();
+  }
+
   return (
-    <div className="flex h-full flex-col items-center">
-      <div className="flex flex-1 flex-col items-center justify-center">
+    <div className="flex h-full min-h-0 w-full flex-col items-center overflow-y-auto px-1 py-5">
+      <div className="flex shrink-0 flex-col items-center">
         <Logo />
-        <p className="mt-4 text-xs font-bold text-muted-foreground">
-          To install Unsloth, click Get Started.
+        <p className="mt-4 max-w-xl text-center text-sm font-semibold text-foreground">
+          Configure ton espace CogniX avant l'installation.
+        </p>
+        <p className="mt-1 max-w-xl text-center text-xs text-muted-foreground">
+          Le profil choisi définit les outils affichés par défaut dans cette installation.
         </p>
       </div>
-      <div className="mb-10">
+
+      <div className="mt-5 grid w-full grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+        {COGNIX_PLAN_OPTIONS.map((plan) => {
+          const selected = plan.id === selectedPlanId;
+          return (
+            <button
+              key={plan.id}
+              type="button"
+              onClick={() => setSelectedPlanId(plan.id)}
+              className={cn(
+                "rounded-lg border px-3 py-3 text-left transition-all",
+                "bg-card/60 hover:border-primary/50 hover:bg-card",
+                selected
+                  ? "border-primary shadow-sm ring-1 ring-primary/35"
+                  : "border-border/60",
+              )}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <p className="text-sm font-semibold text-foreground">
+                    {plan.label}
+                  </p>
+                  <p className="mt-0.5 text-[11px] font-medium text-primary">
+                    {plan.audience}
+                  </p>
+                </div>
+                {plan.id === RECOMMENDED_COGNIX_PLAN_ID && (
+                  <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary">
+                    conseillé
+                  </span>
+                )}
+              </div>
+              <p className="mt-2 min-h-[32px] text-xs leading-4 text-muted-foreground">
+                {plan.summary}
+              </p>
+              <ul className="mt-2 space-y-1">
+                {plan.highlights.slice(0, 3).map((highlight) => (
+                  <li
+                    key={highlight}
+                    className="flex gap-1.5 text-[11px] leading-4 text-muted-foreground"
+                  >
+                    <span className="mt-[6px] size-1 shrink-0 rounded-full bg-primary/70" />
+                    <span>{highlight}</span>
+                  </li>
+                ))}
+              </ul>
+            </button>
+          );
+        })}
+      </div>
+
+      <motion.div
+        key={selectedPlan.id}
+        initial={{ opacity: 0, y: 6 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.18, ease: EASE_OUT_QUART }}
+        className="mt-3 w-full rounded-lg border border-border/60 bg-muted/25 px-4 py-3 text-left"
+      >
+        <p className="text-xs font-semibold text-foreground">
+          Pourquoi choisir {selectedPlan.label}
+        </p>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">
+          {selectedPlan.guidance}
+        </p>
+      </motion.div>
+
+      <div className="mt-4 shrink-0 pb-2">
         <ShimmerButton
-          onClick={onInstall}
+          onClick={handleInstall}
           shimmerColor="#a7f3d0"
           background="oklch(0.696 0.17 162.48)"
           className="text-sm font-medium"
         >
-          Get Started
+          Installer avec {selectedPlan.label}
         </ShimmerButton>
       </div>
     </div>
@@ -434,7 +522,7 @@ export function StartupScreen({
 
   return (
     <div className="flex h-full w-full flex-col items-center bg-background">
-      <div className="flex flex-1 w-full max-w-md items-center justify-center px-6">
+      <div className="flex flex-1 min-h-0 w-full max-w-[940px] items-center justify-center px-6">
         <AnimatePresence mode="wait">
           <motion.div
             key={status}

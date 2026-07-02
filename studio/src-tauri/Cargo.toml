@@ -1,8 +1,8 @@
 [package]
-name = "unsloth-studio"
+name = "cognix"
 version = "2026.4.8"
-description = "Unsloth Studio Desktop App"
-authors = ["Unsloth AI"]
+description = "CogniX Desktop App"
+authors = ["EBK"]
 edition = "2021"
 
 [dependencies]

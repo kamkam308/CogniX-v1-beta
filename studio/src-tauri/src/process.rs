@@ -531,7 +531,7 @@ pub(crate) fn resolve_backend_binary() -> Result<std::path::PathBuf, String> {
     }
 
     find_unsloth_binary()
-        .ok_or_else(|| "Unsloth binary not found. Please install Unsloth Studio first.".to_string())
+        .ok_or_else(|| "CogniX managed runtime not found. Please install CogniX first.".to_string())
 }
 
 fn backend_args(port: u16) -> Vec<String> {
@@ -785,7 +785,7 @@ async fn generic_backend_health_ok(port: u16) -> bool {
     let service = json
         .get("service")
         .and_then(|v| v.as_str())
-        .map(|s| s == "Unsloth UI Backend")
+        .map(crate::backend_identity::is_supported_backend_service)
         .unwrap_or(false);
     healthy && service
 }

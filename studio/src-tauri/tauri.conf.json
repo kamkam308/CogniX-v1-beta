@@ -1,6 +1,6 @@
 {
-  "productName": "Unsloth Studio (Desktop)",
-  "identifier": "ai.unsloth.studio",
+  "productName": "CogniX",
+  "identifier": "com.ebk.cognix",
   "build": {
     "beforeDevCommand": {
       "cwd": "../frontend",
@@ -21,12 +21,12 @@
     "windows": [
       {
         "label": "main",
-        "title": "Unsloth Studio (Desktop)",
-        "width": 690,
-        "height": 480,
+        "title": "CogniX",
+        "width": 1020,
+        "height": 720,
         "center": true,
         "visible": false,
-        "resizable": false
+        "resizable": true
       }
     ]
   },
@@ -34,7 +34,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ2RDhGMDMzNDNEMTlGMkQKUldRdG45RkRNL0RZMXZsaVo2TElUQlVHb1hVNWEyajhUOGFXeTdNVDFZTFdBVUtlZUh5L2wwWVYK",
       "endpoints": [
-        "https://github.com/unslothai/unsloth/releases/download/desktop-latest/latest.json"
+        "https://github.com/kamkam308/CogniX-v1-beta/releases/download/desktop-latest/latest.json"
       ],
       "windows": {
         "installMode": "passive"
@@ -43,12 +43,12 @@
   },
   "bundle": {
     "active": true,
-    "createUpdaterArtifacts": true,
-    "publisher": "Unsloth AI",
-    "homepage": "https://unsloth.ai/",
-    "copyright": "© 2026 Unsloth AI. All rights reserved.",
+    "createUpdaterArtifacts": false,
+    "publisher": "EBK",
+    "homepage": "https://github.com/kamkam308/CogniX-v1-beta",
+    "copyright": "© 2026 EBK. All rights reserved.",
     "license": "AGPL-3.0-only",
-    "targets": ["app", "appimage", "deb", "dmg", "nsis"],
+    "targets": ["deb"],
     "resources": {
       "../../install.sh": "install.sh",
       "../../install.ps1": "install.ps1"

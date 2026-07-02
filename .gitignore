@@ -19,4 +19,5 @@ __pycache__/
 node_modules/
 dist-debug/
 target/
+studio/src-tauri/gen/
 .DS_Store

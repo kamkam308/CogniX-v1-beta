@@ -119,6 +119,10 @@ import {
 } from "@/features/chat";
 import { useSettingsDialogStore } from "@/features/settings";
 import { useEffectiveProfile, UserAvatar } from "@/features/profile";
+import {
+  getEffectiveCogniXPlanConfig,
+  type CogniXToolId,
+} from "@/features/cognix-plan";
 import { fetchDeviceType, usePlatformStore } from "@/config/env";
 import { clearAuthTokens, logout } from "@/features/auth";
 import { TOUR_OPEN_EVENT } from "@/features/tour";
@@ -311,8 +315,15 @@ export function AppSidebar() {
   const trainingCloudAvailable = usePlatformStore((s) => s.trainingCloudAvailable);
   const trainingModeUnlocked = usePlatformStore((s) => s.trainingModeUnlocked);
   const [developerOptions] = useDeveloperOptions();
+  const planConfig = useMemo(() => getEffectiveCogniXPlanConfig(), []);
+  const planTools = useMemo(
+    () => new Set<CogniXToolId>(planConfig.enabledTools),
+    [planConfig],
+  );
+  const planEnables = (tool: CogniXToolId) => planTools.has(tool);
   const showTrainingTools =
-    developerOptions.trainingTools || trainingAccessible || trainingModeUnlocked || cloudTrainingUnlocked || trainingCloudAvailable;
+    planEnables("training") &&
+    (developerOptions.trainingTools || trainingAccessible || trainingModeUnlocked || cloudTrainingUnlocked || trainingCloudAvailable);
   const cloudOnlyTrainingAvailable =
     chatOnly && trainingAccessible && (cloudTrainingUnlocked || trainingCloudAvailable);
   // When Train/Export are greyed out (chat-only host), explain why on hover
@@ -355,13 +366,19 @@ export function AppSidebar() {
   const isStudioRoute = pathname === "/studio" || pathname.startsWith("/studio/");
   const isCodexRoute = pathname === "/codex";
   const isChatSurfaceRoute = isChatRoute || isCodexRoute;
-  const isCognixModuleRoute =
-    pathname === "/pulse" ||
-    pathname === "/library" ||
-    pathname === "/scheduled" ||
-    pathname === "/apps" ||
-    pathname === "/gpts" ||
-    pathname === "/images";
+  const cognixModuleItems = useMemo(
+    () =>
+      [
+        { tool: "pulse" as CogniXToolId, icon: ActivitySparkIcon, label: "Pulse", to: "/pulse", active: pathname === "/pulse" },
+        { tool: "library" as CogniXToolId, icon: AiBookIcon, label: "Library", to: "/library", active: pathname === "/library" },
+        { tool: "scheduled" as CogniXToolId, icon: AiSchedulingIcon, label: "Scheduled", to: "/scheduled", active: pathname === "/scheduled" },
+        { tool: "apps" as CogniXToolId, icon: AppStoreIcon, label: "Apps", to: "/apps", active: pathname === "/apps" },
+        { tool: "gpts" as CogniXToolId, icon: AiGenerativeIcon, label: "GPTs", to: "/gpts", active: pathname === "/gpts" },
+        { tool: "images" as CogniXToolId, icon: AiImageIcon, label: "Images", to: "/images", active: pathname === "/images" },
+      ].filter((item) => planTools.has(item.tool)),
+    [pathname, planTools],
+  );
+  const isCognixModuleRoute = cognixModuleItems.some((item) => item.active);
   const [chatOpen, setChatOpen] = useState(true);
 
   const [trainOpen, setTrainOpen] = useState(true);
@@ -1206,56 +1223,53 @@ export function AppSidebar() {
                   closeMobileIfOpen();
                 }}
               />
-              <NavItem
-                icon={AiProgrammingIcon}
-                label="Codex"
-                active={isCodexRoute}
-                onClick={() => {
-                  navigate({ to: "/codex" });
-                  closeMobileIfOpen();
-                }}
-              />
-              <SidebarMenuItem>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <SidebarMenuButton
-                      tooltip="Plus"
-                      isActive={isCognixModuleRoute}
-                      className="sidebar-nav-btn h-[33px] rounded-full gap-[8.5px] pl-3 pr-2.5 font-medium group-data-[collapsible=icon]:px-2.5 group-data-[collapsible=icon]:!w-[32px] group-data-[collapsible=icon]:mx-auto"
-                    >
-                      <MoreHorizontal className="size-icon shrink-0 group-hover/menu-button:animate-icon-pop" strokeWidth={1.75} />
-                      <span className="text-[14.5px] leading-[19px] tracking-nav">Plus</span>
-                    </SidebarMenuButton>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent
-                    side="right"
-                    align="start"
-                    sideOffset={8}
-                    className="unsloth-plus-menu w-56"
-                  >
-                    {([
-                      { icon: ActivitySparkIcon, label: "Pulse", to: "/pulse", active: pathname === "/pulse" },
-                      { icon: AiBookIcon, label: "Library", to: "/library", active: pathname === "/library" },
-                      { icon: AiSchedulingIcon, label: "Scheduled", to: "/scheduled", active: pathname === "/scheduled" },
-                      { icon: AppStoreIcon, label: "Apps", to: "/apps", active: pathname === "/apps" },
-                      { icon: AiGenerativeIcon, label: "GPTs", to: "/gpts", active: pathname === "/gpts" },
-                      { icon: AiImageIcon, label: "Images", to: "/images", active: pathname === "/images" },
-                    ] as const).map((item) => (
-                      <DropdownMenuItem
-                        key={item.to}
-                        className={item.active ? "bg-nav-surface-hover text-foreground" : undefined}
-                        onSelect={() => {
-                          navigate({ to: item.to });
-                          closeMobileIfOpen();
-                        }}
+              {planEnables("codex") && (
+                <NavItem
+                  icon={AiProgrammingIcon}
+                  label="Codex"
+                  active={isCodexRoute}
+                  onClick={() => {
+                    navigate({ to: "/codex" });
+                    closeMobileIfOpen();
+                  }}
+                />
+              )}
+              {cognixModuleItems.length > 0 && (
+                <SidebarMenuItem>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <SidebarMenuButton
+                        tooltip="Plus"
+                        isActive={isCognixModuleRoute}
+                        className="sidebar-nav-btn h-[33px] rounded-full gap-[8.5px] pl-3 pr-2.5 font-medium group-data-[collapsible=icon]:px-2.5 group-data-[collapsible=icon]:!w-[32px] group-data-[collapsible=icon]:mx-auto"
                       >
-                        <HugeiconsIcon icon={item.icon} strokeWidth={1.75} className="size-icon" />
-                        <span>{item.label}</span>
-                      </DropdownMenuItem>
-                    ))}
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </SidebarMenuItem>
+                        <MoreHorizontal className="size-icon shrink-0 group-hover/menu-button:animate-icon-pop" strokeWidth={1.75} />
+                        <span className="text-[14.5px] leading-[19px] tracking-nav">Plus</span>
+                      </SidebarMenuButton>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent
+                      side="right"
+                      align="start"
+                      sideOffset={8}
+                      className="unsloth-plus-menu w-56"
+                    >
+                      {cognixModuleItems.map((item) => (
+                        <DropdownMenuItem
+                          key={item.to}
+                          className={item.active ? "bg-nav-surface-hover text-foreground" : undefined}
+                          onSelect={() => {
+                            navigate({ to: item.to });
+                            closeMobileIfOpen();
+                          }}
+                        >
+                          <HugeiconsIcon icon={item.icon} strokeWidth={1.75} className="size-icon" />
+                          <span>{item.label}</span>
+                        </DropdownMenuItem>
+                      ))}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </SidebarMenuItem>
+              )}
               {showTrainingTools && (
               <NavItem
                 icon={TestTubeOutlineIcon}

@@ -91,7 +91,7 @@ export function UpdateBanner({
             </button>
 
             <div className="flex items-center gap-2">
-              <span className="text-lg">🦥</span>
+              <img src="/cognix-logo.png" alt="" className="size-5" />
               <div>
                 <p className="text-sm font-semibold text-foreground">
                   {showFailure ? "App update failed" : `New version: v${info?.version}`}
@@ -102,7 +102,7 @@ export function UpdateBanner({
                     : isManualLinuxPackage
                       ? "Open the GitHub release page to install the Linux package"
                       : isExternalServer
-                        ? "Run `unsloth studio update` from your terminal"
+                        ? "Run the CogniX desktop update from your terminal"
                         : "A new app update is available"}
                 </p>
               </div>
