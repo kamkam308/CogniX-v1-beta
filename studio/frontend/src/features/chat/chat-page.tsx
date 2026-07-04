@@ -85,6 +85,7 @@ import { ModelLoadInlineStatus } from "./components/model-load-status";
 import { ProjectContextGraphPanel } from "./components/project-context-graph-panel";
 import { ProjectMemoryReviewPanel } from "./components/project-memory-review-panel";
 import { ProjectPromptCompressionPanel } from "./components/project-prompt-compression-panel";
+import { ProjectSimulationPanel } from "./components/project-simulation-panel";
 import { ProjectSwitcher } from "./components/project-switcher";
 import { ProjectTimelinePanel } from "./components/project-timeline-panel";
 import { ProjectWorkflowRecorderPanel } from "./components/project-workflow-recorder-panel";
@@ -1220,7 +1221,7 @@ function ProjectLanding({
   const activeThreadId = useChatRuntimeStore((s) => s.activeThreadId);
   const initialActiveThreadRef = useRef<string | null>(null);
   const [projectTab, setProjectTab] = useState<
-    "chats" | "sources" | "contextGraph" | "timeline" | "workflows"
+    "chats" | "sources" | "contextGraph" | "timeline" | "simulation" | "workflows"
   >("chats");
   const [pendingNewThreadId, setPendingNewThreadId] = useState<string | null>(
     null,
@@ -1372,6 +1373,14 @@ function ProjectLanding({
               </button>
               <button
                 type="button"
+                onClick={() => setProjectTab("simulation")}
+                data-active={projectTab === "simulation"}
+                className="h-10 rounded-full px-5 text-[14px] font-semibold transition-colors data-[active=true]:bg-muted data-[active=true]:text-foreground data-[active=false]:text-muted-foreground data-[active=false]:hover:bg-nav-surface-hover"
+              >
+                Simulation
+              </button>
+              <button
+                type="button"
                 onClick={() => setProjectTab("workflows")}
                 data-active={projectTab === "workflows"}
                 className="h-10 rounded-full px-5 text-[14px] font-semibold transition-colors data-[active=true]:bg-muted data-[active=true]:text-foreground data-[active=false]:text-muted-foreground data-[active=false]:hover:bg-nav-surface-hover"
@@ -1414,6 +1423,11 @@ function ProjectLanding({
                 projectId={projectId}
                 projectName={projectName}
                 items={items}
+              />
+            ) : projectTab === "simulation" ? (
+              <ProjectSimulationPanel
+                projectId={projectId}
+                projectName={projectName}
               />
             ) : projectTab === "workflows" ? (
               <ProjectWorkflowRecorderPanel

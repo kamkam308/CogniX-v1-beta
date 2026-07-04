@@ -532,6 +532,96 @@ export interface TimelineEventResult {
   plannerVersion?: string;
 }
 
+export type SimulationType =
+  | "business"
+  | "user"
+  | "server"
+  | "database"
+  | "workflow";
+
+export interface SimulationMetric {
+  id: string;
+  label: string;
+  value: number;
+  unit: string;
+  severity: "low" | "medium" | "high" | string;
+}
+
+export interface SimulationFinding {
+  id: string;
+  label?: string;
+  message?: string;
+  severity: "low" | "medium" | "high" | string;
+}
+
+export interface SimulationPlan {
+  simulationEngineVersion?: string;
+  syntheticUserGeneratorVersion?: string;
+  loadScenarioRunnerVersion?: string;
+  reportGeneratorVersion?: string;
+  mode?: string;
+  projectId?: string | null;
+  projectType?: string | null;
+  scenario: {
+    simulationType: SimulationType;
+    userCount: number;
+    durationMinutes: number;
+    description: string;
+    constraints: string[];
+  };
+  syntheticAgents: {
+    plannedCount: number;
+    profiles: string[];
+    willRunNow?: boolean;
+  };
+  queuePlan: {
+    queueRequired?: boolean;
+    queueId?: string | null;
+    jobType?: string | null;
+    willEnqueueNow?: boolean;
+    reason?: string | null;
+  };
+  metrics: SimulationMetric[];
+  report: {
+    title?: string;
+    dashboardSimple?: boolean;
+    risks: SimulationFinding[];
+    bottlenecks: SimulationFinding[];
+    recommendations: string[];
+    summary: {
+      estimatedLatencyMs?: number;
+      estimatedCostUsd?: number;
+      highestMetricSeverity?: "low" | "medium" | "high" | string;
+      queueRequired?: boolean;
+    };
+  };
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface SimulationRunRecord {
+  id: string;
+  projectId?: string | null;
+  projectType?: string | null;
+  simulationType: SimulationType;
+  scenario: string;
+  userCount: number;
+  durationMinutes: number;
+  status?: string | null;
+  plan: SimulationPlan;
+  report: SimulationPlan["report"];
+  metrics: SimulationMetric[];
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface SimulationRunResult {
+  simulationPlan: SimulationPlan;
+  run: SimulationRunRecord | null;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -714,6 +804,150 @@ function normalizeTimelineEventPlan(value: unknown): TimelineEventPlan {
   };
 }
 
+function normalizeSimulationType(value: unknown): SimulationType {
+  const candidate = maybeString(value)?.toLowerCase();
+  if (
+    candidate === "business" ||
+    candidate === "user" ||
+    candidate === "server" ||
+    candidate === "database" ||
+    candidate === "workflow"
+  ) {
+    return candidate;
+  }
+  return "business";
+}
+
+function normalizeSimulationMetric(value: unknown): SimulationMetric {
+  const raw = asRecord(value);
+  const metadata = parseRecordJson(raw.metadata ?? raw.metadataJson) ?? {};
+  return {
+    id: stringValue(raw.id ?? raw.metricKey ?? raw.metric_key ?? metadata.id, "metric"),
+    label: stringValue(raw.label ?? metadata.label, "Metric"),
+    value: numberValue(raw.value ?? raw.metricValue ?? raw.metric_value ?? metadata.value, 0),
+    unit: stringValue(raw.unit ?? metadata.unit),
+    severity: stringValue(raw.severity ?? metadata.severity, "low"),
+  };
+}
+
+function normalizeSimulationFinding(value: unknown): SimulationFinding {
+  const raw = asRecord(value);
+  return {
+    id: stringValue(raw.id, "finding"),
+    label: maybeString(raw.label) ?? undefined,
+    message: maybeString(raw.message) ?? undefined,
+    severity: stringValue(raw.severity, "low"),
+  };
+}
+
+function normalizeSimulationPlan(value: unknown): SimulationPlan {
+  const raw = asRecord(value);
+  const scenario = asRecord(raw.scenario);
+  const syntheticAgents = asRecord(raw.syntheticAgents);
+  const queuePlan = asRecord(raw.queuePlan);
+  const report = asRecord(raw.report);
+  const summary = asRecord(report.summary);
+  return {
+    simulationEngineVersion:
+      maybeString(raw.simulationEngineVersion) ?? undefined,
+    syntheticUserGeneratorVersion:
+      maybeString(raw.syntheticUserGeneratorVersion) ?? undefined,
+    loadScenarioRunnerVersion:
+      maybeString(raw.loadScenarioRunnerVersion) ?? undefined,
+    reportGeneratorVersion:
+      maybeString(raw.reportGeneratorVersion) ?? undefined,
+    mode: maybeString(raw.mode) ?? undefined,
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    projectType: maybeString(raw.projectType ?? raw.project_type),
+    scenario: {
+      simulationType: normalizeSimulationType(
+        scenario.simulationType ?? scenario.simulation_type,
+      ),
+      userCount: numberValue(scenario.userCount ?? scenario.user_count, 10),
+      durationMinutes: numberValue(
+        scenario.durationMinutes ?? scenario.duration_minutes,
+        15,
+      ),
+      description: stringValue(scenario.description, "Simulation CogniX"),
+      constraints: Array.isArray(scenario.constraints)
+        ? scenario.constraints.map((item) => stringValue(item)).filter(Boolean)
+        : [],
+    },
+    syntheticAgents: {
+      plannedCount: numberValue(syntheticAgents.plannedCount, 0),
+      profiles: Array.isArray(syntheticAgents.profiles)
+        ? syntheticAgents.profiles.map((item) => stringValue(item)).filter(Boolean)
+        : [],
+      willRunNow: boolValue(syntheticAgents.willRunNow),
+    },
+    queuePlan: {
+      queueRequired: boolValue(queuePlan.queueRequired),
+      queueId: maybeString(queuePlan.queueId),
+      jobType: maybeString(queuePlan.jobType),
+      willEnqueueNow: boolValue(queuePlan.willEnqueueNow),
+      reason: maybeString(queuePlan.reason),
+    },
+    metrics: Array.isArray(raw.metrics)
+      ? raw.metrics.map(normalizeSimulationMetric)
+      : [],
+    report: {
+      title: maybeString(report.title) ?? undefined,
+      dashboardSimple: boolValue(report.dashboardSimple),
+      risks: Array.isArray(report.risks)
+        ? report.risks.map(normalizeSimulationFinding)
+        : [],
+      bottlenecks: Array.isArray(report.bottlenecks)
+        ? report.bottlenecks.map(normalizeSimulationFinding)
+        : [],
+      recommendations: Array.isArray(report.recommendations)
+        ? report.recommendations.map((item) => stringValue(item)).filter(Boolean)
+        : [],
+      summary: {
+        estimatedLatencyMs: numberValue(summary.estimatedLatencyMs, 0),
+        estimatedCostUsd: numberValue(summary.estimatedCostUsd, 0),
+        highestMetricSeverity:
+          maybeString(summary.highestMetricSeverity) ?? undefined,
+        queueRequired: boolValue(summary.queueRequired),
+      },
+    },
+    sideEffects: parseRecordJson(raw.sideEffects) ?? {},
+  };
+}
+
+function normalizeSimulationRun(value: unknown): SimulationRunRecord {
+  const raw = asRecord(value);
+  const plan =
+    parseRecordJson(raw.plan ?? raw.planJson ?? raw.plan_json) ??
+    asRecord(raw.plan);
+  const normalizedPlan = normalizeSimulationPlan(plan);
+  const report =
+    parseRecordJson(raw.report ?? raw.reportJson ?? raw.report_json) ??
+    normalizedPlan.report;
+  const metrics = Array.isArray(raw.metrics)
+    ? raw.metrics.map(normalizeSimulationMetric)
+    : normalizedPlan.metrics;
+  return {
+    id: stringValue(raw.id),
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    projectType: maybeString(raw.projectType ?? raw.project_type),
+    simulationType: normalizeSimulationType(
+      raw.simulationType ?? raw.simulation_type ?? normalizedPlan.scenario.simulationType,
+    ),
+    scenario: stringValue(raw.scenario, normalizedPlan.scenario.description),
+    userCount: numberValue(raw.userCount ?? raw.user_count, normalizedPlan.scenario.userCount),
+    durationMinutes: numberValue(
+      raw.durationMinutes ?? raw.duration_minutes,
+      normalizedPlan.scenario.durationMinutes,
+    ),
+    status: maybeString(raw.status),
+    plan: normalizedPlan,
+    report: normalizeSimulationPlan({ ...normalizedPlan, report }).report,
+    metrics,
+    createdAt: maybeString(raw.createdAt ?? raw.created_at),
+    updatedAt: maybeString(raw.updatedAt ?? raw.updated_at),
+  };
+}
+
 function normalizeWorkflowRunPlanStep(
   value: unknown,
   fallbackIndex = 0,
@@ -841,6 +1075,75 @@ export async function createTimelineEvent(payload: {
     sideEffects: body.sideEffects,
     plannerVersion: body.plannerVersion,
   };
+}
+
+export async function listSimulationRuns(payload?: {
+  projectId?: string | null;
+  simulationType?: SimulationType | null;
+  query?: string | null;
+}): Promise<SimulationRunRecord[]> {
+  const params = new URLSearchParams();
+  if (payload?.projectId) params.set("project_id", payload.projectId);
+  if (payload?.simulationType) {
+    params.set("simulation_type", payload.simulationType);
+  }
+  if (payload?.query?.trim()) params.set("query", payload.query.trim());
+  const query = params.toString();
+  const response = await authFetch(
+    `/api/cognix/simulations/runs${query ? `?${query}` : ""}`,
+  );
+  const body = await parseJsonOrThrow<{ runs?: unknown[] }>(response);
+  return (body.runs ?? []).map(normalizeSimulationRun);
+}
+
+export async function createSimulationRun(payload: {
+  projectId?: string | null;
+  projectType?: string | null;
+  simulationType: SimulationType;
+  userCount: number;
+  scenario: string;
+  durationMinutes: number;
+  constraints?: string[];
+  storeRun?: boolean;
+}): Promise<SimulationRunResult> {
+  const response = await authFetch("/api/cognix/simulations/runs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      projectId: payload.projectId ?? null,
+      projectType: payload.projectType ?? null,
+      simulationType: payload.simulationType,
+      userCount: payload.userCount,
+      scenario: payload.scenario,
+      durationMinutes: payload.durationMinutes,
+      constraints: payload.constraints ?? [],
+      storeRun: payload.storeRun ?? true,
+    }),
+  });
+  const body = await parseJsonOrThrow<{
+    simulationPlan?: unknown;
+    run?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    simulationPlan: normalizeSimulationPlan(body.simulationPlan),
+    run: body.run ? normalizeSimulationRun(body.run) : null,
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function getSimulationRun(
+  runId: string,
+): Promise<SimulationRunRecord> {
+  const response = await authFetch(
+    `/api/cognix/simulations/runs/${encodeURIComponent(runId)}`,
+  );
+  const body = await parseJsonOrThrow<{ run?: unknown }>(response);
+  return normalizeSimulationRun(body.run);
 }
 
 export async function listWorkflows(payload?: {
