@@ -1152,6 +1152,251 @@ export async function deleteCompressedContext(contextId: string): Promise<void> 
   await parseJsonOrThrow<unknown>(response);
 }
 
+export interface ContextHeatmapEntry {
+  id?: string | null;
+  projectId?: string | null;
+  chunkId: string;
+  sourceType?: string | null;
+  sourceId?: string | null;
+  title?: string | null;
+  utilityScore?: number;
+  usageCount?: number;
+  responseCount?: number;
+  citationCount?: number;
+  copiedTermCount?: number;
+  ageDays?: number;
+  bucket?: "very_useful" | "low_usage" | "archive_candidate" | string;
+  label?: string | null;
+  recommendedAction?: "keep" | "review" | "archive" | "deprioritize" | string;
+  themeToken?: string | null;
+  matchedObjectiveTerms?: string[];
+  signals?: Record<string, unknown>;
+  entry?: Record<string, unknown>;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface ContextUsageStat {
+  id?: string | null;
+  projectId?: string | null;
+  chunkId: string;
+  sourceType?: string | null;
+  sourceId?: string | null;
+  usageCount?: number;
+  responseCount?: number;
+  citationCount?: number;
+  utilityScore?: number;
+  metadata?: Record<string, unknown>;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface ContextHeatmapPlan {
+  usageTrackerVersion?: string;
+  heatmapGeneratorVersion?: string;
+  memoryGarbageCollectorVersion?: string;
+  mode?: string;
+  projectId?: string | null;
+  objective?: string | null;
+  entries?: ContextHeatmapEntry[];
+  summary?: {
+    chunkCount?: number;
+    bucketCounts?: Record<string, number>;
+    averageUtilityScore?: number;
+    archiveCandidateCount?: number;
+    automaticArchiveWillRun?: boolean;
+  };
+  garbageCollectorPlan?: {
+    candidateChunkIds?: string[];
+    recommendedAction?: string;
+    automaticArchiveAllowed?: boolean;
+    automaticDeleteAllowed?: boolean;
+    requiresHumanConfirmation?: boolean;
+  };
+  display?: Record<string, unknown>;
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface ContextHeatmapPlanResult {
+  contextHeatmapPlan: ContextHeatmapPlan;
+  storedHeatmapEntries: ContextHeatmapEntry[];
+  storedUsageStats: ContextUsageStat[];
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
+function normalizeContextHeatmapEntry(value: unknown): ContextHeatmapEntry {
+  const raw = asRecord(value);
+  const entry = parseRecordJson(raw.entry ?? raw.entryJson) ?? {};
+  const merged = { ...entry, ...raw };
+  return {
+    id: maybeString(raw.id),
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    chunkId: stringValue(merged.chunkId ?? merged.chunk_id),
+    sourceType: maybeString(merged.sourceType ?? merged.source_type),
+    sourceId: maybeString(merged.sourceId ?? merged.source_id),
+    title: maybeString(merged.title),
+    utilityScore: numberValue(merged.utilityScore ?? merged.utility_score, 0),
+    usageCount: numberValue(merged.usageCount ?? merged.usage_count, 0),
+    responseCount: numberValue(merged.responseCount ?? merged.response_count, 0),
+    citationCount: numberValue(merged.citationCount ?? merged.citation_count, 0),
+    copiedTermCount: numberValue(
+      merged.copiedTermCount ?? merged.copied_term_count,
+      0,
+    ),
+    ageDays: numberValue(merged.ageDays ?? merged.age_days, 0),
+    bucket: maybeString(merged.bucket) ?? "low_usage",
+    label: maybeString(merged.label),
+    recommendedAction: maybeString(
+      merged.recommendedAction ?? merged.recommended_action,
+    ) ?? "review",
+    themeToken: maybeString(merged.themeToken ?? merged.theme_token),
+    matchedObjectiveTerms: Array.isArray(merged.matchedObjectiveTerms)
+      ? merged.matchedObjectiveTerms.map((item) => stringValue(item)).filter(Boolean)
+      : [],
+    signals: parseRecordJson(merged.signals) ?? {},
+    entry,
+    createdAt: maybeString(raw.createdAt ?? raw.created_at),
+    updatedAt: maybeString(raw.updatedAt ?? raw.updated_at),
+  };
+}
+
+function normalizeContextUsageStat(value: unknown): ContextUsageStat {
+  const raw = asRecord(value);
+  return {
+    id: maybeString(raw.id),
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    chunkId: stringValue(raw.chunkId ?? raw.chunk_id),
+    sourceType: maybeString(raw.sourceType ?? raw.source_type),
+    sourceId: maybeString(raw.sourceId ?? raw.source_id),
+    usageCount: numberValue(raw.usageCount ?? raw.usage_count, 0),
+    responseCount: numberValue(raw.responseCount ?? raw.response_count, 0),
+    citationCount: numberValue(raw.citationCount ?? raw.citation_count, 0),
+    utilityScore: numberValue(raw.utilityScore ?? raw.utility_score, 0),
+    metadata: parseRecordJson(raw.metadata ?? raw.metadataJson) ?? {},
+    createdAt: maybeString(raw.createdAt ?? raw.created_at),
+    updatedAt: maybeString(raw.updatedAt ?? raw.updated_at),
+  };
+}
+
+function normalizeContextHeatmapPlan(value: unknown): ContextHeatmapPlan {
+  const raw = asRecord(value);
+  const summary = asRecord(raw.summary);
+  const bucketCounts = asRecord(summary.bucketCounts);
+  const garbageCollectorPlan = asRecord(raw.garbageCollectorPlan);
+  return {
+    usageTrackerVersion: maybeString(raw.usageTrackerVersion) ?? undefined,
+    heatmapGeneratorVersion: maybeString(raw.heatmapGeneratorVersion) ?? undefined,
+    memoryGarbageCollectorVersion:
+      maybeString(raw.memoryGarbageCollectorVersion) ?? undefined,
+    mode: maybeString(raw.mode) ?? undefined,
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    objective: maybeString(raw.objective),
+    entries: Array.isArray(raw.entries)
+      ? raw.entries.map(normalizeContextHeatmapEntry)
+      : [],
+    summary: {
+      chunkCount: numberValue(summary.chunkCount, 0),
+      bucketCounts: Object.fromEntries(
+        Object.entries(bucketCounts).map(([key, count]) => [
+          key,
+          numberValue(count, 0),
+        ]),
+      ),
+      averageUtilityScore: numberValue(summary.averageUtilityScore, 0),
+      archiveCandidateCount: numberValue(summary.archiveCandidateCount, 0),
+      automaticArchiveWillRun: boolValue(summary.automaticArchiveWillRun),
+    },
+    garbageCollectorPlan: {
+      candidateChunkIds: Array.isArray(garbageCollectorPlan.candidateChunkIds)
+        ? garbageCollectorPlan.candidateChunkIds
+            .map((item) => stringValue(item))
+            .filter(Boolean)
+        : [],
+      recommendedAction:
+        maybeString(garbageCollectorPlan.recommendedAction) ?? undefined,
+      automaticArchiveAllowed: boolValue(
+        garbageCollectorPlan.automaticArchiveAllowed,
+      ),
+      automaticDeleteAllowed: boolValue(
+        garbageCollectorPlan.automaticDeleteAllowed,
+      ),
+      requiresHumanConfirmation: boolValue(
+        garbageCollectorPlan.requiresHumanConfirmation,
+      ),
+    },
+    display: parseRecordJson(raw.display) ?? {},
+    sideEffects: parseRecordJson(raw.sideEffects) ?? {},
+  };
+}
+
+export async function createContextHeatmapPlan(payload: {
+  contextChunks: Array<Record<string, unknown>>;
+  responseUsage?: Array<Record<string, unknown>>;
+  objective?: string | null;
+  projectId?: string | null;
+  storeHeatmap?: boolean;
+}): Promise<ContextHeatmapPlanResult> {
+  const response = await authFetch("/api/cognix/context/heatmap/plan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contextChunks: payload.contextChunks,
+      responseUsage: payload.responseUsage ?? [],
+      objective: payload.objective ?? null,
+      projectId: payload.projectId ?? null,
+      storeHeatmap: payload.storeHeatmap ?? true,
+    }),
+  });
+  const body = await parseJsonOrThrow<{
+    contextHeatmapPlan?: unknown;
+    storedHeatmapEntries?: unknown[];
+    storedUsageStats?: unknown[];
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    contextHeatmapPlan: normalizeContextHeatmapPlan(body.contextHeatmapPlan),
+    storedHeatmapEntries: (body.storedHeatmapEntries ?? []).map(
+      normalizeContextHeatmapEntry,
+    ),
+    storedUsageStats: (body.storedUsageStats ?? []).map(normalizeContextUsageStat),
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function listContextHeatmapEntries(payload?: {
+  projectId?: string | null;
+}): Promise<{
+  entries: ContextHeatmapEntry[];
+  usageStats: ContextUsageStat[];
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}> {
+  const params = new URLSearchParams();
+  if (payload?.projectId) params.set("project_id", payload.projectId);
+  const query = params.toString();
+  const response = await authFetch(
+    `/api/cognix/context/heatmap/entries${query ? `?${query}` : ""}`,
+  );
+  const body = await parseJsonOrThrow<{
+    entries?: unknown[];
+    usageStats?: unknown[];
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    entries: (body.entries ?? []).map(normalizeContextHeatmapEntry),
+    usageStats: (body.usageStats ?? []).map(normalizeContextUsageStat),
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
 export async function planCogniXExecution(payload: {
   objective: string;
   projectType?: string | null;

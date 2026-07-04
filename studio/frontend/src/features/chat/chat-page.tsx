@@ -79,6 +79,7 @@ import {
 import type { ChatArtifact, ChatArtifactSurface } from "./artifacts/types";
 import { ChatSettingsPanel } from "./chat-settings-sheet";
 import { ContextUsageBar } from "./components/context-usage-bar";
+import { ProjectContextHeatmapPanel } from "./components/project-context-heatmap-panel";
 import { ModelLoadInlineStatus } from "./components/model-load-status";
 import { ProjectContextGraphPanel } from "./components/project-context-graph-panel";
 import { ProjectPromptCompressionPanel } from "./components/project-prompt-compression-panel";
@@ -1378,6 +1379,11 @@ function ProjectLanding({
                   items={items}
                 />
                 <ProjectPromptCompressionPanel
+                  projectId={projectId}
+                  projectName={projectName}
+                  items={items}
+                />
+                <ProjectContextHeatmapPanel
                   projectId={projectId}
                   projectName={projectName}
                   items={items}
