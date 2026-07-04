@@ -95,6 +95,7 @@ import type {
   ResourceTypeFilter,
   SelectedModelView,
 } from "./types";
+import { AdaptiveQuantizationPanel } from "./catalog/adaptive-quantization-panel";
 
 const MODELS_TAB_STORAGE_KEY = "unsloth.hub.modelsTab";
 const ALL_MODELS_VIEW_STORAGE_KEY = "unsloth.hub.allModelsView";
@@ -1462,6 +1463,11 @@ export function ModelsPage() {
           onOpenFineTune={() => handleOpenList("finetune")}
         />
       </HubTopBar>
+      <AdaptiveQuantizationPanel
+        activeModelId={activeCheckpoint}
+        activeGgufVariant={activeGgufVariant}
+        hidden={isDatasetMode || detailOpen}
+      />
       {!detailOpen && !splitMode && isDiscoverTab && isFeedMode && (
         <InternalSkillsMarketplace />
       )}
