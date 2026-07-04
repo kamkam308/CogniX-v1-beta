@@ -86,6 +86,60 @@ type RouterLogsResponse = {
   logs?: RouterLog[];
 };
 
+type AdminReadinessState = LoadState | "protected";
+
+type MvpReadiness = {
+  summary?: {
+    phaseCount?: number;
+    readyPhaseCount?: number;
+    partialPhaseCount?: number;
+    plannedPhaseCount?: number;
+    blockedPhaseCount?: number;
+    coreMvpBlocked?: boolean;
+    coreMvpBlockedPhaseIds?: string[];
+    readyForMvpIteration?: boolean;
+  };
+  phases?: Array<{
+    id?: string;
+    phase?: number;
+    title?: string;
+    status?: string;
+    missingRequirements?: string[];
+  }>;
+  sideEffects?: Record<string, boolean>;
+};
+
+type AdvancedRoadmapReadiness = {
+  summary?: {
+    featureCount?: number;
+    readyFeatureCount?: number;
+    partialFeatureCount?: number;
+    plannedFeatureCount?: number;
+    missingFeatureCount?: number;
+    nativeModuleCoverageReady?: boolean;
+    allStorageReady?: boolean;
+    readyForAdvancedIteration?: boolean;
+  };
+  features?: Array<{
+    id?: string;
+    number?: number;
+    title?: string;
+    status?: string;
+    moduleId?: string;
+    moduleDisplayName?: string;
+    capabilityCoverage?: {
+      missingCapabilities?: string[];
+    };
+    routeCoverage?: {
+      status?: string;
+    };
+    storageCoverage?: {
+      status?: string;
+    };
+  }>;
+  sideEffects?: Record<string, boolean>;
+};
+
 function formatGb(value: number | null | undefined): string {
   return typeof value === "number" && Number.isFinite(value)
     ? `${value.toFixed(value >= 10 ? 0 : 1)} GB`
@@ -110,6 +164,10 @@ function formatTimestamp(value: string | null | undefined): string {
   });
 }
 
+function formatCount(value: number | null | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
 function readinessLabel(value: string | undefined): string {
   switch (value) {
     case "ready":
@@ -129,10 +187,53 @@ function readinessLabel(value: string | undefined): string {
   }
 }
 
+function roadmapStatusLabel(value: string | undefined): string {
+  switch (value) {
+    case "ready":
+      return "Ready";
+    case "partial":
+      return "Partial";
+    case "planned":
+      return "Planned";
+    case "blocked":
+      return "Blocked";
+    case "missing":
+      return "Missing";
+    default:
+      return value || "Unknown";
+  }
+}
+
 function statusTone(readiness: string | undefined): string {
   if (readiness === "ready") return "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
   if (readiness === "ready_with_caution") return "bg-amber-500/10 text-amber-700 dark:text-amber-300";
   return "bg-destructive/10 text-destructive";
+}
+
+function readinessTone(isReady: boolean | undefined): string {
+  if (isReady) return "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
+  return "bg-amber-500/10 text-amber-700 dark:text-amber-300";
+}
+
+function blockedTone(count: number): string {
+  return count > 0
+    ? "bg-destructive/10 text-destructive"
+    : "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
+}
+
+function summarizeRoadmapItems(
+  items: Array<{ title?: string; status?: string; missingRequirements?: string[] }>,
+): string {
+  if (!items.length) return "Tous les contrats suivis sont prets.";
+  return items
+    .slice(0, 3)
+    .map((item) => {
+      const missing = item.missingRequirements?.length
+        ? ` (${item.missingRequirements.length} manque)`
+        : "";
+      return `${item.title ?? "Item"}: ${roadmapStatusLabel(item.status)}${missing}`;
+    })
+    .join(" / ");
 }
 
 function InfoPill({
@@ -158,17 +259,23 @@ export function CogniXCoreTab() {
   const [strategy, setStrategy] = useState<StrategyResponse | null>(null);
   const [cache, setCache] = useState<CacheResponse | null>(null);
   const [routerLogs, setRouterLogs] = useState<RouterLog[] | null>(null);
+  const [mvpReadiness, setMvpReadiness] = useState<MvpReadiness | null>(null);
+  const [advancedReadiness, setAdvancedReadiness] = useState<AdvancedRoadmapReadiness | null>(null);
+  const [readinessState, setReadinessState] = useState<AdminReadinessState>("idle");
   const [state, setState] = useState<LoadState>("idle");
   const [message, setMessage] = useState<string | null>(null);
 
   async function loadCore() {
     setState("loading");
+    setReadinessState("loading");
     setMessage(null);
     try {
-      const [strategyRes, cacheRes, logsRes] = await Promise.all([
+      const [strategyRes, cacheRes, logsRes, mvpRes, advancedRes] = await Promise.all([
         authFetch("/api/cognix/strategy"),
         authFetch("/api/cognix/models/cache"),
         authFetch("/api/cognix/admin/router-logs").catch(() => null),
+        authFetch("/api/cognix/admin/mvp-readiness").catch(() => null),
+        authFetch("/api/cognix/admin/advanced-roadmap-readiness").catch(() => null),
       ]);
       if (!strategyRes.ok || !cacheRes.ok) {
         throw new Error("CogniX Core endpoints unavailable.");
@@ -181,15 +288,41 @@ export function CogniXCoreTab() {
       } else {
         setRouterLogs(null);
       }
+
+      let nextMvp: MvpReadiness | null = null;
+      let nextAdvanced: AdvancedRoadmapReadiness | null = null;
+      let protectedReadiness = false;
+
+      if (mvpRes?.ok) {
+        const body = (await mvpRes.json()) as { mvpReadiness?: MvpReadiness };
+        nextMvp = body.mvpReadiness ?? null;
+      } else if (mvpRes?.status === 403) {
+        protectedReadiness = true;
+      }
+
+      if (advancedRes?.ok) {
+        const body = (await advancedRes.json()) as { advancedRoadmapReadiness?: AdvancedRoadmapReadiness };
+        nextAdvanced = body.advancedRoadmapReadiness ?? null;
+      } else if (advancedRes?.status === 403) {
+        protectedReadiness = true;
+      }
+
+      setMvpReadiness(nextMvp);
+      setAdvancedReadiness(nextAdvanced);
+      setReadinessState(nextMvp || nextAdvanced ? "loaded" : protectedReadiness ? "protected" : "error");
       setState("loaded");
     } catch {
       setState("error");
+      setReadinessState("error");
+      setMvpReadiness(null);
+      setAdvancedReadiness(null);
       setMessage("Impossible de charger CogniX Core.");
     }
   }
 
   useEffect(() => {
-    void loadCore();
+    const timer = window.setTimeout(() => void loadCore(), 0);
+    return () => window.clearTimeout(timer);
   }, []);
 
   const recommendation = strategy?.recommendation;
@@ -202,6 +335,23 @@ export function CogniXCoreTab() {
     () => (strategy?.nextSteps ?? []).slice(0, 4),
     [strategy?.nextSteps],
   );
+  const mvpSummary = mvpReadiness?.summary;
+  const advancedSummary = advancedReadiness?.summary;
+  const nonReadyMvpPhases = useMemo(
+    () => (mvpReadiness?.phases ?? []).filter((phase) => phase.status !== "ready"),
+    [mvpReadiness?.phases],
+  );
+  const nonReadyAdvancedFeatures = useMemo(
+    () => (advancedReadiness?.features ?? []).filter((feature) => feature.status !== "ready"),
+    [advancedReadiness?.features],
+  );
+  const readOnlySideEffects = useMemo(() => {
+    const effects = {
+      ...(mvpReadiness?.sideEffects ?? {}),
+      ...(advancedReadiness?.sideEffects ?? {}),
+    };
+    return Object.values(effects).every((value) => value === false);
+  }, [advancedReadiness?.sideEffects, mvpReadiness?.sideEffects]);
 
   return (
     <div className="flex flex-col gap-6">
@@ -366,6 +516,78 @@ export function CogniXCoreTab() {
         >
           <InfoPill label={`${residentModels.length}`} />
         </SettingsRow>
+      </SettingsSection>
+
+      <SettingsSection
+        title="Roadmap readiness"
+        description="Contrats backend natifs pour suivre les phases MVP et les 30 fonctions avancees."
+      >
+        {readinessState === "loading" || readinessState === "idle" ? (
+          <SettingsRow
+            label="Admin contracts"
+            description="Chargement des contrats internes."
+          >
+            <InfoPill label="loading" />
+          </SettingsRow>
+        ) : readinessState === "protected" ? (
+          <SettingsRow
+            label="Admin contracts"
+            description="Connecte en compte CEO/admin pour voir les contrats internes."
+          >
+            <InfoPill label="protected" />
+          </SettingsRow>
+        ) : readinessState === "error" && !mvpReadiness && !advancedReadiness ? (
+          <SettingsRow
+            label="Admin contracts"
+            description="Les contrats internes ne sont pas disponibles sur ce backend."
+          >
+            <InfoPill label="unavailable" tone="bg-destructive/10 text-destructive" />
+          </SettingsRow>
+        ) : (
+          <>
+            <SettingsRow
+              label="MVP phases"
+              description={summarizeRoadmapItems(nonReadyMvpPhases)}
+              alignTop
+            >
+              <div className="flex flex-wrap justify-end gap-2">
+                <InfoPill
+                  label={`${formatCount(mvpSummary?.readyPhaseCount)}/${formatCount(mvpSummary?.phaseCount)} ready`}
+                  tone={readinessTone(mvpSummary?.readyForMvpIteration)}
+                />
+                <InfoPill
+                  label={`${formatCount(mvpSummary?.blockedPhaseCount)} blocked`}
+                  tone={blockedTone(formatCount(mvpSummary?.blockedPhaseCount))}
+                />
+              </div>
+            </SettingsRow>
+            <SettingsRow
+              label="Advanced native"
+              description={summarizeRoadmapItems(nonReadyAdvancedFeatures)}
+              alignTop
+            >
+              <div className="flex flex-wrap justify-end gap-2">
+                <InfoPill
+                  label={`${formatCount(advancedSummary?.readyFeatureCount)}/${formatCount(advancedSummary?.featureCount)} ready`}
+                  tone={readinessTone(advancedSummary?.readyForAdvancedIteration)}
+                />
+                <InfoPill
+                  label={`${formatCount(advancedSummary?.missingFeatureCount)} missing`}
+                  tone={blockedTone(formatCount(advancedSummary?.missingFeatureCount))}
+                />
+              </div>
+            </SettingsRow>
+            <SettingsRow
+              label="Read-only guard"
+              description="Aucune migration, activation, execution d'outil ou chargement de modele depuis cette vue."
+            >
+              <InfoPill
+                label={readOnlySideEffects ? "clean" : "review"}
+                tone={readOnlySideEffects ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "bg-amber-500/10 text-amber-700 dark:text-amber-300"}
+              />
+            </SettingsRow>
+          </>
+        )}
       </SettingsSection>
 
       {warnings.length || nextSteps.length ? (
