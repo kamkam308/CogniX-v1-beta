@@ -9,8 +9,8 @@ import {
   COGNIX_DEFAULT_EXTERNAL_CHECKPOINT,
   externalProviderCanSendWithoutFallback,
   getExternalProviderApiKey,
-  isHuggingFaceProviderConnection,
   isExternalModelId,
+  isHuggingFaceProviderConnection,
   loadExternalProviders,
   parseExternalModelId,
 } from "../external-providers";
@@ -581,7 +581,11 @@ export function isPendingGguf(pending: PendingModelSelection | null): boolean {
  *  wrong file. */
 export function pendingSelectionMatches(
   pending: PendingModelSelection | null,
-  pick: { id: string; ggufVariant?: string | null; nativePathToken?: string | null },
+  pick: {
+    id: string;
+    ggufVariant?: string | null;
+    nativePathToken?: string | null;
+  },
 ): boolean {
   return (
     pending != null &&
@@ -1172,7 +1176,7 @@ export const useChatRuntimeStore = create<ChatRuntimeStore>((set, get) => ({
   loadedSpecDraftNMax: null,
   tensorParallel: false,
   loadedTensorParallel: null,
-  loadOnSelection: loadBool(CHAT_LOAD_ON_SELECTION_KEY, true),
+  loadOnSelection: loadBool(CHAT_LOAD_ON_SELECTION_KEY, false),
   expandQuantizations: loadBool(CHAT_EXPAND_QUANTIZATIONS_KEY, false),
   showAllQuantizations: loadBool(CHAT_SHOW_ALL_QUANTIZATIONS_KEY, true),
   pendingSelection: null,
