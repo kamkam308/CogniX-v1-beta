@@ -365,6 +365,463 @@ export async function listContextGraphSnapshots(payload?: {
   return body.snapshots ?? [];
 }
 
+export type WorkflowStepType =
+  | "user_action"
+  | "tool_call"
+  | "model_call"
+  | "parameters"
+  | "output"
+  | "export"
+  | "approval"
+  | string;
+
+export interface WorkflowStepInput {
+  stepType: WorkflowStepType;
+  label: string;
+  toolName?: string | null;
+  modelId?: string | null;
+  parameters?: Record<string, unknown>;
+  outputSummary?: string | null;
+  requiresApproval?: boolean;
+}
+
+export interface WorkflowStepRecord extends WorkflowStepInput {
+  id?: string | null;
+  workflowId?: string | null;
+  stepIndex: number;
+  willExecuteNow?: boolean;
+  step?: Record<string, unknown>;
+  createdAt?: string | null;
+}
+
+export interface WorkflowTemplate {
+  id: string;
+  workflowType: string;
+  label: string;
+  steps: WorkflowStepInput[];
+}
+
+export interface WorkflowRecord {
+  id: string;
+  projectId?: string | null;
+  title: string;
+  objective?: string | null;
+  workflowType: string;
+  status?: "active" | "disabled" | "archived" | string;
+  shareStatus?: "private" | "shared" | string;
+  metadata?: Record<string, unknown>;
+  steps?: WorkflowStepRecord[];
+  stepCount?: number | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface WorkflowRecordingPlan {
+  workflowRecorderVersion?: string;
+  workflowTemplateManagerVersion?: string;
+  mode?: string;
+  workflow?: Partial<WorkflowRecord>;
+  steps?: WorkflowStepRecord[];
+  summary?: Record<string, unknown>;
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface WorkflowRunPlanStep {
+  stepId?: string | null;
+  stepIndex: number;
+  stepType?: WorkflowStepType;
+  label?: string | null;
+  requiresApproval?: boolean;
+  willExecuteNow?: boolean;
+  blockedSideEffects?: string[];
+}
+
+export interface WorkflowRunPlan {
+  workflowRunnerVersion?: string;
+  mode?: string;
+  workflowId?: string | null;
+  runMode?: "dry_run" | "simulation" | string;
+  inputs?: Record<string, unknown>;
+  orderedSteps?: WorkflowRunPlanStep[];
+  summary?: Record<string, unknown>;
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface WorkflowRunRecord {
+  id: string;
+  workflowId?: string | null;
+  status?: string | null;
+  runMode?: string | null;
+  runPlan?: WorkflowRunPlan;
+  logs?: Array<Record<string, unknown>>;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface WorkflowExportBundle {
+  username?: string;
+  workflow: WorkflowRecord;
+  runs?: WorkflowRunRecord[];
+  exportedAt?: string;
+}
+
+export interface WorkflowRecordResult {
+  recordingPlan: WorkflowRecordingPlan;
+  workflow: WorkflowRecord | null;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
+export interface WorkflowUpdateResult {
+  workflow: WorkflowRecord;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
+export interface WorkflowRunPlanResult {
+  runPlan: WorkflowRunPlan;
+  run: WorkflowRunRecord;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function asOptionalRecord(
+  value: unknown,
+): Record<string, unknown> | undefined {
+  const record = asRecord(value);
+  return Object.keys(record).length > 0 ? record : undefined;
+}
+
+function maybeString(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return null;
+}
+
+function stringValue(value: unknown, fallback = ""): string {
+  return maybeString(value) ?? fallback;
+}
+
+function numberValue(value: unknown, fallback = 0): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return fallback;
+}
+
+function boolValue(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function parseRecordJson(value: unknown): Record<string, unknown> | undefined {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  try {
+    return asOptionalRecord(JSON.parse(value));
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeWorkflowStep(
+  value: unknown,
+  fallbackIndex = 0,
+): WorkflowStepRecord {
+  const raw = asRecord(value);
+  const nestedStep = asRecord(raw.step);
+  return {
+    id: maybeString(raw.id),
+    workflowId: maybeString(raw.workflowId ?? raw.workflow_id),
+    stepIndex: numberValue(
+      raw.stepIndex ?? raw.step_index ?? nestedStep.stepIndex,
+      fallbackIndex,
+    ),
+    stepType: stringValue(
+      raw.stepType ?? raw.step_type ?? nestedStep.stepType,
+      "user_action",
+    ),
+    label: stringValue(raw.label ?? nestedStep.label, `Step ${fallbackIndex + 1}`),
+    toolName: maybeString(raw.toolName ?? raw.tool_name ?? nestedStep.toolName),
+    modelId: maybeString(raw.modelId ?? raw.model_id ?? nestedStep.modelId),
+    parameters:
+      parseRecordJson(raw.parameters ?? raw.parameters_json) ??
+      parseRecordJson(nestedStep.parameters) ??
+      {},
+    outputSummary: maybeString(
+      raw.outputSummary ?? raw.output_summary ?? nestedStep.outputSummary,
+    ),
+    requiresApproval: boolValue(
+      raw.requiresApproval ?? nestedStep.requiresApproval,
+    ),
+    willExecuteNow: boolValue(raw.willExecuteNow ?? nestedStep.willExecuteNow),
+    step: asOptionalRecord(raw.step),
+    createdAt: maybeString(raw.createdAt ?? raw.created_at),
+  };
+}
+
+function normalizeWorkflow(value: unknown): WorkflowRecord {
+  const raw = asRecord(value);
+  const steps = Array.isArray(raw.steps)
+    ? raw.steps.map((step, index) => normalizeWorkflowStep(step, index))
+    : undefined;
+  return {
+    id: stringValue(raw.id),
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    title: stringValue(raw.title, "Workflow CogniX"),
+    objective: maybeString(raw.objective),
+    workflowType: stringValue(raw.workflowType ?? raw.workflow_type, "custom"),
+    status: stringValue(raw.status, "active"),
+    shareStatus: stringValue(raw.shareStatus ?? raw.share_status, "private"),
+    metadata:
+      parseRecordJson(raw.metadata) ?? parseRecordJson(raw.metadata_json) ?? {},
+    steps,
+    stepCount: numberValue(raw.stepCount ?? raw.step_count, steps?.length ?? 0),
+    createdAt: maybeString(raw.createdAt ?? raw.created_at),
+    updatedAt: maybeString(raw.updatedAt ?? raw.updated_at),
+  };
+}
+
+function normalizeWorkflowRunPlanStep(
+  value: unknown,
+  fallbackIndex = 0,
+): WorkflowRunPlanStep {
+  const raw = asRecord(value);
+  return {
+    stepId: maybeString(raw.stepId ?? raw.step_id),
+    stepIndex: numberValue(raw.stepIndex ?? raw.step_index, fallbackIndex),
+    stepType: maybeString(raw.stepType ?? raw.step_type) ?? "user_action",
+    label: maybeString(raw.label),
+    requiresApproval: boolValue(raw.requiresApproval),
+    willExecuteNow: boolValue(raw.willExecuteNow),
+    blockedSideEffects: Array.isArray(raw.blockedSideEffects)
+      ? raw.blockedSideEffects.map((item) => stringValue(item)).filter(Boolean)
+      : [],
+  };
+}
+
+function normalizeWorkflowRunPlan(value: unknown): WorkflowRunPlan {
+  const raw = asRecord(value);
+  return {
+    workflowRunnerVersion: maybeString(raw.workflowRunnerVersion) ?? undefined,
+    mode: maybeString(raw.mode) ?? undefined,
+    workflowId: maybeString(raw.workflowId ?? raw.workflow_id),
+    runMode: maybeString(raw.runMode ?? raw.run_mode) ?? "dry_run",
+    inputs: parseRecordJson(raw.inputs) ?? {},
+    orderedSteps: Array.isArray(raw.orderedSteps)
+      ? raw.orderedSteps.map((step, index) =>
+          normalizeWorkflowRunPlanStep(step, index),
+        )
+      : [],
+    summary: parseRecordJson(raw.summary) ?? {},
+    sideEffects: parseRecordJson(raw.sideEffects) ?? {},
+  };
+}
+
+function normalizeWorkflowRun(value: unknown): WorkflowRunRecord {
+  const raw = asRecord(value);
+  return {
+    id: stringValue(raw.id),
+    workflowId: maybeString(raw.workflowId ?? raw.workflow_id),
+    status: maybeString(raw.status),
+    runMode: maybeString(raw.runMode ?? raw.run_mode),
+    runPlan: normalizeWorkflowRunPlan(raw.runPlan ?? raw.run_plan_json),
+    logs: Array.isArray(raw.logs)
+      ? raw.logs.map((log) => asRecord(log))
+      : undefined,
+    createdAt: maybeString(raw.createdAt ?? raw.created_at),
+    updatedAt: maybeString(raw.updatedAt ?? raw.updated_at),
+  };
+}
+
+function normalizeWorkflowTemplate(value: unknown): WorkflowTemplate {
+  const raw = asRecord(value);
+  return {
+    id: stringValue(raw.id),
+    workflowType: stringValue(raw.workflowType ?? raw.workflow_type, "custom"),
+    label: stringValue(raw.label, "Workflow"),
+    steps: Array.isArray(raw.steps)
+      ? raw.steps.map((step, index) => normalizeWorkflowStep(step, index))
+      : [],
+  };
+}
+
+export async function listWorkflowTemplates(): Promise<WorkflowTemplate[]> {
+  const response = await authFetch("/api/cognix/workflows/templates");
+  const body = await parseJsonOrThrow<{
+    templateRegistry?: { templates?: unknown[] };
+  }>(response);
+  return (body.templateRegistry?.templates ?? []).map(normalizeWorkflowTemplate);
+}
+
+export async function listWorkflows(payload?: {
+  includeDisabled?: boolean;
+}): Promise<WorkflowRecord[]> {
+  const query = payload?.includeDisabled ? "?include_disabled=true" : "";
+  const response = await authFetch(`/api/cognix/workflows${query}`);
+  const body = await parseJsonOrThrow<{ workflows?: unknown[] }>(response);
+  return (body.workflows ?? []).map(normalizeWorkflow);
+}
+
+export async function getWorkflow(workflowId: string): Promise<WorkflowRecord> {
+  const response = await authFetch(
+    `/api/cognix/workflows/${encodeURIComponent(workflowId)}`,
+  );
+  const body = await parseJsonOrThrow<{ workflow?: unknown }>(response);
+  return normalizeWorkflow(body.workflow);
+}
+
+export async function recordWorkflow(payload: {
+  title?: string | null;
+  objective?: string | null;
+  workflowType?: string | null;
+  projectId?: string | null;
+  steps?: WorkflowStepInput[];
+  metadata?: Record<string, unknown>;
+  storeWorkflow?: boolean;
+}): Promise<WorkflowRecordResult> {
+  const response = await authFetch("/api/cognix/workflows/record", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: payload.title ?? null,
+      objective: payload.objective ?? null,
+      workflowType: payload.workflowType ?? null,
+      projectId: payload.projectId ?? null,
+      steps: payload.steps ?? [],
+      metadata: payload.metadata ?? {},
+      storeWorkflow: payload.storeWorkflow ?? true,
+    }),
+  });
+  const body = await parseJsonOrThrow<{
+    recordingPlan?: WorkflowRecordingPlan;
+    workflow?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    recordingPlan: body.recordingPlan ?? {},
+    workflow: body.workflow ? normalizeWorkflow(body.workflow) : null,
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function updateWorkflow(
+  workflowId: string,
+  payload: {
+    title?: string | null;
+    objective?: string | null;
+    status?: "active" | "disabled" | "archived" | null;
+    shareStatus?: "private" | "shared" | null;
+  },
+): Promise<WorkflowUpdateResult> {
+  const response = await authFetch(
+    `/api/cognix/workflows/${encodeURIComponent(workflowId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  const body = await parseJsonOrThrow<{
+    workflow?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    workflow: normalizeWorkflow(body.workflow),
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function deleteWorkflow(workflowId: string): Promise<void> {
+  const response = await authFetch(
+    `/api/cognix/workflows/${encodeURIComponent(workflowId)}`,
+    { method: "DELETE" },
+  );
+  await parseJsonOrThrow<unknown>(response);
+}
+
+export async function exportWorkflowBundle(
+  workflowId: string,
+): Promise<WorkflowExportBundle> {
+  const response = await authFetch(
+    `/api/cognix/workflows/${encodeURIComponent(workflowId)}/export`,
+  );
+  const body = await parseJsonOrThrow<{ workflowExport?: unknown }>(response);
+  const bundle = asRecord(body.workflowExport);
+  return {
+    username: maybeString(bundle.username) ?? undefined,
+    workflow: normalizeWorkflow(bundle.workflow),
+    runs: Array.isArray(bundle.runs)
+      ? bundle.runs.map(normalizeWorkflowRun)
+      : [],
+    exportedAt: maybeString(bundle.exportedAt) ?? undefined,
+  };
+}
+
+export async function buildWorkflowRunPlan(payload: {
+  workflowId: string;
+  runMode?: "dry_run" | "simulation";
+  inputs?: Record<string, unknown>;
+}): Promise<WorkflowRunPlanResult> {
+  const response = await authFetch(
+    `/api/cognix/workflows/${encodeURIComponent(payload.workflowId)}/run-plan`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runMode: payload.runMode ?? "dry_run",
+        inputs: payload.inputs ?? {},
+      }),
+    },
+  );
+  const body = await parseJsonOrThrow<{
+    runPlan?: unknown;
+    run?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    runPlan: normalizeWorkflowRunPlan(body.runPlan),
+    run: normalizeWorkflowRun(body.run),
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function listWorkflowRuns(
+  workflowId: string,
+): Promise<WorkflowRunRecord[]> {
+  const response = await authFetch(
+    `/api/cognix/workflows/${encodeURIComponent(workflowId)}/runs`,
+  );
+  const body = await parseJsonOrThrow<{ runs?: unknown[] }>(response);
+  return (body.runs ?? []).map(normalizeWorkflowRun);
+}
+
 export async function planCogniXExecution(payload: {
   objective: string;
   projectType?: string | null;

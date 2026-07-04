@@ -82,6 +82,7 @@ import { ContextUsageBar } from "./components/context-usage-bar";
 import { ModelLoadInlineStatus } from "./components/model-load-status";
 import { ProjectContextGraphPanel } from "./components/project-context-graph-panel";
 import { ProjectSwitcher } from "./components/project-switcher";
+import { ProjectWorkflowRecorderPanel } from "./components/project-workflow-recorder-panel";
 import {
   buildExternalModelId,
   COGNIX_CODEX_DEFAULT_MODEL_ID,
@@ -1214,7 +1215,7 @@ function ProjectLanding({
   const activeThreadId = useChatRuntimeStore((s) => s.activeThreadId);
   const initialActiveThreadRef = useRef<string | null>(null);
   const [projectTab, setProjectTab] = useState<
-    "chats" | "sources" | "contextGraph"
+    "chats" | "sources" | "contextGraph" | "workflows"
   >("chats");
   const [pendingNewThreadId, setPendingNewThreadId] = useState<string | null>(
     null,
@@ -1328,7 +1329,7 @@ function ProjectLanding({
               placeholder={`New chat in ${projectName}`}
             />
 
-            <div className="mt-9 flex items-center gap-2">
+            <div className="mt-9 flex flex-wrap items-center gap-2">
               <button
                 type="button"
                 onClick={() => setProjectTab("chats")}
@@ -1356,6 +1357,14 @@ function ProjectLanding({
               >
                 Context Graph
               </button>
+              <button
+                type="button"
+                onClick={() => setProjectTab("workflows")}
+                data-active={projectTab === "workflows"}
+                className="h-10 rounded-full px-5 text-[14px] font-semibold transition-colors data-[active=true]:bg-muted data-[active=true]:text-foreground data-[active=false]:text-muted-foreground data-[active=false]:hover:bg-nav-surface-hover"
+              >
+                Workflows
+              </button>
             </div>
 
             {projectTab === "sources" ? (
@@ -1365,6 +1374,11 @@ function ProjectLanding({
                 projectId={projectId}
                 projectName={projectName}
                 items={items}
+              />
+            ) : projectTab === "workflows" ? (
+              <ProjectWorkflowRecorderPanel
+                projectId={projectId}
+                projectName={projectName}
               />
             ) : (
               <div className="mt-8 flex flex-col gap-1">
