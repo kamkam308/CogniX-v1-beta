@@ -16,7 +16,7 @@ from datetime import timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from auth import storage as auth_storage
@@ -12541,10 +12541,19 @@ async def memory_conflicts(
 @router.get("/prompt-compression/contexts")
 async def list_compressed_contexts(
     include_deleted: bool = False,
+    project_id: str | None = Query(None, alias = "projectId", max_length = 160),
     current_subject: str = Depends(get_current_jwt_subject),
 ) -> dict[str, Any]:
+    if project_id:
+        _require_owned_project(project_id, current_subject)
     return {
-        "contexts": _rows(cognix_db.list_compressed_contexts(current_subject, include_deleted = include_deleted)),
+        "contexts": _rows(
+            cognix_db.list_compressed_contexts(
+                current_subject,
+                include_deleted = include_deleted,
+                project_id = project_id,
+            )
+        ),
         "sideEffects": {
             "compressionWrite": False,
             "logWrite": False,

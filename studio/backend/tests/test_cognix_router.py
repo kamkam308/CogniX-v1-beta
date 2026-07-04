@@ -6924,6 +6924,59 @@ def test_prompt_compression_endpoint_stores_lists_deletes_and_audits():
     assert {"prompt_compression_plan_built", "prompt_compression_context_deleted"}.issubset(actions)
 
 
+def test_prompt_compression_contexts_can_be_filtered_by_project():
+    seed_accounts()
+    seed_chat_project("project-alpha")
+    seed_chat_project("project-beta")
+    context = " ".join(
+        [
+            "Objectif important: compresser le contexte projet sans appel modele.",
+            "Decision: garder les contraintes natives et la securite.",
+            "Todo: afficher uniquement le badge Context optimized.",
+        ]
+        * 20
+    )
+
+    alpha = run_async(
+        cognix_routes.prompt_compression_plan(
+            cognix_routes.PromptCompressionRequest(
+                context = context,
+                objective = "alpha native security",
+                projectId = "project-alpha",
+                targetTokens = 90,
+                storeContext = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+    beta = run_async(
+        cognix_routes.prompt_compression_plan(
+            cognix_routes.PromptCompressionRequest(
+                context = context,
+                objective = "beta native security",
+                projectId = "project-beta",
+                targetTokens = 90,
+                storeContext = True,
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    listed = run_async(
+        cognix_routes.list_compressed_contexts(
+            project_id = "project-alpha",
+            current_subject = "alice",
+        )
+    )
+    all_contexts = run_async(cognix_routes.list_compressed_contexts(current_subject = "alice"))
+
+    assert listed["contexts"] == [alpha["compressedContext"]]
+    assert {item["id"] for item in all_contexts["contexts"]} == {
+        alpha["compressedContext"]["id"],
+        beta["compressedContext"]["id"],
+    }
+
+
 def test_conversation_summary_endpoint_stores_redacted_summary_and_audits():
     seed_accounts()
     messages = [

@@ -81,6 +81,7 @@ import { ChatSettingsPanel } from "./chat-settings-sheet";
 import { ContextUsageBar } from "./components/context-usage-bar";
 import { ModelLoadInlineStatus } from "./components/model-load-status";
 import { ProjectContextGraphPanel } from "./components/project-context-graph-panel";
+import { ProjectPromptCompressionPanel } from "./components/project-prompt-compression-panel";
 import { ProjectSwitcher } from "./components/project-switcher";
 import { ProjectWorkflowRecorderPanel } from "./components/project-workflow-recorder-panel";
 import {
@@ -1370,11 +1371,18 @@ function ProjectLanding({
             {projectTab === "sources" ? (
               <ProjectSourcesPanel projectId={projectId} />
             ) : projectTab === "contextGraph" ? (
-              <ProjectContextGraphPanel
-                projectId={projectId}
-                projectName={projectName}
-                items={items}
-              />
+              <>
+                <ProjectContextGraphPanel
+                  projectId={projectId}
+                  projectName={projectName}
+                  items={items}
+                />
+                <ProjectPromptCompressionPanel
+                  projectId={projectId}
+                  projectName={projectName}
+                  items={items}
+                />
+              </>
             ) : projectTab === "workflows" ? (
               <ProjectWorkflowRecorderPanel
                 projectId={projectId}

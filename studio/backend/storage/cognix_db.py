@@ -14481,6 +14481,7 @@ def list_compressed_contexts(
     username: str,
     *,
     include_deleted: bool = False,
+    project_id: str | None = None,
     limit: int = 100,
 ) -> list[dict[str, Any]]:
     safe_limit = min(max(int(limit or 100), 1), 300)
@@ -14490,6 +14491,9 @@ def list_compressed_contexts(
         params: list[Any] = [username]
         if not include_deleted:
             clauses.append("status = 'active'")
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            params.append(project_id)
         params.append(safe_limit)
         rows = conn.execute(
             f"""

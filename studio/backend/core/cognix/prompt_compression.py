@@ -188,7 +188,7 @@ def build_prompt_compression_plan(
     target_tokens: int = 500,
     project_id: str | None = None,
 ) -> dict[str, Any]:
-    normalized_context = _normalize(context)
+    normalized_context, redaction_markers = _redact_sensitive(_normalize(context))
     sentences = _sentences(normalized_context)
     objective_terms = _keywords(objective or "")
     ranked: list[dict[str, Any]] = []
@@ -246,6 +246,13 @@ def build_prompt_compression_plan(
             "reductionRatio": evaluation["reductionRatio"],
             "badge": "Context optimized" if evaluation["reductionRatio"] > 0 else None,
             "lostInfoRisk": evaluation["lostInfoRisk"],
+            "redactionCount": len(redaction_markers),
+            "redactionMarkers": redaction_markers,
+        },
+        "policy": {
+            "rawSecretValuesStored": False,
+            "modelGenerationAllowed": False,
+            "frontendDirectPromptMutationAllowed": False,
         },
         "sideEffects": build_prompt_compression_blueprint()["sideEffects"],
     }

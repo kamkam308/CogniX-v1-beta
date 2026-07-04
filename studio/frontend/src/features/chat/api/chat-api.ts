@@ -822,6 +822,336 @@ export async function listWorkflowRuns(
   return (body.runs ?? []).map(normalizeWorkflowRun);
 }
 
+export interface CompressionEvaluation {
+  originalTokenCount?: number;
+  compressedTokenCount?: number;
+  reductionRatio?: number;
+  retainedKeywordRatio?: number;
+  retainedObjectiveRatio?: number;
+  lostInfoRisk?: "low" | "medium" | "high" | string;
+  qualityGate?: Record<string, unknown>;
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface PromptCompressionSummary {
+  originalTokenCount?: number;
+  compressedTokenCount?: number;
+  targetTokenCount?: number;
+  reductionRatio?: number;
+  badge?: string | null;
+  lostInfoRisk?: "low" | "medium" | "high" | string;
+  messageCount?: number;
+  summarizedMessageCount?: number;
+  retainedRecentMessageCount?: number;
+  rawHistoryIncluded?: boolean;
+  redactionCount?: number;
+}
+
+export interface PromptCompressionPlan {
+  promptCompressionVersion?: string;
+  contextRankerVersion?: string;
+  compressionEvaluatorVersion?: string;
+  mode?: string;
+  projectId?: string | null;
+  objective?: string | null;
+  targetTokens?: number;
+  contextHash?: string;
+  ranking?: Array<Record<string, unknown>>;
+  selectedSentenceIndexes?: number[];
+  compressedContext?: string;
+  evaluation?: CompressionEvaluation;
+  summary?: PromptCompressionSummary;
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface ConversationSummaryPlan extends PromptCompressionPlan {
+  conversationSummaryContractVersion?: string;
+  recentMessageLimit?: number;
+  conversationSummary?: {
+    summaryText?: string;
+    summaryRequired?: boolean;
+    readyForContextInjection?: boolean;
+    summarizedMessageCount?: number;
+    retainedRecentMessageCount?: number;
+    redactionMarkers?: string[];
+  };
+  recentMessages?: Array<Record<string, unknown>>;
+  boundaryContract?: Record<string, unknown>;
+  policy?: Record<string, unknown>;
+}
+
+export interface CompressedContextRecord {
+  id: string;
+  projectId?: string | null;
+  contextHash?: string | null;
+  objectiveExcerpt?: string | null;
+  originalTokenCount?: number | null;
+  compressedTokenCount?: number | null;
+  reductionRatio?: number | null;
+  compressedContext?: string;
+  ranking?: Array<Record<string, unknown>>;
+  evaluation?: CompressionEvaluation;
+  status?: "active" | "deleted" | string;
+  logs?: Array<Record<string, unknown>>;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface PromptCompressionResult {
+  compressionPlan: PromptCompressionPlan;
+  compressedContext: CompressedContextRecord | null;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
+export interface ConversationSummaryResult {
+  conversationSummaryPlan: ConversationSummaryPlan;
+  compressedContext: CompressedContextRecord | null;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
+function normalizeCompressionEvaluation(value: unknown): CompressionEvaluation {
+  const raw = asRecord(value);
+  return {
+    originalTokenCount: numberValue(raw.originalTokenCount, 0),
+    compressedTokenCount: numberValue(raw.compressedTokenCount, 0),
+    reductionRatio: numberValue(raw.reductionRatio, 0),
+    retainedKeywordRatio: numberValue(raw.retainedKeywordRatio, 0),
+    retainedObjectiveRatio: numberValue(raw.retainedObjectiveRatio, 0),
+    lostInfoRisk: maybeString(raw.lostInfoRisk) ?? undefined,
+    qualityGate: parseRecordJson(raw.qualityGate) ?? {},
+    sideEffects: parseRecordJson(raw.sideEffects) ?? {},
+  };
+}
+
+function normalizePromptCompressionSummary(
+  value: unknown,
+): PromptCompressionSummary {
+  const raw = asRecord(value);
+  return {
+    originalTokenCount: numberValue(raw.originalTokenCount, 0),
+    compressedTokenCount: numberValue(raw.compressedTokenCount, 0),
+    targetTokenCount: numberValue(raw.targetTokenCount, 0),
+    reductionRatio: numberValue(raw.reductionRatio, 0),
+    badge: maybeString(raw.badge),
+    lostInfoRisk: maybeString(raw.lostInfoRisk) ?? undefined,
+    messageCount: numberValue(raw.messageCount, 0),
+    summarizedMessageCount: numberValue(raw.summarizedMessageCount, 0),
+    retainedRecentMessageCount: numberValue(raw.retainedRecentMessageCount, 0),
+    rawHistoryIncluded: boolValue(raw.rawHistoryIncluded),
+    redactionCount: numberValue(raw.redactionCount, 0),
+  };
+}
+
+function normalizePromptCompressionPlan(
+  value: unknown,
+): PromptCompressionPlan {
+  const raw = asRecord(value);
+  return {
+    promptCompressionVersion:
+      maybeString(raw.promptCompressionVersion) ?? undefined,
+    contextRankerVersion: maybeString(raw.contextRankerVersion) ?? undefined,
+    compressionEvaluatorVersion:
+      maybeString(raw.compressionEvaluatorVersion) ?? undefined,
+    mode: maybeString(raw.mode) ?? undefined,
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    objective: maybeString(raw.objective),
+    targetTokens: numberValue(raw.targetTokens ?? raw.target_tokens, 0),
+    contextHash: maybeString(raw.contextHash ?? raw.context_hash) ?? undefined,
+    ranking: Array.isArray(raw.ranking)
+      ? raw.ranking.map((item) => asRecord(item))
+      : [],
+    selectedSentenceIndexes: Array.isArray(raw.selectedSentenceIndexes)
+      ? raw.selectedSentenceIndexes
+          .map((item) => numberValue(item, -1))
+          .filter((item) => item >= 0)
+      : [],
+    compressedContext:
+      maybeString(raw.compressedContext ?? raw.compressed_context) ?? "",
+    evaluation: normalizeCompressionEvaluation(raw.evaluation),
+    summary: normalizePromptCompressionSummary(raw.summary),
+    sideEffects: parseRecordJson(raw.sideEffects) ?? {},
+  };
+}
+
+function normalizeConversationSummaryPlan(
+  value: unknown,
+): ConversationSummaryPlan {
+  const raw = asRecord(value);
+  const base = normalizePromptCompressionPlan(raw);
+  const conversationSummary = asRecord(raw.conversationSummary);
+  return {
+    ...base,
+    conversationSummaryContractVersion:
+      maybeString(raw.conversationSummaryContractVersion) ?? undefined,
+    recentMessageLimit: numberValue(raw.recentMessageLimit, 0),
+    conversationSummary: {
+      summaryText: maybeString(conversationSummary.summaryText) ?? undefined,
+      summaryRequired: boolValue(conversationSummary.summaryRequired),
+      readyForContextInjection: boolValue(
+        conversationSummary.readyForContextInjection,
+      ),
+      summarizedMessageCount: numberValue(
+        conversationSummary.summarizedMessageCount,
+        0,
+      ),
+      retainedRecentMessageCount: numberValue(
+        conversationSummary.retainedRecentMessageCount,
+        0,
+      ),
+      redactionMarkers: Array.isArray(conversationSummary.redactionMarkers)
+        ? conversationSummary.redactionMarkers
+            .map((item) => stringValue(item))
+            .filter(Boolean)
+        : [],
+    },
+    recentMessages: Array.isArray(raw.recentMessages)
+      ? raw.recentMessages.map((item) => asRecord(item))
+      : [],
+    boundaryContract: parseRecordJson(raw.boundaryContract) ?? {},
+    policy: parseRecordJson(raw.policy) ?? {},
+  };
+}
+
+function normalizeCompressedContext(value: unknown): CompressedContextRecord {
+  const raw = asRecord(value);
+  const logs = Array.isArray(raw.logs)
+    ? raw.logs.map((log) => asRecord(log))
+    : undefined;
+  return {
+    id: stringValue(raw.id),
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    contextHash: maybeString(raw.contextHash ?? raw.context_hash),
+    objectiveExcerpt: maybeString(
+      raw.objectiveExcerpt ?? raw.objective_excerpt,
+    ),
+    originalTokenCount: numberValue(
+      raw.originalTokenCount ?? raw.original_token_count,
+      0,
+    ),
+    compressedTokenCount: numberValue(
+      raw.compressedTokenCount ?? raw.compressed_token_count,
+      0,
+    ),
+    reductionRatio: numberValue(raw.reductionRatio ?? raw.reduction_ratio, 0),
+    compressedContext:
+      maybeString(raw.compressedContext ?? raw.compressed_context) ?? "",
+    ranking: Array.isArray(raw.ranking)
+      ? raw.ranking.map((item) => asRecord(item))
+      : [],
+    evaluation: normalizeCompressionEvaluation(raw.evaluation),
+    status: maybeString(raw.status) ?? "active",
+    logs,
+    createdAt: maybeString(raw.createdAt ?? raw.created_at),
+    updatedAt: maybeString(raw.updatedAt ?? raw.updated_at),
+  };
+}
+
+export async function createPromptCompressionPlan(payload: {
+  context: string;
+  objective?: string | null;
+  projectId?: string | null;
+  targetTokens?: number;
+  storeContext?: boolean;
+}): Promise<PromptCompressionResult> {
+  const response = await authFetch("/api/cognix/prompt-compression/plan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      context: payload.context,
+      objective: payload.objective ?? null,
+      projectId: payload.projectId ?? null,
+      targetTokens: payload.targetTokens ?? 500,
+      storeContext: payload.storeContext ?? true,
+    }),
+  });
+  const body = await parseJsonOrThrow<{
+    compressionPlan?: unknown;
+    compressedContext?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    compressionPlan: normalizePromptCompressionPlan(body.compressionPlan),
+    compressedContext: body.compressedContext
+      ? normalizeCompressedContext(body.compressedContext)
+      : null,
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function createConversationSummaryPlan(payload: {
+  messages: Array<Record<string, unknown>>;
+  objective?: string | null;
+  projectId?: string | null;
+  targetTokens?: number;
+  recentMessageLimit?: number;
+  storeContext?: boolean;
+}): Promise<ConversationSummaryResult> {
+  const response = await authFetch(
+    "/api/cognix/prompt-compression/conversation-summary-plan",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messages: payload.messages,
+        objective: payload.objective ?? null,
+        projectId: payload.projectId ?? null,
+        targetTokens: payload.targetTokens ?? 420,
+        recentMessageLimit: payload.recentMessageLimit ?? 6,
+        storeContext: payload.storeContext ?? true,
+      }),
+    },
+  );
+  const body = await parseJsonOrThrow<{
+    conversationSummaryPlan?: unknown;
+    compressedContext?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    conversationSummaryPlan: normalizeConversationSummaryPlan(
+      body.conversationSummaryPlan,
+    ),
+    compressedContext: body.compressedContext
+      ? normalizeCompressedContext(body.compressedContext)
+      : null,
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function listCompressedContexts(payload?: {
+  includeDeleted?: boolean;
+  projectId?: string | null;
+}): Promise<CompressedContextRecord[]> {
+  const params = new URLSearchParams();
+  if (payload?.includeDeleted) params.set("include_deleted", "true");
+  if (payload?.projectId) params.set("projectId", payload.projectId);
+  const query = params.toString();
+  const response = await authFetch(
+    `/api/cognix/prompt-compression/contexts${query ? `?${query}` : ""}`,
+  );
+  const body = await parseJsonOrThrow<{ contexts?: unknown[] }>(response);
+  return (body.contexts ?? []).map(normalizeCompressedContext);
+}
+
+export async function deleteCompressedContext(contextId: string): Promise<void> {
+  const response = await authFetch(
+    `/api/cognix/prompt-compression/contexts/${encodeURIComponent(contextId)}`,
+    { method: "DELETE" },
+  );
+  await parseJsonOrThrow<unknown>(response);
+}
+
 export async function planCogniXExecution(payload: {
   objective: string;
   projectType?: string | null;
