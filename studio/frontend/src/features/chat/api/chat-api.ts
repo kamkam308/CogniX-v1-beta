@@ -545,6 +545,102 @@ export async function listResponseReflectionEvaluations(
   return body.evaluations ?? [];
 }
 
+export interface DraftStyleProfile {
+  id: string;
+  label: string;
+  tone?: string;
+  targetLength?: string;
+  bestFor?: string[];
+  instruction?: string;
+}
+
+export interface DraftPlanVariant {
+  id: string;
+  variantType: string;
+  label: string;
+  status?: string;
+  styleProfile?: DraftStyleProfile;
+  promptInstruction?: string;
+  requiresBackendGeneration?: boolean;
+  willGenerateNow?: boolean;
+  willStoreVariant?: boolean;
+}
+
+export interface DraftGenerationPlan {
+  draftGenerationVersion?: string;
+  styleProfileRegistryVersion?: string;
+  mode?: string;
+  messageId?: string | null;
+  projectId?: string | null;
+  modelId?: string | null;
+  taskType?: string;
+  selectedVariantTypes?: string[];
+  variants?: DraftPlanVariant[];
+  rankingPlan?: Record<string, unknown>;
+  costPlan?: {
+    estimatedGenerationCount?: number;
+    requiresExplicitUserAction?: boolean;
+    defaultSingleDraftStillAllowed?: boolean;
+  };
+  policies?: Record<string, unknown>;
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface DraftGenerationPlanResult {
+  username: string;
+  draftGenerationPlan: DraftGenerationPlan;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
+export interface ResponseVariantRecord {
+  id: string;
+  messageId?: string | null;
+  threadId?: string | null;
+  projectId?: string | null;
+  variantType?: string | null;
+  title?: string | null;
+  content?: string | null;
+  modelId?: string | null;
+  rankingScore?: number | null;
+  metadata?: Record<string, unknown>;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export async function createDraftGenerationPlan(payload: {
+  prompt: string;
+  requestedVariants?: string[] | null;
+  maxVariants?: number;
+  taskType?: string | null;
+  includeRanking?: boolean;
+  messageId?: string | null;
+  threadId?: string | null;
+  projectId?: string | null;
+  modelId?: string | null;
+}): Promise<DraftGenerationPlanResult> {
+  const response = await authFetch("/api/cognix/drafts/plan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseJsonOrThrow<DraftGenerationPlanResult>(response);
+}
+
+export async function listResponseVariants(
+  messageId?: string | null,
+): Promise<ResponseVariantRecord[]> {
+  const query = messageId
+    ? `?${new URLSearchParams({ message_id: messageId }).toString()}`
+    : "";
+  const response = await authFetch(`/api/cognix/drafts/variants${query}`);
+  const body = await parseJsonOrThrow<{
+    variants?: ResponseVariantRecord[];
+  }>(response);
+  return body.variants ?? [];
+}
+
 export interface ProjectSkillRecord {
   id: string;
   skillId?: string | null;

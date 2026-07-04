@@ -53,10 +53,14 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
   CHAT_HISTORY_UPDATED_EVENT,
+  createDraftGenerationPlan,
   forkChatThread,
   getForkCount,
   listResponseReflectionEvaluations,
+  listResponseVariants,
+  type DraftGenerationPlan,
   type ResponseReflectionRecord,
+  type ResponseVariantRecord,
 } from "@/features/chat/api/chat-api";
 import { sentAudioNames } from "@/features/chat/api/chat-adapter";
 import {
@@ -3576,6 +3580,29 @@ type ResponseReflectionMetadata = {
   source?: "message" | "stored";
 };
 
+type DraftVariantPanelStatus = "loading" | "loaded" | "error";
+
+type DraftVariantPanelState = {
+  status: DraftVariantPanelStatus;
+  plan?: DraftGenerationPlan | null;
+  variants?: ResponseVariantRecord[];
+  message?: string | null;
+};
+
+const useDraftVariantPanelStore = create<{
+  byMessageId: Record<string, DraftVariantPanelState>;
+  setPanelState: (messageId: string, state: DraftVariantPanelState) => void;
+}>((set) => ({
+  byMessageId: {},
+  setPanelState: (messageId, state) =>
+    set((current) => ({
+      byMessageId: {
+        ...current.byMessageId,
+        [messageId]: state,
+      },
+    })),
+}));
+
 function asResponseReflectionMetadata(
   value: unknown,
 ): ResponseReflectionMetadata | null {
@@ -3742,6 +3769,155 @@ const ResponseReflectionBadge: FC = () => {
   );
 };
 
+function unwrapExportedThreadMessage(message: unknown): unknown {
+  if (!message || typeof message !== "object") return "";
+  const nested = (message as { message?: unknown }).message;
+  return nested && typeof nested === "object" ? nested : message;
+}
+
+function exportedMessageText(message: unknown): string {
+  const threadMessage = unwrapExportedThreadMessage(message);
+  if (!threadMessage || typeof threadMessage !== "object") return "";
+  const content = (threadMessage as { content?: unknown }).content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => {
+      if (!part || typeof part !== "object") return "";
+      const record = part as Record<string, unknown>;
+      if (typeof record.text === "string") return record.text;
+      if (typeof record.markdown === "string") return record.markdown;
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+function latestUserPromptBeforeMessage(exportedThread: unknown, messageId: string): string {
+  const messages =
+    exportedThread &&
+    typeof exportedThread === "object" &&
+    Array.isArray((exportedThread as { messages?: unknown }).messages)
+      ? ((exportedThread as { messages: unknown[] }).messages)
+      : [];
+  const messageIndex = messages.findIndex(
+    (message) => {
+      const threadMessage = unwrapExportedThreadMessage(message);
+      return (
+        threadMessage &&
+        typeof threadMessage === "object" &&
+        (threadMessage as { id?: unknown }).id === messageId
+      );
+    },
+  );
+  const scanEnd = messageIndex >= 0 ? messageIndex - 1 : messages.length - 1;
+  for (let index = scanEnd; index >= 0; index -= 1) {
+    const message = messages[index];
+    const threadMessage = unwrapExportedThreadMessage(message);
+    if (
+      threadMessage &&
+      typeof threadMessage === "object" &&
+      (threadMessage as { role?: unknown }).role === "user"
+    ) {
+      const text = exportedMessageText(threadMessage);
+      if (text) return text;
+    }
+  }
+  return "";
+}
+
+function draftVariantLabel(value: string | null | undefined): string {
+  if (!value) return "Variant";
+  return value
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+const ResponseDraftVariantsPanel: FC = () => {
+  const messageId = useAuiState(({ message }) => message.id);
+  const panel = useDraftVariantPanelStore(
+    (state) => state.byMessageId[messageId],
+  );
+  if (!panel) return null;
+
+  const plannedVariants = panel.plan?.variants ?? [];
+  const storedVariants = panel.variants ?? [];
+  const generationCount =
+    panel.plan?.costPlan?.estimatedGenerationCount ?? plannedVariants.length;
+  const safePlan =
+    panel.plan?.sideEffects?.generation === false &&
+    panel.plan?.sideEffects?.networkModelCall === false;
+
+  return (
+    <div
+      data-testid="cognix-draft-variants-panel"
+      className="mt-2 max-w-full rounded-2xl border border-border/70 bg-muted/25 px-3 py-2 text-xs text-muted-foreground"
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-medium text-foreground">Draft variants</span>
+        <Badge variant={panel.status === "error" ? "destructive" : "outline"} size="sm">
+          {panel.status === "loading"
+            ? "planning"
+            : panel.status === "error"
+              ? "error"
+              : storedVariants.length > 0
+                ? `${storedVariants.length} stored`
+                : `${generationCount} planned`}
+        </Badge>
+        {safePlan && (
+          <Badge variant="muted" size="sm">
+            no direct model call
+          </Badge>
+        )}
+      </div>
+      {panel.status === "loading" ? (
+        <p className="mt-1">Preparing style profiles through CogniX Core.</p>
+      ) : panel.status === "error" ? (
+        <p className="mt-1">{panel.message ?? "Draft planner unavailable."}</p>
+      ) : storedVariants.length > 0 ? (
+        <div className="mt-2 grid gap-2">
+          {storedVariants.slice(0, 3).map((variant) => (
+            <div
+              key={variant.id}
+              className="rounded-xl border border-border/60 bg-background/70 px-2.5 py-2"
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-medium text-foreground">
+                  {variant.title || draftVariantLabel(variant.variantType)}
+                </span>
+                <Badge variant="secondary" size="sm">
+                  {draftVariantLabel(variant.variantType)}
+                </Badge>
+              </div>
+              {variant.content && (
+                <p className="mt-1 line-clamp-2 text-foreground/80">
+                  {variant.content}
+                </p>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {plannedVariants.map((variant) => (
+            <Badge key={variant.id} variant="secondary" size="sm">
+              {variant.label || draftVariantLabel(variant.variantType)}
+            </Badge>
+          ))}
+        </div>
+      )}
+      {panel.status === "loaded" && plannedVariants.length > 0 && storedVariants.length === 0 && (
+        <p className="mt-2">
+          Planned only. Generation must continue through backend orchestration and explicit user action.
+        </p>
+      )}
+    </div>
+  );
+};
+
 /**
  * AssistantMessage handles the display and inline-editing of AI responses.
  * 
@@ -3873,6 +4049,7 @@ const AssistantMessage: FC = () => {
             <MessageHtmlArtifacts />
             <MessageError />
             <ResponseReflectionBadge />
+            <ResponseDraftVariantsPanel />
           </>
         )}
       </div>
@@ -4081,6 +4258,82 @@ const EditAssistantMessageButton: FC = () => {
   );
 };
 
+const DraftVariantsMenuItem: FC = () => {
+  const aui = useAui();
+  const messageId = useAuiState(({ message }) => message.id);
+  const isRunning = useAuiState(({ thread }) => thread.isRunning);
+  const setPanelState = useDraftVariantPanelStore((state) => state.setPanelState);
+  const [pending, setPending] = useState(false);
+
+  const handleDraftVariants = async () => {
+    const remoteId = aui.threadListItem().getState().remoteId;
+    const responseText = aui.message().getCopyText().trim();
+    if (!responseText) {
+      toast.error("Cannot plan variants for an empty response");
+      return;
+    }
+    const exportedThread = aui.thread().export();
+    const prompt =
+      latestUserPromptBeforeMessage(exportedThread, messageId) ||
+      `Create response variants for this CogniX answer:\n\n${responseText}`;
+    const runtime = useChatRuntimeStore.getState();
+    setPending(true);
+    setPanelState(messageId, {
+      status: "loading",
+      plan: null,
+      variants: [],
+      message: "Preparing draft variants.",
+    });
+    try {
+      const [planResult, variants] = await Promise.all([
+        createDraftGenerationPlan({
+          prompt,
+          requestedVariants: ["quick", "detailed", "technical"],
+          maxVariants: 3,
+          taskType: "general",
+          includeRanking: true,
+          messageId,
+          threadId: remoteId ?? null,
+          projectId: runtime.activeProjectId ?? null,
+          modelId: runtime.params.checkpoint ?? null,
+        }),
+        listResponseVariants(messageId).catch(() => []),
+      ]);
+      setPanelState(messageId, {
+        status: "loaded",
+        plan: planResult.draftGenerationPlan,
+        variants,
+        message: "Draft planner ready.",
+      });
+      toast.success("Draft variants planned");
+    } catch (error) {
+      setPanelState(messageId, {
+        status: "error",
+        plan: null,
+        variants: [],
+        message:
+          error instanceof Error ? error.message : "Draft planner unavailable.",
+      });
+      toast.error("Draft variants unavailable", {
+        description: error instanceof Error ? error.message : undefined,
+      });
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <ActionBarMorePrimitive.Item
+      disabled={isRunning || pending}
+      onSelect={() => void handleDraftVariants()}
+      className="aui-action-bar-more-item flex cursor-pointer select-none items-center gap-2 rounded-[12px] px-3 py-2 text-sm outline-none hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50"
+    >
+      <Columns2Icon strokeWidth={1.75} className="size-icon" />
+      {pending ? "Planning drafts" : "Draft variants"}
+    </ActionBarMorePrimitive.Item>
+  );
+};
+
 const AssistantActionBar: FC = () => {
   const { forkMessage, forkDisabled } = useForkMessageAction();
 
@@ -4121,6 +4374,7 @@ const AssistantActionBar: FC = () => {
             <GitBranchIcon strokeWidth={1.75} className="size-icon" />
             Fork in new chat
           </ActionBarMorePrimitive.Item>
+          <DraftVariantsMenuItem />
           <ActionBarPrimitive.ExportMarkdown asChild={true}>
             <ActionBarMorePrimitive.Item className="aui-action-bar-more-item flex cursor-pointer select-none items-center gap-2 rounded-[12px] px-3 py-2 text-sm outline-none hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground">
               <HugeiconsIcon
