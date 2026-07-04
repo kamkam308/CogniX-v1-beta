@@ -1226,6 +1226,255 @@ export interface ContextHeatmapPlanResult {
   plannerVersion?: string;
 }
 
+export interface ProjectDnaModelRef {
+  modelId: string;
+  label: string;
+}
+
+export interface ProjectDnaToolRef {
+  toolId: string;
+  label: string;
+}
+
+export interface ProjectDnaDecision {
+  decisionKey?: string;
+  title: string;
+  rationale?: string;
+  status?: string;
+}
+
+export interface ProjectDnaProfile {
+  username?: string | null;
+  projectId?: string | null;
+  projectName?: string | null;
+  objective?: string | null;
+  context?: string | null;
+  responseStyle?: string | null;
+  preferredModels: ProjectDnaModelRef[];
+  allowedTools: ProjectDnaToolRef[];
+  constraints: string[];
+  decisions: ProjectDnaDecision[];
+  sectionStates: Record<string, string>;
+  completion: {
+    readySectionCount: number;
+    totalSectionCount: number;
+    readySectionIds: string[];
+    score: number;
+  };
+  dnaHash?: string | null;
+}
+
+export interface ProjectDnaInjectionPlan {
+  contextInjectorVersion?: string;
+  channelId?: string;
+  status?: string;
+  includedSectionIds: string[];
+  priority?: number;
+  maxTokens?: number;
+  willInjectNow?: boolean;
+  contextManagerCompatible?: boolean;
+  rawHistoryAllowed?: boolean;
+  reason?: string;
+}
+
+export interface ProjectDnaPlan {
+  projectDnaServiceVersion?: string;
+  profileBuilderVersion?: string;
+  contextInjectorVersion?: string;
+  mode?: string;
+  projectId?: string | null;
+  status?: string;
+  profile: ProjectDnaProfile;
+  contextInjectionPlan: ProjectDnaInjectionPlan;
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface ProjectDnaRecord {
+  id?: string | null;
+  projectId?: string | null;
+  objective?: string | null;
+  context?: string | null;
+  responseStyle?: string | null;
+  preferredModels: ProjectDnaModelRef[];
+  allowedTools: ProjectDnaToolRef[];
+  dna: ProjectDnaPlan | null;
+  dnaHash?: string | null;
+  status?: string | null;
+  constraints?: string[];
+  decisions?: ProjectDnaDecision[];
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface ProjectDnaResult {
+  projectDnaPlan: ProjectDnaPlan;
+  projectDna?: ProjectDnaRecord | null;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
+export interface ProjectDnaPayload {
+  projectId: string;
+  objective?: string | null;
+  context?: string | null;
+  responseStyle?: string | null;
+  preferredModels?: Array<string | ProjectDnaModelRef>;
+  allowedTools?: Array<string | ProjectDnaToolRef>;
+  constraints?: string[];
+  decisions?: Array<string | ProjectDnaDecision>;
+  storeDna?: boolean;
+}
+
+function normalizeStringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value
+        .map((item) => {
+          const record = asRecord(item);
+          return stringValue(
+            record.label ?? record.title ?? record.value ?? item,
+          ).trim();
+        })
+        .filter(Boolean)
+    : [];
+}
+
+function normalizeProjectDnaModels(value: unknown): ProjectDnaModelRef[] {
+  return Array.isArray(value)
+    ? value
+        .map((item) => {
+          const record = asRecord(item);
+          const modelId = stringValue(record.modelId ?? record.id ?? item).trim();
+          const label = stringValue(record.label ?? record.name ?? modelId, modelId).trim();
+          return modelId ? { modelId, label: label || modelId } : null;
+        })
+        .filter((item): item is ProjectDnaModelRef => Boolean(item))
+    : [];
+}
+
+function normalizeProjectDnaTools(value: unknown): ProjectDnaToolRef[] {
+  return Array.isArray(value)
+    ? value
+        .map((item) => {
+          const record = asRecord(item);
+          const toolId = stringValue(record.toolId ?? record.id ?? item).trim();
+          const label = stringValue(record.label ?? record.name ?? toolId, toolId).trim();
+          return toolId ? { toolId, label: label || toolId } : null;
+        })
+        .filter((item): item is ProjectDnaToolRef => Boolean(item))
+    : [];
+}
+
+function normalizeProjectDnaDecisions(value: unknown): ProjectDnaDecision[] {
+  return Array.isArray(value)
+    ? value
+        .map((item): ProjectDnaDecision | null => {
+          const record = asRecord(item);
+          const title = stringValue(record.title ?? record.decision ?? item).trim();
+          if (!title) return null;
+          return {
+            decisionKey: maybeString(record.decisionKey ?? record.decision_key) ?? undefined,
+            title,
+            rationale: maybeString(record.rationale ?? record.reason) ?? undefined,
+            status: maybeString(record.status) ?? undefined,
+          };
+        })
+        .filter((item): item is ProjectDnaDecision => Boolean(item))
+    : [];
+}
+
+function normalizeProjectDnaProfile(value: unknown): ProjectDnaProfile {
+  const raw = asRecord(value);
+  const completion = asRecord(raw.completion);
+  const sectionStates = asRecord(raw.sectionStates);
+  return {
+    username: maybeString(raw.username),
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    projectName: maybeString(raw.projectName ?? raw.project_name),
+    objective: maybeString(raw.objective),
+    context: maybeString(raw.context),
+    responseStyle: maybeString(raw.responseStyle ?? raw.response_style),
+    preferredModels: normalizeProjectDnaModels(
+      raw.preferredModels ?? raw.preferred_models,
+    ),
+    allowedTools: normalizeProjectDnaTools(raw.allowedTools ?? raw.allowed_tools),
+    constraints: normalizeStringList(raw.constraints),
+    decisions: normalizeProjectDnaDecisions(raw.decisions),
+    sectionStates: Object.fromEntries(
+      Object.entries(sectionStates).map(([key, status]) => [
+        key,
+        stringValue(status, "missing_optional"),
+      ]),
+    ),
+    completion: {
+      readySectionCount: numberValue(completion.readySectionCount, 0),
+      totalSectionCount: numberValue(completion.totalSectionCount, 0),
+      readySectionIds: normalizeStringList(completion.readySectionIds),
+      score: numberValue(completion.score, 0),
+    },
+    dnaHash: maybeString(raw.dnaHash ?? raw.dna_hash),
+  };
+}
+
+function normalizeProjectDnaInjectionPlan(value: unknown): ProjectDnaInjectionPlan {
+  const raw = asRecord(value);
+  return {
+    contextInjectorVersion: maybeString(raw.contextInjectorVersion) ?? undefined,
+    channelId: maybeString(raw.channelId) ?? undefined,
+    status: maybeString(raw.status) ?? undefined,
+    includedSectionIds: normalizeStringList(raw.includedSectionIds),
+    priority: numberValue(raw.priority, 0),
+    maxTokens: numberValue(raw.maxTokens, 0),
+    willInjectNow: boolValue(raw.willInjectNow),
+    contextManagerCompatible: boolValue(raw.contextManagerCompatible),
+    rawHistoryAllowed: boolValue(raw.rawHistoryAllowed),
+    reason: maybeString(raw.reason) ?? undefined,
+  };
+}
+
+function normalizeProjectDnaPlan(value: unknown): ProjectDnaPlan {
+  const raw = asRecord(value);
+  return {
+    projectDnaServiceVersion:
+      maybeString(raw.projectDnaServiceVersion) ?? undefined,
+    profileBuilderVersion: maybeString(raw.profileBuilderVersion) ?? undefined,
+    contextInjectorVersion: maybeString(raw.contextInjectorVersion) ?? undefined,
+    mode: maybeString(raw.mode) ?? undefined,
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    status: maybeString(raw.status) ?? undefined,
+    profile: normalizeProjectDnaProfile(raw.profile),
+    contextInjectionPlan: normalizeProjectDnaInjectionPlan(
+      raw.contextInjectionPlan,
+    ),
+    sideEffects: parseRecordJson(raw.sideEffects) ?? {},
+  };
+}
+
+function normalizeProjectDnaRecord(value: unknown): ProjectDnaRecord {
+  const raw = asRecord(value);
+  const dna = parseRecordJson(raw.dna ?? raw.dnaJson ?? raw.dna_json);
+  const constraints = raw.constraints ?? raw.activeConstraints;
+  const decisions = raw.decisions ?? raw.activeDecisions;
+  return {
+    id: maybeString(raw.id),
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    objective: maybeString(raw.objective),
+    context: maybeString(raw.context),
+    responseStyle: maybeString(raw.responseStyle ?? raw.response_style),
+    preferredModels: normalizeProjectDnaModels(
+      raw.preferredModels ?? raw.preferred_models,
+    ),
+    allowedTools: normalizeProjectDnaTools(raw.allowedTools ?? raw.allowed_tools),
+    dna: dna ? normalizeProjectDnaPlan(dna) : null,
+    dnaHash: maybeString(raw.dnaHash ?? raw.dna_hash),
+    status: maybeString(raw.status),
+    constraints: normalizeStringList(constraints),
+    decisions: normalizeProjectDnaDecisions(decisions),
+    createdAt: maybeString(raw.createdAt ?? raw.created_at),
+    updatedAt: maybeString(raw.updatedAt ?? raw.updated_at),
+  };
+}
+
 function normalizeContextHeatmapEntry(value: unknown): ContextHeatmapEntry {
   const raw = asRecord(value);
   const entry = parseRecordJson(raw.entry ?? raw.entryJson) ?? {};
@@ -1328,6 +1577,90 @@ function normalizeContextHeatmapPlan(value: unknown): ContextHeatmapPlan {
     },
     display: parseRecordJson(raw.display) ?? {},
     sideEffects: parseRecordJson(raw.sideEffects) ?? {},
+  };
+}
+
+export async function getProjectDna(
+  projectId: string,
+): Promise<ProjectDnaRecord | null> {
+  const response = await authFetch(
+    `/api/cognix/projects/${encodeURIComponent(projectId)}/dna`,
+  );
+  const body = await parseJsonOrThrow<{
+    projectDna?: unknown;
+  }>(response);
+  return body.projectDna ? normalizeProjectDnaRecord(body.projectDna) : null;
+}
+
+export async function upsertProjectDna(
+  payload: ProjectDnaPayload,
+): Promise<ProjectDnaResult> {
+  const response = await authFetch(
+    `/api/cognix/projects/${encodeURIComponent(payload.projectId)}/dna`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        objective: payload.objective ?? null,
+        context: payload.context ?? null,
+        responseStyle: payload.responseStyle ?? null,
+        preferredModels: payload.preferredModels ?? [],
+        allowedTools: payload.allowedTools ?? [],
+        constraints: payload.constraints ?? [],
+        decisions: payload.decisions ?? [],
+        storeDna: payload.storeDna ?? true,
+      }),
+    },
+  );
+  const body = await parseJsonOrThrow<{
+    projectDnaPlan?: unknown;
+    projectDna?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    projectDnaPlan: normalizeProjectDnaPlan(body.projectDnaPlan),
+    projectDna: body.projectDna
+      ? normalizeProjectDnaRecord(body.projectDna)
+      : null,
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function createProjectDnaInjectionPlan(
+  payload: ProjectDnaPayload,
+): Promise<ProjectDnaResult> {
+  const response = await authFetch(
+    `/api/cognix/projects/${encodeURIComponent(payload.projectId)}/dna/injection-plan`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        objective: payload.objective ?? null,
+        context: payload.context ?? null,
+        responseStyle: payload.responseStyle ?? null,
+        preferredModels: payload.preferredModels ?? [],
+        allowedTools: payload.allowedTools ?? [],
+        constraints: payload.constraints ?? [],
+        decisions: payload.decisions ?? [],
+        storeDna: false,
+      }),
+    },
+  );
+  const body = await parseJsonOrThrow<{
+    projectDnaPlan?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    projectDnaPlan: normalizeProjectDnaPlan(body.projectDnaPlan),
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
   };
 }
 

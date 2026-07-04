@@ -79,6 +79,7 @@ import {
 import type { ChatArtifact, ChatArtifactSurface } from "./artifacts/types";
 import { ChatSettingsPanel } from "./chat-settings-sheet";
 import { ContextUsageBar } from "./components/context-usage-bar";
+import { ProjectDnaPanel } from "./components/project-dna-panel";
 import { ProjectContextHeatmapPanel } from "./components/project-context-heatmap-panel";
 import { ModelLoadInlineStatus } from "./components/model-load-status";
 import { ProjectContextGraphPanel } from "./components/project-context-graph-panel";
@@ -1373,6 +1374,11 @@ function ProjectLanding({
               <ProjectSourcesPanel projectId={projectId} />
             ) : projectTab === "contextGraph" ? (
               <>
+                <ProjectDnaPanel
+                  projectId={projectId}
+                  projectName={projectName}
+                  items={items}
+                />
                 <ProjectContextGraphPanel
                   projectId={projectId}
                   projectName={projectName}
