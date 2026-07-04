@@ -79,6 +79,7 @@ import {
 import type { ChatArtifact, ChatArtifactSurface } from "./artifacts/types";
 import { ChatSettingsPanel } from "./chat-settings-sheet";
 import { ContextUsageBar } from "./components/context-usage-bar";
+import { CostOptimizerChip } from "./components/cost-optimizer-chip";
 import { ProjectDnaPanel } from "./components/project-dna-panel";
 import { ProjectContextHeatmapPanel } from "./components/project-context-heatmap-panel";
 import { ModelLoadInlineStatus } from "./components/model-load-status";
@@ -3022,6 +3023,19 @@ export function ChatPage({
             ) : null}
           </div>
           <div className="ml-auto flex items-center gap-2">
+            {view.mode === "single" ? (
+              <CostOptimizerChip
+                active={active}
+                checkpoint={inferenceParams.checkpoint}
+                isExternalModel={isExternalModel}
+                providerName={activeExternalProvider?.name ?? null}
+                providerType={activeExternalProviderType}
+                projectId={currentProjectId}
+                projectName={currentProject?.name ?? null}
+                threadTitle={currentChatTitle ?? null}
+                contextUsage={contextUsage}
+              />
+            ) : null}
             {view.mode === "single" && contextUsage ? (
               <ContextUsageBar
                 used={contextUsage.totalTokens}
