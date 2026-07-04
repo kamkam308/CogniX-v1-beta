@@ -82,6 +82,7 @@ import { ContextUsageBar } from "./components/context-usage-bar";
 import { CostOptimizerChip } from "./components/cost-optimizer-chip";
 import { ProjectDnaPanel } from "./components/project-dna-panel";
 import { ProjectContextHeatmapPanel } from "./components/project-context-heatmap-panel";
+import { ProjectDatasetBuilderPanel } from "./components/project-dataset-builder-panel";
 import { ModelLoadInlineStatus } from "./components/model-load-status";
 import { ProjectContextGraphPanel } from "./components/project-context-graph-panel";
 import { ProjectMemoryReviewPanel } from "./components/project-memory-review-panel";
@@ -1226,6 +1227,7 @@ function ProjectLanding({
     | "chats"
     | "sources"
     | "contextGraph"
+    | "dataset"
     | "timeline"
     | "simulation"
     | "sandbox"
@@ -1373,6 +1375,14 @@ function ProjectLanding({
               </button>
               <button
                 type="button"
+                onClick={() => setProjectTab("dataset")}
+                data-active={projectTab === "dataset"}
+                className="h-10 rounded-full px-5 text-[14px] font-semibold transition-colors data-[active=true]:bg-muted data-[active=true]:text-foreground data-[active=false]:text-muted-foreground data-[active=false]:hover:bg-nav-surface-hover"
+              >
+                Dataset
+              </button>
+              <button
+                type="button"
                 onClick={() => setProjectTab("timeline")}
                 data-active={projectTab === "timeline"}
                 className="h-10 rounded-full px-5 text-[14px] font-semibold transition-colors data-[active=true]:bg-muted data-[active=true]:text-foreground data-[active=false]:text-muted-foreground data-[active=false]:hover:bg-nav-surface-hover"
@@ -1434,6 +1444,12 @@ function ProjectLanding({
                   items={items}
                 />
               </>
+            ) : projectTab === "dataset" ? (
+              <ProjectDatasetBuilderPanel
+                projectId={projectId}
+                projectName={projectName}
+                items={items}
+              />
             ) : projectTab === "timeline" ? (
               <ProjectTimelinePanel
                 projectId={projectId}

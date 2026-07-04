@@ -2109,6 +2109,99 @@ export interface ContextHeatmapPlanResult {
   plannerVersion?: string;
 }
 
+export interface DatasetBuilderSource {
+  sourceId: string;
+  sourceType?: string | null;
+  title?: string | null;
+  tokenCount?: number;
+  sensitiveTermCount?: number;
+}
+
+export interface DatasetBuilderExample {
+  id: string;
+  datasetId?: string | null;
+  instruction: string;
+  input: string;
+  output: string;
+  metadata: {
+    sourceId?: string | null;
+    sourceType?: string | null;
+    sourceTitle?: string | null;
+    chunkIndex?: number;
+    format?: string | null;
+    dataUsedPreview?: string | null;
+    requiresHumanReview?: boolean;
+  } & Record<string, unknown>;
+  qualityScore: number;
+  qualityLabel?: string | null;
+  status?: string | null;
+  matchedObjectiveTerms: string[];
+  sensitiveTerms: string[];
+  tokenCount?: number;
+}
+
+export interface DatasetBuilderPlan {
+  datasetBuilderVersion?: string;
+  syntheticExampleGeneratorVersion?: string;
+  qualityFilterVersion?: string;
+  exportServiceVersion?: string;
+  mode?: string;
+  username?: string | null;
+  projectId?: string | null;
+  dataset: {
+    datasetId: string;
+    objective?: string | null;
+    format?: string | null;
+    status?: string | null;
+    exampleCount: number;
+    readyExampleCount: number;
+    reviewExampleCount: number;
+    filteredExampleCount?: number;
+  };
+  dataSources: DatasetBuilderSource[];
+  examples: DatasetBuilderExample[];
+  qualitySummary: {
+    averageQualityScore: number;
+    readyExampleCount: number;
+    reviewExampleCount: number;
+    filteredExampleCount: number;
+    sensitiveSourceCount: number;
+  };
+  exportPlan: {
+    format?: string | null;
+    previewJsonl?: string | null;
+    willWriteFile?: boolean;
+    willUploadDataset?: boolean;
+    requiresHumanReview?: boolean;
+  };
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface GeneratedDatasetRecord {
+  id: string;
+  projectId?: string | null;
+  objectiveExcerpt?: string | null;
+  outputFormat?: string | null;
+  status?: string | null;
+  exampleCount: number;
+  readyExampleCount: number;
+  reviewExampleCount: number;
+  qualitySummary: DatasetBuilderPlan["qualitySummary"];
+  dataSources: DatasetBuilderSource[];
+  exportPlan: DatasetBuilderPlan["exportPlan"];
+  examples: DatasetBuilderExample[];
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface DatasetBuilderPlanResult {
+  datasetBuilderPlan: DatasetBuilderPlan;
+  generatedDataset?: GeneratedDatasetRecord | null;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
 export interface ProjectDnaModelRef {
   modelId: string;
   label: string;
@@ -2463,6 +2556,150 @@ function normalizeContextHeatmapPlan(value: unknown): ContextHeatmapPlan {
   };
 }
 
+function normalizeDatasetBuilderSource(value: unknown): DatasetBuilderSource {
+  const raw = asRecord(value);
+  return {
+    sourceId: stringValue(raw.sourceId ?? raw.source_id, "source"),
+    sourceType: maybeString(raw.sourceType ?? raw.source_type),
+    title: maybeString(raw.title),
+    tokenCount: numberValue(raw.tokenCount ?? raw.token_count, 0),
+    sensitiveTermCount: numberValue(
+      raw.sensitiveTermCount ?? raw.sensitive_term_count,
+      0,
+    ),
+  };
+}
+
+function normalizeDatasetBuilderExample(value: unknown): DatasetBuilderExample {
+  const raw = asRecord(value);
+  const metadata = parseRecordJson(raw.metadata ?? raw.metadataJson) ?? {};
+  return {
+    id: stringValue(raw.id, "example"),
+    datasetId: maybeString(raw.datasetId ?? raw.dataset_id),
+    instruction: stringValue(raw.instruction),
+    input: stringValue(raw.input),
+    output: stringValue(raw.output),
+    metadata: {
+      ...metadata,
+      sourceId: maybeString(metadata.sourceId ?? metadata.source_id),
+      sourceType: maybeString(metadata.sourceType ?? metadata.source_type),
+      sourceTitle: maybeString(metadata.sourceTitle ?? metadata.source_title),
+      chunkIndex: numberValue(metadata.chunkIndex ?? metadata.chunk_index, 0),
+      format: maybeString(metadata.format),
+      dataUsedPreview: maybeString(
+        metadata.dataUsedPreview ?? metadata.data_used_preview,
+      ),
+      requiresHumanReview:
+        boolValue(
+          metadata.requiresHumanReview ?? metadata.requires_human_review,
+        ) ?? false,
+    },
+    qualityScore: numberValue(raw.qualityScore ?? raw.quality_score, 0),
+    qualityLabel: maybeString(raw.qualityLabel ?? raw.quality_label),
+    status: maybeString(raw.status),
+    matchedObjectiveTerms: normalizeStringList(raw.matchedObjectiveTerms),
+    sensitiveTerms: normalizeStringList(raw.sensitiveTerms),
+    tokenCount: numberValue(raw.tokenCount ?? raw.token_count, 0),
+  };
+}
+
+function normalizeDatasetQualitySummary(
+  value: unknown,
+): DatasetBuilderPlan["qualitySummary"] {
+  const raw = asRecord(value);
+  return {
+    averageQualityScore: numberValue(raw.averageQualityScore, 0),
+    readyExampleCount: numberValue(raw.readyExampleCount, 0),
+    reviewExampleCount: numberValue(raw.reviewExampleCount, 0),
+    filteredExampleCount: numberValue(raw.filteredExampleCount, 0),
+    sensitiveSourceCount: numberValue(raw.sensitiveSourceCount, 0),
+  };
+}
+
+function normalizeDatasetExportPlan(
+  value: unknown,
+): DatasetBuilderPlan["exportPlan"] {
+  const raw = asRecord(value);
+  return {
+    format: maybeString(raw.format),
+    previewJsonl: maybeString(raw.previewJsonl),
+    willWriteFile: boolValue(raw.willWriteFile) ?? false,
+    willUploadDataset: boolValue(raw.willUploadDataset) ?? false,
+    requiresHumanReview: boolValue(raw.requiresHumanReview) ?? false,
+  };
+}
+
+function normalizeDatasetBuilderPlan(value: unknown): DatasetBuilderPlan {
+  const raw = asRecord(value);
+  const dataset = asRecord(raw.dataset);
+  return {
+    datasetBuilderVersion: maybeString(raw.datasetBuilderVersion) ?? undefined,
+    syntheticExampleGeneratorVersion:
+      maybeString(raw.syntheticExampleGeneratorVersion) ?? undefined,
+    qualityFilterVersion: maybeString(raw.qualityFilterVersion) ?? undefined,
+    exportServiceVersion: maybeString(raw.exportServiceVersion) ?? undefined,
+    mode: maybeString(raw.mode) ?? undefined,
+    username: maybeString(raw.username),
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    dataset: {
+      datasetId: stringValue(dataset.datasetId ?? dataset.dataset_id, "dataset"),
+      objective: maybeString(dataset.objective),
+      format: maybeString(dataset.format),
+      status: maybeString(dataset.status),
+      exampleCount: numberValue(dataset.exampleCount, 0),
+      readyExampleCount: numberValue(dataset.readyExampleCount, 0),
+      reviewExampleCount: numberValue(dataset.reviewExampleCount, 0),
+      filteredExampleCount: numberValue(dataset.filteredExampleCount, 0),
+    },
+    dataSources: Array.isArray(raw.dataSources)
+      ? raw.dataSources.map(normalizeDatasetBuilderSource)
+      : [],
+    examples: Array.isArray(raw.examples)
+      ? raw.examples.map(normalizeDatasetBuilderExample)
+      : [],
+    qualitySummary: normalizeDatasetQualitySummary(raw.qualitySummary),
+    exportPlan: normalizeDatasetExportPlan(raw.exportPlan),
+    sideEffects: parseRecordJson(raw.sideEffects) ?? {},
+  };
+}
+
+function normalizeGeneratedDataset(value: unknown): GeneratedDatasetRecord {
+  const raw = asRecord(value);
+  const qualitySummary =
+    parseRecordJson(raw.qualitySummary ?? raw.quality_summary_json) ??
+    asRecord(raw.qualitySummary);
+  const dataSources =
+    parseArrayJson(raw.dataSources ?? raw.data_sources_json) ??
+    (Array.isArray(raw.dataSources) ? raw.dataSources : []);
+  const exportPlan =
+    parseRecordJson(raw.exportPlan ?? raw.export_plan_json) ??
+    asRecord(raw.exportPlan);
+  return {
+    id: stringValue(raw.id, "dataset"),
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    objectiveExcerpt: maybeString(raw.objectiveExcerpt ?? raw.objective_excerpt),
+    outputFormat: maybeString(raw.outputFormat ?? raw.output_format),
+    status: maybeString(raw.status),
+    exampleCount: numberValue(raw.exampleCount ?? raw.example_count, 0),
+    readyExampleCount: numberValue(
+      raw.readyExampleCount ?? raw.ready_example_count,
+      0,
+    ),
+    reviewExampleCount: numberValue(
+      raw.reviewExampleCount ?? raw.review_example_count,
+      0,
+    ),
+    qualitySummary: normalizeDatasetQualitySummary(qualitySummary),
+    dataSources: dataSources.map(normalizeDatasetBuilderSource),
+    exportPlan: normalizeDatasetExportPlan(exportPlan),
+    examples: Array.isArray(raw.examples)
+      ? raw.examples.map(normalizeDatasetBuilderExample)
+      : [],
+    createdAt: maybeString(raw.createdAt ?? raw.created_at),
+    updatedAt: maybeString(raw.updatedAt ?? raw.updated_at),
+  };
+}
+
 export async function getProjectDna(
   projectId: string,
 ): Promise<ProjectDnaRecord | null> {
@@ -2608,6 +2845,69 @@ export async function listContextHeatmapEntries(payload?: {
   return {
     entries: (body.entries ?? []).map(normalizeContextHeatmapEntry),
     usageStats: (body.usageStats ?? []).map(normalizeContextUsageStat),
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function createDatasetBuilderPlan(payload: {
+  documents: Array<Record<string, unknown>>;
+  objective?: string | null;
+  outputFormat?: "jsonl" | "alpaca_json" | "chatml_jsonl" | string;
+  maxExamples?: number;
+  projectId?: string | null;
+  storeDataset?: boolean;
+}): Promise<DatasetBuilderPlanResult> {
+  const response = await authFetch("/api/cognix/datasets/plan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      documents: payload.documents,
+      objective: payload.objective ?? null,
+      outputFormat: payload.outputFormat ?? "jsonl",
+      maxExamples: payload.maxExamples ?? 50,
+      projectId: payload.projectId ?? null,
+      storeDataset: payload.storeDataset ?? true,
+    }),
+  });
+  const body = await parseJsonOrThrow<{
+    datasetBuilderPlan?: unknown;
+    generatedDataset?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    datasetBuilderPlan: normalizeDatasetBuilderPlan(body.datasetBuilderPlan),
+    generatedDataset: body.generatedDataset
+      ? normalizeGeneratedDataset(body.generatedDataset)
+      : null,
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function listGeneratedDatasets(payload?: {
+  projectId?: string | null;
+}): Promise<{
+  datasets: GeneratedDatasetRecord[];
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}> {
+  const params = new URLSearchParams();
+  if (payload?.projectId) params.set("project_id", payload.projectId);
+  const query = params.toString();
+  const response = await authFetch(
+    `/api/cognix/datasets${query ? `?${query}` : ""}`,
+  );
+  const body = await parseJsonOrThrow<{
+    datasets?: unknown[];
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    datasets: (body.datasets ?? []).map(normalizeGeneratedDataset),
     sideEffects: body.sideEffects,
     plannerVersion: body.plannerVersion,
   };
