@@ -95,7 +95,7 @@ export const zhCN = {
       chat: "聊天",
       cognixCore: "CogniX Core",
       admin: "管理",
-      contextMemory: "上下文记忆",
+      contextMemory: "记忆",
       developer: "开发者",
       connections: "连接",
       apiKeys: "API",

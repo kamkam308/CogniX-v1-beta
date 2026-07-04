@@ -95,7 +95,7 @@ export const en = {
       chat: "Chat",
       cognixCore: "CogniX Core",
       admin: "Admin",
-      contextMemory: "Context Memory",
+      contextMemory: "Memory",
       developer: "Developer",
       connections: "Connections",
       apiKeys: "API",
