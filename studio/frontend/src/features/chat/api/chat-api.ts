@@ -1730,6 +1730,469 @@ export async function listContextHeatmapEntries(payload?: {
   };
 }
 
+export type LiveMemoryCategory =
+  | "preference"
+  | "project"
+  | "skill"
+  | "organization"
+  | "general"
+  | string;
+
+export interface LiveMemoryVersionRecord {
+  id?: string | null;
+  memoryId?: string | null;
+  versionNumber?: number;
+  category?: LiveMemoryCategory;
+  title?: string;
+  content?: string;
+  changeReason?: string | null;
+  metadata?: Record<string, unknown>;
+  createdAt?: string | null;
+}
+
+export interface LiveMemoryAuditLog {
+  id?: string | null;
+  memoryId?: string | null;
+  action?: string | null;
+  actorUsername?: string | null;
+  metadata?: Record<string, unknown>;
+  createdAt?: string | null;
+}
+
+export interface LiveMemoryItem {
+  id: string;
+  projectId?: string | null;
+  category: LiveMemoryCategory;
+  title: string;
+  content: string;
+  status: "active" | "disabled" | "deleted" | string;
+  sensitive: boolean;
+  currentVersion: number;
+  metadata: Record<string, unknown>;
+  versions: LiveMemoryVersionRecord[];
+  auditLogs: LiveMemoryAuditLog[];
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface LiveMemoryMutationResult {
+  memory: LiveMemoryItem | null;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
+export interface MemoryCleanupSuggestion {
+  id?: string | null;
+  projectId?: string | null;
+  memoryId: string;
+  title: string;
+  category: string;
+  reasonCode: string;
+  recommendedAction: string;
+  confidence: number;
+  detail?: string | null;
+  duplicateOf?: string | null;
+  conflictId?: string | null;
+  requiresReview?: boolean;
+  rollbackPlan?: Record<string, unknown>;
+  status?: string | null;
+  createdAt?: string | null;
+}
+
+export interface MemoryConflict {
+  id?: string | null;
+  projectId?: string | null;
+  conflictId?: string | null;
+  memoryIds: string[];
+  conflictType?: string | null;
+  preferenceKey?: string | null;
+  summary?: string | null;
+  requiresReview?: boolean;
+  rollbackRequired?: boolean;
+  status?: string | null;
+  createdAt?: string | null;
+}
+
+export interface MemoryCleanupPlan {
+  memoryGarbageCollectorVersion?: string;
+  memoryConflictResolverVersion?: string;
+  usageTrackerVersion?: string;
+  mode?: string;
+  projectId?: string | null;
+  suggestions: MemoryCleanupSuggestion[];
+  conflicts: MemoryConflict[];
+  summary?: {
+    memoryCount?: number;
+    suggestionCount?: number;
+    archiveCandidateCount?: number;
+    mergeCandidateCount?: number;
+    conflictCount?: number;
+    reviewMessage?: string | null;
+    automaticCleanupWillRun?: boolean;
+  };
+  reviewPolicy?: Record<string, unknown>;
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface MemoryCleanupPlanResult {
+  memoryCleanupPlan: MemoryCleanupPlan;
+  storedSuggestions: MemoryCleanupSuggestion[];
+  storedConflicts: MemoryConflict[];
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
+function normalizeLiveMemoryVersion(
+  value: unknown,
+): LiveMemoryVersionRecord {
+  const raw = asRecord(value);
+  return {
+    id: maybeString(raw.id),
+    memoryId: maybeString(raw.memoryId ?? raw.memory_id),
+    versionNumber: numberValue(raw.versionNumber ?? raw.version_number, 0),
+    category: maybeString(raw.category) ?? "general",
+    title: maybeString(raw.title) ?? "",
+    content: maybeString(raw.content) ?? "",
+    changeReason: maybeString(raw.changeReason ?? raw.change_reason),
+    metadata: parseRecordJson(raw.metadata ?? raw.metadataJson) ?? {},
+    createdAt: maybeString(raw.createdAt ?? raw.created_at),
+  };
+}
+
+function normalizeLiveMemoryAuditLog(value: unknown): LiveMemoryAuditLog {
+  const raw = asRecord(value);
+  return {
+    id: maybeString(raw.id),
+    memoryId: maybeString(raw.memoryId ?? raw.memory_id),
+    action: maybeString(raw.action),
+    actorUsername: maybeString(raw.actorUsername ?? raw.actor_username),
+    metadata: parseRecordJson(raw.metadata ?? raw.metadataJson) ?? {},
+    createdAt: maybeString(raw.createdAt ?? raw.created_at),
+  };
+}
+
+function normalizeLiveMemoryItem(value: unknown): LiveMemoryItem {
+  const raw = asRecord(value);
+  return {
+    id: stringValue(raw.id),
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    category: maybeString(raw.category) ?? "general",
+    title: maybeString(raw.title) ?? "Memory",
+    content: maybeString(raw.content) ?? "",
+    status: maybeString(raw.status) ?? "active",
+    sensitive: boolValue(raw.sensitive) ?? false,
+    currentVersion: numberValue(raw.currentVersion ?? raw.current_version, 1),
+    metadata: parseRecordJson(raw.metadata ?? raw.metadataJson) ?? {},
+    versions: Array.isArray(raw.versions)
+      ? raw.versions.map(normalizeLiveMemoryVersion)
+      : [],
+    auditLogs: Array.isArray(raw.auditLogs)
+      ? raw.auditLogs.map(normalizeLiveMemoryAuditLog)
+      : [],
+    createdAt: maybeString(raw.createdAt ?? raw.created_at),
+    updatedAt: maybeString(raw.updatedAt ?? raw.updated_at),
+  };
+}
+
+function normalizeMemoryCleanupSuggestion(
+  value: unknown,
+): MemoryCleanupSuggestion {
+  const raw = asRecord(value);
+  const embedded = parseRecordJson(raw.suggestion ?? raw.suggestionJson) ?? {};
+  const merged = { ...embedded, ...raw };
+  return {
+    id: maybeString(raw.id),
+    projectId: maybeString(merged.projectId ?? merged.project_id),
+    memoryId: stringValue(merged.memoryId ?? merged.memory_id),
+    title: maybeString(merged.title) ?? "Memory",
+    category: maybeString(merged.category) ?? "general",
+    reasonCode: maybeString(merged.reasonCode ?? merged.reason_code) ?? "review",
+    recommendedAction:
+      maybeString(merged.recommendedAction ?? merged.recommended_action) ??
+      "review",
+    confidence: numberValue(merged.confidence, 0),
+    detail: maybeString(merged.detail),
+    duplicateOf: maybeString(merged.duplicateOf ?? merged.duplicate_of),
+    conflictId: maybeString(merged.conflictId ?? merged.conflict_id),
+    requiresReview: boolValue(merged.requiresReview) ?? true,
+    rollbackPlan: parseRecordJson(merged.rollbackPlan) ?? {},
+    status: maybeString(merged.status),
+    createdAt: maybeString(merged.createdAt ?? merged.created_at),
+  };
+}
+
+function normalizeMemoryConflict(value: unknown): MemoryConflict {
+  const raw = asRecord(value);
+  const embedded = parseRecordJson(raw.conflict ?? raw.conflictJson) ?? {};
+  const merged = { ...embedded, ...raw };
+  const memoryIds = merged.memoryIds ?? merged.memory_ids ?? raw.memoryIds;
+  return {
+    id: maybeString(raw.id),
+    projectId: maybeString(merged.projectId ?? merged.project_id),
+    conflictId: maybeString(merged.conflictId ?? merged.conflict_id),
+    memoryIds: Array.isArray(memoryIds)
+      ? memoryIds.map((item) => stringValue(item)).filter(Boolean)
+      : [],
+    conflictType: maybeString(merged.conflictType ?? merged.conflict_type),
+    preferenceKey: maybeString(merged.preferenceKey ?? merged.preference_key),
+    summary: maybeString(merged.summary),
+    requiresReview: boolValue(merged.requiresReview) ?? true,
+    rollbackRequired: boolValue(merged.rollbackRequired) ?? true,
+    status: maybeString(merged.status),
+    createdAt: maybeString(merged.createdAt ?? merged.created_at),
+  };
+}
+
+function normalizeMemoryCleanupPlan(value: unknown): MemoryCleanupPlan {
+  const raw = asRecord(value);
+  const summary = asRecord(raw.summary);
+  return {
+    memoryGarbageCollectorVersion:
+      maybeString(raw.memoryGarbageCollectorVersion) ?? undefined,
+    memoryConflictResolverVersion:
+      maybeString(raw.memoryConflictResolverVersion) ?? undefined,
+    usageTrackerVersion: maybeString(raw.usageTrackerVersion) ?? undefined,
+    mode: maybeString(raw.mode) ?? undefined,
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    suggestions: Array.isArray(raw.suggestions)
+      ? raw.suggestions.map(normalizeMemoryCleanupSuggestion)
+      : [],
+    conflicts: Array.isArray(raw.conflicts)
+      ? raw.conflicts.map(normalizeMemoryConflict)
+      : [],
+    summary: {
+      memoryCount: numberValue(summary.memoryCount, 0),
+      suggestionCount: numberValue(summary.suggestionCount, 0),
+      archiveCandidateCount: numberValue(summary.archiveCandidateCount, 0),
+      mergeCandidateCount: numberValue(summary.mergeCandidateCount, 0),
+      conflictCount: numberValue(summary.conflictCount, 0),
+      reviewMessage: maybeString(summary.reviewMessage),
+      automaticCleanupWillRun: boolValue(summary.automaticCleanupWillRun),
+    },
+    reviewPolicy: parseRecordJson(raw.reviewPolicy) ?? {},
+    sideEffects: parseRecordJson(raw.sideEffects) ?? {},
+  };
+}
+
+export async function listLiveMemoryItems(payload?: {
+  projectId?: string | null;
+  category?: string | null;
+  query?: string | null;
+  includeDisabled?: boolean;
+}): Promise<LiveMemoryItem[]> {
+  const params = new URLSearchParams();
+  if (payload?.projectId) params.set("project_id", payload.projectId);
+  if (payload?.category) params.set("category", payload.category);
+  if (payload?.query) params.set("query", payload.query);
+  if (payload?.includeDisabled) params.set("include_disabled", "true");
+  const query = params.toString();
+  const response = await authFetch(
+    `/api/cognix/memory/editor/items${query ? `?${query}` : ""}`,
+  );
+  const body = await parseJsonOrThrow<{ items?: unknown[] }>(response);
+  return (body.items ?? []).map(normalizeLiveMemoryItem);
+}
+
+export async function createLiveMemoryItem(payload: {
+  title: string;
+  content: string;
+  category?: string;
+  projectId?: string | null;
+  sensitive?: boolean;
+  confirmedSensitiveControl?: boolean;
+  metadata?: Record<string, unknown>;
+  storeMemory?: boolean;
+}): Promise<LiveMemoryMutationResult> {
+  const response = await authFetch("/api/cognix/memory/editor/items", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: payload.title,
+      content: payload.content,
+      category: payload.category ?? "general",
+      projectId: payload.projectId ?? null,
+      sensitive: payload.sensitive ?? false,
+      confirmedSensitiveControl: payload.confirmedSensitiveControl ?? false,
+      metadata: payload.metadata ?? {},
+      storeMemory: payload.storeMemory ?? true,
+    }),
+  });
+  const body = await parseJsonOrThrow<{
+    memory?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    memory: body.memory ? normalizeLiveMemoryItem(body.memory) : null,
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function updateLiveMemoryItem(
+  memoryId: string,
+  payload: {
+    title?: string | null;
+    content?: string | null;
+    category?: string | null;
+    reason?: string | null;
+  },
+): Promise<LiveMemoryMutationResult> {
+  const response = await authFetch(
+    `/api/cognix/memory/editor/items/${encodeURIComponent(memoryId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: payload.title ?? null,
+        content: payload.content ?? null,
+        category: payload.category ?? null,
+        reason: payload.reason ?? null,
+      }),
+    },
+  );
+  const body = await parseJsonOrThrow<{
+    memory?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    memory: body.memory ? normalizeLiveMemoryItem(body.memory) : null,
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function disableLiveMemoryItem(
+  memoryId: string,
+  reason?: string,
+): Promise<LiveMemoryMutationResult> {
+  const response = await authFetch(
+    `/api/cognix/memory/editor/items/${encodeURIComponent(memoryId)}/disable`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: reason ?? "memory_review_disabled" }),
+    },
+  );
+  const body = await parseJsonOrThrow<{
+    memory?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    memory: body.memory ? normalizeLiveMemoryItem(body.memory) : null,
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function mergeLiveMemoryItems(payload: {
+  sourceIds: string[];
+  title?: string | null;
+  category?: string | null;
+  disableSources?: boolean;
+  metadata?: Record<string, unknown>;
+}): Promise<LiveMemoryMutationResult> {
+  const response = await authFetch("/api/cognix/memory/editor/merge", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sourceIds: payload.sourceIds,
+      title: payload.title ?? null,
+      category: payload.category ?? null,
+      disableSources: payload.disableSources ?? true,
+      metadata: payload.metadata ?? {},
+    }),
+  });
+  const body = await parseJsonOrThrow<{
+    memory?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    memory: body.memory ? normalizeLiveMemoryItem(body.memory) : null,
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function createMemoryCleanupPlan(payload: {
+  memories: Array<Record<string, unknown>>;
+  usageEntries?: Array<Record<string, unknown>>;
+  projectId?: string | null;
+  storeSuggestions?: boolean;
+}): Promise<MemoryCleanupPlanResult> {
+  const response = await authFetch("/api/cognix/memory/cleanup/plan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      memories: payload.memories,
+      usageEntries: payload.usageEntries ?? [],
+      projectId: payload.projectId ?? null,
+      storeSuggestions: payload.storeSuggestions ?? true,
+    }),
+  });
+  const body = await parseJsonOrThrow<{
+    memoryCleanupPlan?: unknown;
+    storedSuggestions?: unknown[];
+    storedConflicts?: unknown[];
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    memoryCleanupPlan: normalizeMemoryCleanupPlan(body.memoryCleanupPlan),
+    storedSuggestions: (body.storedSuggestions ?? []).map(
+      normalizeMemoryCleanupSuggestion,
+    ),
+    storedConflicts: (body.storedConflicts ?? []).map(normalizeMemoryConflict),
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function listMemoryCleanupSuggestions(payload?: {
+  projectId?: string | null;
+  limit?: number;
+}): Promise<MemoryCleanupSuggestion[]> {
+  const params = new URLSearchParams();
+  if (payload?.projectId) params.set("project_id", payload.projectId);
+  if (payload?.limit) params.set("limit", String(payload.limit));
+  const query = params.toString();
+  const response = await authFetch(
+    `/api/cognix/memory/cleanup/suggestions${query ? `?${query}` : ""}`,
+  );
+  const body = await parseJsonOrThrow<{ suggestions?: unknown[] }>(response);
+  return (body.suggestions ?? []).map(normalizeMemoryCleanupSuggestion);
+}
+
+export async function listMemoryConflicts(payload?: {
+  projectId?: string | null;
+  limit?: number;
+}): Promise<MemoryConflict[]> {
+  const params = new URLSearchParams();
+  if (payload?.projectId) params.set("project_id", payload.projectId);
+  if (payload?.limit) params.set("limit", String(payload.limit));
+  const query = params.toString();
+  const response = await authFetch(
+    `/api/cognix/memory/cleanup/conflicts${query ? `?${query}` : ""}`,
+  );
+  const body = await parseJsonOrThrow<{ conflicts?: unknown[] }>(response);
+  return (body.conflicts ?? []).map(normalizeMemoryConflict);
+}
+
 export async function planCogniXExecution(payload: {
   objective: string;
   projectType?: string | null;

@@ -11538,13 +11538,17 @@ async def list_live_memory_items(
     category: str | None = None,
     query: str | None = None,
     include_disabled: bool = False,
+    project_id: str | None = None,
     current_subject: str = Depends(get_current_jwt_subject),
 ) -> dict[str, Any]:
+    if project_id:
+        _require_owned_project(project_id, current_subject)
     return {
         "username": current_subject,
         "items": _rows(
             cognix_db.list_live_memories(
                 current_subject,
+                project_id = project_id,
                 category = cognix_memory_editor.normalize_category(category) if category else None,
                 query = query,
                 include_disabled = include_disabled,

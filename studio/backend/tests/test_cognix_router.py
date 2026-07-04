@@ -6616,6 +6616,46 @@ def test_live_memory_editor_endpoint_versions_searches_exports_and_deletes():
     }.issubset(actions)
 
 
+def test_live_memory_list_can_filter_by_project():
+    seed_accounts()
+    seed_chat_project(project_id = "project-memory-a", owner_username = "alice")
+    seed_chat_project(project_id = "project-memory-b", owner_username = "alice")
+
+    first = run_async(
+        cognix_routes.create_live_memory_item(
+            cognix_routes.LiveMemoryCreateRequest(
+                title = "Projet A",
+                content = "Memoire native du projet A.",
+                category = "project",
+                projectId = "project-memory-a",
+            ),
+            current_subject = "alice",
+        )
+    )
+    second = run_async(
+        cognix_routes.create_live_memory_item(
+            cognix_routes.LiveMemoryCreateRequest(
+                title = "Projet B",
+                content = "Memoire native du projet B.",
+                category = "project",
+                projectId = "project-memory-b",
+            ),
+            current_subject = "alice",
+        )
+    )
+
+    listed = run_async(
+        cognix_routes.list_live_memory_items(
+            project_id = "project-memory-a",
+            include_disabled = True,
+            current_subject = "alice",
+        )
+    )
+
+    assert [item["id"] for item in listed["items"]] == [first["memory"]["id"]]
+    assert second["memory"]["id"] not in {item["id"] for item in listed["items"]}
+
+
 def test_live_memory_merge_creates_new_memory_and_can_disable_sources():
     seed_accounts()
     first = run_async(

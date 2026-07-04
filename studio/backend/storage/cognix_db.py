@@ -13827,6 +13827,7 @@ def create_live_memory(username: str, *, plan: dict[str, Any], actor_username: s
 def list_live_memories(
     username: str,
     *,
+    project_id: str | None = None,
     category: str | None = None,
     query: str | None = None,
     include_disabled: bool = False,
@@ -13839,6 +13840,9 @@ def list_live_memories(
         clauses.append("status = 'active'")
     else:
         clauses.append("status != 'deleted'")
+    if project_id:
+        clauses.append("project_id = ?")
+        params.append(project_id)
     if category:
         clauses.append("category = ?")
         params.append(category)

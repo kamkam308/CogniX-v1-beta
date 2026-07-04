@@ -83,6 +83,7 @@ import { ProjectDnaPanel } from "./components/project-dna-panel";
 import { ProjectContextHeatmapPanel } from "./components/project-context-heatmap-panel";
 import { ModelLoadInlineStatus } from "./components/model-load-status";
 import { ProjectContextGraphPanel } from "./components/project-context-graph-panel";
+import { ProjectMemoryReviewPanel } from "./components/project-memory-review-panel";
 import { ProjectPromptCompressionPanel } from "./components/project-prompt-compression-panel";
 import { ProjectSwitcher } from "./components/project-switcher";
 import { ProjectWorkflowRecorderPanel } from "./components/project-workflow-recorder-panel";
@@ -1378,6 +1379,10 @@ function ProjectLanding({
                   projectId={projectId}
                   projectName={projectName}
                   items={items}
+                />
+                <ProjectMemoryReviewPanel
+                  projectId={projectId}
+                  projectName={projectName}
                 />
                 <ProjectContextGraphPanel
                   projectId={projectId}
