@@ -622,6 +622,121 @@ export interface SimulationRunResult {
   plannerVersion?: string;
 }
 
+export type SandboxTargetType =
+  | "feature"
+  | "model"
+  | "tool"
+  | "code_change"
+  | "config_change";
+
+export interface SandboxCheck {
+  id: string;
+  label: string;
+  required?: boolean;
+}
+
+export interface SandboxPipelineStep {
+  id: string;
+  service: string;
+  status: string;
+  willExecuteNow?: boolean;
+  detail?: string;
+}
+
+export interface SandboxRisk {
+  id: string;
+  severity: "low" | "medium" | "high" | string;
+  active?: boolean;
+}
+
+export interface SandboxPlan {
+  sandboxManagerVersion?: string;
+  isolatedRuntimeVersion?: string;
+  experimentRunnerVersion?: string;
+  rollbackServiceVersion?: string;
+  mode?: string;
+  username?: string | null;
+  projectId?: string | null;
+  projectType?: string | null;
+  target: {
+    type: SandboxTargetType;
+    objective: string;
+    changeSummary: string;
+    durationMinutes: number;
+  };
+  isolation: {
+    ephemeral?: boolean;
+    minimalConfigOnly?: boolean;
+    minimalConfigKeys: string[];
+    productionSecretsAccessible?: boolean;
+    productionDatabaseWritable?: boolean;
+    networkAllowedByDefault?: boolean;
+    rawDatasetCopyAllowed?: boolean;
+  };
+  checks: SandboxCheck[];
+  pipeline: SandboxPipelineStep[];
+  rollbackPlan: {
+    defaultAction?: string;
+    deleteSandboxOnFailure?: boolean;
+    promotionRequiresApproval?: boolean;
+    productionRollbackWillExecuteNow?: boolean;
+  };
+  report: {
+    title?: string;
+    status?: string;
+    riskLevel: "low" | "medium" | "high" | string;
+    badge?: string;
+    summary: {
+      checkCount?: number;
+      requiresHumanApproval?: boolean;
+      productionSecretsAccessible?: boolean;
+      autoPromotionAllowed?: boolean;
+    };
+    risks: SandboxRisk[];
+    recommendations: string[];
+  };
+  queuePlan: {
+    queueRequired?: boolean;
+    queueId?: string | null;
+    jobType?: string | null;
+    willEnqueueNow?: boolean;
+    reason?: string | null;
+  };
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface SandboxRunRecord {
+  id: string;
+  sandboxId?: string | null;
+  projectId?: string | null;
+  targetType: SandboxTargetType;
+  objective: string;
+  changeSummary: string;
+  status?: string | null;
+  plan: SandboxPlan;
+  pipeline: SandboxPipelineStep[];
+  sandbox?: {
+    id?: string | null;
+    status?: string | null;
+    badgeLabel?: string | null;
+  } | null;
+  reportRecord?: {
+    id?: string | null;
+    riskLevel?: string | null;
+    report?: SandboxPlan["report"];
+  } | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface SandboxPlanResult {
+  sandboxPlan: SandboxPlan;
+  run: SandboxRunRecord | null;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -667,6 +782,17 @@ function parseRecordJson(value: unknown): Record<string, unknown> | undefined {
   if (typeof value !== "string" || !value.trim()) return undefined;
   try {
     return asOptionalRecord(JSON.parse(value));
+  } catch {
+    return undefined;
+  }
+}
+
+function parseArrayJson(value: unknown): unknown[] | undefined {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : undefined;
   } catch {
     return undefined;
   }
@@ -948,6 +1074,220 @@ function normalizeSimulationRun(value: unknown): SimulationRunRecord {
   };
 }
 
+function normalizeSandboxTargetType(value: unknown): SandboxTargetType {
+  const candidate = maybeString(value)?.toLowerCase().replace(/[-\s]+/g, "_");
+  if (
+    candidate === "feature" ||
+    candidate === "model" ||
+    candidate === "tool" ||
+    candidate === "code_change" ||
+    candidate === "config_change"
+  ) {
+    return candidate;
+  }
+  return "feature";
+}
+
+function normalizeSandboxCheck(value: unknown): SandboxCheck {
+  const raw = asRecord(value);
+  return {
+    id: stringValue(raw.id, "check"),
+    label: stringValue(raw.label, "Check"),
+    required: boolValue(raw.required),
+  };
+}
+
+function normalizeSandboxPipelineStep(value: unknown): SandboxPipelineStep {
+  const raw = asRecord(value);
+  return {
+    id: stringValue(raw.id, "step"),
+    service: stringValue(raw.service, "SandboxManager"),
+    status: stringValue(raw.status, "planned"),
+    willExecuteNow: boolValue(raw.willExecuteNow ?? raw.will_execute_now),
+    detail: maybeString(raw.detail) ?? undefined,
+  };
+}
+
+function normalizeSandboxRisk(value: unknown): SandboxRisk {
+  const raw = asRecord(value);
+  return {
+    id: stringValue(raw.id, "risk"),
+    severity: stringValue(raw.severity, "low"),
+    active: boolValue(raw.active),
+  };
+}
+
+function normalizeSandboxPlan(value: unknown): SandboxPlan {
+  const raw = asRecord(value);
+  const target = asRecord(raw.target);
+  const isolation = asRecord(raw.isolation);
+  const rollbackPlan = asRecord(raw.rollbackPlan);
+  const report = asRecord(raw.report);
+  const summary = asRecord(report.summary);
+  const queuePlan = asRecord(raw.queuePlan);
+  return {
+    sandboxManagerVersion: maybeString(raw.sandboxManagerVersion) ?? undefined,
+    isolatedRuntimeVersion:
+      maybeString(raw.isolatedRuntimeVersion) ?? undefined,
+    experimentRunnerVersion:
+      maybeString(raw.experimentRunnerVersion) ?? undefined,
+    rollbackServiceVersion:
+      maybeString(raw.rollbackServiceVersion) ?? undefined,
+    mode: maybeString(raw.mode) ?? undefined,
+    username: maybeString(raw.username),
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    projectType: maybeString(raw.projectType ?? raw.project_type),
+    target: {
+      type: normalizeSandboxTargetType(target.type),
+      objective: stringValue(target.objective, "Tester en sandbox"),
+      changeSummary: stringValue(
+        target.changeSummary ?? target.change_summary,
+        "Modification a tester",
+      ),
+      durationMinutes: numberValue(
+        target.durationMinutes ?? target.duration_minutes,
+        30,
+      ),
+    },
+    isolation: {
+      ephemeral: boolValue(isolation.ephemeral),
+      minimalConfigOnly: boolValue(
+        isolation.minimalConfigOnly ?? isolation.minimal_config_only,
+      ),
+      minimalConfigKeys: Array.isArray(isolation.minimalConfigKeys)
+        ? isolation.minimalConfigKeys
+            .map((item) => stringValue(item))
+            .filter(Boolean)
+        : [],
+      productionSecretsAccessible: boolValue(
+        isolation.productionSecretsAccessible ??
+          isolation.production_secrets_accessible,
+      ),
+      productionDatabaseWritable: boolValue(
+        isolation.productionDatabaseWritable ??
+          isolation.production_database_writable,
+      ),
+      networkAllowedByDefault: boolValue(
+        isolation.networkAllowedByDefault ??
+          isolation.network_allowed_by_default,
+      ),
+      rawDatasetCopyAllowed: boolValue(
+        isolation.rawDatasetCopyAllowed ?? isolation.raw_dataset_copy_allowed,
+      ),
+    },
+    checks: Array.isArray(raw.checks)
+      ? raw.checks.map(normalizeSandboxCheck)
+      : [],
+    pipeline: Array.isArray(raw.pipeline)
+      ? raw.pipeline.map(normalizeSandboxPipelineStep)
+      : [],
+    rollbackPlan: {
+      defaultAction: maybeString(
+        rollbackPlan.defaultAction ?? rollbackPlan.default_action,
+      ) ?? undefined,
+      deleteSandboxOnFailure: boolValue(
+        rollbackPlan.deleteSandboxOnFailure ??
+          rollbackPlan.delete_sandbox_on_failure,
+      ),
+      promotionRequiresApproval: boolValue(
+        rollbackPlan.promotionRequiresApproval ??
+          rollbackPlan.promotion_requires_approval,
+      ),
+      productionRollbackWillExecuteNow: boolValue(
+        rollbackPlan.productionRollbackWillExecuteNow ??
+          rollbackPlan.production_rollback_will_execute_now,
+      ),
+    },
+    report: {
+      title: maybeString(report.title) ?? undefined,
+      status: maybeString(report.status) ?? undefined,
+      riskLevel: stringValue(report.riskLevel ?? report.risk_level, "low"),
+      badge: maybeString(report.badge) ?? undefined,
+      summary: {
+        checkCount: numberValue(summary.checkCount ?? summary.check_count, 0),
+        requiresHumanApproval: boolValue(
+          summary.requiresHumanApproval ?? summary.requires_human_approval,
+        ),
+        productionSecretsAccessible: boolValue(
+          summary.productionSecretsAccessible ??
+            summary.production_secrets_accessible,
+        ),
+        autoPromotionAllowed: boolValue(
+          summary.autoPromotionAllowed ?? summary.auto_promotion_allowed,
+        ),
+      },
+      risks: Array.isArray(report.risks)
+        ? report.risks.map(normalizeSandboxRisk)
+        : [],
+      recommendations: Array.isArray(report.recommendations)
+        ? report.recommendations.map((item) => stringValue(item)).filter(Boolean)
+        : [],
+    },
+    queuePlan: {
+      queueRequired: boolValue(queuePlan.queueRequired),
+      queueId: maybeString(queuePlan.queueId),
+      jobType: maybeString(queuePlan.jobType),
+      willEnqueueNow: boolValue(queuePlan.willEnqueueNow),
+      reason: maybeString(queuePlan.reason),
+    },
+    sideEffects: parseRecordJson(raw.sideEffects) ?? {},
+  };
+}
+
+function normalizeSandboxRun(value: unknown): SandboxRunRecord {
+  const raw = asRecord(value);
+  const plan =
+    parseRecordJson(raw.plan ?? raw.planJson ?? raw.plan_json) ??
+    asRecord(raw.plan);
+  const normalizedPlan = normalizeSandboxPlan(plan);
+  const pipeline =
+    parseArrayJson(raw.pipeline ?? raw.pipelineJson ?? raw.pipeline_json) ??
+    normalizedPlan.pipeline;
+  const sandbox = asRecord(raw.sandbox);
+  const reportRecord = asRecord(raw.reportRecord ?? raw.report_record);
+  const report =
+    parseRecordJson(
+      reportRecord.report ?? reportRecord.reportJson ?? reportRecord.report_json,
+    ) ?? normalizedPlan.report;
+  return {
+    id: stringValue(raw.id),
+    sandboxId: maybeString(raw.sandboxId ?? raw.sandbox_id),
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    targetType: normalizeSandboxTargetType(
+      raw.targetType ?? raw.target_type ?? normalizedPlan.target.type,
+    ),
+    objective: stringValue(raw.objective, normalizedPlan.target.objective),
+    changeSummary: stringValue(
+      raw.changeSummary ?? raw.change_summary,
+      normalizedPlan.target.changeSummary,
+    ),
+    status: maybeString(raw.status),
+    plan: normalizedPlan,
+    pipeline: pipeline.map(normalizeSandboxPipelineStep),
+    sandbox: Object.keys(sandbox).length
+      ? {
+          id: maybeString(sandbox.id),
+          status: maybeString(sandbox.status),
+          badgeLabel: maybeString(sandbox.badgeLabel ?? sandbox.badge_label),
+        }
+      : null,
+    reportRecord: Object.keys(reportRecord).length
+      ? {
+          id: maybeString(reportRecord.id),
+          riskLevel: maybeString(
+            reportRecord.riskLevel ?? reportRecord.risk_level,
+          ),
+          report: normalizeSandboxPlan({ ...normalizedPlan, report }).report,
+        }
+      : {
+          riskLevel: normalizedPlan.report.riskLevel,
+          report: normalizedPlan.report,
+        },
+    createdAt: maybeString(raw.createdAt ?? raw.created_at),
+    updatedAt: maybeString(raw.updatedAt ?? raw.updated_at),
+  };
+}
+
 function normalizeWorkflowRunPlanStep(
   value: unknown,
   fallbackIndex = 0,
@@ -1144,6 +1484,71 @@ export async function getSimulationRun(
   );
   const body = await parseJsonOrThrow<{ run?: unknown }>(response);
   return normalizeSimulationRun(body.run);
+}
+
+export async function listSandboxRuns(payload?: {
+  projectId?: string | null;
+  targetType?: SandboxTargetType | null;
+  query?: string | null;
+}): Promise<SandboxRunRecord[]> {
+  const params = new URLSearchParams();
+  if (payload?.projectId) params.set("project_id", payload.projectId);
+  if (payload?.targetType) params.set("target_type", payload.targetType);
+  if (payload?.query?.trim()) params.set("query", payload.query.trim());
+  const query = params.toString();
+  const response = await authFetch(
+    `/api/cognix/sandbox/runs${query ? `?${query}` : ""}`,
+  );
+  const body = await parseJsonOrThrow<{ runs?: unknown[] }>(response);
+  return (body.runs ?? []).map(normalizeSandboxRun);
+}
+
+export async function createSandboxPlan(payload: {
+  projectId?: string | null;
+  projectType?: string | null;
+  targetType: SandboxTargetType;
+  objective: string;
+  changeSummary: string;
+  requestedChecks?: string[];
+  durationMinutes: number;
+  storeRun?: boolean;
+}): Promise<SandboxPlanResult> {
+  const response = await authFetch("/api/cognix/sandbox/plans", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      projectId: payload.projectId ?? null,
+      projectType: payload.projectType ?? null,
+      targetType: payload.targetType,
+      objective: payload.objective,
+      changeSummary: payload.changeSummary,
+      requestedChecks: payload.requestedChecks ?? [],
+      durationMinutes: payload.durationMinutes,
+      storeRun: payload.storeRun ?? true,
+    }),
+  });
+  const body = await parseJsonOrThrow<{
+    sandboxPlan?: unknown;
+    run?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    sandboxPlan: normalizeSandboxPlan(body.sandboxPlan),
+    run: body.run ? normalizeSandboxRun(body.run) : null,
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function getSandboxRun(runId: string): Promise<SandboxRunRecord> {
+  const response = await authFetch(
+    `/api/cognix/sandbox/runs/${encodeURIComponent(runId)}`,
+  );
+  const body = await parseJsonOrThrow<{ run?: unknown }>(response);
+  return normalizeSandboxRun(body.run);
 }
 
 export async function listWorkflows(payload?: {
