@@ -119,9 +119,10 @@ const DEFAULT_DOCUMENT_TITLE = "CogniX";
 function RootLayout() {
   const t = useT();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const hideNavbar = HIDDEN_NAVBAR_ROUTES.includes(pathname);
+  const isMarketingRoute = pathname === "/";
+  const hideNavbar = isMarketingRoute || HIDDEN_NAVBAR_ROUTES.includes(pathname);
   const isAuthFlowRoute = AUTH_FLOW_ROUTES.has(pathname);
-  const hiddenRouteKey = isAuthFlowRoute ? "auth-flow" : pathname;
+  const hiddenRouteKey = isMarketingRoute ? "marketing" : isAuthFlowRoute ? "auth-flow" : pathname;
   // Exact match: a prefix would treat /chatty as chat, hiding its not-found UI.
   const isChatRoute = pathname === "/chat";
   const isCodexRoute = pathname === "/codex";
@@ -246,7 +247,7 @@ function RootLayout() {
       <RemoteCodeConsentDialog />
       <CogniXCommandPalette />
       {hideNavbar ? (
-        <main className="flex-1 overflow-hidden">
+        <main className={`flex-1 ${isMarketingRoute ? "overflow-y-auto" : "overflow-hidden"}`}>
           <AnimatePresence initial={false} mode={isAuthFlowRoute ? "popLayout" : "wait"}>
             <motion.div
               key={hiddenRouteKey}
