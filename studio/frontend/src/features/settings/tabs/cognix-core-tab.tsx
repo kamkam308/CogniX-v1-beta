@@ -140,6 +140,67 @@ type AdvancedRoadmapReadiness = {
   sideEffects?: Record<string, boolean>;
 };
 
+type RuntimeMetrics = {
+  runtime?: {
+    runtimeType?: string | null;
+    activeModel?: string | null;
+    loadedModelCount?: number | null;
+    loadingModelCount?: number | null;
+  };
+  hardware?: {
+    ram?: {
+      totalGb?: number | null;
+      availableGb?: number | null;
+      usedGb?: number | null;
+      usedPercent?: number | null;
+    };
+    cpu?: {
+      usagePercent?: number | null;
+    };
+    gpu?: {
+      available?: boolean;
+      deviceCount?: number | null;
+    };
+  };
+  inference?: {
+    tokensPerSecond?: number | null;
+    latencyMs?: number | null;
+    loadTimeMs?: number | null;
+    estimatedCostUsd?: number | null;
+  };
+  sideEffects?: Record<string, boolean>;
+};
+
+type RuntimeMetricRow = {
+  id?: string;
+  created_at?: string;
+  model_id?: string | null;
+  runtime_type?: string | null;
+  ram_used_percent?: number | null;
+  cpu_used_percent?: number | null;
+  gpu_available?: boolean | number | null;
+  tokens_per_second?: number | null;
+  latency_ms?: number | null;
+  load_time_ms?: number | null;
+  estimated_cost_usd?: number | null;
+  metrics?: RuntimeMetrics;
+};
+
+type PerformanceBlueprint = {
+  services?: string[];
+  metrics?: string[];
+  displayModes?: string[];
+  sideEffects?: Record<string, boolean>;
+};
+
+type MetricsStreamPlan = {
+  intervalMs?: number | null;
+  displayMode?: string | null;
+  transport?: string | null;
+  willOpenStreamNow?: boolean;
+  sideEffects?: Record<string, boolean>;
+};
+
 function formatGb(value: number | null | undefined): string {
   return typeof value === "number" && Number.isFinite(value)
     ? `${value.toFixed(value >= 10 ? 0 : 1)} GB`
@@ -166,6 +227,22 @@ function formatTimestamp(value: string | null | undefined): string {
 
 function formatCount(value: number | null | undefined): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function formatPercent(value: number | null | undefined): string {
+  return typeof value === "number" && Number.isFinite(value) ? `${Math.round(value)}%` : "unknown";
+}
+
+function formatMs(value: number | null | undefined): string {
+  return typeof value === "number" && Number.isFinite(value)
+    ? `${Math.round(value)} ms`
+    : "unknown";
+}
+
+function formatRate(value: number | null | undefined): string {
+  return typeof value === "number" && Number.isFinite(value)
+    ? `${value.toFixed(value >= 10 ? 1 : 2)}/s`
+    : "unknown";
 }
 
 function readinessLabel(value: string | undefined): string {
@@ -262,20 +339,41 @@ export function CogniXCoreTab() {
   const [mvpReadiness, setMvpReadiness] = useState<MvpReadiness | null>(null);
   const [advancedReadiness, setAdvancedReadiness] = useState<AdvancedRoadmapReadiness | null>(null);
   const [readinessState, setReadinessState] = useState<AdminReadinessState>("idle");
+  const [performanceBlueprint, setPerformanceBlueprint] = useState<PerformanceBlueprint | null>(null);
+  const [metricsStreamPlan, setMetricsStreamPlan] = useState<MetricsStreamPlan | null>(null);
+  const [runtimeMetrics, setRuntimeMetrics] = useState<RuntimeMetrics | null>(null);
+  const [performanceMetrics, setPerformanceMetrics] = useState<RuntimeMetricRow[]>([]);
+  const [performanceState, setPerformanceState] = useState<LoadState>("idle");
+  const [performanceMessage, setPerformanceMessage] = useState<string | null>(null);
+  const [recordingPerformance, setRecordingPerformance] = useState(false);
   const [state, setState] = useState<LoadState>("idle");
   const [message, setMessage] = useState<string | null>(null);
 
   async function loadCore() {
     setState("loading");
     setReadinessState("loading");
+    setPerformanceState("loading");
     setMessage(null);
+    setPerformanceMessage(null);
     try {
-      const [strategyRes, cacheRes, logsRes, mvpRes, advancedRes] = await Promise.all([
+      const [
+        strategyRes,
+        cacheRes,
+        logsRes,
+        mvpRes,
+        advancedRes,
+        performanceBlueprintRes,
+        metricsStreamPlanRes,
+        performanceMetricsRes,
+      ] = await Promise.all([
         authFetch("/api/cognix/strategy"),
         authFetch("/api/cognix/models/cache"),
         authFetch("/api/cognix/admin/router-logs").catch(() => null),
         authFetch("/api/cognix/admin/mvp-readiness").catch(() => null),
         authFetch("/api/cognix/admin/advanced-roadmap-readiness").catch(() => null),
+        authFetch("/api/cognix/performance/blueprint").catch(() => null),
+        authFetch("/api/cognix/performance/stream-plan").catch(() => null),
+        authFetch("/api/cognix/performance/metrics?limit=8").catch(() => null),
       ]);
       if (!strategyRes.ok || !cacheRes.ok) {
         throw new Error("CogniX Core endpoints unavailable.");
@@ -310,13 +408,83 @@ export function CogniXCoreTab() {
       setMvpReadiness(nextMvp);
       setAdvancedReadiness(nextAdvanced);
       setReadinessState(nextMvp || nextAdvanced ? "loaded" : protectedReadiness ? "protected" : "error");
+
+      if (performanceBlueprintRes?.ok) {
+        const body = (await performanceBlueprintRes.json()) as { performanceBlueprint?: PerformanceBlueprint };
+        setPerformanceBlueprint(body.performanceBlueprint ?? null);
+      } else {
+        setPerformanceBlueprint(null);
+      }
+
+      if (metricsStreamPlanRes?.ok) {
+        const body = (await metricsStreamPlanRes.json()) as { metricsStreamPlan?: MetricsStreamPlan };
+        setMetricsStreamPlan(body.metricsStreamPlan ?? null);
+      } else {
+        setMetricsStreamPlan(null);
+      }
+
+      if (performanceMetricsRes?.ok) {
+        const body = (await performanceMetricsRes.json()) as { metrics?: RuntimeMetricRow[] };
+        setPerformanceMetrics((body.metrics ?? []).slice(0, 8));
+      } else {
+        setPerformanceMetrics([]);
+      }
+      setRuntimeMetrics(null);
+      setPerformanceState(
+        performanceBlueprintRes?.ok || metricsStreamPlanRes?.ok || performanceMetricsRes?.ok ? "loaded" : "error",
+      );
       setState("loaded");
     } catch {
       setState("error");
       setReadinessState("error");
+      setPerformanceState("error");
       setMvpReadiness(null);
       setAdvancedReadiness(null);
+      setPerformanceBlueprint(null);
+      setMetricsStreamPlan(null);
+      setRuntimeMetrics(null);
+      setPerformanceMetrics([]);
       setMessage("Impossible de charger CogniX Core.");
+    }
+  }
+
+  async function recordPerformanceSnapshot() {
+    setRecordingPerformance(true);
+    setPerformanceMessage(null);
+    try {
+      const runtimeSnapshot = {
+        runtimeType: runtime?.runtimeType ?? "unknown",
+        activeModel: runtime?.activeModel ?? null,
+        loadedModels: runtime?.loadedModels ?? [],
+        loadingModels: runtime?.loadingModels ?? [],
+      };
+      const response = await authFetch("/api/cognix/performance/snapshot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          runtimeSnapshot,
+          modelId: runtime?.activeModel ?? null,
+          storeMetric: true,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error("Performance snapshot unavailable.");
+      }
+      const body = (await response.json()) as {
+        runtimeMetrics?: RuntimeMetrics;
+        storedMetric?: RuntimeMetricRow | null;
+      };
+      setRuntimeMetrics(body.runtimeMetrics ?? null);
+      if (body.storedMetric) {
+        setPerformanceMetrics((current) => [body.storedMetric as RuntimeMetricRow, ...current].slice(0, 8));
+      }
+      setPerformanceState("loaded");
+      setPerformanceMessage("Snapshot enregistre.");
+    } catch {
+      setPerformanceState("error");
+      setPerformanceMessage("Impossible d'enregistrer le snapshot.");
+    } finally {
+      setRecordingPerformance(false);
     }
   }
 
@@ -352,6 +520,27 @@ export function CogniXCoreTab() {
     };
     return Object.values(effects).every((value) => value === false);
   }, [advancedReadiness?.sideEffects, mvpReadiness?.sideEffects]);
+  const latestPerformanceMetric = performanceMetrics[0] ?? null;
+  const displayedRuntimeMetrics = runtimeMetrics ?? latestPerformanceMetric?.metrics ?? null;
+  const displayedRamPercent =
+    displayedRuntimeMetrics?.hardware?.ram?.usedPercent ?? latestPerformanceMetric?.ram_used_percent;
+  const displayedCpuPercent =
+    displayedRuntimeMetrics?.hardware?.cpu?.usagePercent ?? latestPerformanceMetric?.cpu_used_percent;
+  const displayedTokensPerSecond =
+    displayedRuntimeMetrics?.inference?.tokensPerSecond ?? latestPerformanceMetric?.tokens_per_second;
+  const displayedLatencyMs =
+    displayedRuntimeMetrics?.inference?.latencyMs ?? latestPerformanceMetric?.latency_ms;
+  const streamIntervalSeconds = Math.max(1, Math.round((metricsStreamPlan?.intervalMs ?? 3000) / 1000));
+  const performanceNoExecution = useMemo(() => {
+    const effects = {
+      ...(performanceBlueprint?.sideEffects ?? {}),
+      ...(metricsStreamPlan?.sideEffects ?? {}),
+      ...(displayedRuntimeMetrics?.sideEffects ?? {}),
+    };
+    return ["modelLoad", "generation", "benchmarkRun", "gpuStressTest", "networkCall"].every(
+      (key) => effects[key] === false || effects[key] === undefined,
+    );
+  }, [displayedRuntimeMetrics?.sideEffects, metricsStreamPlan?.sideEffects, performanceBlueprint?.sideEffects]);
 
   return (
     <div className="flex flex-col gap-6">
@@ -515,6 +704,64 @@ export function CogniXCoreTab() {
           }
         >
           <InfoPill label={`${residentModels.length}`} />
+        </SettingsRow>
+      </SettingsSection>
+
+      <SettingsSection
+        title="Performance monitor"
+        description="Suivi natif des ressources runtime, snapshots persistants et garde anti-execution."
+      >
+        <SettingsRow
+          label="Collector"
+          description={`${performanceBlueprint?.services?.length ?? 0} services / ${performanceBlueprint?.metrics?.length ?? 0} metrics / ${streamIntervalSeconds}s`}
+        >
+          <InfoPill
+            label={performanceState === "loading" ? "loading" : performanceState}
+            tone={performanceState === "error" ? "bg-destructive/10 text-destructive" : undefined}
+          />
+        </SettingsRow>
+        <SettingsRow
+          label="Host load"
+          description={`RAM ${formatPercent(displayedRamPercent)} / CPU ${formatPercent(displayedCpuPercent)}`}
+        >
+          <InfoPill
+            label={displayedRuntimeMetrics?.hardware?.gpu?.available || latestPerformanceMetric?.gpu_available ? "GPU visible" : "CPU only"}
+          />
+        </SettingsRow>
+        <SettingsRow
+          label="Inference"
+          description={
+            <span className="flex flex-col gap-1">
+              <span>
+                {formatRate(displayedTokensPerSecond)} tokens / latency {formatMs(displayedLatencyMs)}
+              </span>
+              <span>
+                {performanceMetrics.length} snapshots
+                {latestPerformanceMetric?.created_at ? ` / latest ${formatTimestamp(latestPerformanceMetric.created_at)}` : ""}
+                {performanceMessage ? ` / ${performanceMessage}` : ""}
+              </span>
+            </span>
+          }
+          alignTop
+        >
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => void recordPerformanceSnapshot()}
+            disabled={recordingPerformance || state === "loading"}
+          >
+            {recordingPerformance ? "Recording..." : "Snapshot"}
+          </Button>
+        </SettingsRow>
+        <SettingsRow
+          label="Execution guard"
+          description={`Stream plan: ${metricsStreamPlan?.displayMode ?? "discreet_panel"} / ${metricsStreamPlan?.transport ?? "polling"}`}
+        >
+          <InfoPill
+            label={performanceNoExecution ? "safe" : "review"}
+            tone={performanceNoExecution ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "bg-amber-500/10 text-amber-700 dark:text-amber-300"}
+          />
         </SettingsRow>
       </SettingsSection>
 
