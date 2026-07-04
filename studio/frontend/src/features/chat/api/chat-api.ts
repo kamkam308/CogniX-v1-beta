@@ -641,6 +641,122 @@ export async function listResponseVariants(
   return body.variants ?? [];
 }
 
+export interface DebateRoleProfile {
+  id: string;
+  label: string;
+  displayRole?: string;
+  purpose?: string;
+  visibility?: string;
+}
+
+export interface DebatePlanRound {
+  id: string;
+  roundIndex?: number;
+  roleId: string;
+  label: string;
+  purpose?: string;
+  publicPrompt?: string;
+  status?: string;
+  requiresBackendGeneration?: boolean;
+  willGenerateNow?: boolean;
+}
+
+export interface DebatePlan {
+  debateOrchestratorVersion?: string;
+  debateRoleRegistryVersion?: string;
+  mode?: string;
+  messageId?: string | null;
+  projectId?: string | null;
+  modelId?: string | null;
+  taskType?: string;
+  objectiveExcerpt?: string;
+  roles?: DebateRoleProfile[];
+  rounds?: DebatePlanRound[];
+  summary?: {
+    roleCount?: number;
+    plannedRoundCount?: number;
+    maxRounds?: number;
+    finalRoundId?: string;
+  };
+  displayContract?: Record<string, unknown>;
+  policies?: Record<string, unknown>;
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface DebateSessionRoundRecord extends DebatePlanRound {
+  sessionId?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface DebateOutputRecord {
+  id: string;
+  sessionId?: string | null;
+  roundId?: string | null;
+  roleId?: string | null;
+  outputType?: "argument" | "critique" | "reply" | "synthesis" | "note" | string;
+  publicSummary?: string | null;
+  content?: string | null;
+  modelId?: string | null;
+  metadata?: Record<string, unknown>;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface DebateSessionRecord {
+  id: string;
+  messageId?: string | null;
+  threadId?: string | null;
+  projectId?: string | null;
+  prompt?: string | null;
+  plan?: DebatePlan | null;
+  rounds?: DebateSessionRoundRecord[];
+  outputs?: DebateOutputRecord[];
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface DebatePlanResult {
+  username: string;
+  debatePlan: DebatePlan;
+  session?: DebateSessionRecord | null;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
+export async function createDebatePlan(payload: {
+  prompt: string;
+  requestedRoles?: string[] | null;
+  maxRounds?: number;
+  taskType?: string | null;
+  messageId?: string | null;
+  threadId?: string | null;
+  projectId?: string | null;
+  modelId?: string | null;
+  createSession?: boolean;
+}): Promise<DebatePlanResult> {
+  const response = await authFetch("/api/cognix/debate/plan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseJsonOrThrow<DebatePlanResult>(response);
+}
+
+export async function listDebateSessions(
+  messageId?: string | null,
+): Promise<DebateSessionRecord[]> {
+  const query = messageId
+    ? `?${new URLSearchParams({ message_id: messageId }).toString()}`
+    : "";
+  const response = await authFetch(`/api/cognix/debate/sessions${query}`);
+  const body = await parseJsonOrThrow<{
+    sessions?: DebateSessionRecord[];
+  }>(response);
+  return body.sessions ?? [];
+}
+
 export interface ProjectSkillRecord {
   id: string;
   skillId?: string | null;

@@ -52,12 +52,21 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import {
   CHAT_HISTORY_UPDATED_EVENT,
+  createDebatePlan,
   createDraftGenerationPlan,
   forkChatThread,
   getForkCount,
+  listDebateSessions,
   listResponseReflectionEvaluations,
   listResponseVariants,
+  type DebatePlan,
+  type DebateSessionRecord,
   type DraftGenerationPlan,
   type ResponseReflectionRecord,
   type ResponseVariantRecord,
@@ -139,6 +148,7 @@ import { useNavigate } from "@tanstack/react-router";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
+  ChevronDownIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   Columns2Icon,
@@ -149,6 +159,7 @@ import {
   MoreHorizontalIcon,
   PlusIcon,
   RefreshCwIcon,
+  ScaleIcon,
   SquareIcon,
   TerminalIcon,
   XIcon,
@@ -3589,9 +3600,33 @@ type DraftVariantPanelState = {
   message?: string | null;
 };
 
+type DebatePanelStatus = "loading" | "loaded" | "error";
+
+type DebatePanelState = {
+  status: DebatePanelStatus;
+  plan?: DebatePlan | null;
+  session?: DebateSessionRecord | null;
+  sessions?: DebateSessionRecord[];
+  message?: string | null;
+};
+
 const useDraftVariantPanelStore = create<{
   byMessageId: Record<string, DraftVariantPanelState>;
   setPanelState: (messageId: string, state: DraftVariantPanelState) => void;
+}>((set) => ({
+  byMessageId: {},
+  setPanelState: (messageId, state) =>
+    set((current) => ({
+      byMessageId: {
+        ...current.byMessageId,
+        [messageId]: state,
+      },
+    })),
+}));
+
+const useDebatePanelStore = create<{
+  byMessageId: Record<string, DebatePanelState>;
+  setPanelState: (messageId: string, state: DebatePanelState) => void;
 }>((set) => ({
   byMessageId: {},
   setPanelState: (messageId, state) =>
@@ -3918,6 +3953,144 @@ const ResponseDraftVariantsPanel: FC = () => {
   );
 };
 
+function debateRoleLabel(
+  plan: DebatePlan | null | undefined,
+  roleId: string | null | undefined,
+): string {
+  if (!roleId) return "Agent";
+  const role = (plan?.roles ?? []).find((item) => item.id === roleId);
+  return role?.label || draftVariantLabel(roleId);
+}
+
+const ResponseDebatePanel: FC = () => {
+  const messageId = useAuiState(({ message }) => message.id);
+  const panel = useDebatePanelStore((state) => state.byMessageId[messageId]);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  if (!panel) return null;
+
+  const activeSession = panel.session ?? panel.sessions?.[0] ?? null;
+  const plan = panel.plan ?? activeSession?.plan ?? null;
+  const rounds = plan?.rounds ?? activeSession?.rounds ?? [];
+  const outputs = activeSession?.outputs ?? [];
+  const synthesis =
+    outputs.find((output) => output.outputType === "synthesis") ??
+    outputs.find((output) => output.roleId === "synthesizer") ??
+    null;
+  const plannedRoundCount =
+    plan?.summary?.plannedRoundCount ?? rounds.length;
+  const roleCount = plan?.summary?.roleCount ?? plan?.roles?.length ?? 0;
+  const safePlan =
+    plan?.displayContract?.rawChainOfThoughtVisible === false &&
+    plan?.sideEffects?.generation === false &&
+    plan?.sideEffects?.networkModelCall === false;
+
+  return (
+    <div
+      data-testid="cognix-debate-panel"
+      className="mt-2 max-w-full rounded-2xl border border-border/70 bg-muted/25 px-3 py-2 text-xs text-muted-foreground"
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-medium text-foreground">Internal debate</span>
+        <Badge variant={panel.status === "error" ? "destructive" : "outline"} size="sm">
+          {panel.status === "loading"
+            ? "planning"
+            : panel.status === "error"
+              ? "error"
+              : `${plannedRoundCount} planned`}
+        </Badge>
+        {roleCount > 0 && (
+          <Badge variant="secondary" size="sm">
+            {roleCount} roles
+          </Badge>
+        )}
+        {safePlan && (
+          <Badge variant="muted" size="sm">
+            public summaries only
+          </Badge>
+        )}
+      </div>
+      {panel.status === "loading" ? (
+        <p className="mt-1">Preparing a bounded CogniX debate plan.</p>
+      ) : panel.status === "error" ? (
+        <p className="mt-1">{panel.message ?? "Debate planner unavailable."}</p>
+      ) : (
+        <>
+          <p className="mt-2 text-foreground/85">
+            {synthesis?.publicSummary ||
+              "Debate plan ready. CogniX will keep one clean answer visible and hide internal rounds until explicitly expanded."}
+          </p>
+          <Collapsible open={detailsOpen} onOpenChange={setDetailsOpen}>
+            <CollapsibleTrigger asChild>
+              <button
+                type="button"
+                className="mt-2 flex items-center gap-1.5 rounded-full text-xs font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <ChevronDownIcon
+                  className={cn(
+                    "size-3.5 transition-transform duration-200",
+                    !detailsOpen && "-rotate-90",
+                  )}
+                />
+                Debate details
+              </button>
+            </CollapsibleTrigger>
+            <CollapsibleContent className="mt-2 space-y-1.5 data-[state=closed]:animate-out data-[state=open]:animate-in data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0">
+              {outputs.length > 0 ? (
+                outputs.slice(0, 5).map((output) => (
+                  <div
+                    key={output.id}
+                    className="rounded-xl border border-border/60 bg-background/65 px-2.5 py-2"
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium text-foreground">
+                        {debateRoleLabel(plan, output.roleId)}
+                      </span>
+                      <Badge variant="secondary" size="sm">
+                        {draftVariantLabel(output.outputType)}
+                      </Badge>
+                    </div>
+                    <p className="mt-1 line-clamp-2 text-foreground/80">
+                      {output.publicSummary}
+                    </p>
+                  </div>
+                ))
+              ) : rounds.length > 0 ? (
+                rounds.map((round) => (
+                  <div
+                    key={round.id}
+                    className="rounded-xl border border-border/60 bg-background/65 px-2.5 py-2"
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium text-foreground">
+                        {debateRoleLabel(plan, round.roleId)}
+                      </span>
+                      <Badge variant="secondary" size="sm">
+                        {round.label}
+                      </Badge>
+                    </div>
+                    {round.purpose && (
+                      <p className="mt-1 line-clamp-2 text-foreground/80">
+                        {round.purpose}
+                      </p>
+                    )}
+                  </div>
+                ))
+              ) : (
+                <p>No debate rounds are available yet.</p>
+              )}
+            </CollapsibleContent>
+          </Collapsible>
+          {safePlan && (
+            <p className="mt-2">
+              Raw chain-of-thought is hidden; only bounded public arguments and the final synthesis are shown.
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+};
+
 /**
  * AssistantMessage handles the display and inline-editing of AI responses.
  * 
@@ -4050,6 +4223,7 @@ const AssistantMessage: FC = () => {
             <MessageError />
             <ResponseReflectionBadge />
             <ResponseDraftVariantsPanel />
+            <ResponseDebatePanel />
           </>
         )}
       </div>
@@ -4334,6 +4508,85 @@ const DraftVariantsMenuItem: FC = () => {
   );
 };
 
+const InternalDebateMenuItem: FC = () => {
+  const aui = useAui();
+  const messageId = useAuiState(({ message }) => message.id);
+  const isRunning = useAuiState(({ thread }) => thread.isRunning);
+  const setPanelState = useDebatePanelStore((state) => state.setPanelState);
+  const [pending, setPending] = useState(false);
+
+  const handleInternalDebate = async () => {
+    const remoteId = aui.threadListItem().getState().remoteId;
+    const responseText = aui.message().getCopyText().trim();
+    if (!responseText) {
+      toast.error("Cannot plan debate for an empty response");
+      return;
+    }
+    const exportedThread = aui.thread().export();
+    const prompt =
+      latestUserPromptBeforeMessage(exportedThread, messageId) ||
+      `Prepare a CogniX internal debate for this answer:\n\n${responseText}`;
+    const runtime = useChatRuntimeStore.getState();
+    setPending(true);
+    setPanelState(messageId, {
+      status: "loading",
+      plan: null,
+      session: null,
+      sessions: [],
+      message: "Preparing internal debate.",
+    });
+    try {
+      const [planResult, sessions] = await Promise.all([
+        createDebatePlan({
+          prompt,
+          requestedRoles: ["advocate", "critic", "domain_expert", "synthesizer"],
+          maxRounds: 4,
+          taskType: "general",
+          messageId,
+          threadId: remoteId ?? null,
+          projectId: runtime.activeProjectId ?? null,
+          modelId: runtime.params.checkpoint ?? null,
+          createSession: true,
+        }),
+        listDebateSessions(messageId).catch(() => []),
+      ]);
+      setPanelState(messageId, {
+        status: "loaded",
+        plan: planResult.debatePlan,
+        session: planResult.session ?? null,
+        sessions: planResult.session ? [planResult.session, ...sessions] : sessions,
+        message: "Internal debate ready.",
+      });
+      toast.success("Internal debate planned");
+    } catch (error) {
+      setPanelState(messageId, {
+        status: "error",
+        plan: null,
+        session: null,
+        sessions: [],
+        message:
+          error instanceof Error ? error.message : "Debate planner unavailable.",
+      });
+      toast.error("Internal debate unavailable", {
+        description: error instanceof Error ? error.message : undefined,
+      });
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <ActionBarMorePrimitive.Item
+      disabled={isRunning || pending}
+      onSelect={() => void handleInternalDebate()}
+      className="aui-action-bar-more-item flex cursor-pointer select-none items-center gap-2 rounded-[12px] px-3 py-2 text-sm outline-none hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50"
+    >
+      <ScaleIcon strokeWidth={1.75} className="size-icon" />
+      {pending ? "Planning debate" : "Internal debate"}
+    </ActionBarMorePrimitive.Item>
+  );
+};
+
 const AssistantActionBar: FC = () => {
   const { forkMessage, forkDisabled } = useForkMessageAction();
 
@@ -4375,6 +4628,7 @@ const AssistantActionBar: FC = () => {
             Fork in new chat
           </ActionBarMorePrimitive.Item>
           <DraftVariantsMenuItem />
+          <InternalDebateMenuItem />
           <ActionBarPrimitive.ExportMarkdown asChild={true}>
             <ActionBarMorePrimitive.Item className="aui-action-bar-more-item flex cursor-pointer select-none items-center gap-2 rounded-[12px] px-3 py-2 text-sm outline-none hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground">
               <HugeiconsIcon
