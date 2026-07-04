@@ -58,6 +58,7 @@ import {
 } from "@/components/ui/collapsible";
 import {
   CHAT_HISTORY_UPDATED_EVENT,
+  analyzeToolDiscovery,
   createDebatePlan,
   createDraftGenerationPlan,
   forkChatThread,
@@ -65,11 +66,15 @@ import {
   listDebateSessions,
   listResponseReflectionEvaluations,
   listResponseVariants,
+  listToolRecommendations,
   type DebatePlan,
   type DebateSessionRecord,
   type DraftGenerationPlan,
   type ResponseReflectionRecord,
   type ResponseVariantRecord,
+  type StoredToolRecommendationRecord,
+  type ToolDiscoveryPlan,
+  type ToolDiscoveryRecommendation,
 } from "@/features/chat/api/chat-api";
 import { sentAudioNames } from "@/features/chat/api/chat-adapter";
 import {
@@ -162,6 +167,7 @@ import {
   ScaleIcon,
   SquareIcon,
   TerminalIcon,
+  WrenchIcon,
   XIcon,
 } from "lucide-react";
 import {
@@ -3610,6 +3616,15 @@ type DebatePanelState = {
   message?: string | null;
 };
 
+type ToolDiscoveryPanelStatus = "loading" | "loaded" | "error";
+
+type ToolDiscoveryPanelState = {
+  status: ToolDiscoveryPanelStatus;
+  plan?: ToolDiscoveryPlan | null;
+  recommendations?: StoredToolRecommendationRecord[];
+  message?: string | null;
+};
+
 const useDraftVariantPanelStore = create<{
   byMessageId: Record<string, DraftVariantPanelState>;
   setPanelState: (messageId: string, state: DraftVariantPanelState) => void;
@@ -3627,6 +3642,20 @@ const useDraftVariantPanelStore = create<{
 const useDebatePanelStore = create<{
   byMessageId: Record<string, DebatePanelState>;
   setPanelState: (messageId: string, state: DebatePanelState) => void;
+}>((set) => ({
+  byMessageId: {},
+  setPanelState: (messageId, state) =>
+    set((current) => ({
+      byMessageId: {
+        ...current.byMessageId,
+        [messageId]: state,
+      },
+    })),
+}));
+
+const useToolDiscoveryPanelStore = create<{
+  byMessageId: Record<string, ToolDiscoveryPanelState>;
+  setPanelState: (messageId: string, state: ToolDiscoveryPanelState) => void;
 }>((set) => ({
   byMessageId: {},
   setPanelState: (messageId, state) =>
@@ -4091,6 +4120,168 @@ const ResponseDebatePanel: FC = () => {
   );
 };
 
+function toolRecommendationFromStored(
+  record: StoredToolRecommendationRecord,
+): ToolDiscoveryRecommendation {
+  return {
+    ...(record.recommendation ?? {}),
+    id: record.id,
+    toolId: record.recommendation?.toolId ?? record.toolId ?? undefined,
+    toolName: record.recommendation?.toolName ?? record.toolName ?? undefined,
+    category: record.recommendation?.category ?? record.category ?? undefined,
+    needId: record.recommendation?.needId ?? record.needId ?? undefined,
+    reason: record.recommendation?.reason ?? record.reason ?? undefined,
+    confidence:
+      record.recommendation?.confidence ??
+      (typeof record.confidence === "number" ? record.confidence : undefined),
+    status: record.recommendation?.status ?? record.status ?? undefined,
+  };
+}
+
+function toolDiscoveryStatusVariant(
+  status: string | null | undefined,
+): ComponentProps<typeof Badge>["variant"] {
+  switch (status) {
+    case "installed":
+      return "success";
+    case "connector_disabled":
+      return "warning";
+    case "ignored":
+      return "muted";
+    case "recommended":
+      return "info";
+    default:
+      return "outline";
+  }
+}
+
+function toolDiscoveryStatusLabel(status: string | null | undefined): string {
+  switch (status) {
+    case "installed":
+      return "installed";
+    case "connector_disabled":
+      return "connector disabled";
+    case "ignored":
+      return "ignored";
+    case "recommended":
+      return "recommended";
+    default:
+      return status ? draftVariantLabel(status) : "suggested";
+  }
+}
+
+const ResponseToolDiscoveryPanel: FC = () => {
+  const messageId = useAuiState(({ message }) => message.id);
+  const panel = useToolDiscoveryPanelStore(
+    (state) => state.byMessageId[messageId],
+  );
+  if (!panel) return null;
+
+  const storedRecommendations = panel.recommendations ?? [];
+  const planRecommendations = panel.plan?.recommendations ?? [];
+  const recommendations =
+    storedRecommendations.length > 0
+      ? storedRecommendations.map(toolRecommendationFromStored)
+      : planRecommendations;
+  const recommendationCount =
+    panel.plan?.summary?.recommendationCount ?? recommendations.length;
+  const needCount = panel.plan?.summary?.needCount ?? panel.plan?.needs?.length ?? 0;
+  const safePlan =
+    panel.plan?.summary?.automaticInstallAllowed === false &&
+    panel.plan?.sideEffects?.installation === false &&
+    panel.plan?.sideEffects?.toolExecution === false;
+
+  return (
+    <div
+      data-testid="cognix-tool-discovery-panel"
+      className="mt-2 max-w-full rounded-2xl border border-border/70 bg-muted/25 px-3 py-2 text-xs text-muted-foreground"
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-medium text-foreground">Tool discovery</span>
+        <Badge variant={panel.status === "error" ? "destructive" : "outline"} size="sm">
+          {panel.status === "loading"
+            ? "analyzing"
+            : panel.status === "error"
+              ? "error"
+              : `${recommendationCount} recommended`}
+        </Badge>
+        {needCount > 0 && (
+          <Badge variant="secondary" size="sm">
+            {needCount} needs
+          </Badge>
+        )}
+        {safePlan && (
+          <Badge variant="muted" size="sm">
+            no auto install
+          </Badge>
+        )}
+      </div>
+      {panel.status === "loading" ? (
+        <p className="mt-1">Analyzing the project signals through CogniX Core.</p>
+      ) : panel.status === "error" ? (
+        <p className="mt-1">{panel.message ?? "Tool discovery unavailable."}</p>
+      ) : recommendations.length > 0 ? (
+        <div className="mt-2 grid gap-2">
+          {recommendations.slice(0, 3).map((recommendation, index) => {
+            const confidence =
+              typeof recommendation.confidence === "number"
+                ? `${Math.round(recommendation.confidence * 100)}%`
+                : null;
+            return (
+              <div
+                key={recommendation.id ?? recommendation.toolId ?? `tool-${index}`}
+                className="rounded-xl border border-border/60 bg-background/70 px-2.5 py-2"
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium text-foreground">
+                    {recommendation.toolName ||
+                      draftVariantLabel(recommendation.toolId)}
+                  </span>
+                  <Badge
+                    variant={toolDiscoveryStatusVariant(recommendation.status)}
+                    size="sm"
+                  >
+                    {toolDiscoveryStatusLabel(recommendation.status)}
+                  </Badge>
+                  {recommendation.category && (
+                    <Badge variant="secondary" size="sm">
+                      {draftVariantLabel(recommendation.category)}
+                    </Badge>
+                  )}
+                  {confidence && (
+                    <Badge variant="muted" size="sm">
+                      {confidence}
+                    </Badge>
+                  )}
+                </div>
+                {recommendation.reason && (
+                  <p className="mt-1 line-clamp-2 text-foreground/80">
+                    {recommendation.reason}
+                  </p>
+                )}
+                {recommendation.installHint && (
+                  <p className="mt-1 line-clamp-1">
+                    {recommendation.installHint}
+                  </p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <p className="mt-1">
+          No extra tool need was detected for this message yet.
+        </p>
+      )}
+      {panel.status === "loaded" && (
+        <p className="mt-2">
+          Suggestions only. Activation or installation stays behind CogniX permissions and explicit validation.
+        </p>
+      )}
+    </div>
+  );
+};
+
 /**
  * AssistantMessage handles the display and inline-editing of AI responses.
  * 
@@ -4224,6 +4415,7 @@ const AssistantMessage: FC = () => {
             <ResponseReflectionBadge />
             <ResponseDraftVariantsPanel />
             <ResponseDebatePanel />
+            <ResponseToolDiscoveryPanel />
           </>
         )}
       </div>
@@ -4587,6 +4779,88 @@ const InternalDebateMenuItem: FC = () => {
   );
 };
 
+const ToolDiscoveryMenuItem: FC = () => {
+  const aui = useAui();
+  const messageId = useAuiState(({ message }) => message.id);
+  const isRunning = useAuiState(({ thread }) => thread.isRunning);
+  const setPanelState = useToolDiscoveryPanelStore((state) => state.setPanelState);
+  const [pending, setPending] = useState(false);
+
+  const handleToolDiscovery = async () => {
+    const responseText = aui.message().getCopyText().trim();
+    if (!responseText) {
+      toast.error("Cannot discover tools for an empty response");
+      return;
+    }
+    const exportedThread = aui.thread().export();
+    const prompt = latestUserPromptBeforeMessage(exportedThread, messageId);
+    const objective = [
+      prompt ? `User need:\n${prompt}` : null,
+      `CogniX response context:\n${responseText.slice(0, 1600)}`,
+    ]
+      .filter(Boolean)
+      .join("\n\n")
+      .slice(0, 3800);
+    const runtime = useChatRuntimeStore.getState();
+    setPending(true);
+    setPanelState(messageId, {
+      status: "loading",
+      plan: null,
+      recommendations: [],
+      message: "Analyzing tool needs.",
+    });
+    try {
+      const result = await analyzeToolDiscovery({
+        objective,
+        projectId: runtime.activeProjectId ?? null,
+        projectType: "general",
+        installedToolIds: [],
+        storeRecommendations: true,
+        recordInstalledSnapshot: false,
+      });
+      const storedRecommendations =
+        result.storedRecommendations && result.storedRecommendations.length > 0
+          ? result.storedRecommendations
+          : runtime.activeProjectId
+            ? await listToolRecommendations({
+                projectId: runtime.activeProjectId,
+              }).catch(() => [])
+            : [];
+      setPanelState(messageId, {
+        status: "loaded",
+        plan: result.toolDiscoveryPlan,
+        recommendations: storedRecommendations,
+        message: "Tool discovery ready.",
+      });
+      toast.success("Tool discovery ready");
+    } catch (error) {
+      setPanelState(messageId, {
+        status: "error",
+        plan: null,
+        recommendations: [],
+        message:
+          error instanceof Error ? error.message : "Tool discovery unavailable.",
+      });
+      toast.error("Tool discovery unavailable", {
+        description: error instanceof Error ? error.message : undefined,
+      });
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <ActionBarMorePrimitive.Item
+      disabled={isRunning || pending}
+      onSelect={() => void handleToolDiscovery()}
+      className="aui-action-bar-more-item flex cursor-pointer select-none items-center gap-2 rounded-[12px] px-3 py-2 text-sm outline-none hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50"
+    >
+      <WrenchIcon strokeWidth={1.75} className="size-icon" />
+      {pending ? "Discovering tools" : "Discover tools"}
+    </ActionBarMorePrimitive.Item>
+  );
+};
+
 const AssistantActionBar: FC = () => {
   const { forkMessage, forkDisabled } = useForkMessageAction();
 
@@ -4629,6 +4903,7 @@ const AssistantActionBar: FC = () => {
           </ActionBarMorePrimitive.Item>
           <DraftVariantsMenuItem />
           <InternalDebateMenuItem />
+          <ToolDiscoveryMenuItem />
           <ActionBarPrimitive.ExportMarkdown asChild={true}>
             <ActionBarMorePrimitive.Item className="aui-action-bar-more-item flex cursor-pointer select-none items-center gap-2 rounded-[12px] px-3 py-2 text-sm outline-none hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground">
               <HugeiconsIcon

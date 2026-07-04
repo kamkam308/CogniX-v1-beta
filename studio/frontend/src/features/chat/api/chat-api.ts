@@ -757,6 +757,118 @@ export async function listDebateSessions(
   return body.sessions ?? [];
 }
 
+export interface ToolDiscoveryNeed {
+  needId?: string;
+  label?: string;
+  description?: string;
+  confidence?: number;
+  toolIds?: string[];
+}
+
+export interface ToolDiscoveryRecommendation {
+  id?: string;
+  toolId?: string;
+  toolName?: string;
+  category?: string;
+  needId?: string;
+  needs?: ToolDiscoveryNeed[];
+  reason?: string;
+  confidence?: number;
+  status?: string;
+  capabilities?: string[];
+  installHint?: string | null;
+  connectorBacked?: boolean;
+  actions?: {
+    primary?: string;
+    ignoreAllowed?: boolean;
+    automaticInstallAllowed?: boolean;
+    requiresHumanConfirmation?: boolean;
+  };
+  guardrails?: Record<string, unknown>;
+}
+
+export interface ToolDiscoveryPlan {
+  toolDiscoveryVersion?: string;
+  capabilityRegistryVersion?: string;
+  mode?: string;
+  projectId?: string | null;
+  projectType?: string | null;
+  projectName?: string | null;
+  objectiveExcerpt?: string;
+  needs?: ToolDiscoveryNeed[];
+  recommendations?: ToolDiscoveryRecommendation[];
+  summary?: {
+    needCount?: number;
+    recommendationCount?: number;
+    installedMatchCount?: number;
+    connectorDisabledCount?: number;
+    automaticInstallAllowed?: boolean;
+  };
+  policies?: Record<string, unknown>;
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface StoredToolRecommendationRecord {
+  id: string;
+  projectId?: string | null;
+  needId?: string | null;
+  toolId?: string | null;
+  toolName?: string | null;
+  category?: string | null;
+  reason?: string | null;
+  status?: string | null;
+  confidence?: number | null;
+  ignored?: boolean;
+  recommendation?: ToolDiscoveryRecommendation;
+  recommendationJson?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface ToolDiscoveryAnalyzeResult {
+  username: string;
+  toolDiscoveryPlan: ToolDiscoveryPlan;
+  storedRecommendations?: StoredToolRecommendationRecord[];
+  installedTools?: Array<Record<string, unknown>>;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+}
+
+export async function analyzeToolDiscovery(payload: {
+  objective?: string | null;
+  projectId?: string | null;
+  projectType?: string | null;
+  projectName?: string | null;
+  fileNames?: string[] | null;
+  documents?: Array<Record<string, unknown>> | null;
+  tags?: string[] | null;
+  installedToolIds?: string[] | null;
+  storeRecommendations?: boolean;
+  recordInstalledSnapshot?: boolean;
+}): Promise<ToolDiscoveryAnalyzeResult> {
+  const response = await authFetch("/api/cognix/tools/discovery/analyze", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseJsonOrThrow<ToolDiscoveryAnalyzeResult>(response);
+}
+
+export async function listToolRecommendations(payload?: {
+  projectId?: string | null;
+  includeIgnored?: boolean;
+}): Promise<StoredToolRecommendationRecord[]> {
+  const params = new URLSearchParams();
+  if (payload?.projectId) params.set("project_id", payload.projectId);
+  if (payload?.includeIgnored) params.set("include_ignored", "true");
+  const query = params.toString() ? `?${params.toString()}` : "";
+  const response = await authFetch(`/api/cognix/tools/recommendations${query}`);
+  const body = await parseJsonOrThrow<{
+    recommendations?: StoredToolRecommendationRecord[];
+  }>(response);
+  return body.recommendations ?? [];
+}
+
 export interface ProjectSkillRecord {
   id: string;
   skillId?: string | null;
