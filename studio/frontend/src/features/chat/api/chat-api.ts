@@ -498,6 +498,21 @@ export interface ResponseReflectionResult {
   plannerVersion?: string;
 }
 
+export interface ResponseReflectionRecord {
+  id: string;
+  messageId?: string | null;
+  threadId?: string | null;
+  projectId?: string | null;
+  modelId?: string | null;
+  confidenceScore?: number | null;
+  confidenceLabel?: string | null;
+  verificationRequired?: boolean | number | null;
+  recommendedAction?: string | null;
+  issues?: ResponseReflectionIssue[];
+  evaluation?: ResponseReflectionEvaluation;
+  createdAt?: string | null;
+}
+
 export async function evaluateResponseReflection(payload: {
   prompt: string;
   response: string;
@@ -515,6 +530,19 @@ export async function evaluateResponseReflection(payload: {
     body: JSON.stringify(payload),
   });
   return parseJsonOrThrow<ResponseReflectionResult>(response);
+}
+
+export async function listResponseReflectionEvaluations(
+  messageId?: string | null,
+): Promise<ResponseReflectionRecord[]> {
+  const query = messageId
+    ? `?${new URLSearchParams({ message_id: messageId }).toString()}`
+    : "";
+  const response = await authFetch(`/api/cognix/reflection/evaluations${query}`);
+  const body = await parseJsonOrThrow<{
+    evaluations?: ResponseReflectionRecord[];
+  }>(response);
+  return body.evaluations ?? [];
 }
 
 export interface ProjectSkillRecord {

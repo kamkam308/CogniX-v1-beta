@@ -55,6 +55,8 @@ import {
   CHAT_HISTORY_UPDATED_EVENT,
   forkChatThread,
   getForkCount,
+  listResponseReflectionEvaluations,
+  type ResponseReflectionRecord,
 } from "@/features/chat/api/chat-api";
 import { sentAudioNames } from "@/features/chat/api/chat-adapter";
 import {
@@ -3563,11 +3565,15 @@ const DiffusionCanvas: FC = () => {
 };
 
 type ResponseReflectionMetadata = {
+  recordId?: string;
   confidenceScore?: number;
   confidenceLabel?: string;
   verificationRequired?: boolean;
   recommendedAction?: string;
   issueCount?: number;
+  issueIds?: string[];
+  createdAt?: string | null;
+  source?: "message" | "stored";
 };
 
 function asResponseReflectionMetadata(
@@ -3577,6 +3583,57 @@ function asResponseReflectionMetadata(
     return null;
   }
   return value as ResponseReflectionMetadata;
+}
+
+function responseReflectionMetadataFromRecord(
+  record: ResponseReflectionRecord | undefined,
+): ResponseReflectionMetadata | null {
+  if (!record) return null;
+  const confidence = record.evaluation?.confidence;
+  const issues = Array.isArray(record.issues)
+    ? record.issues
+    : Array.isArray(record.evaluation?.issues)
+      ? record.evaluation.issues
+      : [];
+  const confidenceScore =
+    typeof record.confidenceScore === "number"
+      ? record.confidenceScore
+      : typeof confidence?.score === "number"
+        ? confidence.score
+        : undefined;
+  const confidenceLabel =
+    typeof record.confidenceLabel === "string" && record.confidenceLabel
+      ? record.confidenceLabel
+      : confidence?.label;
+  const recommendedAction =
+    typeof record.recommendedAction === "string" &&
+    record.recommendedAction.length > 0
+      ? record.recommendedAction
+      : confidence?.recommendedAction;
+  const verificationRequired =
+    typeof record.verificationRequired === "boolean"
+      ? record.verificationRequired
+      : typeof record.verificationRequired === "number"
+        ? record.verificationRequired !== 0
+        : confidence?.verificationRequired;
+
+  if (confidenceScore == null && !confidenceLabel && !recommendedAction) {
+    return null;
+  }
+
+  return {
+    recordId: record.id,
+    confidenceScore,
+    confidenceLabel,
+    verificationRequired,
+    recommendedAction,
+    issueCount: issues.length,
+    issueIds: issues
+      .map((issue) => issue.id)
+      .filter((id): id is string => typeof id === "string" && id.length > 0),
+    createdAt: record.createdAt ?? null,
+    source: "stored",
+  };
 }
 
 function reflectionBadgeVariant(
@@ -3597,13 +3654,66 @@ function reflectionBadgeText(reflection: ResponseReflectionMetadata): string {
   return "Reliability checked";
 }
 
+function reflectionActionText(action: string | undefined): string {
+  switch (action) {
+    case "accept":
+      return "Answer can be accepted.";
+    case "light_review_recommended":
+      return "Light review recommended.";
+    case "second_pass_recommended":
+      return "Second pass recommended.";
+    case "verify_with_sources":
+      return "Source verification recommended.";
+    case "regenerate_response":
+      return "Regeneration recommended.";
+    default:
+      return action ? `Action: ${action}.` : "";
+  }
+}
+
 const ResponseReflectionBadge: FC = () => {
-  const reflection = useAuiState(({ message }) =>
+  const messageId = useAuiState(({ message }) => message.id);
+  const localReflection = useAuiState(({ message }) =>
     asResponseReflectionMetadata(
       (message.metadata?.custom as Record<string, unknown> | undefined)
         ?.responseReflection,
     ),
   );
+  const [storedReflectionResult, setStoredReflectionResult] = useState<{
+    messageId: string;
+    reflection: ResponseReflectionMetadata | null;
+  } | null>(null);
+  const hasLocalReflection = Boolean(localReflection);
+
+  useEffect(() => {
+    if (hasLocalReflection || !messageId) {
+      return;
+    }
+    let cancelled = false;
+    void listResponseReflectionEvaluations(messageId)
+      .then((evaluations) => {
+        if (cancelled) return;
+        setStoredReflectionResult({
+          messageId,
+          reflection: responseReflectionMetadataFromRecord(evaluations[0]),
+        });
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setStoredReflectionResult({ messageId, reflection: null });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [hasLocalReflection, messageId]);
+
+  const storedReflection =
+    storedReflectionResult?.messageId === messageId
+      ? storedReflectionResult.reflection
+      : null;
+  const reflection =
+    localReflection ? { ...localReflection, source: "message" as const } : storedReflection;
   if (!reflection) return null;
 
   const score =
@@ -3614,16 +3724,16 @@ const ResponseReflectionBadge: FC = () => {
     typeof reflection.issueCount === "number"
       ? `${reflection.issueCount} issue${reflection.issueCount === 1 ? "" : "s"}`
       : "issues unknown";
-  const action = reflection.recommendedAction
-    ? ` Action: ${reflection.recommendedAction}.`
-    : "";
+  const action = reflectionActionText(reflection.recommendedAction);
+  const source =
+    reflection.source === "stored" ? " Loaded from stored CogniX evaluation." : "";
 
   return (
     <div className="mt-2 flex flex-wrap items-center gap-2">
       <Badge
         variant={reflectionBadgeVariant(reflection)}
         size="sm"
-        title={`CogniX response self-reflection. Confidence: ${score}. ${issues}.${action}`}
+        title={`CogniX response self-reflection. Confidence: ${score}. ${issues}. ${action}${source}`}
         className="rounded-full text-[11px]"
       >
         {reflectionBadgeText(reflection)}
