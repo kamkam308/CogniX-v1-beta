@@ -80,6 +80,7 @@ import type { ChatArtifact, ChatArtifactSurface } from "./artifacts/types";
 import { ChatSettingsPanel } from "./chat-settings-sheet";
 import { ContextUsageBar } from "./components/context-usage-bar";
 import { ModelLoadInlineStatus } from "./components/model-load-status";
+import { ProjectContextGraphPanel } from "./components/project-context-graph-panel";
 import { ProjectSwitcher } from "./components/project-switcher";
 import {
   buildExternalModelId,
@@ -1212,7 +1213,9 @@ function ProjectLanding({
   const navigate = useNavigate();
   const activeThreadId = useChatRuntimeStore((s) => s.activeThreadId);
   const initialActiveThreadRef = useRef<string | null>(null);
-  const [projectTab, setProjectTab] = useState<"chats" | "sources">("chats");
+  const [projectTab, setProjectTab] = useState<
+    "chats" | "sources" | "contextGraph"
+  >("chats");
   const [pendingNewThreadId, setPendingNewThreadId] = useState<string | null>(
     null,
   );
@@ -1345,10 +1348,24 @@ function ProjectLanding({
                   New
                 </span>
               </button>
+              <button
+                type="button"
+                onClick={() => setProjectTab("contextGraph")}
+                data-active={projectTab === "contextGraph"}
+                className="h-10 rounded-full px-5 text-[14px] font-semibold transition-colors data-[active=true]:bg-muted data-[active=true]:text-foreground data-[active=false]:text-muted-foreground data-[active=false]:hover:bg-nav-surface-hover"
+              >
+                Context Graph
+              </button>
             </div>
 
             {projectTab === "sources" ? (
               <ProjectSourcesPanel projectId={projectId} />
+            ) : projectTab === "contextGraph" ? (
+              <ProjectContextGraphPanel
+                projectId={projectId}
+                projectName={projectName}
+                items={items}
+              />
             ) : (
               <div className="mt-8 flex flex-col gap-1">
                 {items.map((item) => {

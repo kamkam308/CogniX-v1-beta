@@ -262,6 +262,109 @@ export async function buildCogniXContextPack(payload: {
   return parseJsonOrThrow(response);
 }
 
+export interface ContextGraphVisualToken {
+  colorToken?: string;
+  icon?: string;
+}
+
+export interface ContextGraphNode {
+  id: string;
+  type: string;
+  label: string;
+  source?: string;
+  weight?: number;
+  visual?: ContextGraphVisualToken;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ContextGraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  type: string;
+  label?: string;
+  weight?: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ContextGraphSnapshot {
+  contextGraphVersion?: string;
+  entityExtractorVersion?: string;
+  relationBuilderVersion?: string;
+  mode?: string;
+  projectId?: string | null;
+  projectName?: string | null;
+  projectType?: string | null;
+  nodes?: ContextGraphNode[];
+  edges?: ContextGraphEdge[];
+  summary?: {
+    nodeCount?: number;
+    edgeCount?: number;
+    conceptCount?: number;
+    documentCount?: number;
+    chatCount?: number;
+    fileCount?: number;
+    modelCount?: number;
+    toolCount?: number;
+  };
+  displayContract?: Record<string, unknown>;
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface StoredContextGraphSnapshot {
+  id: string;
+  projectId?: string | null;
+  title?: string | null;
+  graph?: ContextGraphSnapshot;
+  nodeCount?: number | null;
+  edgeCount?: number | null;
+  createdAt?: string | null;
+}
+
+export interface ContextGraphBuildResult {
+  username: string;
+  contextGraph: ContextGraphSnapshot;
+  snapshot?: StoredContextGraphSnapshot | null;
+  auditLogId?: string | null;
+  warnings?: string[];
+  sideEffects?: Record<string, unknown>;
+}
+
+export async function buildContextGraph(payload: {
+  projectId?: string | null;
+  projectName?: string | null;
+  projectType?: string | null;
+  messages?: Array<Record<string, unknown>> | null;
+  documents?: Array<Record<string, unknown>> | null;
+  files?: unknown[] | null;
+  decisions?: unknown[] | null;
+  tasks?: unknown[] | null;
+  models?: unknown[] | null;
+  tools?: unknown[] | null;
+  includeProjectThreads?: boolean;
+  storeSnapshot?: boolean;
+}): Promise<ContextGraphBuildResult> {
+  const response = await authFetch("/api/cognix/context/graph/build", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseJsonOrThrow<ContextGraphBuildResult>(response);
+}
+
+export async function listContextGraphSnapshots(payload?: {
+  projectId?: string | null;
+}): Promise<StoredContextGraphSnapshot[]> {
+  const params = new URLSearchParams();
+  if (payload?.projectId) params.set("project_id", payload.projectId);
+  const query = params.toString() ? `?${params.toString()}` : "";
+  const response = await authFetch(`/api/cognix/context/graph/snapshots${query}`);
+  const body = await parseJsonOrThrow<{
+    snapshots?: StoredContextGraphSnapshot[];
+  }>(response);
+  return body.snapshots ?? [];
+}
+
 export async function planCogniXExecution(payload: {
   objective: string;
   projectType?: string | null;
