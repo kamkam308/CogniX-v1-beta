@@ -86,6 +86,7 @@ import { ProjectContextGraphPanel } from "./components/project-context-graph-pan
 import { ProjectMemoryReviewPanel } from "./components/project-memory-review-panel";
 import { ProjectPromptCompressionPanel } from "./components/project-prompt-compression-panel";
 import { ProjectSwitcher } from "./components/project-switcher";
+import { ProjectTimelinePanel } from "./components/project-timeline-panel";
 import { ProjectWorkflowRecorderPanel } from "./components/project-workflow-recorder-panel";
 import {
   buildExternalModelId,
@@ -1219,7 +1220,7 @@ function ProjectLanding({
   const activeThreadId = useChatRuntimeStore((s) => s.activeThreadId);
   const initialActiveThreadRef = useRef<string | null>(null);
   const [projectTab, setProjectTab] = useState<
-    "chats" | "sources" | "contextGraph" | "workflows"
+    "chats" | "sources" | "contextGraph" | "timeline" | "workflows"
   >("chats");
   const [pendingNewThreadId, setPendingNewThreadId] = useState<string | null>(
     null,
@@ -1363,6 +1364,14 @@ function ProjectLanding({
               </button>
               <button
                 type="button"
+                onClick={() => setProjectTab("timeline")}
+                data-active={projectTab === "timeline"}
+                className="h-10 rounded-full px-5 text-[14px] font-semibold transition-colors data-[active=true]:bg-muted data-[active=true]:text-foreground data-[active=false]:text-muted-foreground data-[active=false]:hover:bg-nav-surface-hover"
+              >
+                Timeline
+              </button>
+              <button
+                type="button"
                 onClick={() => setProjectTab("workflows")}
                 data-active={projectTab === "workflows"}
                 className="h-10 rounded-full px-5 text-[14px] font-semibold transition-colors data-[active=true]:bg-muted data-[active=true]:text-foreground data-[active=false]:text-muted-foreground data-[active=false]:hover:bg-nav-surface-hover"
@@ -1400,6 +1409,12 @@ function ProjectLanding({
                   items={items}
                 />
               </>
+            ) : projectTab === "timeline" ? (
+              <ProjectTimelinePanel
+                projectId={projectId}
+                projectName={projectName}
+                items={items}
+              />
             ) : projectTab === "workflows" ? (
               <ProjectWorkflowRecorderPanel
                 projectId={projectId}

@@ -488,6 +488,50 @@ export interface WorkflowRunPlanResult {
   plannerVersion?: string;
 }
 
+export type TimelineEventType =
+  | "model_selected"
+  | "architecture_decision"
+  | "document_added"
+  | "fine_tuning_started"
+  | "critical_error"
+  | "business_decision";
+
+export interface TimelineEventRecord {
+  id: string;
+  projectId?: string | null;
+  eventType: TimelineEventType;
+  title: string;
+  summary?: string | null;
+  sourceType?: string | null;
+  sourceId?: string | null;
+  importance?: "normal" | "high" | string;
+  metadata?: Record<string, unknown>;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface TimelineEventPlan {
+  timelineVersion?: string;
+  eventClassifierVersion?: string;
+  mode?: string;
+  projectId?: string | null;
+  event?: Omit<TimelineEventRecord, "id" | "createdAt" | "updatedAt">;
+  classification?: {
+    eventType?: TimelineEventType | string;
+    confidence?: number;
+    matchedSignals?: string[];
+  };
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface TimelineEventResult {
+  timelineEventPlan: TimelineEventPlan;
+  event: TimelineEventRecord | null;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -596,6 +640,80 @@ function normalizeWorkflow(value: unknown): WorkflowRecord {
   };
 }
 
+function normalizeTimelineEventType(value: unknown): TimelineEventType {
+  const candidate = maybeString(value);
+  if (
+    candidate === "model_selected" ||
+    candidate === "architecture_decision" ||
+    candidate === "document_added" ||
+    candidate === "fine_tuning_started" ||
+    candidate === "critical_error" ||
+    candidate === "business_decision"
+  ) {
+    return candidate;
+  }
+  return "architecture_decision";
+}
+
+function normalizeTimelineEventPlanEvent(
+  value: unknown,
+): Omit<TimelineEventRecord, "id" | "createdAt" | "updatedAt"> {
+  const raw = asRecord(value);
+  return {
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    eventType: normalizeTimelineEventType(raw.eventType ?? raw.event_type),
+    title: stringValue(raw.title, "Timeline event"),
+    summary: maybeString(raw.summary),
+    sourceType: maybeString(raw.sourceType ?? raw.source_type),
+    sourceId: maybeString(raw.sourceId ?? raw.source_id),
+    importance: stringValue(raw.importance, "normal"),
+    metadata: parseRecordJson(raw.metadata ?? raw.metadataJson) ?? {},
+  };
+}
+
+function normalizeTimelineEvent(value: unknown): TimelineEventRecord {
+  const raw = asRecord(value);
+  return {
+    id: stringValue(raw.id),
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    eventType: normalizeTimelineEventType(raw.eventType ?? raw.event_type),
+    title: stringValue(raw.title, "Timeline event"),
+    summary: maybeString(raw.summary),
+    sourceType: maybeString(raw.sourceType ?? raw.source_type),
+    sourceId: maybeString(raw.sourceId ?? raw.source_id),
+    importance: stringValue(raw.importance, "normal"),
+    metadata:
+      parseRecordJson(raw.metadata ?? raw.metadataJson) ??
+      parseRecordJson(raw.metadata_json) ??
+      {},
+    createdAt: maybeString(raw.createdAt ?? raw.created_at),
+    updatedAt: maybeString(raw.updatedAt ?? raw.updated_at),
+  };
+}
+
+function normalizeTimelineEventPlan(value: unknown): TimelineEventPlan {
+  const raw = asRecord(value);
+  const classification = asRecord(raw.classification);
+  return {
+    timelineVersion: maybeString(raw.timelineVersion) ?? undefined,
+    eventClassifierVersion:
+      maybeString(raw.eventClassifierVersion) ?? undefined,
+    mode: maybeString(raw.mode) ?? undefined,
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    event: normalizeTimelineEventPlanEvent(raw.event),
+    classification: {
+      eventType: maybeString(classification.eventType) ?? undefined,
+      confidence: numberValue(classification.confidence, 0),
+      matchedSignals: Array.isArray(classification.matchedSignals)
+        ? classification.matchedSignals
+            .map((signal) => stringValue(signal).trim())
+            .filter(Boolean)
+        : [],
+    },
+    sideEffects: parseRecordJson(raw.sideEffects) ?? {},
+  };
+}
+
 function normalizeWorkflowRunPlanStep(
   value: unknown,
   fallbackIndex = 0,
@@ -666,6 +784,63 @@ export async function listWorkflowTemplates(): Promise<WorkflowTemplate[]> {
     templateRegistry?: { templates?: unknown[] };
   }>(response);
   return (body.templateRegistry?.templates ?? []).map(normalizeWorkflowTemplate);
+}
+
+export async function listTimelineEvents(payload?: {
+  projectId?: string | null;
+  eventType?: TimelineEventType | null;
+  query?: string | null;
+}): Promise<TimelineEventRecord[]> {
+  const params = new URLSearchParams();
+  if (payload?.projectId) params.set("project_id", payload.projectId);
+  if (payload?.eventType) params.set("event_type", payload.eventType);
+  if (payload?.query?.trim()) params.set("query", payload.query.trim());
+  const query = params.toString();
+  const response = await authFetch(
+    `/api/cognix/timeline/events${query ? `?${query}` : ""}`,
+  );
+  const body = await parseJsonOrThrow<{ events?: unknown[] }>(response);
+  return (body.events ?? []).map(normalizeTimelineEvent);
+}
+
+export async function createTimelineEvent(payload: {
+  projectId?: string | null;
+  eventType?: TimelineEventType | null;
+  title: string;
+  summary?: string | null;
+  sourceType?: string | null;
+  sourceId?: string | null;
+  metadata?: Record<string, unknown>;
+  storeEvent?: boolean;
+}): Promise<TimelineEventResult> {
+  const response = await authFetch("/api/cognix/timeline/events", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      projectId: payload.projectId ?? null,
+      eventType: payload.eventType ?? null,
+      title: payload.title,
+      summary: payload.summary ?? null,
+      sourceType: payload.sourceType ?? null,
+      sourceId: payload.sourceId ?? null,
+      metadata: payload.metadata ?? {},
+      storeEvent: payload.storeEvent ?? true,
+    }),
+  });
+  const body = await parseJsonOrThrow<{
+    timelineEventPlan?: unknown;
+    event?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    timelineEventPlan: normalizeTimelineEventPlan(body.timelineEventPlan),
+    event: body.event ? normalizeTimelineEvent(body.event) : null,
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
 }
 
 export async function listWorkflows(payload?: {
