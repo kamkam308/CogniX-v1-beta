@@ -100,6 +100,13 @@ const PREPROCESS_FIXTURES = [
 | $\displaystyle \int\frac{dx}{a\cos x+b\sin x}=\frac{1}{\sqrt{a^{2}+b^{2}}} | a\cos x+b\sin x\bigr |`,
   },
   {
+    name: "compact math formula table without spaced pipes",
+    markdown: String.raw`|Formule|Utilisation|
+|---|---|
+|(\displaystyle \int\frac{dx}{\sqrt{x^{2}+a}} = \ln\!\bigl(x+\sqrt{x^{2}+a}\bigr)+C)|Racine carrée simple|
+|$\displaystyle \int\frac{dx}{a\cos x+b\sin x}=\frac{1}{\sqrt{a^{2}+b^{2}}}|a\cos x+b\sin x\bigr|`,
+  },
+  {
     name: "labeled physics table display math",
     markdown: String.raw`| Action | Direction | Expression (module) |
 |---|---|---|
@@ -119,6 +126,28 @@ m_{2};\ddot{x}_2 = 2T - m_2g . \tag{19}
 $\begin{aligned}$ m_{2}\,a &=2\bigl(m_{1}g-2m_{1}a\bigr)-m_{2}g, $\qquad a\equiv\ddot x_{2}$,\\[2mm] $\bigl(m_{2}+4m_{1}\bigr)a &=g\,(2m_{1}-m_{2}), $\end{aligned}$
 
 $\boxed{a=\ddot x_{2}=g\,\frac{2m_{1}-m_{2}}{m_{2}+4m_{1}}}. $\tag{20}$`,
+  },
+  {
+    name: "physics prose continuation with boxed and differential equation",
+    markdown: String.raw`Le point (5) du sujet fournit la valeur numérique de (E). || 3 – Expression de la résistance totale (R) | Le circuit vu par la source comprend les deux résistances extérieures et la résistance interne de la bobine :
+
+\boxed{\,R = R_{1}+R_{2}+r\,}. $$ || **4** – Expression de (u_{1}(t)) | En écrivant la loi des mailles, on obtient \frac{{\rm d}u_{1}}{{\rm d}t}+\frac{1}{\tau}u_{1}=\frac{E}{\tau}, \qquad \tau=\frac{L}{R}.`,
+  },
+  {
+    name: "physics prose with compact numeric relations",
+    markdown: String.raw`Avec (A=R_{1}/R = 10/(20+r)). Avec (A=0.50) on trouve 0.50 = \frac{10}{20+r};\Longrightarrow;20+r=20;\Longrightarrow;\boxed{r=0;\Omega}.
+
+La constante de temps \tau (lecture graphique) correspond à l'abscisse où la courbe atteint (1-1/e)\approx0.632 de sa valeur finale.
+
+La poulie descend si 2m_1 > m_2 et monte si m_2 < 4m_1.`,
+  },
+  {
+    name: "physics vector comments and orphan tag",
+    markdown: String.raw`Projection de \vec F_{t\to p} sur \vec\rho :
+
+Comme \vec F_{t\to p} = -\vec F_{p\to t}, le module est exactement le même.
+
+Le résultat devient \boxed{F_{t\to p}=F_p}. \tag{9}$`,
   },
   {
     name: "escaped parenthesis summary table",

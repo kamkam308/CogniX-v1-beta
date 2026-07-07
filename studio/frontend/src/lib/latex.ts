@@ -144,7 +144,8 @@ const LATEX_COMMAND_NAMES = [
 
 const LATEX_COMMAND_PATTERN = LATEX_COMMAND_NAMES.join("|");
 const LATEX_IDENTIFIER_PATTERN = String.raw`[A-Za-z](?:[A-Za-z0-9]|_\{?[^{}\s]+\}?|\^\{?[^{}\s]+\}?)*`;
-const LATEX_ASSIGNMENT_LEFT_PATTERN = String.raw`${LATEX_IDENTIFIER_PATTERN}(?:\s*/\s*${LATEX_IDENTIFIER_PATTERN})?`;
+const LATEX_NUMERIC_IDENTIFIER_PATTERN = String.raw`\d+(?:[.,]\d+)?(?:\s*[+\-*/]\s*${LATEX_IDENTIFIER_PATTERN})?`;
+const LATEX_ASSIGNMENT_LEFT_PATTERN = String.raw`(?:${LATEX_IDENTIFIER_PATTERN}|${LATEX_NUMERIC_IDENTIFIER_PATTERN})(?:\s*/\s*(?:${LATEX_IDENTIFIER_PATTERN}|${LATEX_NUMERIC_IDENTIFIER_PATTERN}))?`;
 const LATEX_ASSIGNMENT_PATTERN = String.raw`${LATEX_ASSIGNMENT_LEFT_PATTERN}(?:\s*['’])?(?:\s*\([^()\n]{0,80}\))?\s*=`;
 const LATEX_COMMAND_START_PATTERN = String.raw`(?:${LATEX_IDENTIFIER_PATTERN}\s*;\s*)?\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])`;
 const LATEX_COMMAND_RE = new RegExp(
@@ -183,11 +184,14 @@ const BACKSLASH_INLINE_MATH_RE = /\\\(([^)\n]*?)\\\)/g;
 const UNESCAPED_DOLLAR_GLOBAL_RE = /(?<!\\)\$/g;
 const SPACED_TABLE_SEPARATOR_RE = /\s+\|\s+/;
 const TABLE_LINE_SPLIT_RE = /(\s+\|\s+)/;
+const UNESCAPED_PIPE_RE = /(?<!\\)\|/g;
 const TABLE_CELL_LEADING_RE = /^\s*\|\s*/;
 const TABLE_CELL_TRAILING_RE = /\s*\|\s*$/;
 const MARKDOWN_TABLE_SEPARATOR_RE = /^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*$/;
 const PROSE_WORD_RE =
-  /\b(?:avec|alors|aucun|comme|condition|dans|de|des|donc|du|en|est|et|la|le|les|nom|on|ou|par|pour|regime|régime|sur|une|un|valeur|voir)\b/i;
+  /\b(?:abscisse|alors|aucun|atteint|avec|bas|bobine|bornes|comme|condition|correspond|courbe|dans|de|des|donc|du|en|est|et|exactement|graphique|haut|la|le|lecture|les|masse|même|meme|mobile|module|nom|on|ou|par|poulie|pour|projection|regime|régime|résultat|resultat|segment|segments|si|sur|tension|tire|une|un|valeur|vers|voir)\b/i;
+const PROSE_WORD_GLOBAL_RE =
+  /\b(?:abscisse|alors|aucun|atteint|avec|bas|bobine|bornes|comme|condition|correspond|courbe|dans|de|des|donc|du|en|est|et|exactement|graphique|haut|la|le|lecture|les|masse|même|meme|mobile|module|nom|on|ou|par|poulie|pour|projection|regime|régime|résultat|resultat|segment|segments|si|sur|tension|tire|une|un|valeur|vers|voir)\b/gi;
 const MATH_LEADING_BODY_RE = new RegExp(
   `^\\s*(?:${LATEX_COMMAND_START_PATTERN}|${LATEX_ASSIGNMENT_PATTERN}|[A-Za-z0-9_{}\\\\^]+\\s*[+\\-*/=<>])`,
 );
@@ -204,7 +208,15 @@ const ORPHAN_DISPLAY_CLOSER_RE =
   /(^|[\n\s])((?:\\(?:boxed|displaystyle|frac|sqrt|int)[^\n$]*?))\s*\$\$(?=\s*(?:\|\||\||$))/g;
 const DOUBLE_PIPE_DISPLAY_RE = /\$\$\s+\|\|\s+/g;
 const WORD_RE = /[\p{L}]+/gu;
-const WRAPPABLE_COMMANDS_WITH_ARGUMENT_RE = /\\boxed\{(?:[^{}]|\{[^{}]*\})*\}/g;
+const BOXED_COMMAND_BODY_PATTERN = String.raw`\\boxed\{(?:[^{}]|\{[^{}]*\})*\}`;
+const WRAPPABLE_COMMANDS_WITH_ARGUMENT_RE = new RegExp(
+  BOXED_COMMAND_BODY_PATTERN,
+  "g",
+);
+const TAGGED_BOXED_ORPHAN_RE = new RegExp(
+  String.raw`(${BOXED_COMMAND_BODY_PATTERN})\.?\s*(\\tag\{[^{}]+\})\s*\$+`,
+  "g",
+);
 const TABLE_CELL_LABELED_DISPLAY_MATH_RE = new RegExp(
   String.raw`^(\s*)\$?([^$\\\n]*?[\p{L}][^$\\\n]*?)\s*\$\$\s*([^$\n]*\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])[^$\n]*?)\s*\$\$+\s*$`,
   "u",
@@ -231,6 +243,7 @@ const SPLIT_TAGGED_INLINE_MATH_RE =
   /(?<!\\)\$([^$\n]*\\(?:boxed|frac|sqrt|vec|dot|ddot|displaystyle)[^$\n]*?)\s*(?<!\\)\$\s*(\\tag\{[^{}]+\})(?<!\\)\$/g;
 const ESCAPED_OPEN_PAREN_RE = /^\\\(/;
 const ESCAPED_CLOSE_PAREN_RE = /\\\)$/g;
+const DANGLING_OPEN_PAREN_RE = /\s*\($/;
 const FORMULA_CONNECTOR_SPLIT_RE = new RegExp(
   String.raw`(\s+(?:et|ou|donc|avec)\s+)(?=${LATEX_ASSIGNMENT_LEFT_PATTERN}(?:\s*['’])?(?:\s*\([^()\n]{0,80}\))?\s*=)`,
   "i",
@@ -238,6 +251,12 @@ const FORMULA_CONNECTOR_SPLIT_RE = new RegExp(
 const LATEX_SCRIPT_SUFFIX_PATTERN = String.raw`(?:_\{[^{}\s]+\}|_\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])|_[0-9A-Za-z](?![A-Za-z])|\^\{[^{}\s]+\}|\^\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])|\^[0-9A-Za-z](?![A-Za-z]))`;
 const STANDALONE_SCRIPTED_IDENTIFIER_RE = new RegExp(
   String.raw`(^|[\s([{;:,|])((?:[A-Za-z]{1,4}|\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z]))${LATEX_SCRIPT_SUFFIX_PATTERN}+(?:\([^()\n]{0,80}\))?)`,
+  "g",
+);
+const COMPACT_RELATION_ATOM_PATTERN = String.raw`(?:\d+(?:[.,]\d+)?[A-Za-z](?:${LATEX_SCRIPT_SUFFIX_PATTERN})*|\d+(?:[.,]\d+)?|[A-Za-z](?:${LATEX_SCRIPT_SUFFIX_PATTERN})*|\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])(?:\{[^{}\n]*\})*|\([^()\n]{1,80}\))`;
+const COMPACT_RELATION_SIDE_PATTERN = String.raw`${COMPACT_RELATION_ATOM_PATTERN}(?:\s*[+\-*/]\s*${COMPACT_RELATION_ATOM_PATTERN})*`;
+const BARE_COMPACT_RELATION_RE = new RegExp(
+  String.raw`(^|[\s(;:,])(${COMPACT_RELATION_SIDE_PATTERN}\s*(?:=|<|>|≤|≥|≈|\\approx|\\Rightarrow|\\Longrightarrow|⇒|→)\s*${COMPACT_RELATION_SIDE_PATTERN})`,
   "g",
 );
 
@@ -678,6 +697,48 @@ function splitTableLine(line: string): string[] {
   return line.split(TABLE_LINE_SPLIT_RE);
 }
 
+function countUnescapedPipes(line: string): number {
+  UNESCAPED_PIPE_RE.lastIndex = 0;
+  let count = 0;
+  while (UNESCAPED_PIPE_RE.exec(line) !== null) {
+    count += 1;
+  }
+  return count;
+}
+
+function splitCompactTableLine(line: string): string[] {
+  const parts: string[] = [];
+  let buffer = "";
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (char === "|" && line[index - 1] !== "\\") {
+      parts.push(buffer, "|");
+      buffer = "";
+      continue;
+    }
+    buffer += char;
+  }
+  parts.push(buffer);
+  return parts;
+}
+
+function isCompactMarkdownTableLine(line: string): boolean {
+  if (
+    !hasBareMathSignal(line) ||
+    MARKDOWN_TABLE_SEPARATOR_RE.test(line.trim())
+  ) {
+    return false;
+  }
+  if (SPACED_TABLE_SEPARATOR_RE.test(line)) {
+    return false;
+  }
+  const trimmed = line.trim();
+  if (!(trimmed.startsWith("|") || trimmed.endsWith("|"))) {
+    return false;
+  }
+  return countUnescapedPipes(line) >= 2;
+}
+
 function splitCellChrome(part: string): {
   body: string;
   leading: string;
@@ -802,7 +863,14 @@ function wrapSpacedMarkdownTableLines(content: string): string {
 
       const normalizedLine = normalizeMalformedTableLineMath(part);
       if (!isSpacedMarkdownTableLine(normalizedLine)) {
-        return normalizedLine;
+        if (!isCompactMarkdownTableLine(normalizedLine)) {
+          return normalizedLine;
+        }
+        return splitCompactTableLine(normalizedLine)
+          .map((cellOrSeparator, index) =>
+            index % 2 === 1 ? cellOrSeparator : wrapTableCell(cellOrSeparator),
+          )
+          .join("");
       }
 
       const protectedLine = protectMathPipesInTableLine(normalizedLine);
@@ -880,6 +948,14 @@ function wrapWrappableCommandExpressions(content: string): string {
   );
 }
 
+function normalizeTaggedBoxedOrphans(content: string): string {
+  return content.replace(
+    TAGGED_BOXED_ORPHAN_RE,
+    (_match, body: string, tag: string) =>
+      `\n$$\n${normalizeBareLatexBody(`${body}${tag}`)}\n$$`,
+  );
+}
+
 function wrapStandaloneScriptedIdentifiers(
   content: string,
   options: { tableCell?: boolean } = {},
@@ -891,6 +967,97 @@ function wrapStandaloneScriptedIdentifiers(
         return match;
       }
       return `${prefix}${wrapInlineBareLatex(body, options)}`;
+    },
+  );
+}
+
+function isInsideBalancedBraces(value: string, index: number): boolean {
+  let depth = 0;
+  for (let i = 0; i < index; i += 1) {
+    const char = value[i];
+    if (char === "\\") {
+      i += 1;
+      continue;
+    }
+    if (char === "{") {
+      depth += 1;
+    } else if (char === "}" && depth > 0) {
+      depth -= 1;
+    }
+  }
+  return depth > 0;
+}
+
+function splitLeadingFormulaFromTrailingProse(
+  body: string,
+): { formula: string; prose: string } | null {
+  PROSE_WORD_GLOBAL_RE.lastIndex = 0;
+  let match: RegExpExecArray | null = PROSE_WORD_GLOBAL_RE.exec(body);
+  while (match !== null) {
+    if (match.index > 0 && !isInsideBalancedBraces(body, match.index)) {
+      const formulaPrefix = body.slice(0, match.index);
+      const danglingOpenParen =
+        formulaPrefix.match(DANGLING_OPEN_PAREN_RE)?.[0] ?? "";
+      const formula = danglingOpenParen
+        ? formulaPrefix.slice(
+            0,
+            formulaPrefix.length - danglingOpenParen.length,
+          )
+        : formulaPrefix;
+      const prose = `${danglingOpenParen}${body.slice(match.index)}`;
+      if (looksLikeBareLatexMath(formula)) {
+        return { formula, prose };
+      }
+    }
+    match = PROSE_WORD_GLOBAL_RE.exec(body);
+  }
+  return null;
+}
+
+function wrapTrailingProseBareLatex(
+  content: string,
+  options: { tableCell?: boolean } = {},
+): string {
+  const withParentheses = wrapParenthesizedBareLatex(content, options);
+  return withParentheses.replace(
+    SENTENCE_BARE_LATEX_RE,
+    (match, prefix: string, body: string) => {
+      const nestedSplit = splitLeadingFormulaFromTrailingProse(body);
+      const formula = nestedSplit?.formula ?? body;
+      const prose = nestedSplit?.prose ?? "";
+      if (!looksLikeBareLatexMath(formula)) {
+        return match;
+      }
+      return `${prefix}${wrapInlineBareLatex(formula, options)}${prose}`;
+    },
+  );
+}
+
+function wrapSentenceBareLatexBody(
+  body: string,
+  options: { tableCell?: boolean } = {},
+): string {
+  const split = splitLeadingFormulaFromTrailingProse(body);
+  if (!split) {
+    return wrapInlineBareLatex(body, options);
+  }
+  return `${wrapInlineBareLatex(split.formula, options)}${wrapTrailingProseBareLatex(
+    split.prose,
+    options,
+  )}`;
+}
+
+function wrapCompactRelationSegments(
+  content: string,
+  options: { tableCell?: boolean } = {},
+): string {
+  return content.replace(
+    BARE_COMPACT_RELATION_RE,
+    (match, prefix: string, body: string) => {
+      if (looksLikeMostlyProse(body) || !hasMathStructure(body)) {
+        return match;
+      }
+      return `${prefix}$${normalizeBareLatexBody(body, options)}$`;
     },
   );
 }
@@ -934,12 +1101,17 @@ function wrapBareLatexSegments(
           if (!looksLikeBareLatexMath(body)) {
             return match;
           }
-          return `${prefix}${wrapInlineBareLatex(body, options)}`;
+          return `${prefix}${wrapSentenceBareLatexBody(body, options)}`;
         },
       ),
   );
 
-  return processOutsideMathDelimiters(withSentenceMath, (segment) =>
+  const withCompactRelations = processOutsideMathDelimiters(
+    withSentenceMath,
+    (segment) => wrapCompactRelationSegments(segment, options),
+  );
+
+  return processOutsideMathDelimiters(withCompactRelations, (segment) =>
     wrapStandaloneScriptedIdentifiers(segment, options),
   );
 }
@@ -952,8 +1124,12 @@ function wrapBareLaTeX(content: string): string {
   const normalizedFragments = normalizeFragmentedDelimitedMath(
     normalizedInitialClosers,
   );
-  const normalizedTaggedEquations = processOutsideMathDelimiters(
+  const normalizedTaggedBoxedOrphans = processOutsideMathDelimiters(
     normalizedFragments,
+    normalizeTaggedBoxedOrphans,
+  );
+  const normalizedTaggedEquations = processOutsideMathDelimiters(
+    normalizedTaggedBoxedOrphans,
     normalizeBareTaggedEquationLines,
   );
   const withInitialDisplayClosers = processOutsideMathDelimiters(
