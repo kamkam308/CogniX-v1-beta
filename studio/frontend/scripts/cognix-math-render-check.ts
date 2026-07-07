@@ -79,8 +79,22 @@ const PREPROCESS_FIXTURES = [
 | 2 – Valeur de l’EMF (E) | En régime permanent (t \to \infty) le courant est constant. Le courant total est I_\infty = E/(R_1+R_2+r). La tension aux bornes de (R_{1}) vaut alors (\displaystyle u_1(\infty)=I_\infty R_1). La lecture du graphe donne u_{1}(\infty)=6.0\,{\rm V}. |`,
   },
   {
+    name: "screenshot physics table with mixed prose and displaystyle",
+    markdown: String.raw`| Question | Réponse & développement |
+|---|---|
+| 1 – Quelle grandeur est tracée sous le nom (u_{1}(t)) ? | La courbe montre une tension qui augmente de façon exponentielle et tend vers une valeur constante. C’est donc la tension aux bornes de la résistance (R_{1}). |
+| 2 – Valeur de l’EMF (E) | En régime permanent (t \to \infty) le courant est constant. Le courant total est I_\infty = \frac{E}{R_1+R_2+r}. La tension aux bornes de (R_{1}) vaut alors (\displaystyle u_{1}(\infty)=I_\infty R_{1}). La lecture du graphe donne (u_{1}(\infty)=6.0\,{\rm V}). |`,
+  },
+  {
     name: "physics continuation after broken table",
     markdown: String.raw`\boxed{\,R = R_{1}+R_{2}+r\,} $$ || **4** – Expression de (u_{1}(t)) | En écrivant la loi des mailles pour la boucle contenant (R_{1}) et la bobine, on obtient \frac{{\rm d}u_1}{{\rm d}t}+\frac{1}{\tau}u_1=\frac{E}{\tau}, \qquad \tau=\frac{L}{R}.`,
+  },
+  {
+    name: "screenshot physics broken continuation paragraph",
+    markdown: String.raw`Le point (5) du sujet fournit la valeur numérique de (E) (voir plus bas). || 3 – Expression de la résistance totale (R) | Le circuit vu par la source comprend les deux résistances extérieures et la résistance interne de la bobine :
+
+\boxed{\,R = R_{1}+R_{2}+r\,}. $$ || **4** – Expression de (u_{1}(t)) | En écrivant la loi des mailles pour la boucle contenant (R_{1}) et la bobine, on obtient l'équation caractéristique
+\frac{{\rm d}u_{1}}{{\rm d}t}+\frac{1}{\tau}u_{1}=\frac{E}{\tau}, \qquad \tau=\frac{L}{R}.`,
   },
   {
     name: "math substitution table",
@@ -98,6 +112,23 @@ const PREPROCESS_FIXTURES = [
 | \int u'v = uv-\int uv' | Intégration par parties |
 | (\displaystyle \int\frac{dx}{\sqrt{x^{2}+a}}=\ln\!\bigl(x+\sqrt{x^{2}+a}\bigr)+C) | Racine carrée simple |
 | $\displaystyle \int\frac{dx}{a\cos x+b\sin x}=\frac{1}{\sqrt{a^{2}+b^{2}}} | a\cos x+b\sin x\bigr |`,
+  },
+  {
+    name: "screenshot math formula recap table",
+    markdown: String.raw`| Formule | Utilisation |
+|---|---|
+| \int u'v = uv-\int uv' | Intégration par parties |
+| (\displaystyle \int\frac{dx}{\sqrt{x^{2}+a}} = \ln\!\bigl(x+\sqrt{x^{2}+a}\bigr)+C) | Racine carrée simple |
+| \displaystyle \int\frac{dx}{ax^{2}+bx+c} - \Delta < 0 \to \frac{2}{\sqrt{-\Delta}}\arctan\frac{2ax+b}{\sqrt{-\Delta}} | Quadratique sans racine réelle |
+| (\displaystyle \int\frac{d}{dx}\int_{u(x)}^{v(x)}f(t),dt = f(v(x))v'(x)-f(u(x))u'(x)) | Dérivée d’une fonction-intégrale |
+| $\displaystyle \int\frac{dx}{a\cos x+b\sin x}=\frac{1}{\sqrt{a^{2}+b^{2}}}\ln\bigl|a\cos x+b\sin x\bigr|$ | Formule trigonométrique |`,
+  },
+  {
+    name: "math tips preserve example label outside formulas",
+    markdown: String.raw`Simplifier avant de choisir : parfois une simple factorisation (ex. (x^{2}+1 = (x+i)(x-i))) rend la substitution de Bioche superflue.
+
+Faire attention aux bornes après une substitution (ex. t = \tan \frac{x}{2} → (x=0\Rightarrow t=0), x=\pi → t → \infty).`,
+    expectedVisibleIncludes: ["factorisation (ex.", "substitution (ex."],
   },
   {
     name: "compact math formula table without spaced pipes",
@@ -341,35 +372,78 @@ function renderMarkdownVisibleText(markdown: string): string {
   return collectVisibleText(fragment).replace(/\s+/g, " ").trim();
 }
 
+function assertNoRawLatexOutsideMath(
+  processed: string,
+  fixtureName: string,
+): void {
+  const outsideMath = stripMathSpans(processed);
+  if (
+    RAW_LATEX_OUTSIDE_MATH_RE.test(outsideMath) ||
+    RAW_SCRIPTED_IDENTIFIER_RE.test(outsideMath)
+  ) {
+    throw new Error(
+      `Raw LaTeX remained outside math spans in ${fixtureName}:\n${processed}`,
+    );
+  }
+}
+
+function assertProcessedMathSpansRender(
+  processed: string,
+  fixtureName: string,
+): void {
+  if (SPLIT_TEX_SPACING_RE.test(processed)) {
+    throw new Error(
+      `A TeX spacing command was split by a dollar delimiter in ${fixtureName}:\n${processed}`,
+    );
+  }
+  for (const formula of collectMathSpans(processed)) {
+    assertMathJaxRenders(formula, fixtureName);
+  }
+}
+
+function assertRenderedTextHasNoRawLatex(
+  visibleText: string,
+  fixtureName: string,
+  processed: string,
+): void {
+  if (
+    VISIBLE_RAW_LATEX_RE.test(visibleText) ||
+    RAW_SCRIPTED_IDENTIFIER_RE.test(visibleText)
+  ) {
+    throw new Error(
+      `Raw LaTeX remained visible after Streamdown render in ${fixtureName}:\n${visibleText}\n\nProcessed markdown:\n${processed}`,
+    );
+  }
+}
+
+function assertExpectedVisibleText(
+  expectedVisibleIncludes: string[] | undefined,
+  visibleText: string,
+  fixtureName: string,
+  processed: string,
+): void {
+  for (const expected of expectedVisibleIncludes ?? []) {
+    if (!visibleText.includes(expected)) {
+      throw new Error(
+        `Expected visible prose was lost in ${fixtureName}: ${expected}\n${visibleText}\n\nProcessed markdown:\n${processed}`,
+      );
+    }
+  }
+}
+
 function assertPreprocessedMarkdownHasNoRawLatex(): void {
   for (const fixture of PREPROCESS_FIXTURES) {
     const processed = preprocessLaTeX(fixture.markdown);
-    const outsideMath = stripMathSpans(processed);
-    if (
-      RAW_LATEX_OUTSIDE_MATH_RE.test(outsideMath) ||
-      RAW_SCRIPTED_IDENTIFIER_RE.test(outsideMath)
-    ) {
-      throw new Error(
-        `Raw LaTeX remained outside math spans in ${fixture.name}:\n${processed}`,
-      );
-    }
-    if (SPLIT_TEX_SPACING_RE.test(processed)) {
-      throw new Error(
-        `A TeX spacing command was split by a dollar delimiter in ${fixture.name}:\n${processed}`,
-      );
-    }
-    for (const formula of collectMathSpans(processed)) {
-      assertMathJaxRenders(formula, fixture.name);
-    }
+    assertNoRawLatexOutsideMath(processed, fixture.name);
+    assertProcessedMathSpansRender(processed, fixture.name);
     const visibleText = renderMarkdownVisibleText(processed);
-    if (
-      VISIBLE_RAW_LATEX_RE.test(visibleText) ||
-      RAW_SCRIPTED_IDENTIFIER_RE.test(visibleText)
-    ) {
-      throw new Error(
-        `Raw LaTeX remained visible after Streamdown render in ${fixture.name}:\n${visibleText}\n\nProcessed markdown:\n${processed}`,
-      );
-    }
+    assertRenderedTextHasNoRawLatex(visibleText, fixture.name, processed);
+    assertExpectedVisibleText(
+      fixture.expectedVisibleIncludes,
+      visibleText,
+      fixture.name,
+      processed,
+    );
   }
 
   for (const fixture of NON_MATH_FIXTURES) {

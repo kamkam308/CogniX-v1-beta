@@ -245,6 +245,9 @@ const SPLIT_TAGGED_INLINE_MATH_RE =
 const ESCAPED_OPEN_PAREN_RE = /^\\\(/;
 const ESCAPED_CLOSE_PAREN_RE = /\\\)$/g;
 const DANGLING_OPEN_PAREN_RE = /\s*\($/;
+const EXAMPLE_PREFIX_IN_PAREN_RE = /^(\s*(?:ex\.|exemple\s*:?)\s+)([\s\S]+)$/i;
+const EXAMPLE_PREFIX_WITH_NESTED_FORMULA_RE =
+  /^(\s*(?:ex\.|exemple\s*:?)\s*)\(([\s\S]+)\)\s*$/i;
 const FORMULA_CONNECTOR_SPLIT_RE = new RegExp(
   String.raw`(\s+(?:et|ou|donc|avec)\s+)(?=${LATEX_ASSIGNMENT_LEFT_PATTERN}(?:\s*['’])?(?:\s*\([^()\n]{0,80}\))?\s*=)`,
   "i",
@@ -616,6 +619,29 @@ function findClosingParenthesis(content: string, openIndex: number): number {
   return -1;
 }
 
+function wrapExamplePrefixedBareLatex(
+  body: string,
+  options: { tableCell?: boolean } = {},
+): string | null {
+  const nested = body.match(EXAMPLE_PREFIX_WITH_NESTED_FORMULA_RE);
+  if (nested) {
+    const [, prefix, formula] = nested;
+    if (looksLikeBareLatexMath(formula)) {
+      return `${prefix}(${wrapInlineBareLatex(formula, options)})`;
+    }
+  }
+
+  const direct = body.match(EXAMPLE_PREFIX_IN_PAREN_RE);
+  if (!direct) {
+    return null;
+  }
+  const [, prefix, formula] = direct;
+  if (!looksLikeBareLatexMath(formula)) {
+    return null;
+  }
+  return `${prefix}${wrapInlineBareLatex(formula, options)}`;
+}
+
 function wrapParenthesizedBareLatex(
   content: string,
   options: { tableCell?: boolean } = {},
@@ -643,7 +669,9 @@ function wrapParenthesizedBareLatex(
     const body = content.slice(openIndex + 1, closeIndex);
     out += content.slice(cursor, openIndex + 1);
     if (shouldWrapParenthesizedLatex(body)) {
-      out += wrapInlineBareLatex(body, options);
+      out +=
+        wrapExamplePrefixedBareLatex(body, options) ??
+        wrapInlineBareLatex(body, options);
     } else {
       out += body.includes("(")
         ? wrapParenthesizedBareLatex(body, options)
