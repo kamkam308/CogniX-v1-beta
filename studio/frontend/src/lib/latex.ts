@@ -142,7 +142,8 @@ const LATEX_COMMAND_NAMES = [
 
 const LATEX_COMMAND_PATTERN = LATEX_COMMAND_NAMES.join("|");
 const LATEX_IDENTIFIER_PATTERN = String.raw`[A-Za-z](?:[A-Za-z0-9]|_\{?[^{}\s]+\}?|\^\{?[^{}\s]+\}?)*`;
-const LATEX_ASSIGNMENT_PATTERN = String.raw`${LATEX_IDENTIFIER_PATTERN}(?:\s*['’])?(?:\s*\([^()\n]{0,80}\))?\s*=`;
+const LATEX_ASSIGNMENT_LEFT_PATTERN = String.raw`${LATEX_IDENTIFIER_PATTERN}(?:\s*/\s*${LATEX_IDENTIFIER_PATTERN})?`;
+const LATEX_ASSIGNMENT_PATTERN = String.raw`${LATEX_ASSIGNMENT_LEFT_PATTERN}(?:\s*['’])?(?:\s*\([^()\n]{0,80}\))?\s*=`;
 const LATEX_COMMAND_RE = new RegExp(
   `\\\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])`,
 );
@@ -153,11 +154,25 @@ const BRACKETED_BARE_LATEX_LINE_RE = new RegExp(
   "g",
 );
 const SENTENCE_BARE_LATEX_RE = new RegExp(
-  `(^|[\\s:;,.])((?:\\\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])|${LATEX_ASSIGNMENT_PATTERN})(?:\\.(?=\\d)|\\\\[,;:!]|[^\\n.!?;:,|()[\\]]|\\{[^\\n{}]*\\})*)`,
+  `(^|[\\s:;,.])((?:\\\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])|${LATEX_ASSIGNMENT_PATTERN})(?:\\.(?=\\d)|\\\\[,;:!]|[^\\n.!?;:,|[\\]]|\\([^()\\n]*\\)|\\{[^\\n{}]*\\})*)`,
   "g",
 );
 const URL_IN_TEXT_RE = /\shttps?:\/\//i;
 const BARE_LATEX_MATH_CHAR_RE = /[\\^_{}=+\-*/<>]/;
+const ANY_LATEX_COMMAND_RE = /\\[a-zA-Z]+/;
+const RELATION_COMMAND_RE =
+  /\\(?:to|rightarrow|Rightarrow|Longrightarrow|Leftarrow|Leftrightarrow|Longleftrightarrow|leq?|geq?|neq|approx|sim|equiv)(?![a-zA-Z])/;
+const SUBSCRIPT_OR_SUPERSCRIPT_RE = /[A-Za-z0-9)}]\s*(?:[_^]\{?[^{}\s]+\}?)/;
+const UNICODE_MATH_SIGNAL_RE = /[∫∑∏√∞≈≠≤≥→⇒↔±×÷πθτφϕΩωαβγδλμσΔΣ]/;
+const COMPACT_EQUATION_RE =
+  /(?:^|[\s([{])(?:[A-Za-z](?:_\{?[^{}\s]+\}?|\^\{?[^{}\s]+\}?|\([^)\n]{0,80}\))*|[A-Za-z]{1,4}_\{?[^{}\s]+\}?|\\[a-zA-Z]+(?:\{[^{}\n]*\})?)\s*(?:=|<|>|≤|≥|≈|\\leq?|\\geq?|\\neq|\\approx|\\Rightarrow|\\Longrightarrow|⇒|→)/;
+const FUNCTION_EQUATION_RE =
+  /(?:^|[\s([{])(?:[A-Za-z]|\\[a-zA-Z]+)\s*\([^)\n]{1,80}\)\s*(?:=|<|>|≤|≥|≈|\\leq?|\\geq?|\\neq|\\approx)/;
+const PLAIN_FUNCTION_MATH_RE =
+  /\b(?:sin|cos|tan|ln|log|exp|lim|arctan|arcsin|arccos)\s*(?:[A-Za-z0-9({\\]|$)/;
+const COMPACT_OPERATOR_CHAIN_RE =
+  /(?:[A-Za-z0-9)}\]]|\\[a-zA-Z]+)\s*(?:[+\-*/=<>]|≤|≥|≈|⇒|→)\s*(?:[A-Za-z0-9({\\[]|[-+])/;
+const MAX_PROSE_WORDS_IN_BARE_MATH = 3;
 const LEADING_SPACE_RE = /^\s*/;
 const TRAILING_SPACE_RE = /\s*$/;
 const BACKSLASH_DISPLAY_MATH_RE = /\\\[([\s\S]*?)\\\]/g;
@@ -169,7 +184,7 @@ const TABLE_CELL_LEADING_RE = /^\s*\|\s*/;
 const TABLE_CELL_TRAILING_RE = /\s*\|\s*$/;
 const MARKDOWN_TABLE_SEPARATOR_RE = /^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*$/;
 const PROSE_WORD_RE =
-  /\b(?:avec|alors|aucun|comme|dans|de|des|donc|du|en|est|et|la|le|les|on|ou|par|pour|sur|une|un|voir)\b/i;
+  /\b(?:avec|alors|aucun|comme|condition|dans|de|des|donc|du|en|est|et|la|le|les|nom|on|ou|par|pour|regime|régime|sur|une|un|valeur|voir)\b/i;
 const MATH_LEADING_BODY_RE = new RegExp(
   `^\\s*(?:\\\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])|${LATEX_ASSIGNMENT_PATTERN}|[A-Za-z0-9_{}\\\\^]+\\s*[+\\-*/=<>])`,
 );
@@ -178,12 +193,19 @@ const NEWLINE_SPLIT_RE = /(\n)/;
 const WHITESPACE_RE = /\s/;
 const MATH_OPERATOR_CHAR_RE = /[=+\-*/<>]/;
 const DIGIT_RE = /\d/;
+const MATH_IDENTIFIER_SUFFIX_RE = /[A-Za-z0-9}_]$/;
 const MAX_INLINE_MATH_SPAN = 200;
 const DANGLING_DELIMITER_SIZE_RE =
   /\\(?:(?:bigl|Bigl|biggl|Biggl|bigr|Bigr|biggr|Biggr)(?!\s*(?:[()[\]{}|.]|\\(?:lvert|rvert|vert|lbrace|rbrace|langle|rangle|lfloor|rfloor|lceil|rceil)))|(?:big|Big|bigg|Bigg)(?![a-zA-Z])(?!\s*(?:[()[\]{}|.]|\\(?:lvert|rvert|vert|lbrace|rbrace|langle|rangle|lfloor|rfloor|lceil|rceil))))/g;
 const ORPHAN_DISPLAY_CLOSER_RE =
   /(^|[\n\s])((?:\\(?:boxed|displaystyle|frac|sqrt|int)[^\n$]*?))\s*\$\$(?=\s*(?:\|\||\||$))/g;
 const DOUBLE_PIPE_DISPLAY_RE = /\$\$\s+\|\|\s+/g;
+const WORD_RE = /[\p{L}]+/gu;
+const WRAPPABLE_COMMANDS_WITH_ARGUMENT_RE = /\\boxed\{(?:[^{}]|\{[^{}]*\})*\}/g;
+const FORMULA_CONNECTOR_SPLIT_RE = new RegExp(
+  String.raw`(\s+(?:et|ou|donc|avec)\s+)(?=${LATEX_ASSIGNMENT_LEFT_PATTERN}(?:\s*['’])?(?:\s*\([^()\n]{0,80}\))?\s*=)`,
+  "i",
+);
 
 /**
  * Find code-block regions (``` ... ``` and ` ... `) to skip.
@@ -308,13 +330,58 @@ function normalizeBackslashMathDelimiters(content: string): string {
 }
 
 function looksLikeBareLatexMath(value: string): boolean {
-  if (!LATEX_COMMAND_RE.test(value)) {
+  const trimmed = value.trim();
+  if (!trimmed) {
     return false;
   }
-  if (URL_IN_TEXT_RE.test(value)) {
+  if (URL_IN_TEXT_RE.test(trimmed)) {
     return false;
   }
-  return BARE_LATEX_MATH_CHAR_RE.test(value);
+  if (LATEX_COMMAND_RE.test(trimmed)) {
+    return (
+      BARE_LATEX_MATH_CHAR_RE.test(trimmed) || RELATION_COMMAND_RE.test(trimmed)
+    );
+  }
+  if (
+    SUBSCRIPT_OR_SUPERSCRIPT_RE.test(trimmed) ||
+    UNICODE_MATH_SIGNAL_RE.test(trimmed)
+  ) {
+    return hasMathStructure(trimmed) && !looksLikeMostlyProse(trimmed);
+  }
+  if (COMPACT_EQUATION_RE.test(trimmed) || FUNCTION_EQUATION_RE.test(trimmed)) {
+    return !looksLikeMostlyProse(trimmed);
+  }
+  return (
+    PLAIN_FUNCTION_MATH_RE.test(trimmed) &&
+    COMPACT_OPERATOR_CHAIN_RE.test(trimmed) &&
+    !looksLikeMostlyProse(trimmed)
+  );
+}
+
+function hasBareMathSignal(value: string): boolean {
+  return (
+    ANY_LATEX_COMMAND_RE.test(value) ||
+    SUBSCRIPT_OR_SUPERSCRIPT_RE.test(value) ||
+    UNICODE_MATH_SIGNAL_RE.test(value) ||
+    COMPACT_EQUATION_RE.test(value) ||
+    FUNCTION_EQUATION_RE.test(value)
+  );
+}
+
+function hasMathStructure(value: string): boolean {
+  return (
+    BARE_LATEX_MATH_CHAR_RE.test(value) ||
+    COMPACT_OPERATOR_CHAIN_RE.test(value) ||
+    PLAIN_FUNCTION_MATH_RE.test(value)
+  );
+}
+
+function looksLikeMostlyProse(value: string): boolean {
+  const words = value.match(WORD_RE) ?? [];
+  if (words.length <= MAX_PROSE_WORDS_IN_BARE_MATH) {
+    return false;
+  }
+  return PROSE_WORD_RE.test(value);
 }
 
 function hasOddUnescapedDollars(value: string): boolean {
@@ -327,7 +394,7 @@ function hasOddUnescapedDollars(value: string): boolean {
 }
 
 function closeUnbalancedInlineMath(value: string): string {
-  if (!(hasOddUnescapedDollars(value) && LATEX_COMMAND_RE.test(value))) {
+  if (!(hasOddUnescapedDollars(value) && hasBareMathSignal(value))) {
     return value;
   }
 
@@ -362,6 +429,25 @@ function normalizeBareLatexBody(
     : withoutDanglingDelimiters;
 }
 
+function wrapSplitBareLatexBody(
+  body: string,
+  options: { tableCell?: boolean } = {},
+): string | null {
+  const split = body.match(FORMULA_CONNECTOR_SPLIT_RE);
+  if (!split?.index) {
+    return null;
+  }
+
+  const connector = split[1];
+  const left = body.slice(0, split.index);
+  const right = body.slice(split.index + connector.length);
+  if (!(looksLikeBareLatexMath(left) && looksLikeBareLatexMath(right))) {
+    return null;
+  }
+
+  return `${wrapInlineBareLatex(left, options)}${connector}${wrapInlineBareLatex(right, options)}`;
+}
+
 function wrapInlineBareLatex(
   value: string,
   options: { tableCell?: boolean } = {},
@@ -380,6 +466,10 @@ function wrapInlineBareLatex(
     value.slice(leading.length, value.length - trailing.length),
     options,
   );
+  const splitBody = wrapSplitBareLatexBody(body, options);
+  if (splitBody !== null) {
+    return `${leading}${splitBody}${trailing}`;
+  }
   if (
     body.startsWith("$") ||
     body.startsWith("\\(") ||
@@ -402,7 +492,31 @@ function shouldWrapParenthesizedLatex(body: string): boolean {
   if (!WHITESPACE_RE.test(trimmed)) {
     return true;
   }
-  return !PROSE_WORD_RE.test(trimmed) && MATH_OPERATOR_CHAR_RE.test(trimmed);
+  return (
+    !PROSE_WORD_RE.test(trimmed) &&
+    (MATH_OPERATOR_CHAR_RE.test(trimmed) ||
+      RELATION_COMMAND_RE.test(trimmed) ||
+      UNICODE_MATH_SIGNAL_RE.test(trimmed))
+  );
+}
+
+function shouldSkipParenthesizedBody(
+  content: string,
+  openIndex: number,
+): boolean {
+  const previous = content
+    .slice(Math.max(0, openIndex - 8), openIndex)
+    .trimEnd();
+  const immediatePrevious = content[openIndex - 1] ?? "";
+  return (
+    (immediatePrevious !== "" &&
+      !WHITESPACE_RE.test(immediatePrevious) &&
+      MATH_IDENTIFIER_SUFFIX_RE.test(immediatePrevious)) ||
+    previous.endsWith("/") ||
+    previous.endsWith("\\Bigl") ||
+    previous.endsWith("\\bigl") ||
+    previous.endsWith("\\left")
+  );
 }
 
 function findClosingParenthesis(content: string, openIndex: number): number {
@@ -445,6 +559,11 @@ function wrapParenthesizedBareLatex(
     if (closeIndex < 0) {
       out += content.slice(cursor);
       break;
+    }
+    if (shouldSkipParenthesizedBody(content, openIndex)) {
+      out += content.slice(cursor, closeIndex + 1);
+      cursor = closeIndex + 1;
+      continue;
     }
 
     const body = content.slice(openIndex + 1, closeIndex);
@@ -496,7 +615,7 @@ function protectMathPipesInTableLine(line: string): string {
 
 function isSpacedMarkdownTableLine(line: string): boolean {
   return (
-    line.includes("\\") &&
+    hasBareMathSignal(line) &&
     SPACED_TABLE_SEPARATOR_RE.test(line) &&
     !MARKDOWN_TABLE_SEPARATOR_RE.test(line.trim())
   );
@@ -533,7 +652,7 @@ function shouldWrapWholeTableCell(body: string): boolean {
 }
 
 function wrapTableCell(part: string): string {
-  if (!part.includes("\\")) {
+  if (!hasBareMathSignal(part)) {
     return part;
   }
 
@@ -577,6 +696,12 @@ function normalizeOrphanDisplayClosers(content: string): string {
     .replace(DOUBLE_PIPE_DISPLAY_RE, () => "$$\n\n");
 }
 
+function wrapWrappableCommandExpressions(content: string): string {
+  return content.replace(WRAPPABLE_COMMANDS_WITH_ARGUMENT_RE, (match) =>
+    looksLikeBareLatexMath(match) ? wrapInlineBareLatex(match) : match,
+  );
+}
+
 function wrapBareLatexSegments(
   content: string,
   options: { tableCell?: boolean } = {},
@@ -597,8 +722,13 @@ function wrapBareLatexSegments(
       ),
   );
 
-  const withParentheses = processOutsideMathDelimiters(
+  const withCommandExpressions = processOutsideMathDelimiters(
     withDisplayBlocks,
+    wrapWrappableCommandExpressions,
+  );
+
+  const withParentheses = processOutsideMathDelimiters(
+    withCommandExpressions,
     (segment) => wrapParenthesizedBareLatex(segment, options),
   );
 
@@ -616,7 +746,7 @@ function wrapBareLatexSegments(
 }
 
 function wrapBareLaTeX(content: string): string {
-  if (!content.includes("\\")) {
+  if (!hasBareMathSignal(content)) {
     return content;
   }
   const normalizedDisplayClosers = normalizeOrphanDisplayClosers(content);

@@ -46,11 +46,64 @@ const PREPROCESS_FIXTURES = [
 | Poids | F_g = -mg\mathbf j |
 | Tension | (\displaystyle \mathbf F_s=-k(r-l_{0})\,\mathbf e_r) |`,
   },
+  {
+    name: "full physics comment block",
+    markdown: String.raw`> Exercice A – Ressort-masse tournant dans le plan vertical
+>
+> 1. Forces : F_g = -mg\mathbf j, (\mathbf{F}_{s}= -k(r-l_{0})\,\mathbf e_{r}).
+> 2. Position d’équilibre : (k(r_{e}-l_{0})=mg;\Rightarrow\;r_{e}=l_{0}+mg/k).
+> 3. j = \sin\theta e_r + \cos\theta e_\theta.
+> 4. Vitesse : v = \dot r e_r + r\dot\theta e_\theta.
+> 5. Accélération : (\mathbf a = (\ddot r-r\dot\theta^2)\mathbf e_r+(r\ddot\theta+2\dot r\dot\theta)\mathbf e_\theta).
+>
+> Valeurs numériques : k/m = 2.94\times 10^2 s^{-2} et r_e = 0.298 m ; k=1.47\times10^3 N m^{-1}, l_0=0.265 m.`,
+  },
+  {
+    name: "physics answer table with prose and formulas",
+    markdown: String.raw`| Question | Réponse & développement |
+|---|---|
+| 1 – Quelle grandeur est tracée sous le nom (u_{1}(t)) ? | La tension aux bornes de (R_{1}). |
+| 2 – Valeur de l’EMF (E) | En régime permanent (t \to \infty), I_\infty = E/(R_1+R_2+r). La tension vaut u_1(\infty)=I_\infty R_1. |`,
+  },
+  {
+    name: "physics continuation after broken table",
+    markdown: String.raw`\boxed{\,R = R_{1}+R_{2}+r\,} $$ || **4** – Expression de (u_{1}(t)) | En écrivant la loi des mailles pour la boucle contenant (R_{1}) et la bobine, on obtient \frac{{\rm d}u_1}{{\rm d}t}+\frac{1}{\tau}u_1=\frac{E}{\tau}, \qquad \tau=\frac{L}{R}.`,
+  },
+  {
+    name: "math substitution table",
+    markdown: String.raw`| Condition sur f(t) | Substitution proposée |
+|---|---|
+| (f(-t)=-f(t)) | x = \cos t |
+| (f(\pi-t)=-f(t)) | x = \sin t |
+| (f(\pi+t)=f(t)) | x = \tan t |
+| Aucun des cas précédents | x = \tan \frac{t}{2} |`,
+  },
+  {
+    name: "math formula recap table",
+    markdown: String.raw`| Formule | Utilisation |
+|---|---|
+| \int u'v = uv-\int uv' | Intégration par parties |
+| (\displaystyle \int\frac{dx}{\sqrt{x^{2}+a}}=\ln\!\bigl(x+\sqrt{x^{2}+a}\bigr)+C) | Racine carrée simple |
+| $\displaystyle \int\frac{dx}{a\cos x+b\sin x}=\frac{1}{\sqrt{a^{2}+b^{2}}} | a\cos x+b\sin x\bigr |`,
+  },
 ];
 
 const RAW_LATEX_OUTSIDE_MATH_RE =
-  /\\(?:boxed|displaystyle|frac|sqrt|mathbf|mathcal|Rightarrow|cos|sin|ln|bigl|bigr)(?![a-zA-Z])|(?:F_g|u_\{?1\}?|R_\{?1\}?)\s*=/;
+  /\\(?![$\\])(?:[a-zA-Z]+|[,;:!])|(?:^|[\s([{])(?:[A-Za-z](?:_\{?[^{}\s]+\}?|\^\{?[^{}\s]+\}?|\([^)\n]{0,80}\))*|[A-Za-z]{1,4}_\{?[^{}\s]+\}?)\s*(?:=|<|>|≤|≥|≈|⇒|→)/;
 const SPLIT_TEX_SPACING_RE = /\\\$[,;:!]/;
+
+const NON_MATH_FIXTURES = [
+  {
+    name: "currency dollars stay escaped",
+    markdown: "This costs $5 and $10, not a math formula.",
+    expected: "This costs \\$5 and \\$10, not a math formula.",
+  },
+  {
+    name: "config assignments stay prose",
+    markdown: "Use repo=foo and branch=main in the config.",
+    expected: "Use repo=foo and branch=main in the config.",
+  },
+];
 
 function stripMathSpans(markdown: string): string {
   let out = "";
@@ -143,6 +196,15 @@ function assertPreprocessedMarkdownHasNoRawLatex(): void {
     }
     for (const formula of collectMathSpans(processed)) {
       assertMathJaxRenders(formula, fixture.name);
+    }
+  }
+
+  for (const fixture of NON_MATH_FIXTURES) {
+    const processed = preprocessLaTeX(fixture.markdown);
+    if (processed !== fixture.expected) {
+      throw new Error(
+        `Non-math fixture changed unexpectedly in ${fixture.name}:\n${processed}`,
+      );
     }
   }
 }
