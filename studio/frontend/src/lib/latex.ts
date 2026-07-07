@@ -22,19 +22,33 @@ const LATEX_COMMAND_NAMES = [
   "cos",
   "Delta",
   "delta",
+  "displaystyle",
+  "dot",
+  "ddot",
+  "ell",
   "frac",
   "gamma",
+  "infty",
   "int",
   "left",
+  "ln",
+  "Longrightarrow",
+  "mathbf",
+  "mathit",
+  "mathrm",
   "omega",
   "Omega",
   "pi",
+  "qquad",
   "right",
+  "rm",
   "sin",
   "sqrt",
   "sum",
   "tag",
   "tan",
+  "tau",
+  "text",
   "theta",
   "times",
   "varphi",
@@ -45,7 +59,7 @@ const LATEX_COMMAND_RE = new RegExp(
   `\\\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])`,
 );
 const DELIMITED_MATH_RE =
-  /(\$\$[\s\S]*?\$\$|\$[^$\n]*?\$|\\\[[\s\S]*?\\\]|\\\([^)\n]*?\\\))/g;
+  /((?<!\\)\$\$[\s\S]*?(?<!\\)\$\$|(?<!\\)\$[^$\n]*?(?<!\\)\$|\\\[[\s\S]*?\\\]|\\\([^)\n]*?\\\))/g;
 const BRACKETED_BARE_LATEX_LINE_RE = new RegExp(
   `(^|\\n)([ \\t]*)\\[\\s*([^\\n\\]]*\\\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])[^\\n\\]]*)\\s*\\](?=\\s*(?:\\n|$))`,
   "g",
@@ -62,6 +76,8 @@ const URL_IN_TEXT_RE = /\shttps?:\/\//i;
 const BARE_LATEX_MATH_CHAR_RE = /[\\^_{}=+\-*/<>]/;
 const LEADING_SPACE_RE = /^\s*/;
 const TRAILING_SPACE_RE = /\s*$/;
+const BACKSLASH_DISPLAY_MATH_RE = /\\\[([\s\S]*?)\\\]/g;
+const BACKSLASH_INLINE_MATH_RE = /\\\(([^)\n]*?)\\\)/g;
 
 /**
  * Find code-block regions (``` ... ``` and ` ... `) to skip.
@@ -167,6 +183,24 @@ function processOutsideMathDelimiters(
   return out;
 }
 
+function normalizeBackslashMathDelimiters(content: string): string {
+  return content
+    .replace(BACKSLASH_DISPLAY_MATH_RE, (_match, body: string) => {
+      const trimmed = body.trim();
+      if (!looksLikeBareLatexMath(trimmed)) {
+        return _match;
+      }
+      return `$$\n${trimmed}\n$$`;
+    })
+    .replace(BACKSLASH_INLINE_MATH_RE, (_match, body: string) => {
+      const trimmed = body.trim();
+      if (!looksLikeBareLatexMath(trimmed)) {
+        return _match;
+      }
+      return `$${trimmed}$`;
+    });
+}
+
 function looksLikeBareLatexMath(value: string): boolean {
   if (!LATEX_COMMAND_RE.test(value)) {
     return false;
@@ -188,7 +222,8 @@ function wrapInlineBareLatex(value: string): string {
   if (
     body.startsWith("$") ||
     body.startsWith("\\(") ||
-    body.startsWith("\\[")
+    body.startsWith("\\[") ||
+    body.startsWith("\\]")
   ) {
     return value;
   }
@@ -197,15 +232,18 @@ function wrapInlineBareLatex(value: string): string {
 
 function wrapBareLaTeX(content: string): string {
   if (!content.includes("\\")) return content;
+  const normalizedDelimiters = normalizeBackslashMathDelimiters(content);
 
-  const withDisplayBlocks = processOutsideMathDelimiters(content, (segment) =>
-    segment.replace(
-      BRACKETED_BARE_LATEX_LINE_RE,
-      (match, prefix: string, indent: string, body: string) => {
-        if (!looksLikeBareLatexMath(body)) return match;
-        return `${prefix}${indent}$$\n${body.trim()}\n$$`;
-      },
-    ),
+  const withDisplayBlocks = processOutsideMathDelimiters(
+    normalizedDelimiters,
+    (segment) =>
+      segment.replace(
+        BRACKETED_BARE_LATEX_LINE_RE,
+        (match, prefix: string, indent: string, body: string) => {
+          if (!looksLikeBareLatexMath(body)) return match;
+          return `${prefix}${indent}$$\n${body.trim()}\n$$`;
+        },
+      ),
   );
 
   const withParentheses = processOutsideMathDelimiters(
@@ -226,6 +264,15 @@ function wrapBareLaTeX(content: string): string {
       },
     ),
   );
+}
+
+function escapeCurrencyDollars(content: string): string {
+  const codeRegions = findCodeBlockRegions(content);
+  return content.replace(CURRENCY_REGEX, (match, offset) => {
+    if (isInCodeBlock(offset, codeRegions)) return match;
+    if (hasInlineMathCloser(content, offset)) return match;
+    return `\\${match}`;
+  });
 }
 
 /** A whitespace-free token that looks purely like currency, e.g. `5`, `1,000`, `5.99`, `100K`, `3.5M`. */
@@ -340,18 +387,12 @@ function hasInlineMathCloser(content: string, offset: number): boolean {
  * - Currency inside code blocks/spans is untouched
  */
 export function preprocessLaTeX(content: string): string {
-  const codeRegions = findCodeBlockRegions(content);
+  const currencySafeContent = escapeCurrencyDollars(content);
+  const codeRegions = findCodeBlockRegions(currencySafeContent);
   const withBareLatex = processOutsideRegions(
-    content,
+    currencySafeContent,
     codeRegions,
     wrapBareLaTeX,
   );
-  if (!withBareLatex.includes("$")) return withBareLatex;
-  const updatedCodeRegions = findCodeBlockRegions(withBareLatex);
-
-  return withBareLatex.replace(CURRENCY_REGEX, (match, offset) => {
-    if (isInCodeBlock(offset, updatedCodeRegions)) return match;
-    if (hasInlineMathCloser(withBareLatex, offset)) return match;
-    return `\\${match}`;
-  });
+  return withBareLatex;
 }
