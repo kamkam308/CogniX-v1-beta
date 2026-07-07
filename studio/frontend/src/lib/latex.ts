@@ -20,35 +20,70 @@ const LATEX_COMMAND_NAMES = [
   "arccos",
   "arcsin",
   "arctan",
+  "bar",
   "begin",
   "beta",
+  "big",
+  "Big",
+  "bigg",
+  "Bigg",
+  "bigl",
+  "Bigl",
+  "biggl",
+  "Biggl",
+  "bigr",
+  "Bigr",
+  "biggr",
+  "Biggr",
+  "binom",
   "boxed",
   "boldsymbol",
+  "cap",
   "cdot",
   "cdots",
+  "choose",
   "cos",
   "cosh",
+  "cot",
+  "csc",
+  "cup",
   "Delta",
   "delta",
+  "det",
   "displaystyle",
+  "dfrac",
   "dot",
   "ddot",
   "ell",
   "end",
+  "epsilon",
+  "equiv",
+  "exists",
   "exp",
+  "forall",
   "frac",
   "gamma",
   "ge",
+  "geq",
+  "hat",
   "infty",
+  "in",
   "int",
+  "lambda",
   "left",
+  "Leftarrow",
+  "Leftrightarrow",
   "le",
+  "leq",
   "ldots",
   "lim",
+  "liminf",
+  "limsup",
+  "lvert",
   "ln",
   "log",
-  "Longrightarrow",
   "Longleftrightarrow",
+  "Longrightarrow",
   "mathbb",
   "mathcal",
   "mathfrak",
@@ -57,36 +92,57 @@ const LATEX_COMMAND_NAMES = [
   "mathrm",
   "max",
   "min",
+  "mu",
   "nabla",
   "neq",
+  "notin",
   "omega",
   "Omega",
   "overline",
   "overrightarrow",
   "partial",
+  "phi",
+  "Phi",
   "pi",
+  "pmatrix",
+  "prime",
+  "quad",
   "qquad",
-  "right",
   "Rightarrow",
+  "rightarrow",
+  "right",
   "rm",
+  "rvert",
+  "sec",
+  "sim",
   "sin",
   "sinh",
   "sqrt",
+  "subset",
+  "subseteq",
   "sum",
+  "sup",
   "tag",
   "tan",
   "tanh",
   "tau",
+  "tfrac",
   "text",
   "theta",
+  "tilde",
   "to",
   "times",
   "underline",
+  "varepsilon",
   "vec",
   "varphi",
+  "widehat",
+  "widetilde",
 ];
 
 const LATEX_COMMAND_PATTERN = LATEX_COMMAND_NAMES.join("|");
+const LATEX_IDENTIFIER_PATTERN = String.raw`[A-Za-z](?:[A-Za-z0-9]|_\{?[^{}\s]+\}?|\^\{?[^{}\s]+\}?)*`;
+const LATEX_ASSIGNMENT_PATTERN = String.raw`${LATEX_IDENTIFIER_PATTERN}(?:\s*['’])?(?:\s*\([^()\n]{0,80}\))?\s*=`;
 const LATEX_COMMAND_RE = new RegExp(
   `\\\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])`,
 );
@@ -96,12 +152,8 @@ const BRACKETED_BARE_LATEX_LINE_RE = new RegExp(
   `(^|\\n)([ \\t]*)\\[\\s*([^\\n\\]]*\\\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])[^\\n\\]]*)\\s*\\](?=\\s*(?:\\n|$))`,
   "g",
 );
-const PARENTHESIZED_BARE_LATEX_RE = new RegExp(
-  `\\(([^()\\n]*\\\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])[^()\\n]*)\\)`,
-  "g",
-);
 const SENTENCE_BARE_LATEX_RE = new RegExp(
-  `(^|[\\s:;,.])((?:\\\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])|[A-Za-z][A-Za-z0-9_]*\\s*=)(?:\\.(?=\\d)|[^\\n.!?;:,|()[\\]]|\\{[^\\n{}]*\\})*)`,
+  `(^|[\\s:;,.])((?:\\\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])|${LATEX_ASSIGNMENT_PATTERN})(?:\\.(?=\\d)|\\\\[,;:!]|[^\\n.!?;:,|()[\\]]|\\{[^\\n{}]*\\})*)`,
   "g",
 );
 const URL_IN_TEXT_RE = /\shttps?:\/\//i;
@@ -110,6 +162,28 @@ const LEADING_SPACE_RE = /^\s*/;
 const TRAILING_SPACE_RE = /\s*$/;
 const BACKSLASH_DISPLAY_MATH_RE = /\\\[([\s\S]*?)\\\]/g;
 const BACKSLASH_INLINE_MATH_RE = /\\\(([^)\n]*?)\\\)/g;
+const UNESCAPED_DOLLAR_GLOBAL_RE = /(?<!\\)\$/g;
+const SPACED_TABLE_SEPARATOR_RE = /\s+\|\s+/;
+const TABLE_LINE_SPLIT_RE = /(\s+\|\s+)/;
+const TABLE_CELL_LEADING_RE = /^\s*\|\s*/;
+const TABLE_CELL_TRAILING_RE = /\s*\|\s*$/;
+const MARKDOWN_TABLE_SEPARATOR_RE = /^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*$/;
+const PROSE_WORD_RE =
+  /\b(?:avec|alors|aucun|comme|dans|de|des|donc|du|en|est|et|la|le|les|on|ou|par|pour|sur|une|un|voir)\b/i;
+const MATH_LEADING_BODY_RE = new RegExp(
+  `^\\s*(?:\\\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])|${LATEX_ASSIGNMENT_PATTERN}|[A-Za-z0-9_{}\\\\^]+\\s*[+\\-*/=<>])`,
+);
+const TABLE_CELL_DISPLAYSTYLE_RE = /^\(?\s*\\displaystyle\b/;
+const NEWLINE_SPLIT_RE = /(\n)/;
+const WHITESPACE_RE = /\s/;
+const MATH_OPERATOR_CHAR_RE = /[=+\-*/<>]/;
+const DIGIT_RE = /\d/;
+const MAX_INLINE_MATH_SPAN = 200;
+const DANGLING_DELIMITER_SIZE_RE =
+  /\\(?:(?:bigl|Bigl|biggl|Biggl|bigr|Bigr|biggr|Biggr)(?!\s*(?:[()[\]{}|.]|\\(?:lvert|rvert|vert|lbrace|rbrace|langle|rangle|lfloor|rfloor|lceil|rceil)))|(?:big|Big|bigg|Bigg)(?![a-zA-Z])(?!\s*(?:[()[\]{}|.]|\\(?:lvert|rvert|vert|lbrace|rbrace|langle|rangle|lfloor|rfloor|lceil|rceil))))/g;
+const ORPHAN_DISPLAY_CLOSER_RE =
+  /(^|[\n\s])((?:\\(?:boxed|displaystyle|frac|sqrt|int)[^\n$]*?))\s*\$\$(?=\s*(?:\|\||\||$))/g;
+const DOUBLE_PIPE_DISPLAY_RE = /\$\$\s+\|\|\s+/g;
 
 /**
  * Find code-block regions (``` ... ``` and ` ... `) to skip.
@@ -243,14 +317,69 @@ function looksLikeBareLatexMath(value: string): boolean {
   return BARE_LATEX_MATH_CHAR_RE.test(value);
 }
 
-function wrapInlineBareLatex(value: string): string {
+function hasOddUnescapedDollars(value: string): boolean {
+  UNESCAPED_DOLLAR_GLOBAL_RE.lastIndex = 0;
+  let count = 0;
+  while (UNESCAPED_DOLLAR_GLOBAL_RE.exec(value) !== null) {
+    count += 1;
+  }
+  return count % 2 === 1;
+}
+
+function closeUnbalancedInlineMath(value: string): string {
+  if (!(hasOddUnescapedDollars(value) && LATEX_COMMAND_RE.test(value))) {
+    return value;
+  }
+
+  const trailing = value.match(TRAILING_SPACE_RE)?.[0] ?? "";
+  const body = value.slice(0, value.length - trailing.length);
+  return `${body}$${trailing}`;
+}
+
+function normalizeTableVerticalBars(value: string): string {
+  let nextLeft = true;
+  return value
+    .replace(/\\(bigl|Bigl|biggl|Biggl)\|/g, "\\$1\\lvert ")
+    .replace(/\\(bigr|Bigr|biggr|Biggr)\|/g, "\\$1\\rvert ")
+    .replace(/\\\|/g, "\\vert ")
+    .replace(/(?<!\\)\|/g, () => {
+      const replacement = nextLeft ? "\\lvert " : "\\rvert ";
+      nextLeft = !nextLeft;
+      return replacement;
+    });
+}
+
+function normalizeBareLatexBody(
+  value: string,
+  options: { tableCell?: boolean } = {},
+): string {
+  const withoutDanglingDelimiters = value.replace(
+    DANGLING_DELIMITER_SIZE_RE,
+    "",
+  );
+  return options.tableCell
+    ? normalizeTableVerticalBars(withoutDanglingDelimiters)
+    : withoutDanglingDelimiters;
+}
+
+function wrapInlineBareLatex(
+  value: string,
+  options: { tableCell?: boolean } = {},
+): string {
+  const balancedValue = closeUnbalancedInlineMath(value);
+  if (balancedValue !== value) {
+    return balancedValue;
+  }
   const trimmed = value.trim();
   if (!(trimmed && looksLikeBareLatexMath(trimmed))) {
     return value;
   }
   const leading = value.match(LEADING_SPACE_RE)?.[0] ?? "";
   const trailing = value.match(TRAILING_SPACE_RE)?.[0] ?? "";
-  const body = value.slice(leading.length, value.length - trailing.length);
+  const body = normalizeBareLatexBody(
+    value.slice(leading.length, value.length - trailing.length),
+    options,
+  );
   if (
     body.startsWith("$") ||
     body.startsWith("\\(") ||
@@ -262,8 +391,196 @@ function wrapInlineBareLatex(value: string): string {
   return `${leading}$${body}$${trailing}`;
 }
 
-function wrapBareLaTeX(content: string): string {
-  if (!content.includes("\\")) return content;
+function shouldWrapParenthesizedLatex(body: string): boolean {
+  const trimmed = body.trim();
+  if (!looksLikeBareLatexMath(trimmed)) {
+    return false;
+  }
+  if (MATH_LEADING_BODY_RE.test(trimmed)) {
+    return true;
+  }
+  if (!WHITESPACE_RE.test(trimmed)) {
+    return true;
+  }
+  return !PROSE_WORD_RE.test(trimmed) && MATH_OPERATOR_CHAR_RE.test(trimmed);
+}
+
+function findClosingParenthesis(content: string, openIndex: number): number {
+  let depth = 0;
+  for (let i = openIndex; i < content.length; i++) {
+    const char = content[i];
+    if (char === "\\") {
+      i += 1;
+      continue;
+    }
+    if (char === "(") {
+      depth += 1;
+      continue;
+    }
+    if (char !== ")") {
+      continue;
+    }
+    depth -= 1;
+    if (depth === 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function wrapParenthesizedBareLatex(
+  content: string,
+  options: { tableCell?: boolean } = {},
+): string {
+  let out = "";
+  let cursor = 0;
+
+  while (cursor < content.length) {
+    const openIndex = content.indexOf("(", cursor);
+    if (openIndex < 0) {
+      out += content.slice(cursor);
+      break;
+    }
+    const closeIndex = findClosingParenthesis(content, openIndex);
+    if (closeIndex < 0) {
+      out += content.slice(cursor);
+      break;
+    }
+
+    const body = content.slice(openIndex + 1, closeIndex);
+    out += content.slice(cursor, openIndex + 1);
+    if (shouldWrapParenthesizedLatex(body)) {
+      out += wrapInlineBareLatex(body, options);
+    } else {
+      out += body.includes("(")
+        ? wrapParenthesizedBareLatex(body, options)
+        : body;
+    }
+    out += ")";
+    cursor = closeIndex + 1;
+  }
+
+  return out;
+}
+
+function isSeparatorPipe(line: string, index: number): boolean {
+  if (line[index] !== "|") {
+    return false;
+  }
+  if (line[index - 1] === "\\") {
+    return false;
+  }
+  if (index === 0 || index === line.length - 1) {
+    return true;
+  }
+  return (
+    WHITESPACE_RE.test(line[index - 1] ?? "") &&
+    WHITESPACE_RE.test(line[index + 1] ?? "")
+  );
+}
+
+function protectMathPipesInTableLine(line: string): string {
+  let nextLeft = true;
+  let out = "";
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    if (char !== "|" || isSeparatorPipe(line, i)) {
+      out += char;
+      continue;
+    }
+    out += nextLeft ? "\\lvert " : "\\rvert ";
+    nextLeft = !nextLeft;
+  }
+  return out;
+}
+
+function isSpacedMarkdownTableLine(line: string): boolean {
+  return (
+    line.includes("\\") &&
+    SPACED_TABLE_SEPARATOR_RE.test(line) &&
+    !MARKDOWN_TABLE_SEPARATOR_RE.test(line.trim())
+  );
+}
+
+function splitTableLine(line: string): string[] {
+  return line.split(TABLE_LINE_SPLIT_RE);
+}
+
+function splitCellChrome(part: string): {
+  body: string;
+  leading: string;
+  trailing: string;
+} {
+  const leading = part.match(TABLE_CELL_LEADING_RE)?.[0] ?? "";
+  let body = part.slice(leading.length);
+  const trailing = body.match(TABLE_CELL_TRAILING_RE)?.[0] ?? "";
+  if (trailing) {
+    body = body.slice(0, body.length - trailing.length);
+  }
+  return { body, leading, trailing };
+}
+
+function shouldWrapWholeTableCell(body: string): boolean {
+  const trimmed = body.trim();
+  if (!looksLikeBareLatexMath(trimmed)) {
+    return false;
+  }
+  return (
+    MATH_LEADING_BODY_RE.test(trimmed) ||
+    !PROSE_WORD_RE.test(trimmed) ||
+    TABLE_CELL_DISPLAYSTYLE_RE.test(trimmed)
+  );
+}
+
+function wrapTableCell(part: string): string {
+  if (!part.includes("\\")) {
+    return part;
+  }
+
+  const { body, leading, trailing } = splitCellChrome(part);
+  const closedBody = closeUnbalancedInlineMath(body);
+  const wrappedBody = shouldWrapWholeTableCell(closedBody)
+    ? wrapInlineBareLatex(closedBody, { tableCell: true })
+    : wrapBareLatexSegments(closedBody, { tableCell: true });
+  return `${leading}${wrappedBody}${trailing}`;
+}
+
+function wrapSpacedMarkdownTableLines(content: string): string {
+  return content
+    .split(NEWLINE_SPLIT_RE)
+    .map((part) => {
+      if (part === "\n" || !isSpacedMarkdownTableLine(part)) {
+        return part;
+      }
+
+      const protectedLine = protectMathPipesInTableLine(part);
+      return splitTableLine(protectedLine)
+        .map((cellOrSeparator, index) =>
+          index % 2 === 1 ? cellOrSeparator : wrapTableCell(cellOrSeparator),
+        )
+        .join("");
+    })
+    .join("");
+}
+
+function normalizeOrphanDisplayClosers(content: string): string {
+  return content
+    .replace(
+      ORPHAN_DISPLAY_CLOSER_RE,
+      (match, prefix: string, body: string) => {
+        if (!looksLikeBareLatexMath(body)) {
+          return match;
+        }
+        return `${prefix}$$\n${normalizeBareLatexBody(body.trim())}\n$$`;
+      },
+    )
+    .replace(DOUBLE_PIPE_DISPLAY_RE, () => "$$\n\n");
+}
+
+function wrapBareLatexSegments(
+  content: string,
+  options: { tableCell?: boolean } = {},
+): string {
   const normalizedDelimiters = normalizeBackslashMathDelimiters(content);
 
   const withDisplayBlocks = processOutsideMathDelimiters(
@@ -272,7 +589,9 @@ function wrapBareLaTeX(content: string): string {
       segment.replace(
         BRACKETED_BARE_LATEX_LINE_RE,
         (match, prefix: string, indent: string, body: string) => {
-          if (!looksLikeBareLatexMath(body)) return match;
+          if (!looksLikeBareLatexMath(body)) {
+            return match;
+          }
           return `${prefix}${indent}$$\n${body.trim()}\n$$`;
         },
       ),
@@ -280,29 +599,40 @@ function wrapBareLaTeX(content: string): string {
 
   const withParentheses = processOutsideMathDelimiters(
     withDisplayBlocks,
-    (segment) =>
-      segment.replace(PARENTHESIZED_BARE_LATEX_RE, (match, body: string) => {
-        if (!looksLikeBareLatexMath(body)) return match;
-        return `(${wrapInlineBareLatex(body)})`;
-      }),
+    (segment) => wrapParenthesizedBareLatex(segment, options),
   );
 
   return processOutsideMathDelimiters(withParentheses, (segment) =>
     segment.replace(
       SENTENCE_BARE_LATEX_RE,
       (match, prefix: string, body: string) => {
-        if (!looksLikeBareLatexMath(body)) return match;
-        return `${prefix}${wrapInlineBareLatex(body)}`;
+        if (!looksLikeBareLatexMath(body)) {
+          return match;
+        }
+        return `${prefix}${wrapInlineBareLatex(body, options)}`;
       },
     ),
   );
 }
 
+function wrapBareLaTeX(content: string): string {
+  if (!content.includes("\\")) {
+    return content;
+  }
+  const normalizedDisplayClosers = normalizeOrphanDisplayClosers(content);
+  const withTableRows = wrapSpacedMarkdownTableLines(normalizedDisplayClosers);
+  return wrapBareLatexSegments(withTableRows);
+}
+
 function escapeCurrencyDollars(content: string): string {
   const codeRegions = findCodeBlockRegions(content);
   return content.replace(CURRENCY_REGEX, (match, offset) => {
-    if (isInCodeBlock(offset, codeRegions)) return match;
-    if (hasInlineMathCloser(content, offset)) return match;
+    if (isInCodeBlock(offset, codeRegions)) {
+      return match;
+    }
+    if (hasInlineMathCloser(content, offset)) {
+      return match;
+    }
     return `\\${match}`;
   });
 }
@@ -353,16 +683,54 @@ const SIMPLE_MATH_RE =
  *   - `$1,000$`     -> NOT math (single currency-like token)
  */
 function looksLikeMathBody(body: string): boolean {
-  if (LATEX_CHAR_RE.test(body)) return true;
+  if (LATEX_CHAR_RE.test(body)) {
+    return true;
+  }
   const trimmed = body.trim().replace(TRAIL_PUNCT_RE, "");
-  if (!trimmed) return false;
-  if (CURRENCY_BODY_RE.test(trimmed)) return false;
+  if (!trimmed) {
+    return false;
+  }
+  if (CURRENCY_BODY_RE.test(trimmed)) {
+    return false;
+  }
   // Numeric-only operator forms: `2 + 2`, `100 < 200`, `1,000 - 500`.
   // Recognised without requiring a lone-variable letter.
-  if (SIMPLE_MATH_RE.test(trimmed)) return true;
-  if (!/\s/.test(trimmed)) return true;
-  if (!MATH_OP_RE.test(trimmed)) return false;
+  if (SIMPLE_MATH_RE.test(trimmed)) {
+    return true;
+  }
+  if (!WHITESPACE_RE.test(trimmed)) {
+    return true;
+  }
+  if (!MATH_OP_RE.test(trimmed)) {
+    return false;
+  }
   return LONE_LETTER_RE.test(trimmed);
+}
+
+function isBoldWrappedMath(
+  content: string,
+  openIndex: number,
+  closeIndex: number,
+): boolean {
+  if (openIndex < 2) {
+    return false;
+  }
+  const wrapper = content[openIndex - 1];
+  return (
+    (wrapper === "*" || wrapper === "_") &&
+    content[openIndex - 2] === wrapper &&
+    content[closeIndex + 1] === wrapper &&
+    content[closeIndex + 2] === wrapper
+  );
+}
+
+function isInlineMathCloserCandidate(content: string, index: number): boolean {
+  return (
+    content[index] === "$" &&
+    content[index - 1] !== "\\" &&
+    content[index + 1] !== "$" &&
+    !DIGIT_RE.test(content[index + 1] ?? "")
+  );
 }
 
 /**
@@ -374,13 +742,15 @@ function looksLikeMathBody(body: string): boolean {
  * and the heuristic would otherwise reject prose-shaped bodies like "90 - x".
  */
 function hasInlineMathCloser(content: string, offset: number): boolean {
-  const maxSpan = 200;
-  const limit = Math.min(content.length, offset + 1 + maxSpan);
+  const limit = Math.min(content.length, offset + 1 + MAX_INLINE_MATH_SPAN);
   for (let i = offset + 1; i < limit; i++) {
     const c = content[i];
-    if (c === "\n") return false;
-    if (c !== "$") continue;
-    if (content[i - 1] === "\\") continue;
+    if (c === "\n") {
+      return false;
+    }
+    if (c !== "$" || content[i - 1] === "\\") {
+      continue;
+    }
     if (content[i + 1] === "$") {
       i++;
       continue;
@@ -388,19 +758,11 @@ function hasInlineMathCloser(content: string, offset: number): boolean {
     // A `$` followed by a digit is more likely another currency token than
     // the closer. Keep scanning so prose like `$5 + a $10 add-on` doesn't
     // pair the two currency markers as a math span.
-    if (/\d/.test(content[i + 1] ?? "")) {
+    if (!isInlineMathCloserCandidate(content, i)) {
       continue;
     }
-    if (offset >= 2) {
-      const op = content[offset - 1];
-      if (
-        (op === "*" || op === "_") &&
-        content[offset - 2] === op &&
-        content[i + 1] === op &&
-        content[i + 2] === op
-      ) {
-        return true;
-      }
+    if (isBoldWrappedMath(content, offset, i)) {
+      return true;
     }
     return looksLikeMathBody(content.slice(offset + 1, i));
   }
