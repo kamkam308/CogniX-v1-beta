@@ -191,6 +191,77 @@ export function customPresetSkipsApiKeyField(
   return providerType === "ollama" || providerType === "llama_cpp";
 }
 
+export function isHuggingFaceTokenCandidate(value: string | null | undefined): boolean {
+  const token = (value ?? "").trim();
+  return /^hf_[A-Za-z0-9_]{8,}$/.test(token);
+}
+
+export function isHuggingFaceProviderConnection(
+  provider:
+    | (Pick<ExternalProviderConfig, "providerType" | "baseUrl"> &
+        Partial<Pick<ExternalProviderConfig, "name">>)
+    | null
+    | undefined,
+): boolean {
+  if (!provider) return false;
+  const providerType = provider.providerType.trim().toLowerCase();
+  if (providerType === "huggingface") return true;
+  const name = (provider.name ?? "").trim().toLowerCase().replace(/[\s_-]+/g, "");
+  if (name === "huggingface") return true;
+  try {
+    const host = new URL(provider.baseUrl).hostname.toLowerCase();
+    return host === "router.huggingface.co" || host.endsWith(".huggingface.co");
+  } catch {
+    return false;
+  }
+}
+
+export function externalProviderAllowsMissingApiKey(
+  provider:
+    | (Pick<ExternalProviderConfig, "providerType" | "baseUrl"> &
+        Partial<Pick<ExternalProviderConfig, "name">>)
+    | null
+    | undefined,
+): boolean {
+  if (!provider) return false;
+  if (isHuggingFaceProviderConnection(provider)) return false;
+  if (isCustomProviderType(provider.providerType)) return true;
+  if (provider.providerType !== "gemini") return false;
+  try {
+    const host = new URL(provider.baseUrl).hostname.toLowerCase();
+    return host !== "generativelanguage.googleapis.com";
+  } catch {
+    return false;
+  }
+}
+
+export function externalProviderApiKeyStatus(
+  provider:
+    | (Pick<ExternalProviderConfig, "providerType" | "baseUrl"> &
+        Partial<Pick<ExternalProviderConfig, "name">>)
+    | null
+    | undefined,
+  apiKey: string | null | undefined,
+): "not_required" | "usable" | "missing" | "invalid" {
+  if (!provider) return "missing";
+  const key = (apiKey ?? "").trim();
+  if (isHuggingFaceProviderConnection(provider)) {
+    if (!key) return "missing";
+    return isHuggingFaceTokenCandidate(key) ? "usable" : "invalid";
+  }
+  if (externalProviderAllowsMissingApiKey(provider)) return "not_required";
+  if (!key) return "missing";
+  return "usable";
+}
+
+export function externalProviderCanSendWithoutFallback(
+  provider: Pick<ExternalProviderConfig, "providerType" | "baseUrl"> | null | undefined,
+  apiKey: string | null | undefined,
+): boolean {
+  const status = externalProviderApiKeyStatus(provider, apiKey);
+  return status === "usable" || status === "not_required";
+}
+
 /** Catalog load plus optional manual model IDs. */
 export function allowsManualModelIdsWithCatalog(
   providerType: string | null | undefined,
@@ -268,6 +339,23 @@ export const COGNIX_OLLAMA_MODEL_ID =
 export const COGNIX_OLLAMA_PROVIDER_NAME = "Ollama Qwen 4B";
 export const COGNIX_OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1";
 const COGNIX_OLLAMA_CREATED_AT = 1790000000000;
+export const COGNIX_CODEX_MODEL_IDS = [
+  "gpt-5.5",
+  "gpt-5.5-pro",
+  "gpt-5.3-codex",
+] as const;
+export const COGNIX_CODEX_DEFAULT_MODEL_ID = COGNIX_CODEX_MODEL_IDS[0];
+
+export function isCogniXCodexModelId(
+  value: string | null | undefined,
+): value is (typeof COGNIX_CODEX_MODEL_IDS)[number] {
+  return (
+    typeof value === "string" &&
+    COGNIX_CODEX_MODEL_IDS.includes(
+      value as (typeof COGNIX_CODEX_MODEL_IDS)[number],
+    )
+  );
+}
 
 function canUseStorage(): boolean {
   return typeof window !== "undefined";

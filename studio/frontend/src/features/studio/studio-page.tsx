@@ -143,7 +143,7 @@ export function StudioPage(): ReactElement {
   })();
 
   return (
-    <div className="relative min-h-[calc(100dvh-var(--studio-titlebar-height,0px))] bg-background">
+    <div className="relative min-h-dvh bg-background">
       <main className="relative z-10 mx-auto max-w-7xl px-4 py-8 sm:px-6">
         <GuidedTour {...tour.tourProps} celebrate={isConfigTour} />
 

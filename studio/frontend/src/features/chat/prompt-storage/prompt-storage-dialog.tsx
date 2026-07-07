@@ -1155,7 +1155,7 @@ function ExportModal({
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-semibold leading-none">Training Style</p>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    ShareGPT format for Unsloth fine-tuning
+                    ShareGPT format for CogniX fine-tuning
                   </p>
                   <code className="mt-2 block w-full truncate rounded-md bg-muted px-2 py-1 font-mono text-[10px] text-muted-foreground/60">
                     {`{"conversations":[{"from":"human","value":"..."},{"from":"gpt","value":""}]}`}

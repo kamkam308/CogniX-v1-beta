@@ -3,9 +3,9 @@
 # Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 <#
 .SYNOPSIS
-    Full environment setup for Unsloth Studio on Windows (bundled version).
+    Full environment setup for CogniX on Windows (bundled version).
 .DESCRIPTION
-    Uses an isolated, Unsloth-managed Node.js for the frontend build when the
+    Uses an isolated, CogniX-managed Node.js for the frontend build when the
     system Node/npm do not meet requirements (never modifies the system Node).
     When running from pip install: skips frontend build (already bundled). When
     running from git repo: full setup including frontend build.
@@ -882,10 +882,10 @@ function substep {
 # ─────────────────────────────────────────────
 Write-Host ""
 if ($script:StudioVtOk -and -not $env:NO_COLOR) {
-    Write-Host ("  " + (Get-StudioAnsi Title) + [char]::ConvertFromUtf32(0x1F9A5) + " Unsloth Studio Setup" + (Get-StudioAnsi Reset))
+        Write-Host ("  " + (Get-StudioAnsi Title) + "CogniX Setup" + (Get-StudioAnsi Reset))
     Write-Host ("  {0}{1}{2}" -f (Get-StudioAnsi Dim), $Rule, (Get-StudioAnsi Reset))
 } else {
-    Write-Host ("  " + [char]::ConvertFromUtf32(0x1F9A5) + " Unsloth Studio Setup") -ForegroundColor Green
+        Write-Host "  CogniX Setup" -ForegroundColor Green
     Write-Host "  $Rule" -ForegroundColor DarkGray
 }
 
@@ -2066,7 +2066,7 @@ if ($NeedNodeForSetup) {
         }
         $NeedFrontendBuild = $false
         substep "found Node='$SysNodeVersion' npm='$SysNpmVersion'; Studio needs Node >=20.19/22.12/23 and npm >= 11" "Yellow"
-        substep "install a suitable Node + npm, or unset UNSLOTH_SKIP_NODE_INSTALL to let Unsloth manage an isolated Node" "Yellow"
+        substep "install a suitable Node + npm, or unset UNSLOTH_SKIP_NODE_INSTALL to let CogniX manage an isolated Node" "Yellow"
     } elseif ($NodeSource -eq "bundled") {
         New-Item -ItemType Directory -Force -Path $NodeParent -ErrorAction SilentlyContinue | Out-Null
         # Minimal ownership guard for a custom-home dir (the full Studio-owned
@@ -2511,7 +2511,7 @@ if ((Test-Path -LiteralPath $VenvDir -PathType Container) -and -not $NoTorchMode
             -not (Test-Path -LiteralPath (Join-Path $StudioHome "share\studio.conf") -PathType Leaf) -and
             -not (Test-Path -LiteralPath (Join-Path $StudioHome "bin\unsloth.exe") -PathType Leaf)
         ) {
-            Write-Host "[ERROR] $VenvDir already exists but does not look like an Unsloth Studio install." -ForegroundColor Red
+            Write-Host "[ERROR] $VenvDir already exists but does not look like a CogniX install." -ForegroundColor Red
             Write-Host "        Move it aside or choose an empty UNSLOTH_STUDIO_HOME before re-running." -ForegroundColor Yellow
             exit 1
         }
@@ -2528,7 +2528,7 @@ if ((Test-Path -LiteralPath $VenvDir -PathType Container) -and -not $NoTorchMode
 if (-not (Test-Path -LiteralPath $VenvDir)) {
     Write-Host "[ERROR] Virtual environment not found at $VenvDir" -ForegroundColor Red
     Write-Host "        Run install.ps1 first to create the environment:" -ForegroundColor Yellow
-    Write-Host "        irm https://unsloth.ai/install.ps1 | iex" -ForegroundColor Yellow
+    Write-Host "        irm https://raw.githubusercontent.com/kamkam308/CogniX-v1-beta/main/install.ps1 | iex" -ForegroundColor Yellow
     exit 1
 } else {
     substep "reusing existing virtual environment at $VenvDir"
@@ -3844,7 +3844,7 @@ if (-not $NeedLlamaSourceBuild) {
 # ─────────────────────────────────────────────
 # Footer
 # ─────────────────────────────────────────────
-$DoneLabel = if ($env:SKIP_STUDIO_BASE -eq "1") { "Unsloth Studio Setup Complete" } else { "Unsloth Studio Updated" }
+$DoneLabel = if ($env:SKIP_STUDIO_BASE -eq "1") { "CogniX Setup Complete" } else { "CogniX Updated" }
 if ($script:StudioVtOk -and -not $env:NO_COLOR) {
     Write-Host ("  {0}{1}{2}" -f (Get-StudioAnsi Dim), $Rule, (Get-StudioAnsi Reset))
     if ($script:LlamaCppDegraded) {
@@ -3862,7 +3862,7 @@ if ($script:StudioVtOk -and -not $env:NO_COLOR) {
     }
     Write-Host "  $Rule" -ForegroundColor DarkGray
 }
-step "launch" "unsloth studio -H 0.0.0.0 -p 8888"
+step "launch" "CogniX runtime: unsloth studio -H 0.0.0.0 -p 8888"
 Write-Host ""
 
 # Match studio/setup.sh: exit non-zero for degraded llama.cpp when called

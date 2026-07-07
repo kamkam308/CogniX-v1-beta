@@ -2,6 +2,7 @@
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
 import { primeNativeNotificationPermission } from "@/lib/native-notifications";
+import { fetchDeviceType, isCloudOnlyTrainingMode, usePlatformStore } from "@/config/env";
 import { confirmRemoteCodeIfNeeded } from "@/features/security";
 import { useCallback } from "react";
 import { toast } from "@/lib/toast";
@@ -9,7 +10,12 @@ import { checkDatasetFormat } from "../api/datasets-api";
 import { emitTrainingRunsChanged } from "../events";
 import { getTrainingRun } from "../api/history-api";
 import { buildTrainingStartPayload } from "../api/mappers";
-import { resetTraining, startTraining, stopTraining } from "../api/train-api";
+import {
+  prepareCloudTrainingHandoff,
+  resetTraining,
+  startTraining,
+  stopTraining,
+} from "../api/train-api";
 import { isRawTextDatasetFormat } from "../lib/training-methods";
 import { syncTrainingRuntimeFromBackend } from "../lib/sync-runtime";
 import { validateTrainingConfig } from "../lib/validation";
@@ -54,7 +60,9 @@ export function useTrainingActions() {
       return false;
     }
 
-    primeNativeNotificationPermission().catch(() => undefined);
+    await fetchDeviceType({ force: true }).catch(() => undefined);
+    const platform = usePlatformStore.getState();
+    const cloudOnlyTraining = isCloudOnlyTrainingMode(platform);
 
     runtimeStore.setStartResources(
       config.selectedModel ?? null,
@@ -64,6 +72,36 @@ export function useTrainingActions() {
     runtimeStore.setStarting(true);
 
     try {
+      if (cloudOnlyTraining) {
+        const targetId = preferredCloudTrainingTarget(platform.cloudTrainingProviders);
+        const response = await prepareCloudTrainingHandoff({
+          objective: buildCloudTrainingObjective(config),
+          project_type: "training",
+          targetId,
+          dataset: buildCloudTrainingDataset(config),
+        });
+        const handoff = response.cloudHandoffPlan;
+        const targetLabel =
+          handoff.target?.label || handoff.target?.id || targetId || "Cloud GPU";
+
+        runtimeStore.setStarting(false);
+        runtimeStore.setStartError(null);
+
+        if (handoff.readyToExport) {
+          toast.success("Cloud training handoff ready", {
+            description: `${targetLabel} · ${handoff.target?.exportFormat ?? handoff.notebookPlan?.format ?? handoff.status}`,
+          });
+          return true;
+        }
+
+        toast.info("Cloud training plan prepared", {
+          description: `${targetLabel} · ${handoff.status}`,
+        });
+        return false;
+      }
+
+      primeNativeNotificationPermission().catch(() => undefined);
+
       const datasetName = getDatasetName(config);
       let isVlm = config.isVisionModel && config.isDatasetImage === true;
 
@@ -291,6 +329,66 @@ export function useTrainingActions() {
     stopTrainingRun,
     dismissTrainingRun,
   };
+}
+
+function preferredCloudTrainingTarget(providers: string[]): string {
+  if (providers.includes("google_colab")) return "google_colab";
+  if (providers.includes("kaggle")) return "kaggle";
+  return providers[0] || "cloud_gpu";
+}
+
+function inferCloudDatasetFormat(config: TrainingConfigState): string {
+  if (config.datasetSource === "huggingface") return "hf_dataset";
+  if (config.datasetSource === "s3") return "folder";
+  const sourceName = config.uploadedFile || config.dataset || "";
+  const lower = sourceName.toLowerCase();
+  if (lower.endsWith(".jsonl") || lower.endsWith(".json")) return "jsonl";
+  if (lower.endsWith(".csv")) return "csv";
+  if (lower.endsWith(".parquet")) return "parquet";
+  if (config.datasetFormat !== "auto") return config.datasetFormat;
+  return config.datasetSource === "upload" ? "jsonl" : "hf_dataset";
+}
+
+function buildCloudTrainingDataset(config: TrainingConfigState): Record<string, unknown> | null {
+  const sourceRef =
+    config.datasetSource === "huggingface"
+      ? config.dataset
+      : config.datasetSource === "upload"
+        ? config.uploadedFile
+        : config.datasetSource === "s3"
+          ? config.s3Config?.bucket
+          : config.dataset;
+
+  if (!sourceRef) return null;
+
+  return {
+    format: inferCloudDatasetFormat(config),
+    sourceRef,
+    datasetId: sourceRef,
+    source: config.datasetSource,
+    subset: config.datasetSubset,
+    split: config.datasetSplit,
+    evalSplit: config.datasetEvalSplit,
+    streaming: config.datasetStreaming,
+    license: "unknown",
+    containsSensitiveData: false,
+    sampleCount: null,
+    estimatedTokens: null,
+    localFileRead: false,
+    datasetUpload: false,
+  };
+}
+
+function buildCloudTrainingObjective(config: TrainingConfigState): string {
+  const model = config.selectedModel || "selected_model";
+  const dataset = getDatasetName(config) || config.dataset || "selected_dataset";
+  const method = config.trainingMethod === "full" ? "LoRA/QLoRA" : config.trainingMethod.toUpperCase();
+  return [
+    `Planifier un fine-tuning ${method} pour ${model}.`,
+    `Utiliser le dataset ${dataset}.`,
+    "Mode CEO cloud training: preparer un handoff Colab/Kaggle/Cloud GPU sans GPU local AMD/NVIDIA.",
+    "Ne pas lancer de job local, ne pas uploader le dataset et ne pas lire de secrets pendant la planification.",
+  ].join(" ");
 }
 
 function getDatasetName(config: TrainingConfigState): string | null {

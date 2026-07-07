@@ -18,13 +18,13 @@ export function WizardSidebar({ returnTo }: { returnTo: string }) {
     <aside className="w-full shrink-0 bg-muted/70 p-4 md:w-64 md:p-6">
       <div className="flex items-center gap-3 py-1 md:py-2">
         <img
-          src={`${import.meta.env.BASE_URL}sticker.png`}
-          alt="Unsloth"
-          className="size-12"
+          src={`${import.meta.env.BASE_URL}cognix-logo-512.png`}
+          alt="CogniX"
+          className="cognix-logo-mark size-12 object-contain"
         />
         <div className="flex flex-col">
-          <span className="font-semibold text-lg leading-tight">Unsloth</span>
-          <span className="text-xs text-muted-foreground">Studio</span>
+          <span className="font-semibold text-lg leading-tight">CogniX</span>
+          <span className="text-xs text-muted-foreground">Setup</span>
         </div>
       </div>
       <div className="mt-3 md:mt-0">

@@ -677,7 +677,7 @@ export function ExportPage() {
 
   // ---- Render ----
   return (
-    <div className="min-h-[calc(100dvh-var(--studio-titlebar-height,0px))] bg-background">
+    <div className="min-h-dvh bg-background">
       <main className="mx-auto max-w-7xl px-5 py-8 sm:px-9">
         <GuidedTour {...tour.tourProps} />
 
@@ -847,7 +847,7 @@ export function ExportPage() {
                               Choose a saved checkpoint to export. Lower loss
                               generally means better quality.{" "}
                               <a
-                                href="https://unsloth.ai/docs/basics/inference-and-deployment"
+                                href="https://github.com/kamkam308/CogniX-v1-beta"
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 className="text-primary underline"

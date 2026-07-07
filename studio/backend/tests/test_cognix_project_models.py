@@ -1,0 +1,296 @@
+import secrets
+import sqlite3
+import sys
+from pathlib import Path
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+_BACKEND_ROOT = Path(__file__).resolve().parents[1]
+if str(_BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_ROOT))
+
+from auth import storage
+from core.cognix import favorite_models
+from routes import auth as auth_routes
+from routes import cognix as cognix_routes
+from storage import cognix_db, providers_db
+from storage import studio_db as studio_db_storage
+from utils.paths import studio_db_path
+
+
+@pytest.fixture(autouse = True)
+def isolated_state(tmp_path, monkeypatch):
+    studio_home = tmp_path / "studio_home"
+    studio_home.mkdir(parents = True, exist_ok = True)
+    monkeypatch.setenv("UNSLOTH_STUDIO_HOME", str(studio_home))
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "auth.db")
+    monkeypatch.setattr(storage, "_BOOTSTRAP_PW_PATH", tmp_path / ".bootstrap_password")
+    monkeypatch.setattr(storage, "_bootstrap_password", None)
+    monkeypatch.setattr(storage, "_api_key_pbkdf2_salt_cache", None)
+    monkeypatch.setattr(cognix_db, "_schema_ready", False)
+    monkeypatch.setattr(providers_db, "_schema_ready", False)
+    monkeypatch.setattr(studio_db_storage, "_schema_ready", False)
+    auth_routes._LOGIN_BUCKETS.clear()
+    auth_routes._LOGIN_IP_BUCKETS.clear()
+    auth_routes._REGISTER_IP_BUCKETS.clear()
+    yield
+    cognix_db._schema_ready = False
+    providers_db._schema_ready = False
+    studio_db_storage._schema_ready = False
+    auth_routes._LOGIN_BUCKETS.clear()
+    auth_routes._LOGIN_IP_BUCKETS.clear()
+    auth_routes._REGISTER_IP_BUCKETS.clear()
+
+
+@pytest.fixture
+def client():
+    app = FastAPI()
+    app.include_router(auth_routes.router, prefix = "/api/auth")
+    app.include_router(cognix_routes.router, prefix = "/api/cognix")
+    return TestClient(app)
+
+
+def seed_accounts() -> None:
+    storage.create_initial_user(
+        username = storage.DEFAULT_ADMIN_USERNAME,
+        password = "admin-password-123",
+        jwt_secret = secrets.token_urlsafe(64),
+        must_change_password = False,
+    )
+    storage.create_user(
+        username = "alice",
+        email = "alice@example.com",
+        password = "alice-password-123",
+    )
+    storage.create_user(
+        username = "bob",
+        email = "bob@example.com",
+        password = "bob-password-123",
+    )
+
+
+def login_headers(client: TestClient, username: str, password: str) -> dict[str, str]:
+    response = client.post(
+        "/api/auth/login",
+        json = {"username": username, "password": password},
+    )
+    assert response.status_code == 200
+    return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+
+def seed_project(owner_username: str = "alice", project_id: str = "project-alice-1") -> dict:
+    return studio_db_storage.upsert_chat_project(
+        {
+            "id": project_id,
+            "name": "CogniX benchmark",
+            "instructions": "Prefer local Qwen for early MVP tests.",
+            "archived": False,
+            "createdAt": 1000,
+            "updatedAt": 2000,
+        },
+        owner_username = owner_username,
+    )
+
+
+def test_project_default_model_can_be_set_listed_read_and_deleted(client):
+    seed_accounts()
+    seed_project()
+    headers = login_headers(client, "alice", "alice-password-123")
+
+    response = client.put(
+        "/api/cognix/projects/project-alice-1/default-model",
+        headers = headers,
+        json = {
+            "modelId": "huihui_ai/qwen3-vl-abliterated:4b-instruct",
+            "label": "Ollama Qwen 4B",
+            "providerType": "ollama",
+            "providerId": "b6878df754d543b1",
+        },
+    )
+
+    assert response.status_code == 200
+    default_model = response.json()["defaultModel"]
+    assert default_model["projectId"] == "project-alice-1"
+    assert default_model["ownerUsername"] == "alice"
+    assert default_model["modelId"] == "huihui_ai/qwen3-vl-abliterated:4b-instruct"
+    assert default_model["label"] == "Ollama Qwen 4B"
+    assert default_model["providerType"] == "ollama"
+    assert default_model["providerId"] == "b6878df754d543b1"
+
+    read_response = client.get(
+        "/api/cognix/projects/project-alice-1/default-model",
+        headers = headers,
+    )
+    assert read_response.status_code == 200
+    assert read_response.json()["defaultModel"]["modelId"] == default_model["modelId"]
+
+    list_response = client.get("/api/cognix/project-model-defaults", headers = headers)
+    assert list_response.status_code == 200
+    assert [item["projectId"] for item in list_response.json()["defaults"]] == ["project-alice-1"]
+
+    delete_response = client.delete(
+        "/api/cognix/projects/project-alice-1/default-model",
+        headers = headers,
+    )
+    assert delete_response.status_code == 200
+    assert delete_response.json()["ok"] is True
+
+    empty_response = client.get(
+        "/api/cognix/projects/project-alice-1/default-model",
+        headers = headers,
+    )
+    assert empty_response.status_code == 200
+    assert empty_response.json()["defaultModel"] is None
+
+
+def test_favorite_models_blueprint_declares_native_services_and_no_model_execution():
+    blueprint = favorite_models.build_favorite_models_blueprint()
+
+    assert blueprint["favoriteModelServiceVersion"] == "cognix_favorite_model_service_v1"
+    assert {
+        "FavoriteModelService",
+        "ModelQuickSwitcher",
+        "UserModelPreferenceService",
+    }.issubset(set(blueprint["services"]))
+    assert blueprint["tables"] == ["favorite_models", "user_model_defaults", "project_model_defaults"]
+    assert blueprint["sideEffects"]["modelLoad"] is False
+    assert blueprint["sideEffects"]["generation"] is False
+    assert blueprint["sideEffects"]["frontendDirectModelCall"] is False
+
+
+def test_model_pins_schema_migrates_legacy_quick_switcher_index():
+    path = studio_db_path()
+    path.parent.mkdir(parents = True, exist_ok = True)
+    with sqlite3.connect(path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE cognix_model_pins (
+                username TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                label TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(username, model_id)
+            );
+            """
+        )
+
+    cognix_db.ensure_schema()
+
+    with sqlite3.connect(path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(cognix_model_pins)").fetchall()}
+        indexes = {row[1] for row in conn.execute("PRAGMA index_list(cognix_model_pins)").fetchall()}
+    assert "quick_switcher" in columns
+    assert "sort_order" in columns
+    assert "updated_at" in columns
+    assert "idx_cognix_model_pins_username_sort" in indexes
+
+
+def test_favorite_model_user_default_and_quick_switcher_are_native_and_audited(client):
+    seed_accounts()
+    seed_project()
+    headers = login_headers(client, "alice", "alice-password-123")
+
+    blueprint_response = client.get("/api/cognix/models/favorites/blueprint", headers = headers)
+    assert blueprint_response.status_code == 200
+    assert blueprint_response.json()["favoriteModelsBlueprint"]["uiContract"]["chatQuickSwitcher"] is True
+
+    favorite_response = client.post(
+        "/api/cognix/models/favorites",
+        headers = headers,
+        json = {
+            "modelId": "huihui_ai/qwen3-vl-abliterated:4b-instruct",
+            "label": "Ollama Qwen 4B",
+            "providerType": "ollama",
+            "providerId": "b6878df754d543b1",
+            "quickSwitcher": True,
+            "sortOrder": 10,
+        },
+    )
+    assert favorite_response.status_code == 200
+    favorite_body = favorite_response.json()
+    assert favorite_body["sideEffects"]["favoriteWrite"] is True
+    assert favorite_body["favoriteModel"]["payload"]["model"]["modelId"] == "huihui_ai/qwen3-vl-abliterated:4b-instruct"
+    assert favorite_body["favoriteModelPlan"]["sideEffects"]["modelLoad"] is False
+    assert favorite_body["auditLogId"]
+
+    default_response = client.put(
+        "/api/cognix/models/default",
+        headers = headers,
+        json = {
+            "modelId": "huihui_ai/qwen3-vl-abliterated:4b-instruct",
+            "label": "Ollama Qwen 4B",
+            "providerType": "ollama",
+            "providerId": "b6878df754d543b1",
+        },
+    )
+    assert default_response.status_code == 200
+    assert default_response.json()["defaultModel"]["payload"]["defaultModel"]["scope"] == "user"
+
+    quick_response = client.get("/api/cognix/models/quick-switcher", headers = headers)
+    assert quick_response.status_code == 200
+    quick = quick_response.json()["quickSwitcher"]
+    assert quick["summary"]["favoriteCount"] == 1
+    assert quick["summary"]["hasUserDefault"] is True
+    assert quick["selectedDefaultModel"]["modelId"] == "huihui_ai/qwen3-vl-abliterated:4b-instruct"
+
+    legacy_response = client.get("/api/cognix/model-pins", headers = headers)
+    assert legacy_response.status_code == 200
+    assert legacy_response.json()["pins"][0]["modelId"] == "huihui_ai/qwen3-vl-abliterated:4b-instruct"
+
+    stored_favorites = cognix_db.list_favorite_models("alice")
+    assert stored_favorites[0]["payload"]["favorite"]["quickSwitcher"] is True
+    assert cognix_db.get_user_model_default("alice") is not None
+
+
+def test_project_default_model_updates_roadmap_table_and_quick_switcher(client):
+    seed_accounts()
+    seed_project()
+    headers = login_headers(client, "alice", "alice-password-123")
+
+    response = client.put(
+        "/api/cognix/projects/project-alice-1/default-model",
+        headers = headers,
+        json = {
+            "modelId": "cognix-code-4b-q4",
+            "label": "CogniX Code 4B",
+            "providerType": "local_gguf",
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["projectDefaultModelPlan"]["defaultModel"]["scope"] == "project"
+    assert body["sideEffects"]["projectDefaultWrite"] is True
+    assert body["auditLogId"]
+
+    switcher = client.get(
+        "/api/cognix/models/quick-switcher?project_id=project-alice-1",
+        headers = headers,
+    )
+    assert switcher.status_code == 200
+    assert switcher.json()["quickSwitcher"]["projectDefaultModel"]["modelId"] == "cognix-code-4b-q4"
+
+
+def test_project_default_model_is_limited_to_project_owner(client):
+    seed_accounts()
+    seed_project(owner_username = "alice")
+    bob_headers = login_headers(client, "bob", "bob-password-123")
+
+    response = client.put(
+        "/api/cognix/projects/project-alice-1/default-model",
+        headers = bob_headers,
+        json = {
+            "modelId": "huihui_ai/qwen3-vl-abliterated:4b-instruct",
+            "label": "Ollama Qwen 4B",
+        },
+    )
+
+    assert response.status_code == 404
+    assert cognix_db.get_project_model_default("project-alice-1") is None
+
+
+def test_project_default_model_requires_authentication(client):
+    response = client.get("/api/cognix/project-model-defaults")
+
+    assert response.status_code in {401, 403}

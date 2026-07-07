@@ -17,11 +17,14 @@ from typing import Optional, Tuple
 from utils.paths import auth_db_path, ensure_dir
 
 DB_PATH = auth_db_path()
-DEFAULT_ADMIN_USERNAME = "unsloth"
-ADMIN_USERNAMES = frozenset({DEFAULT_ADMIN_USERNAME, "kamil", "kamil_ebk"})
+DEFAULT_ADMIN_USERNAME = "kamil"
+LEGACY_ADMIN_USERNAME = "unsloth"
+ADMIN_USERNAMES = frozenset({DEFAULT_ADMIN_USERNAME, LEGACY_ADMIN_USERNAME, "kamil_ebk"})
 ADMIN_LOGIN_ALIASES = frozenset({"kamil", "kamil_ebk", "ceo"})
+CEO_ACCOUNT_ALIASES = frozenset({"ceo"})
 DEFAULT_USER_PLAN = "free"
 CEO_PLAN = "CEO"
+CEO_TRAINING_PLAN_TOKENS = frozenset({"ceo", "cloud_ceo", "local_plus_cloud_ceo"})
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{2,31}$")
 PASSWORD_MIN_LENGTH = 8
 PASSWORD_MAX_LENGTH = 128
@@ -37,6 +40,53 @@ _BOOTSTRAP_PW_PATH = DB_PATH.parent / ".bootstrap_password"
 
 # In-process cache to avoid re-reading the file on every HTML serve.
 _bootstrap_password: Optional[str] = None
+
+
+def _migrate_legacy_admin_identity(conn: sqlite3.Connection, now: str) -> None:
+    """Promote a restored legacy admin row to the native CogniX CEO identity."""
+
+    default_row = conn.execute(
+        "SELECT id FROM auth_user WHERE username = ?",
+        (DEFAULT_ADMIN_USERNAME,),
+    ).fetchone()
+    legacy_row = conn.execute(
+        "SELECT id FROM auth_user WHERE username = ?",
+        (LEGACY_ADMIN_USERNAME,),
+    ).fetchone()
+    if legacy_row is None or default_row is not None:
+        return
+
+    conn.execute(
+        """
+        UPDATE auth_user
+        SET username = ?,
+            display_name = ?,
+            role = 'admin',
+            plan = ?,
+            updated_at = ?
+        WHERE username = ?
+        """,
+        (DEFAULT_ADMIN_USERNAME, "Kamil", CEO_PLAN, now, LEGACY_ADMIN_USERNAME),
+    )
+    conn.execute(
+        "UPDATE refresh_tokens SET username = ? WHERE username = ?",
+        (DEFAULT_ADMIN_USERNAME, LEGACY_ADMIN_USERNAME),
+    )
+    conn.execute(
+        "UPDATE api_keys SET username = ? WHERE username = ?",
+        (DEFAULT_ADMIN_USERNAME, LEGACY_ADMIN_USERNAME),
+    )
+
+
+def _canonical_username_for_lookup(conn: sqlite3.Connection, username: str) -> str:
+    normalized = (username or "").strip()
+    if normalized.casefold() != LEGACY_ADMIN_USERNAME.casefold():
+        return normalized
+    row = conn.execute(
+        "SELECT id FROM auth_user WHERE username = ?",
+        (DEFAULT_ADMIN_USERNAME,),
+    ).fetchone()
+    return DEFAULT_ADMIN_USERNAME if row is not None else normalized
 
 
 def generate_bootstrap_password() -> str:
@@ -208,6 +258,7 @@ def get_connection() -> sqlite3.Connection:
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_user_email ON auth_user(email) WHERE email IS NOT NULL AND email != ''"
     )
     now = datetime.now(timezone.utc).isoformat()
+    _migrate_legacy_admin_identity(conn, now)
     conn.execute(
         """
         UPDATE auth_user
@@ -518,7 +569,7 @@ def _normalize_display_name(display_name: str | None, username: str) -> str:
 
 def _normalize_role(role: str | None) -> str:
     role = (role or "user").strip().lower()
-    return "admin" if role == "admin" else "user"
+    return role if role in {"admin", "ceo"} else "user"
 
 
 def _normalize_plan(plan: str | None) -> str:
@@ -595,6 +646,7 @@ def get_user_login_record(identifier: str) -> Optional[dict]:
     email = _normalize_email(identifier)
     conn = get_connection()
     try:
+        canonical_identifier = _canonical_username_for_lookup(conn, identifier)
         cur = conn.execute(
             """
             SELECT id, username, email, display_name, role, plan,
@@ -608,7 +660,13 @@ def get_user_login_record(identifier: str) -> Optional[dict]:
             ORDER BY CASE WHEN username = ? THEN 0 WHEN lower(username) = lower(?) THEN 1 ELSE 2 END
             LIMIT 1
             """,
-            (identifier, identifier, email, identifier, identifier),
+            (
+                canonical_identifier,
+                canonical_identifier,
+                email,
+                canonical_identifier,
+                canonical_identifier,
+            ),
         )
         row = cur.fetchone()
         if row is None and identifier.casefold() in ADMIN_LOGIN_ALIASES:
@@ -621,7 +679,7 @@ def get_user_login_record(identifier: str) -> Optional[dict]:
                 FROM auth_user
                 WHERE username = ?
                 """,
-                (DEFAULT_ADMIN_USERNAME,),
+                (get_default_admin_username(),),
             ).fetchone()
         return dict(row) if row else None
     finally:
@@ -631,6 +689,7 @@ def get_user_login_record(identifier: str) -> Optional[dict]:
 def get_user_profile(username: str) -> Optional[dict]:
     conn = get_connection()
     try:
+        username = _canonical_username_for_lookup(conn, username)
         row = conn.execute(
             """
             SELECT id, username, email, display_name, role, plan, must_change_password,
@@ -666,6 +725,30 @@ def list_user_profiles() -> list[dict]:
 def is_admin(username: str) -> bool:
     profile = get_user_profile(username)
     return bool(profile and profile["role"] == "admin")
+
+
+def has_ceo_training_entitlement(username: str, profile: Optional[dict] = None) -> bool:
+    """Return whether a user can bypass local GPU checks for cloud training."""
+
+    if profile is None:
+        profile = get_user_profile(username) or {}
+    normalized_username = str(profile.get("username") or username or "").strip().casefold()
+    role = str(profile.get("role") or "").strip().casefold()
+    plan = str(profile.get("plan") or "").strip().casefold()
+    admin_names = {item.casefold() for item in ADMIN_USERNAMES}
+    return (
+        plan in CEO_TRAINING_PLAN_TOKENS
+        or role in {"admin", "ceo"}
+        or normalized_username in admin_names
+        or normalized_username in CEO_ACCOUNT_ALIASES
+    )
+
+
+def is_training_operator(username: str) -> bool:
+    """Return whether a user can operate local or CEO cloud training flows."""
+
+    profile = get_user_profile(username) or {}
+    return has_ceo_training_entitlement(username, profile)
 
 
 def get_login_lockout_state(username: str) -> Optional[dict]:
@@ -892,6 +975,7 @@ def get_user_and_secret(username: str) -> Optional[Tuple[str, str, str, bool]]:
     """
     conn = get_connection()
     try:
+        username = _canonical_username_for_lookup(conn, username)
         cur = conn.execute(
             """
             SELECT password_salt, password_hash, jwt_secret, must_change_password
@@ -913,10 +997,20 @@ def get_user_and_secret(username: str) -> Optional[Tuple[str, str, str, bool]]:
         conn.close()
 
 
+def get_default_admin_username() -> str:
+    """Return the native CogniX admin, falling back to legacy installs."""
+    if get_user_and_secret(DEFAULT_ADMIN_USERNAME) is not None:
+        return DEFAULT_ADMIN_USERNAME
+    if get_user_and_secret(LEGACY_ADMIN_USERNAME) is not None:
+        return LEGACY_ADMIN_USERNAME
+    return DEFAULT_ADMIN_USERNAME
+
+
 def get_jwt_secret(username: str) -> Optional[str]:
     """Return the current JWT signing secret for a user."""
     conn = get_connection()
     try:
+        username = _canonical_username_for_lookup(conn, username)
         cur = conn.execute(
             "SELECT jwt_secret FROM auth_user WHERE username = ?",
             (username,),
@@ -931,12 +1025,23 @@ def requires_password_change(username: str) -> bool:
     """Return whether the user must change the seeded default password."""
     conn = get_connection()
     try:
+        username = _canonical_username_for_lookup(conn, username)
         cur = conn.execute(
             "SELECT must_change_password FROM auth_user WHERE username = ?",
             (username,),
         )
         row = cur.fetchone()
         return bool(row and row["must_change_password"])
+    finally:
+        conn.close()
+
+
+def canonicalize_subject(username: str) -> str:
+    """Return the active username for a possibly legacy JWT/login subject."""
+
+    conn = get_connection()
+    try:
+        return _canonical_username_for_lookup(conn, username)
     finally:
         conn.close()
 
@@ -967,6 +1072,9 @@ def ensure_default_admin() -> bool:
     Returns True when the default admin was created in this call.
     """
     if get_user_and_secret(DEFAULT_ADMIN_USERNAME) is not None:
+        _load_bootstrap_password()
+        return False
+    if get_user_and_secret(LEGACY_ADMIN_USERNAME) is not None:
         _load_bootstrap_password()
         return False
 
@@ -1007,6 +1115,8 @@ def update_password(username: str, new_password: str) -> bool:
             """,
             (salt, pwd_hash, jwt_secret, username),
         )
+        if cursor.rowcount > 0:
+            conn.execute("DELETE FROM refresh_tokens WHERE username = ?", (username,))
         conn.commit()
         if cursor.rowcount > 0:
             clear_bootstrap_password()
@@ -1173,7 +1283,8 @@ def validate_desktop_secret(raw_secret: str) -> Optional[str]:
     """Return the real admin username when the desktop secret matches."""
     if not raw_secret.startswith(DESKTOP_SECRET_PREFIX):
         return None
-    if get_user_and_secret(DEFAULT_ADMIN_USERNAME) is None:
+    admin_username = get_default_admin_username()
+    if get_user_and_secret(admin_username) is None:
         return None
 
     secret_hash = _pbkdf2_desktop_secret(raw_secret)
@@ -1188,7 +1299,7 @@ def validate_desktop_secret(raw_secret: str) -> Optional[str]:
             return None
         if not secrets.compare_digest(row["value"], secret_hash):
             return None
-        return DEFAULT_ADMIN_USERNAME
+        return admin_username
     finally:
         conn.close()
 

@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
-"""Cross-platform Python dependency installer for Unsloth Studio.
+"""Cross-platform Python dependency installer for CogniX Desktop.
 
 Called by setup.sh (Linux/WSL) and setup.ps1 (Windows) after the venv is
 activated. Expects `pip` and `python` on PATH to point at the venv.

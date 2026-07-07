@@ -152,6 +152,7 @@ export function applyActiveModelStatusToStore(
       : (["low", "medium", "high"] as const);
   const supportsPreserveThinking = status.supports_preserve_thinking ?? false;
   const supportsTools = status.supports_tools ?? false;
+  const supportsManagedWebSearch = Boolean(checkpointId);
   const storedReasoningEnabled = loadOptionalBool(CHAT_REASONING_ENABLED_KEY);
   const currentGgufContextLength = status.is_gguf
     ? (status.context_length ?? null)
@@ -188,7 +189,8 @@ export function applyActiveModelStatusToStore(
     reasoningEffort: clampedReasoningEffort,
     supportsPreserveThinking,
     supportsTools,
-    ...resolveToolsEnabledOnLoad(supportsTools),
+    supportsBuiltinWebSearch: supportsManagedWebSearch,
+    ...resolveToolsEnabledOnLoad(supportsTools, supportsManagedWebSearch),
     reasoningEnabled: supportsReasoning
       ? reasoningStyle === "reasoning_effort"
         ? true

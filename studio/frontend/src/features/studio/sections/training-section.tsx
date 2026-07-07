@@ -17,6 +17,7 @@ import {
   useTrainingConfigStore,
   validateTrainingConfig,
 } from "@/features/training";
+import { isCloudOnlyTrainingMode, usePlatformStore } from "@/config/env";
 import {
   Archive04Icon,
   ChartAverageIcon,
@@ -41,6 +42,11 @@ const placeholderData = [
 
 export function TrainingSection() {
   const t = useT();
+  const cloudOnlyTraining = usePlatformStore((s) => isCloudOnlyTrainingMode(s));
+  const cloudProviders = usePlatformStore((s) => s.cloudTrainingProviders);
+  const cloudProviderLabel = cloudProviders.length > 0
+    ? cloudProviders.map(formatCloudProviderLabel).join(", ")
+    : "Colab, Kaggle, Cloud GPU";
   const chartConfig = {
     loss: { label: t("studio.charts.loss"), color: "#3b82f6" },
   } satisfies ChartConfig;
@@ -182,12 +188,19 @@ export function TrainingSection() {
           <HugeiconsIcon icon={Rocket01Icon} className="size-4" />
           {isStarting
             ? t("studio.training.starting")
-            : isLoadingModel
-              ? t("studio.training.loadingModel")
-              : store.isCheckingDataset
-                ? t("studio.training.checkingDataset")
-                : t("studio.training.startTraining")}
+              : isLoadingModel
+                ? t("studio.training.loadingModel")
+                : store.isCheckingDataset
+                  ? t("studio.training.checkingDataset")
+                  : cloudOnlyTraining
+                    ? t("studio.training.prepareCloudTraining")
+                    : t("studio.training.startTraining")}
         </Button>
+        {cloudOnlyTraining && (
+          <p className="text-xs text-muted-foreground leading-relaxed">
+            {t("studio.training.cloudTrainingReady", { providers: cloudProviderLabel })}
+          </p>
+        )}
         {startError && (
           <p className="text-xs text-red-500 leading-relaxed">{startError}</p>
         )}
@@ -261,4 +274,17 @@ export function TrainingSection() {
       </SectionCard>
     </div>
   );
+}
+
+function formatCloudProviderLabel(provider: string): string {
+  switch (provider) {
+    case "google_colab":
+      return "Google Colab";
+    case "kaggle":
+      return "Kaggle";
+    case "cloud_gpu":
+      return "Cloud GPU";
+    default:
+      return provider;
+  }
 }

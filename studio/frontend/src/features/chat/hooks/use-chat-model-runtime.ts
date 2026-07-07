@@ -718,6 +718,7 @@ export function useChatModelRuntime() {
             const reasoningStyle = loadResponse.reasoning_style ?? "enable_thinking";
             const supportsReasoning = loadResponse.supports_reasoning ?? false;
             const supportsTools = loadResponse.supports_tools ?? false;
+            const supportsManagedWebSearch = true;
             // GLM-5.2-style models report their own effort levels (e.g.
             // high|max); everything else keeps the default low/medium/high.
             const reasoningEffortLevels =
@@ -755,12 +756,15 @@ export function useChatModelRuntime() {
               reasoningEffort: clampedReasoningEffort,
               supportsPreserveThinking: loadResponse.supports_preserve_thinking ?? false,
               supportsTools,
-              ...(reloadingSameModel && supportsTools
+              supportsBuiltinWebSearch: supportsManagedWebSearch,
+              ...(reloadingSameModel && (supportsTools || supportsManagedWebSearch)
                 ? {
                     toolsEnabled: stateBeforeUnload.toolsEnabled,
-                    codeToolsEnabled: stateBeforeUnload.codeToolsEnabled,
+                    codeToolsEnabled: supportsTools
+                      ? stateBeforeUnload.codeToolsEnabled
+                      : false,
                   }
-                : resolveToolsEnabledOnLoad(supportsTools)),
+                : resolveToolsEnabledOnLoad(supportsTools, supportsManagedWebSearch)),
               kvCacheDtype: loadedKv,
               loadedKvCacheDtype: loadedKv,
               tensorParallel: loadedTp,

@@ -7,7 +7,11 @@ import { toast } from "@/lib/toast";
 import { create } from "zustand";
 import {
   COGNIX_DEFAULT_EXTERNAL_CHECKPOINT,
+  externalProviderCanSendWithoutFallback,
+  getExternalProviderApiKey,
   isExternalModelId,
+  isHuggingFaceProviderConnection,
+  loadExternalProviders,
   parseExternalModelId,
 } from "../external-providers";
 import {
@@ -157,7 +161,24 @@ function loadLastExternalCheckpoint(): string | null {
   if (typeof window === "undefined") return null;
   try {
     const value = window.localStorage.getItem(LAST_EXTERNAL_CHECKPOINT_KEY);
-    return isExternalModelId(value) ? value : null;
+    if (!isExternalModelId(value)) return null;
+    const selection = parseExternalModelId(value);
+    if (!selection) return null;
+    const provider = loadExternalProviders().find(
+      (item) => item.id === selection.providerId,
+    );
+    if (!provider) return null;
+    if (
+      isHuggingFaceProviderConnection(provider) &&
+      !externalProviderCanSendWithoutFallback(
+        provider,
+        getExternalProviderApiKey(provider.id),
+      )
+    ) {
+      window.localStorage.removeItem(LAST_EXTERNAL_CHECKPOINT_KEY);
+      return null;
+    }
+    return value;
   } catch {
     return null;
   }
@@ -199,6 +220,32 @@ export type PendingImageEditReference = {
   openaiImageGenerationCallId: string;
   openaiResponseId?: string;
   openaiReasoningItem?: unknown;
+};
+
+export type CogniXRouteSnapshot = {
+  selectedDomain: string;
+  label: string;
+  recommendedModelLabel: string;
+  domainModelLabel?: string | null;
+  providerId?: string | null;
+  providerType?: string | null;
+  baseUrl?: string | null;
+  selectedModelId?: string | null;
+  selectedModelLabel?: string | null;
+  executionStatus?: string | null;
+  executionMode?: string | null;
+  willLoadModel?: boolean;
+  willGenerate?: boolean;
+  planMode?: string | null;
+  planSteps?: string[];
+  warnings?: string[];
+  routerLogId?: string | number | null;
+  orchestratorLogId?: string | number | null;
+  confidence: number;
+  needsClarification: boolean;
+  routingMode: string;
+  reason: string;
+  createdAt: number;
 };
 export type ReasoningEffort =
   | "none"
@@ -316,14 +363,21 @@ export function loadOptionalBool(key: string): boolean | null {
  * re-enables a pill the user turned off; falls back to the model's capability
  * only when no preference has been expressed.
  */
-export function resolveToolsEnabledOnLoad(supportsTools: boolean): {
+export function resolveToolsEnabledOnLoad(
+  supportsTools: boolean,
+  supportsManagedWebSearch = supportsTools,
+): {
   toolsEnabled: boolean;
   codeToolsEnabled: boolean;
 } {
-  if (!supportsTools) return { toolsEnabled: false, codeToolsEnabled: false };
+  if (!supportsTools && !supportsManagedWebSearch) {
+    return { toolsEnabled: false, codeToolsEnabled: false };
+  }
   return {
     toolsEnabled: loadOptionalBool(CHAT_TOOLS_ENABLED_KEY) ?? true,
-    codeToolsEnabled: loadOptionalBool(CHAT_CODE_TOOLS_ENABLED_KEY) ?? true,
+    codeToolsEnabled: supportsTools
+      ? (loadOptionalBool(CHAT_CODE_TOOLS_ENABLED_KEY) ?? true)
+      : false,
   };
 }
 
@@ -534,7 +588,11 @@ export function isPendingGguf(pending: PendingModelSelection | null): boolean {
  *  wrong file. */
 export function pendingSelectionMatches(
   pending: PendingModelSelection | null,
-  pick: { id: string; ggufVariant?: string | null; nativePathToken?: string | null },
+  pick: {
+    id: string;
+    ggufVariant?: string | null;
+    nativePathToken?: string | null;
+  },
 ): boolean {
   return (
     pending != null &&
@@ -575,6 +633,7 @@ type ChatRuntimeStore = {
    * non-OpenRouter model. UI display only (appended after `openrouter/free:`).
    */
   lastOpenRouterChosenModel: string | null;
+  latestCogniXRoute: CogniXRouteSnapshot | null;
   reasoningStyle: ReasoningStyle;
   reasoningEffort: ReasoningEffort;
   supportsReasoningOff: boolean;
@@ -583,10 +642,10 @@ type ChatRuntimeStore = {
   preserveThinking: boolean;
   supportsTools: boolean;
   /**
-   * Whether the active external provider exposes a server-side web_search tool
-   * (OpenAI's /v1/responses today). Distinct from `supportsTools` (the local
-   * tool runtime): this only enables the composer's Search pill for external
-   * models. Local models keep `supportsTools` only.
+   * Whether the active provider/session can satisfy the Search pill without the
+   * local tool-call loop: provider-native hosted tools on cloud models, or
+   * CogniX-managed pre-search context for Hugging Face/Ollama/custom/local
+   * models that cannot emit tool calls themselves.
    */
   supportsBuiltinWebSearch: boolean;
   /**
@@ -756,6 +815,7 @@ type ChatRuntimeStore = {
     options?: { persist?: boolean },
   ) => void;
   setLastOpenRouterChosenModel: (chosen: string | null) => void;
+  setLatestCogniXRoute: (route: CogniXRouteSnapshot | null) => void;
   setReasoningStyle: (style: ReasoningStyle) => void;
   setReasoningEffort: (effort: ReasoningEffort) => void;
   setPreserveThinking: (value: boolean) => void;
@@ -1070,6 +1130,7 @@ export const useChatRuntimeStore = create<ChatRuntimeStore>((set, get) => ({
   supportsReasoningOff: false,
   reasoningEffortLevels: ["low", "medium", "high"],
   lastOpenRouterChosenModel: null,
+  latestCogniXRoute: null,
   supportsPreserveThinking: false,
   preserveThinking: false,
   supportsTools: false,
@@ -1122,7 +1183,7 @@ export const useChatRuntimeStore = create<ChatRuntimeStore>((set, get) => ({
   loadedSpecDraftNMax: null,
   tensorParallel: false,
   loadedTensorParallel: null,
-  loadOnSelection: loadBool(CHAT_LOAD_ON_SELECTION_KEY, true),
+  loadOnSelection: loadBool(CHAT_LOAD_ON_SELECTION_KEY, false),
   expandQuantizations: loadBool(CHAT_EXPAND_QUANTIZATIONS_KEY, false),
   showAllQuantizations: loadBool(CHAT_SHOW_ALL_QUANTIZATIONS_KEY, true),
   pendingSelection: null,
@@ -1383,6 +1444,7 @@ export const useChatRuntimeStore = create<ChatRuntimeStore>((set, get) => ({
     }),
   setLastOpenRouterChosenModel: (lastOpenRouterChosenModel) =>
     set({ lastOpenRouterChosenModel }),
+  setLatestCogniXRoute: (latestCogniXRoute) => set({ latestCogniXRoute }),
   setReasoningStyle: (reasoningStyle) => set({ reasoningStyle }),
   setReasoningEffort: (reasoningEffort) =>
     set((state) => {

@@ -2667,7 +2667,7 @@ def run_training_process(*, event_queue: Any, stop_queue: Any, config: dict) -> 
 
     # ── 2. Now import ML libraries (fresh in this clean process) ──
     try:
-        _send_status(event_queue, "Importing Unsloth...")
+        _send_status(event_queue, "Importing training runtime...")
 
         backend_path = str(Path(__file__).resolve().parent.parent.parent)
         if backend_path not in sys.path:

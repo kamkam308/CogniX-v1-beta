@@ -422,7 +422,7 @@ export function ModelSection() {
                 <TooltipContent>
                   {t("studio.model.huggingFaceModelTooltip")}{" "}
                   <a
-                    href="https://unsloth.ai/docs/get-started/fine-tuning-llms-guide/what-model-should-i-use"
+                    href="https://github.com/kamkam308/CogniX-v1-beta"
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-primary underline"
@@ -579,7 +579,7 @@ export function ModelSection() {
                 <TooltipContent className="max-w-xs">
                   {t("studio.model.methodTooltip")}{" "}
                   <a
-                    href="https://unsloth.ai/docs/get-started/fine-tuning-llms-guide/lora-hyperparameters-guide"
+                    href="https://github.com/kamkam308/CogniX-v1-beta"
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-primary underline"

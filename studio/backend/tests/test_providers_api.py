@@ -4,7 +4,7 @@
 """
 Integration tests for the external providers API.
 
-Requires a running Unsloth Studio server. Configure via env vars:
+Requires a running CogniX server. Configure via env vars:
 
     export STUDIO_TEST_URL="http://localhost:8888"   # default
     export STUDIO_TEST_USER="unsloth"                # default

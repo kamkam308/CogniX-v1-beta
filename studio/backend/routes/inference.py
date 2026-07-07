@@ -20,6 +20,7 @@ from loggers import get_logger
 import asyncio
 import threading
 
+from core.cognix import cache_manager as cognix_cache_manager
 
 import re as _re
 
@@ -3287,13 +3288,21 @@ async def unload_model(request: UnloadRequest, current_subject: str = Depends(ge
             or is_registered_native_path_label(llama_backend.model_identifier, request.model_path)
             or not llama_backend.is_loaded
         ):
+            loaded_label = (
+                getattr(llama_backend, "_native_display_label", None)
+                or llama_backend.model_identifier
+                or request.model_path
+            )
             llama_backend.unload_model()
+            cognix_cache_manager.mark_model_unloaded(loaded_label)
+            cognix_cache_manager.mark_model_unloaded(request.model_path)
             logger.info(f"Unloaded GGUF model: {request.model_path}")
             return UnloadResponse(status = "unloaded", model = request.model_path)
 
         # Otherwise, unload from Unsloth backend
         backend = get_inference_backend()
         backend.unload_model(request.model_path)
+        cognix_cache_manager.mark_model_unloaded(request.model_path)
         logger.info(f"Unloaded model: {request.model_path}")
         return UnloadResponse(status = "unloaded", model = request.model_path)
 
@@ -4028,6 +4037,29 @@ def _extract_content_parts(messages: list) -> tuple[str, list[dict], "Optional[s
 _INPUT_DOCUMENT_PROVIDERS = frozenset({"anthropic", "openai"})
 
 
+def _is_huggingface_api_key_candidate(api_key: str | None) -> bool:
+    token = (api_key or "").strip()
+    return token.startswith("hf_") and len(token) >= 11 and token.replace("_", "").isalnum()
+
+
+def _is_huggingface_router_base_url(base_url: str | None) -> bool:
+    if not base_url:
+        return False
+    try:
+        from urllib.parse import urlparse as _urlparse
+
+        host = (_urlparse(base_url).hostname or "").lower()
+    except Exception:
+        return False
+    return host == "router.huggingface.co" or host.endswith(".huggingface.co")
+
+
+def _effective_external_provider_type(provider_type: str, base_url: str | None) -> str:
+    if provider_type == "huggingface" or _is_huggingface_router_base_url(base_url):
+        return "huggingface"
+    return provider_type
+
+
 def _build_external_messages(
     messages: list,
     supports_vision: bool,
@@ -4334,10 +4366,251 @@ def _build_external_messages(
                         entry["tool_call_id"] = msg.tool_call_id
                     if msg.name:
                         entry["name"] = msg.name
-                if emit_extra_content and msg.role == "assistant" and msg.extra_content:
-                    entry["extra_content"] = msg.extra_content
+            if emit_extra_content and msg.role == "assistant" and msg.extra_content:
+                entry["extra_content"] = msg.extra_content
                 result.append(entry)
     return result
+
+
+_NATIVE_WEB_SEARCH_PROVIDERS = frozenset(
+    {"openai", "anthropic", "gemini", "openrouter", "kimi"}
+)
+
+
+def _tool_choice_blocks_cognix_web_search(tool_choice: Any) -> bool:
+    """Return True when a request explicitly disables hosted/builtin tools.
+
+    A forced function tool is treated the same as provider-native web-search
+    gates: the caller asked for one specific tool, so CogniX should not run a
+    hidden pre-search beside it.
+    """
+    if isinstance(tool_choice, str):
+        return tool_choice.strip().lower() == "none"
+    return (
+        isinstance(tool_choice, dict)
+        and tool_choice.get("type") == "function"
+        and isinstance(tool_choice.get("function"), dict)
+        and bool(tool_choice["function"].get("name"))
+    )
+
+
+def _external_provider_needs_cognix_web_search(
+    provider_type: str,
+    enabled_tools: Optional[list[str]],
+    tool_choice: Any = None,
+) -> bool:
+    return (
+        provider_type not in _NATIVE_WEB_SEARCH_PROVIDERS
+        and bool(enabled_tools)
+        and "web_search" in (enabled_tools or [])
+        and not _tool_choice_blocks_cognix_web_search(tool_choice)
+    )
+
+
+def _external_enabled_tools_after_cognix_web_search(
+    provider_type: str,
+    enabled_tools: Optional[list[str]],
+    tool_choice: Any = None,
+) -> Optional[list[str]]:
+    """Remove `web_search` before forwarding to providers where CogniX ran it.
+
+    Non-native providers either ignore `enabled_tools` or reject provider-native
+    search envelopes. Keeping the rest of the list preserves future provider
+    capabilities without letting this fallback request an unsupported connector.
+    """
+    if not _external_provider_needs_cognix_web_search(provider_type, enabled_tools, tool_choice):
+        return enabled_tools
+    remaining = [name for name in (enabled_tools or []) if name != "web_search"]
+    return remaining or None
+
+
+def _external_latest_user_text(messages: list[dict[str, Any]]) -> str:
+    for msg in reversed(messages):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts: list[str] = []
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") in ("text", "input_text"):
+                    text = part.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+            return "\n".join(parts).strip()
+    return ""
+
+
+def _with_cognix_web_search_context(
+    messages: list[dict[str, Any]],
+    *,
+    query: str,
+    result: str,
+) -> list[dict[str, Any]]:
+    context = _cognix_web_search_system_context(query = query, result = result)
+    injected = list(messages)
+    insert_at = 0
+    while insert_at < len(injected) and injected[insert_at].get("role") == "system":
+        insert_at += 1
+    injected.insert(insert_at, {"role": "system", "content": context})
+    return injected
+
+
+def _cognix_web_search_system_context(*, query: str, result: str) -> str:
+    return (
+        f"CogniX web_search results for the latest user request.\n"
+        f"Current date: {_date.today().isoformat()}.\n"
+        f"Search query: {query}\n\n"
+        "Use these web results when they are relevant, cite URLs from the "
+        "results, and say when the search result is insufficient.\n\n"
+        f"{result}"
+    )
+
+
+def _append_cognix_web_search_system_context(
+    system_prompt: str,
+    *,
+    query: str,
+    result: str,
+) -> str:
+    context = _cognix_web_search_system_context(query = query, result = result)
+    if system_prompt.strip():
+        return system_prompt.rstrip() + "\n\n" + context
+    return context
+
+
+def _external_tool_event_sse(provider_type: str, payload: dict[str, Any]) -> str:
+    if payload.get("type") == "tool_start":
+        args = payload.get("arguments")
+        if not isinstance(args, dict):
+            args = {}
+            payload["arguments"] = args
+        args["_server_tool"] = True
+    chunk = {
+        "id": f"chatcmpl-{provider_type}-cognix-web",
+        "object": "chat.completion.chunk",
+        "choices": [
+            {
+                "index": 0,
+                "delta": {},
+                "finish_reason": None,
+            }
+        ],
+        "_toolEvent": payload,
+    }
+    return f"data: {json.dumps(chunk, ensure_ascii = False)}"
+
+
+async def _build_cognix_web_search_context(
+    messages: list[dict[str, Any]],
+    *,
+    provider_type: str,
+    timeout: Optional[int],
+) -> Optional[dict[str, Any]]:
+    query = _external_latest_user_text(messages)
+    if not query:
+        return None
+    query = query[:500]
+    tool_call_id = "cognix_web_search_" + uuid.uuid4().hex[:12]
+    start = _external_tool_event_sse(
+        provider_type,
+        {
+            "type": "tool_start",
+            "tool_name": "web_search",
+            "tool_call_id": tool_call_id,
+            "arguments": {"query": query},
+        },
+    )
+    from core.inference.tools import execute_tool
+
+    effective_timeout = timeout if timeout is not None else 300
+    try:
+        result = await asyncio.to_thread(
+            execute_tool,
+            "web_search",
+            {"query": query},
+            timeout = effective_timeout,
+        )
+    except Exception as exc:
+        logger.warning(
+            "external_provider.cognix_web_search_failed",
+            provider_type = provider_type,
+            error = str(exc),
+        )
+        result = f"CogniX web_search failed: {_friendly_error(exc)}"
+    end = _external_tool_event_sse(
+        provider_type,
+        {
+            "type": "tool_end",
+            "tool_name": "web_search",
+            "tool_call_id": tool_call_id,
+            "result": result,
+        },
+    )
+    return {
+        "start": start,
+        "end": end,
+        "query": query,
+        "result": result,
+    }
+
+
+async def _build_external_cognix_web_search_context(
+    messages: list[dict[str, Any]],
+    *,
+    provider_type: str,
+    enabled_tools: Optional[list[str]],
+    tool_choice: Any,
+    timeout: Optional[int],
+) -> Optional[dict[str, Any]]:
+    if not _external_provider_needs_cognix_web_search(
+        provider_type,
+        enabled_tools,
+        tool_choice,
+    ):
+        return None
+    context = await _build_cognix_web_search_context(
+        messages,
+        provider_type = provider_type,
+        timeout = timeout,
+    )
+    if not context:
+        return None
+    context["messages"] = _with_cognix_web_search_context(
+        messages,
+        query = context["query"],
+        result = context["result"],
+    )
+    return context
+
+
+def _local_request_needs_cognix_web_search(
+    tools_on: Optional[bool],
+    enabled_tools: Optional[list[str]],
+    tool_choice: Any = None,
+    *,
+    tool_loop_active: bool,
+) -> bool:
+    if tool_loop_active or not tools_on:
+        return False
+    if _tool_choice_blocks_cognix_web_search(tool_choice):
+        return False
+    return enabled_tools is None or "web_search" in enabled_tools
+
+
+async def _build_local_cognix_web_search_context(
+    payload: ChatCompletionRequest,
+    *,
+    timeout: Optional[int],
+) -> Optional[dict[str, Any]]:
+    return await _build_cognix_web_search_context(
+        [m.model_dump(exclude_none = True) for m in payload.messages],
+        provider_type = "local",
+        timeout = timeout,
+    )
 
 
 async def _proxy_to_external_provider(
@@ -4396,6 +4669,22 @@ async def _proxy_to_external_provider(
                 detail = "Failed to decrypt API key. The server key may have changed — try refreshing the page.",
             )
 
+    effective_provider_type = _effective_external_provider_type(provider_type, base_url)
+
+    if effective_provider_type == "huggingface" and not _is_huggingface_api_key_candidate(api_key):
+        raise HTTPException(
+            status_code = 401,
+            detail = openai_error_body(
+                (
+                    "Hugging Face requires a valid hf_ token for router chat completions. "
+                    "Set the Hugging Face token in Connections or switch to the native "
+                    "Ollama Qwen model."
+                ),
+                status = 401,
+                code = "invalid_api_key",
+            ),
+        )
+
     model = payload.external_model or payload.model
     if model == "default":
         raise HTTPException(
@@ -4406,12 +4695,12 @@ async def _proxy_to_external_provider(
     # Build messages, preserving multimodal content for vision providers
     from core.inference.providers import get_provider_info as _get_provider_info
 
-    _pinfo = _get_provider_info(provider_type) or {}
+    _pinfo = _get_provider_info(effective_provider_type) or {}
     _supports_vision = _pinfo.get("supports_vision", False)
     chat_messages = _build_external_messages(
         payload.messages,
         _supports_vision,
-        provider_type = provider_type,
+        provider_type = effective_provider_type,
         base_url = base_url,
     )
     monitor_id = None
@@ -4426,7 +4715,7 @@ async def _proxy_to_external_provider(
         )
 
     client = ExternalProviderClient(
-        provider_type = provider_type,
+        provider_type = effective_provider_type,
         base_url = base_url,
         api_key = api_key,
     )
@@ -4439,31 +4728,49 @@ async def _proxy_to_external_provider(
     _top_k_explicit = payload.top_k if "top_k" in payload.model_fields_set else None
 
     async def _stream():
-        gen = client.stream_chat_completion(
-            messages = chat_messages,
-            model = model,
-            temperature = payload.temperature,
-            top_p = payload.top_p,
-            # Honor max_completion_tokens when max_tokens is absent, so a
-            # provider-routed request capped only by the newer field still gets
-            # a limit instead of falling back to the provider default.
-            max_tokens = _effective_max_tokens(payload),
-            presence_penalty = payload.presence_penalty,
-            top_k = _top_k_explicit,
-            enable_thinking = payload.enable_thinking,
-            reasoning_effort = payload.reasoning_effort,
-            enabled_tools = payload.enabled_tools,
-            enable_prompt_caching = payload.enable_prompt_caching,
-            openai_code_exec_container_id = payload.openai_code_exec_container_id,
-            anthropic_code_exec_container_id = payload.anthropic_code_exec_container_id,
-            prompt_cache_ttl = payload.prompt_cache_ttl,
-            compaction_threshold = payload.compaction_threshold,
-            tools = payload.tools,
-            tool_choice = payload.tool_choice,
-            fast_mode = payload.fast_mode,
-            stream = payload.stream,
-        )
+        gen = None
         try:
+            effective_messages = chat_messages
+            forwarded_enabled_tools = _external_enabled_tools_after_cognix_web_search(
+                effective_provider_type,
+                payload.enabled_tools,
+                payload.tool_choice,
+            )
+            web_context = await _build_external_cognix_web_search_context(
+                effective_messages,
+                provider_type = effective_provider_type,
+                enabled_tools = payload.enabled_tools,
+                tool_choice = payload.tool_choice,
+                timeout = payload.tool_call_timeout,
+            )
+            if web_context:
+                yield f"{web_context['start']}\n\n"
+                yield f"{web_context['end']}\n\n"
+                effective_messages = web_context["messages"]
+            gen = client.stream_chat_completion(
+                messages = effective_messages,
+                model = model,
+                temperature = payload.temperature,
+                top_p = payload.top_p,
+                # Honor max_completion_tokens when max_tokens is absent, so a
+                # provider-routed request capped only by the newer field still gets
+                # a limit instead of falling back to the provider default.
+                max_tokens = _effective_max_tokens(payload),
+                presence_penalty = payload.presence_penalty,
+                top_k = _top_k_explicit,
+                enable_thinking = payload.enable_thinking,
+                reasoning_effort = payload.reasoning_effort,
+                enabled_tools = forwarded_enabled_tools,
+                enable_prompt_caching = payload.enable_prompt_caching,
+                openai_code_exec_container_id = payload.openai_code_exec_container_id,
+                anthropic_code_exec_container_id = payload.anthropic_code_exec_container_id,
+                prompt_cache_ttl = payload.prompt_cache_ttl,
+                compaction_threshold = payload.compaction_threshold,
+                tools = payload.tools,
+                tool_choice = payload.tool_choice,
+                fast_mode = payload.fast_mode,
+                stream = payload.stream,
+            )
             sent_done = False
             stream_failed = False
             async for line in gen:
@@ -4489,10 +4796,11 @@ async def _proxy_to_external_provider(
             logger.error("external_provider.stream_error", error = str(exc))
             api_monitor.fail(monitor_id, _friendly_error(exc))
         finally:
-            try:
-                await gen.aclose()
-            except RuntimeError:
-                pass  # suppress httpcore asyncgen cleanup error (Python 3.13 + httpcore 1.0.x)
+            if gen is not None:
+                try:
+                    await gen.aclose()
+                except RuntimeError:
+                    pass  # suppress httpcore asyncgen cleanup error (Python 3.13 + httpcore 1.0.x)
             await client.close()
 
     return StreamingResponse(
@@ -4832,6 +5140,11 @@ async def openai_chat_completions(
 
     if using_gguf:
         model_name = llama_backend.model_identifier or payload.model
+        cognix_cache_manager.mark_model_used(
+            model_name,
+            runtime_type = "gguf",
+            project_id = payload.project_id,
+        )
         if getattr(llama_backend, "_is_audio", False):
             if _wants_multiple_choices(payload):
                 _raise_unsupported_n("GGUF audio chat completions")
@@ -4847,6 +5160,11 @@ async def openai_chat_completions(
                 detail = "No model loaded. Call POST /inference/load first.",
             )
         model_name = backend.active_model_name or payload.model
+        cognix_cache_manager.mark_model_used(
+            model_name,
+            runtime_type = "unsloth",
+            project_id = payload.project_id,
+        )
         if _wants_multiple_choices(payload):
             _raise_unsupported_n("non-GGUF chat completions")
 
@@ -5181,6 +5499,25 @@ async def openai_chat_completions(
             # discovery + opt-in left it genuinely empty.
             if not tools_to_use:
                 use_tools = False
+
+        local_web_context = None
+        if _local_request_needs_cognix_web_search(
+            _tools_on,
+            payload.enabled_tools,
+            payload.tool_choice,
+            tool_loop_active = use_tools,
+        ):
+            local_web_context = await _build_local_cognix_web_search_context(
+                payload,
+                timeout = payload.tool_call_timeout,
+            )
+            if local_web_context:
+                system_prompt = _append_cognix_web_search_system_context(
+                    system_prompt,
+                    query = local_web_context["query"],
+                    result = local_web_context["result"],
+                )
+                gguf_messages = _set_or_prepend_system_message(gguf_messages, system_prompt)
 
         if use_tools:
             # Bypass Permissions suppresses confirm, so the stream requirement
@@ -5582,6 +5919,9 @@ async def openai_chat_completions(
                 )
                 try:
                     yield _chat_role_chunk(completion_id, created, model_name)
+                    if local_web_context:
+                        yield f"{local_web_context['start']}\n\n"
+                        yield f"{local_web_context['end']}\n\n"
 
                     # Iterate the sync generator in a thread so the event loop
                     # stays free for disconnect detection.
@@ -5876,6 +6216,24 @@ async def openai_chat_completions(
         # empty allow-list.
         if not _sf_tools_to_use:
             _sf_use_tools = False
+
+    sf_local_web_context = None
+    if _local_request_needs_cognix_web_search(
+        _sf_tools_on,
+        payload.enabled_tools,
+        payload.tool_choice,
+        tool_loop_active = _sf_use_tools,
+    ):
+        sf_local_web_context = await _build_local_cognix_web_search_context(
+            payload,
+            timeout = payload.tool_call_timeout,
+        )
+        if sf_local_web_context:
+            system_prompt = _append_cognix_web_search_system_context(
+                system_prompt,
+                query = sf_local_web_context["query"],
+                result = sf_local_web_context["result"],
+            )
 
     if _sf_use_tools:
         # Bypass Permissions suppresses confirm, so the stream requirement
@@ -6184,6 +6542,9 @@ async def openai_chat_completions(
             )
             try:
                 yield _chat_role_chunk(completion_id, created, model_name)
+                if sf_local_web_context:
+                    yield f"{sf_local_web_context['start']}\n\n"
+                    yield f"{sf_local_web_context['end']}\n\n"
 
                 prev_text = ""
                 # Run the sync generator in a thread pool to avoid blocking the

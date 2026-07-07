@@ -104,7 +104,7 @@ def validate_extra_args(args: Optional[Iterable[str]]) -> list[str]:
         flag = _flag_name(token)
         if flag is not None and flag in _DENYLIST:
             raise ValueError(
-                f"llama-server flag '{flag}' is managed by Unsloth Studio "
+                f"llama-server flag '{flag}' is managed by CogniX "
                 f"and cannot be passed as an extra arg"
             )
         out.append(token)

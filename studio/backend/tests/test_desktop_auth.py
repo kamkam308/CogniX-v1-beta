@@ -640,6 +640,22 @@ def test_update_password_clears_desktop_secret():
     assert storage.validate_desktop_secret(raw) is None
 
 
+def test_update_password_revokes_existing_refresh_tokens():
+    seed_user()
+    from datetime import datetime, timedelta, timezone
+
+    raw_refresh = secrets.token_urlsafe(48)
+    expires = (datetime.now(timezone.utc) + timedelta(days = 30)).isoformat()
+    storage.save_refresh_token(raw_refresh, storage.DEFAULT_ADMIN_USERNAME, expires)
+    assert storage.verify_refresh_token(raw_refresh) == (storage.DEFAULT_ADMIN_USERNAME, False)
+
+    changed = storage.update_password(storage.DEFAULT_ADMIN_USERNAME, "new-admin-password")
+
+    assert changed is True
+    assert storage.verify_refresh_token(raw_refresh) is None
+    assert storage.consume_refresh_token(raw_refresh) is None
+
+
 def test_update_password_on_unknown_user_leaves_desktop_secret_intact():
     seed_user()
     raw = storage.create_desktop_secret()

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
-import { MascotImg } from "@/components/mascot-img";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -37,6 +36,7 @@ import { useEffect, useState, type ReactElement } from "react";
 import { useT } from "@/i18n";
 
 const HF_REPO_REGEX = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+const COGNIX_LOGO_SRC = `${import.meta.env.BASE_URL}cognix-logo-512.png`;
 
 // Tracks which jobs have already played the terminal intro animation. The
 // overlay unmounts on navigation away, so without this its typing/fade-in would
@@ -317,7 +317,13 @@ export function TrainingStartOverlay({
   return (
     <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-2xl bg-background/45 backdrop-blur-[1px]">
       <div className="pointer-events-auto relative flex w-[860px] max-w-[calc(100%-2rem)] flex-col items-center">
-        <MascotImg src="unsloth-gem.png" className="size-24 object-contain" />
+        <img
+          src={COGNIX_LOGO_SRC}
+          alt=""
+          aria-hidden={true}
+          className="cognix-logo-mark size-28 object-contain"
+          draggable={false}
+        />
         <div className="relative w-full">
           <AlertDialog open={cancelDialogOpen} onOpenChange={setCancelDialogOpen}>
             <Button

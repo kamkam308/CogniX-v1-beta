@@ -11,6 +11,7 @@ import jwt
 
 from .storage import (
     API_KEY_PREFIX,
+    canonicalize_subject,
     consume_refresh_token,
     get_jwt_secret,
     get_user_and_secret,
@@ -83,7 +84,8 @@ def is_desktop_access_token(token: str) -> bool:
     if subject is None:
         return False
 
-    record = get_user_and_secret(subject)
+    canonical_subject = canonicalize_subject(subject)
+    record = get_user_and_secret(canonical_subject)
     if record is None:
         return False
 
@@ -206,7 +208,8 @@ async def _get_current_subject(
             detail = "Invalid token payload",
         )
 
-    record = get_user_and_secret(subject)
+    canonical_subject = canonicalize_subject(subject)
+    record = get_user_and_secret(canonical_subject)
     if record is None:
         raise HTTPException(
             status_code = status.HTTP_401_UNAUTHORIZED,
@@ -227,7 +230,7 @@ async def _get_current_subject(
                 status_code = status.HTTP_403_FORBIDDEN,
                 detail = "Password change required",
             )
-        return subject
+        return canonical_subject
     except jwt.InvalidTokenError:
         raise HTTPException(
             status_code = status.HTTP_401_UNAUTHORIZED,

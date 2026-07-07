@@ -1,6 +1,7 @@
 import secrets
 import sys
 import hashlib
+import asyncio
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -13,6 +14,7 @@ if str(_BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(_BACKEND_ROOT))
 
 from auth import hashing, storage
+from auth.authentication import create_access_token, get_current_jwt_subject
 from routes import auth as auth_routes
 
 
@@ -53,6 +55,136 @@ def seed_user(username = "alice", password = "correct-password-123") -> None:
         email = f"{username}@example.com",
         password = password,
     )
+
+
+def test_auth_status_exposes_cognix_admin_before_initialization(client):
+    response = client.get("/api/auth/status")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["initialized"] is False
+    assert body["default_username"] == "kamil"
+
+
+def test_default_admin_bootstrap_uses_cognix_username():
+    created = storage.ensure_default_admin()
+
+    assert created is True
+    assert storage.DEFAULT_ADMIN_USERNAME == "kamil"
+    assert storage.get_user_and_secret("kamil") is not None
+    conn = storage.get_connection()
+    try:
+        row = conn.execute(
+            "SELECT username FROM auth_user WHERE username = ?",
+            (storage.LEGACY_ADMIN_USERNAME,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is None
+
+
+def test_restored_legacy_admin_migrates_to_cognix_ceo_identity():
+    jwt_secret = secrets.token_urlsafe(64)
+    storage.create_initial_user(
+        username = storage.LEGACY_ADMIN_USERNAME,
+        password = "human-password-123",
+        jwt_secret = jwt_secret,
+        must_change_password = False,
+        display_name = "unsloth",
+        role = "admin",
+        plan = storage.CEO_PLAN,
+    )
+
+    profile = storage.get_user_profile(storage.DEFAULT_ADMIN_USERNAME)
+
+    assert profile is not None
+    assert profile["username"] == storage.DEFAULT_ADMIN_USERNAME
+    assert profile["displayName"] == "Kamil"
+    assert profile["role"] == "admin"
+    assert profile["plan"] == storage.CEO_PLAN
+    assert storage.get_user_profile(storage.LEGACY_ADMIN_USERNAME) == profile
+    assert storage.get_default_admin_username() == storage.DEFAULT_ADMIN_USERNAME
+    assert storage.get_user_and_secret(storage.DEFAULT_ADMIN_USERNAME)[2] == jwt_secret
+    assert storage.is_training_operator(storage.DEFAULT_ADMIN_USERNAME) is True
+
+
+def test_legacy_admin_jwt_subject_resolves_to_cognix_ceo_identity():
+    storage.create_initial_user(
+        username = storage.LEGACY_ADMIN_USERNAME,
+        password = "human-password-123",
+        jwt_secret = secrets.token_urlsafe(64),
+        must_change_password = False,
+        display_name = "unsloth",
+        role = "admin",
+        plan = storage.CEO_PLAN,
+    )
+
+    token = create_access_token(storage.LEGACY_ADMIN_USERNAME)
+    subject = asyncio.run(
+        get_current_jwt_subject(type("Creds", (), {"credentials": token})())
+    )
+
+    assert subject == storage.DEFAULT_ADMIN_USERNAME
+    assert storage.is_training_operator(subject) is True
+
+
+def test_ceo_plan_is_training_operator_without_admin_role():
+    storage.create_user(
+        username = "ceo_user",
+        email = "ceo@example.com",
+        password = "human-password-123",
+        plan = storage.CEO_PLAN,
+    )
+
+    profile = storage.get_user_profile("ceo_user")
+
+    assert profile is not None
+    assert profile["role"] == "user"
+    assert profile["plan"] == storage.CEO_PLAN
+    assert storage.is_admin("ceo_user") is False
+    assert storage.has_ceo_training_entitlement("ceo_user", profile) is True
+    assert storage.is_training_operator("ceo_user") is True
+
+
+def test_ceo_role_and_account_alias_are_training_operators_without_admin_role():
+    storage.create_user(
+        username = "cloud_lead",
+        email = "cloud-lead@example.com",
+        password = "human-password-123",
+        role = "ceo",
+    )
+    storage.create_user(
+        username = "CEO",
+        email = "ceo-account@example.com",
+        password = "human-password-123",
+    )
+
+    role_profile = storage.get_user_profile("cloud_lead")
+    alias_profile = storage.get_user_profile("CEO")
+
+    assert role_profile is not None
+    assert role_profile["role"] == "ceo"
+    assert storage.is_admin("cloud_lead") is False
+    assert storage.is_training_operator("cloud_lead") is True
+
+    assert alias_profile is not None
+    assert alias_profile["role"] == "user"
+    assert storage.is_admin("CEO") is False
+    assert storage.has_ceo_training_entitlement("CEO", alias_profile) is True
+    assert storage.is_training_operator("CEO") is True
+
+
+def test_default_admin_keeps_ceo_cloud_training_without_seeded_profile():
+    assert storage.get_user_profile(storage.DEFAULT_ADMIN_USERNAME) is None
+    assert storage.has_ceo_training_entitlement(storage.DEFAULT_ADMIN_USERNAME) is True
+    assert storage.is_training_operator(storage.DEFAULT_ADMIN_USERNAME) is True
+
+
+def test_free_user_is_not_training_operator():
+    seed_user("freeuser")
+
+    assert storage.has_ceo_training_entitlement("freeuser") is False
+    assert storage.is_training_operator("freeuser") is False
 
 
 def test_auth_status_does_not_disclose_admin_username_after_initialization(client):

@@ -149,7 +149,7 @@ export function HyperparametersStep() {
                       ? "Number of full passes over the dataset."
                       : "Override total optimizer steps."}{" "}
                     <a
-                      href="https://unsloth.ai/docs/get-started/fine-tuning-llms-guide/lora-hyperparameters-guide"
+                      href="https://github.com/kamkam308/CogniX-v1-beta"
                       target="_blank"
                       rel="noopener noreferrer"
                       className="text-primary underline"
@@ -224,7 +224,7 @@ export function HyperparametersStep() {
                 <TooltipContent>
                   Maximum number of tokens per training sample.{" "}
                   <a
-                    href="https://unsloth.ai/docs/get-started/fine-tuning-llms-guide/lora-hyperparameters-guide"
+                    href="https://github.com/kamkam308/CogniX-v1-beta"
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-primary underline"
@@ -269,7 +269,7 @@ export function HyperparametersStep() {
                 <TooltipContent>
                   Step size for weight updates. Lower = slower but more stable.{" "}
                   <a
-                    href="https://unsloth.ai/docs/get-started/fine-tuning-llms-guide/lora-hyperparameters-guide"
+                    href="https://github.com/kamkam308/CogniX-v1-beta"
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-primary underline"
@@ -328,7 +328,7 @@ export function HyperparametersStep() {
                       Dimension of the low-rank matrices. Higher = more
                       capacity.{" "}
                       <a
-                        href="https://unsloth.ai/docs/get-started/fine-tuning-llms-guide/lora-hyperparameters-guide"
+                        href="https://github.com/kamkam308/CogniX-v1-beta"
                         target="_blank"
                         rel="noopener noreferrer"
                         className="text-primary underline"
@@ -377,7 +377,7 @@ export function HyperparametersStep() {
                     <TooltipContent>
                       Scaling factor. Typically set to 2x the rank value.{" "}
                       <a
-                        href="https://unsloth.ai/docs/get-started/fine-tuning-llms-guide/lora-hyperparameters-guide"
+                        href="https://github.com/kamkam308/CogniX-v1-beta"
                         target="_blank"
                         rel="noopener noreferrer"
                         className="text-primary underline"
@@ -427,7 +427,7 @@ export function HyperparametersStep() {
                       Probability of dropping neurons during training for
                       regularization.{" "}
                       <a
-                        href="https://unsloth.ai/docs/get-started/fine-tuning-llms-guide/lora-hyperparameters-guide"
+                        href="https://github.com/kamkam308/CogniX-v1-beta"
                         target="_blank"
                         rel="noopener noreferrer"
                         className="text-primary underline"

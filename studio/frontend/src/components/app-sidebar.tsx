@@ -50,6 +50,13 @@ import { useWebUpdateCheck } from "@/hooks/use-web-update-check";
 import {
   Archive03Icon,
   ArrowRight02Icon,
+  ActivitySparkIcon,
+  AiBookIcon,
+  AiGenerativeIcon,
+  AiImageIcon,
+  AiProgrammingIcon,
+  AiSchedulingIcon,
+  AppStoreIcon,
   BadgeInfoIcon,
   ChefHatIcon,
   CursorInfo02Icon,
@@ -89,7 +96,7 @@ import {
 } from "@/components/ui/tooltip";
 import { Tooltip as TooltipPrimitive } from "radix-ui";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { ChevronDown, Moon } from "lucide-react";
+import { ChevronDown, Moon, MoreHorizontal } from "lucide-react";
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   archiveChatItem,
@@ -112,6 +119,10 @@ import {
 } from "@/features/chat";
 import { useSettingsDialogStore } from "@/features/settings";
 import { useEffectiveProfile, UserAvatar } from "@/features/profile";
+import {
+  getEffectiveCogniXPlanConfig,
+  type CogniXToolId,
+} from "@/features/cognix-plan";
 import { fetchDeviceType, usePlatformStore } from "@/config/env";
 import { clearAuthTokens, logout } from "@/features/auth";
 import { TOUR_OPEN_EVENT } from "@/features/tour";
@@ -299,19 +310,42 @@ export function AppSidebar() {
 
   const chatOnly = usePlatformStore((s) => s.isChatOnly());
   const chatOnlyReason = usePlatformStore((s) => s.chatOnlyReason);
+  const trainingAccessible = usePlatformStore((s) => s.isTrainingAccessible());
+  const cloudTrainingUnlocked = usePlatformStore((s) => s.cloudTrainingUnlocked);
+  const trainingCloudAvailable = usePlatformStore((s) => s.trainingCloudAvailable);
+  const trainingModeUnlocked = usePlatformStore((s) => s.trainingModeUnlocked);
   const [developerOptions] = useDeveloperOptions();
+  const planConfig = useMemo(() => getEffectiveCogniXPlanConfig(), []);
+  const planTools = useMemo(
+    () => new Set<CogniXToolId>(planConfig.enabledTools),
+    [planConfig],
+  );
+  const planEnables = (tool: CogniXToolId) => planTools.has(tool);
+  const showTrainingTools =
+    planEnables("training") &&
+    (developerOptions.trainingTools || trainingAccessible || trainingModeUnlocked || cloudTrainingUnlocked || trainingCloudAvailable);
+  const cloudOnlyTrainingAvailable =
+    chatOnly && trainingAccessible && (cloudTrainingUnlocked || trainingCloudAvailable);
   // When Train/Export are greyed out (chat-only host), explain why on hover
   // instead of disabling them silently. mlx_unavailable is the common macOS case
   // after a reinstall/update dropped MLX and is recoverable via `unsloth studio update`.
   const trainExportDisabledHint: string | undefined = !chatOnly
     ? undefined
+    : cloudOnlyTrainingAvailable
+      ? "CEO cloud training is available in Train via Google Colab, Kaggle, or Cloud GPU."
     : chatOnlyReason === "mlx_unavailable"
       ? "Training needs MLX. Run `unsloth studio update` to enable Train and Export."
       : chatOnlyReason === "intel_mac"
         ? "Training needs Apple Silicon or a GPU. Intel Macs are chat-only."
         : chatOnlyReason === "no_gpu"
-          ? "Training needs an NVIDIA or AMD GPU."
+          ? "Local training needs an NVIDIA or AMD GPU."
           : undefined;
+  const trainingDisabledHint = trainingAccessible
+    ? undefined
+    : trainExportDisabledHint;
+  const exportDisabledHint = cloudOnlyTrainingAvailable
+    ? "Export remains local; use Train to prepare CEO cloud training."
+    : trainExportDisabledHint;
 
   // The backend MLX self-heal (utils/mlx_repair) can reinstall MLX in the
   // background and flip chat_only false without a restart. The platform store
@@ -330,6 +364,21 @@ export function AppSidebar() {
 
   const isChatRoute = pathname.startsWith("/chat");
   const isStudioRoute = pathname === "/studio" || pathname.startsWith("/studio/");
+  const isCodexRoute = pathname === "/codex";
+  const isChatSurfaceRoute = isChatRoute || isCodexRoute;
+  const cognixModuleItems = useMemo(
+    () =>
+      [
+        { tool: "pulse" as CogniXToolId, icon: ActivitySparkIcon, label: "Pulse", to: "/pulse", active: pathname === "/pulse" },
+        { tool: "library" as CogniXToolId, icon: AiBookIcon, label: "Library", to: "/library", active: pathname === "/library" },
+        { tool: "scheduled" as CogniXToolId, icon: AiSchedulingIcon, label: "Scheduled", to: "/scheduled", active: pathname === "/scheduled" },
+        { tool: "apps" as CogniXToolId, icon: AppStoreIcon, label: "Apps", to: "/apps", active: pathname === "/apps" },
+        { tool: "gpts" as CogniXToolId, icon: AiGenerativeIcon, label: "GPTs", to: "/gpts", active: pathname === "/gpts" },
+        { tool: "images" as CogniXToolId, icon: AiImageIcon, label: "Images", to: "/images", active: pathname === "/images" },
+      ].filter((item) => planTools.has(item.tool)),
+    [pathname, planTools],
+  );
+  const isCognixModuleRoute = cognixModuleItems.some((item) => item.active);
   const [chatOpen, setChatOpen] = useState(true);
 
   const [trainOpen, setTrainOpen] = useState(true);
@@ -343,7 +392,6 @@ export function AppSidebar() {
     if (!isStudioRoute) return;
     queueMicrotask(() => setRunsOpen(true));
   }, [isStudioRoute]);
-
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [scrolled, setScrolled] = useState(false);
   // Bottom fade hides at the very bottom / for short lists so the last row
@@ -418,11 +466,11 @@ export function AppSidebar() {
   // falling back to chat recents when there are no runs yet.
   const trainingRecentsRoute = isStudioRoute || isRecipesRoute || isExportRoute;
   const { items: runItems } = useTrainingHistorySidebarItems(
-    !chatOnly && trainingRecentsRoute,
+    trainingAccessible && trainingRecentsRoute,
   );
   const showTrainingRecents =
-    developerOptions.trainingTools &&
-    !chatOnly &&
+    showTrainingTools &&
+    trainingAccessible &&
     trainingRecentsRoute &&
     runItems.length > 0;
   const activeJobId = useTrainingRuntimeStore((s) => s.jobId);
@@ -438,7 +486,7 @@ export function AppSidebar() {
   // back to the live chat instead of starting a new one, whenever a chat is
   // running or its thread is still active, or a training / export is in progress.
   const showReturnToChat =
-    !isChatRoute &&
+    !isChatSurfaceRoute &&
     (trainingInProgress || exportInProgress || anyChatRunning || storeThreadId != null);
   // The Train-page status poll doesn't run off-route; keep state fresh so the spinner
   // clears even if a run finishes while the user is on another tab.
@@ -1003,7 +1051,7 @@ export function AppSidebar() {
             <img
               src="/cognix-logo.png"
               alt="CogniX"
-              className="h-[24px] w-[24px] rounded-full object-cover"
+              className="cognix-logo-mark h-[31px] w-[31px] rounded-full object-cover"
             />
             <span className="font-heading text-[17px] font-semibold tracking-[0em] dark:tracking-[0.02em] leading-none text-black dark:text-white">
               CogniX
@@ -1050,7 +1098,7 @@ export function AppSidebar() {
                     src="/cognix-logo.png"
                     alt=""
                     aria-hidden="true"
-                    className="h-[18px] w-[18px] rounded-full object-cover"
+                    className="cognix-logo-mark h-[24px] w-[24px] rounded-full object-cover"
                   />
                 </button>
               </TooltipPrimitive.Trigger>
@@ -1175,18 +1223,65 @@ export function AppSidebar() {
                   closeMobileIfOpen();
                 }}
               />
-              {developerOptions.trainingTools && (
+              {planEnables("codex") && (
+                <NavItem
+                  icon={AiProgrammingIcon}
+                  label="Codex"
+                  active={isCodexRoute}
+                  onClick={() => {
+                    navigate({ to: "/codex" });
+                    closeMobileIfOpen();
+                  }}
+                />
+              )}
+              {cognixModuleItems.length > 0 && (
+                <SidebarMenuItem>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <SidebarMenuButton
+                        tooltip="Plus"
+                        isActive={isCognixModuleRoute}
+                        className="sidebar-nav-btn h-[33px] rounded-full gap-[8.5px] pl-3 pr-2.5 font-medium group-data-[collapsible=icon]:px-2.5 group-data-[collapsible=icon]:!w-[32px] group-data-[collapsible=icon]:mx-auto"
+                      >
+                        <MoreHorizontal className="size-icon shrink-0 group-hover/menu-button:animate-icon-pop" strokeWidth={1.75} />
+                        <span className="text-[14.5px] leading-[19px] tracking-nav">Plus</span>
+                      </SidebarMenuButton>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent
+                      side="right"
+                      align="start"
+                      sideOffset={8}
+                      className="unsloth-plus-menu w-56"
+                    >
+                      {cognixModuleItems.map((item) => (
+                        <DropdownMenuItem
+                          key={item.to}
+                          className={item.active ? "bg-nav-surface-hover text-foreground" : undefined}
+                          onSelect={() => {
+                            navigate({ to: item.to });
+                            closeMobileIfOpen();
+                          }}
+                        >
+                          <HugeiconsIcon icon={item.icon} strokeWidth={1.75} className="size-icon" />
+                          <span>{item.label}</span>
+                        </DropdownMenuItem>
+                      ))}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </SidebarMenuItem>
+              )}
+              {showTrainingTools && (
               <NavItem
                 icon={TestTubeOutlineIcon}
                 label={t("shell.navigation.train")}
                 active={
                   pathname === "/studio" || pathname.startsWith("/studio/")
                 }
-                disabled={chatOnly}
-                tooltip={trainExportDisabledHint}
+                disabled={!trainingAccessible}
+                tooltip={trainingDisabledHint}
                 spinner={trainingInProgress}
                 onClick={() => {
-                  if (chatOnly) return;
+                  if (!trainingAccessible) return;
                   navigate({ to: "/studio" });
                   closeMobileIfOpen();
                 }}
@@ -1197,7 +1292,7 @@ export function AppSidebar() {
           </SidebarGroupContent>
         </SidebarGroup>
 
-        {developerOptions.trainingTools && (
+        {showTrainingTools && (
         <Collapsible open={trainOpen} onOpenChange={setTrainOpen} asChild>
           <SidebarGroup data-tour="navbar" className="group-data-[collapsible=icon]:hidden px-0 py-0">
             <SidebarGroupLabel className={cn("sidebar-sticky-label sidebar-sticky-label-following", scrolled && "is-scrolled")} asChild>
@@ -1213,11 +1308,11 @@ export function AppSidebar() {
                     icon={TestTubeOutlineIcon}
                     label={t("shell.navigation.train")}
                     active={pathname === "/studio" || pathname.startsWith("/studio/")}
-                    disabled={chatOnly}
-                    tooltip={trainExportDisabledHint}
+                    disabled={!trainingAccessible}
+                    tooltip={trainingDisabledHint}
                     spinner={trainingInProgress}
                     onClick={() => {
-                      if (chatOnly) return;
+                      if (!trainingAccessible) return;
                       navigate({ to: "/studio" });
                       closeMobileIfOpen();
                     }}
@@ -1236,7 +1331,7 @@ export function AppSidebar() {
                     label={t("shell.navigation.export")}
                     active={pathname === "/export" || pathname.startsWith("/export/")}
                     disabled={chatOnly}
-                    tooltip={trainExportDisabledHint}
+                    tooltip={exportDisabledHint}
                     spinner={exportInProgress}
                     onClick={() => {
                       if (chatOnly) return;
@@ -1486,7 +1581,7 @@ export function AppSidebar() {
                   <div className="flex flex-col gap-px leading-tight group-data-[collapsible=icon]:hidden">
                     <span className="truncate font-heading text-[13.5px] tracking-[0.025em] dark:tracking-[0.04em] font-semibold text-nav-fg">{displayTitle}</span>
                     <span className="truncate text-[11.5px] tracking-nav text-muted-foreground">
-                      {displayTitle.trim().toLowerCase() === "kamil" ? "CEO" : "free"}
+                      {cloudTrainingUnlocked ? "CEO" : "free"}
                     </span>
                   </div>
                   {/* settings cog (replaces the up/down chevron) */}

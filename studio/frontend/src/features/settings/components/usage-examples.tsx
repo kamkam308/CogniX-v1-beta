@@ -67,7 +67,7 @@ const OS_AWARE: Record<ExampleType, boolean> = {
 
 const CURL_TYPES = new Set<ExampleType>(["curl", "curlTools", "curlAdvanced"]);
 
-const PROMPT = "Can Unsloth Studio do API calling?";
+const PROMPT = "Can CogniX do API calling?";
 // web_search + python + terminal are the reliable built-in tools.
 const TOOLS = ["web_search", "python", "terminal"];
 // Sampling/thinking knobs for the "+ advanced" examples.
@@ -83,23 +83,23 @@ const ADV = {
 const DOC_LINKS = [
   {
     label: "Claude Code",
-    href: "https://unsloth.ai/docs/basics/claude-code",
+    href: "https://github.com/kamkam308/CogniX-v1-beta",
   },
   {
     label: "Codex",
-    href: "https://unsloth.ai/docs/basics/codex",
+    href: "https://github.com/kamkam308/CogniX-v1-beta",
   },
   {
     label: "OpenClaw",
-    href: "https://unsloth.ai/docs/integrations/openclaw",
+    href: "https://github.com/kamkam308/CogniX-v1-beta",
   },
   {
     label: "OpenCode",
-    href: "https://unsloth.ai/docs/integrations/opencode",
+    href: "https://github.com/kamkam308/CogniX-v1-beta",
   },
   {
     label: "Hermes Agent",
-    href: "https://unsloth.ai/docs/integrations/hermes-agent",
+    href: "https://github.com/kamkam308/CogniX-v1-beta",
   },
 ];
 
@@ -196,7 +196,7 @@ function pythonSnippet(
   model: string,
   variant: Variant,
 ): string {
-  // Standard OpenAI args are named; Unsloth extensions go through extra_body.
+  // Standard OpenAI args are named; CogniX extensions go through extra_body.
   const named =
     variant === "advanced"
       ? `

@@ -2,7 +2,7 @@
 # Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
 """
-End-to-end tests for Unsloth Studio's HTTP API surface.
+End-to-end tests for CogniX's HTTP API surface.
 
 Covers the OpenAI- and Anthropic-compatible endpoints exposed by the
 server that ``unsloth studio run`` boots, plus API key authentication and

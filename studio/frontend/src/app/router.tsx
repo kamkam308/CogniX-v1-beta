@@ -3,7 +3,6 @@
 
 import { Link, createRouter, useRouterState } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
-import { MascotImg } from "@/components/mascot-img";
 import { useT } from "@/i18n";
 import { Route as rootRoute } from "./routes/__root";
 import { Route as dataRecipesRoute } from "./routes/data-recipes";
@@ -13,20 +12,38 @@ import { Route as exportRoute } from "./routes/export";
 import { Route as gridTestRoute } from "./routes/grid-test";
 import { Route as indexRoute } from "./routes/index";
 import { Route as loginRoute } from "./routes/login";
+import { Route as signupRoute } from "./routes/signup";
 import { Route as hubRoute } from "./routes/hub";
+import { Route as pulseRoute } from "./routes/pulse";
+import { Route as libraryRoute } from "./routes/library";
+import { Route as scheduledRoute } from "./routes/scheduled";
+import { Route as appsRoute } from "./routes/apps";
+import { Route as gptsRoute } from "./routes/gpts";
+import { Route as imagesRoute } from "./routes/images";
+import { Route as codexRoute } from "./routes/codex";
 import { Route as onboardingRoute } from "./routes/onboarding";
 import { Route as projectsRoute } from "./routes/projects";
 import { Route as changePasswordRoute } from "./routes/change-password";
 import { Route as settingsRoute } from "./routes/settings";
 import { Route as studioRoute } from "./routes/studio";
+import { Route as adminSecurityThreatsRoute } from "./routes/admin-security-threats";
+import { Route as adminUsageRoute } from "./routes/admin-usage";
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
   onboardingRoute,
   loginRoute,
+  signupRoute,
   changePasswordRoute,
   gridTestRoute,
   hubRoute,
+  pulseRoute,
+  libraryRoute,
+  scheduledRoute,
+  appsRoute,
+  gptsRoute,
+  imagesRoute,
+  codexRoute,
   settingsRoute,
   studioRoute,
   chatRoute,
@@ -34,7 +51,11 @@ const routeTree = rootRoute.addChildren([
   exportRoute,
   dataRecipesRoute,
   dataRecipeRoute,
+  adminUsageRoute,
+  adminSecurityThreatsRoute,
 ]);
+
+const COGNIX_LOGO_SRC = `${import.meta.env.BASE_URL}cognix-logo-512.png`;
 
 function DefaultNotFound() {
   const t = useT();
@@ -42,7 +63,13 @@ function DefaultNotFound() {
 
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center">
-      <MascotImg src="Sloth emojis/sloth shy large.png" className="size-24" />
+      <img
+        src={COGNIX_LOGO_SRC}
+        alt=""
+        aria-hidden={true}
+        className="cognix-logo-mark size-28 object-contain"
+        draggable={false}
+      />
       <div className="flex flex-col items-center gap-1">
         <h1 className="font-heading font-semibold text-2xl tracking-tight">
           {t("shell.notFound.title")}

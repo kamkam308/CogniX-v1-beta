@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
-"""Cross platform llama.cpp prebuilt installer for Unsloth Studio"""
+"""Cross platform llama.cpp prebuilt installer for CogniX Desktop"""
 
 from __future__ import annotations
 
@@ -2617,7 +2617,7 @@ def resolve_requested_llama_tag(
          ggml-org/llama.cpp repo. This may return a newer, untested tag.
 
     The Unsloth repo is preferred because its releases are pinned to specific
-    upstream tags that have been validated with Unsloth Studio. Using the
+    upstream tags that have been validated with CogniX Desktop. Using the
     upstream bleeding-edge tag risks API/ABI incompatibilities.
     """
     normalized_requested = normalized_requested_llama_tag(requested_tag)
@@ -6647,7 +6647,7 @@ def install_prebuilt(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description = "Install and validate a prebuilt llama.cpp bundle for Unsloth Studio."
+        description = "Install and validate a prebuilt llama.cpp bundle for CogniX Desktop."
     )
     parser.add_argument("--install-dir", help = "Target ~/.unsloth/llama.cpp directory")
     parser.add_argument(

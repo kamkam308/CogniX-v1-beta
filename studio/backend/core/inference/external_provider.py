@@ -815,6 +815,264 @@ class ExternalProviderClient:
                 return True
         return info.get("openai_compatible", True)
 
+    def _ollama_native_url(self) -> str:
+        """Return Ollama's native API root from a saved OpenAI-compatible base."""
+        return self.base_url.removesuffix("/v1").rstrip("/")
+
+    @staticmethod
+    def _ollama_image_from_url(value: Any) -> Optional[str]:
+        if not isinstance(value, str) or not value.startswith("data:image/"):
+            return None
+        marker = ";base64,"
+        if marker not in value:
+            return None
+        encoded = value.split(marker, 1)[1].strip()
+        return encoded or None
+
+    @classmethod
+    def _ollama_messages(cls, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Convert OpenAI-compatible messages to Ollama's native /api/chat shape."""
+        converted: list[dict[str, Any]] = []
+        for message in messages:
+            role = message.get("role")
+            if role not in {"system", "user", "assistant", "tool"}:
+                role = "user"
+
+            content = message.get("content")
+            images: list[str] = []
+            text = ""
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                text_parts: list[str] = []
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    part_type = part.get("type")
+                    if part_type == "text":
+                        part_text = part.get("text")
+                        if isinstance(part_text, str) and part_text:
+                            text_parts.append(part_text)
+                    elif part_type == "image_url":
+                        image_url = part.get("image_url")
+                        url = (
+                            image_url.get("url")
+                            if isinstance(image_url, dict)
+                            else image_url
+                        )
+                        image = cls._ollama_image_from_url(url)
+                        if image:
+                            images.append(image)
+                text = "\n".join(text_parts)
+
+            if not text and not images:
+                continue
+
+            entry: dict[str, Any] = {"role": role, "content": text}
+            if images:
+                entry["images"] = images
+            converted.append(entry)
+        return converted
+
+    @staticmethod
+    def _ollama_chat_chunk(
+        model: str,
+        content: str = "",
+        finish_reason: Optional[str] = None,
+    ) -> str:
+        chunk = {
+            "id": f"chatcmpl-ollama-{int(time.time() * 1000)}",
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"content": content} if content else {},
+                    "finish_reason": finish_reason,
+                }
+            ],
+        }
+        return f"data: {_json.dumps(chunk, ensure_ascii=False)}"
+
+    @staticmethod
+    def _ollama_usage_chunk(model: str, payload: dict[str, Any]) -> Optional[str]:
+        prompt_tokens = payload.get("prompt_eval_count")
+        completion_tokens = payload.get("eval_count")
+        if not isinstance(prompt_tokens, int) and not isinstance(completion_tokens, int):
+            return None
+        prompt = prompt_tokens if isinstance(prompt_tokens, int) else 0
+        completion = completion_tokens if isinstance(completion_tokens, int) else 0
+        chunk = {
+            "id": f"chatcmpl-ollama-usage-{int(time.time() * 1000)}",
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [],
+            "usage": {
+                "prompt_tokens": prompt,
+                "completion_tokens": completion,
+                "total_tokens": prompt + completion,
+            },
+        }
+        return f"data: {_json.dumps(chunk)}"
+
+    async def _stream_ollama_native(
+        self,
+        messages: list[dict[str, Any]],
+        model: str,
+        temperature: float,
+        top_p: float,
+        max_tokens: Optional[int],
+        top_k: Optional[int],
+        stream: bool,
+    ) -> AsyncGenerator[str, None]:
+        """Stream via Ollama's native API so first send lazily loads the model."""
+        url = f"{self._ollama_native_url()}/api/chat"
+        options: dict[str, Any] = {
+            "temperature": temperature,
+            "top_p": top_p,
+        }
+        if isinstance(top_k, int) and top_k >= 0:
+            options["top_k"] = top_k
+        if isinstance(max_tokens, int) and max_tokens > 0:
+            options["num_predict"] = max_tokens
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": self._ollama_messages(messages),
+            "stream": stream,
+            # Selection stays cheap; Ollama loads on this request, then keeps
+            # the model warm so the next turn does not pay the cold-start cost.
+            "keep_alive": "15m",
+            "options": options,
+        }
+
+        logger.info(
+            "Proxying chat completion to Ollama native API (model=%s, lazy_load=true)",
+            model,
+        )
+
+        try:
+            if not stream:
+                response = await _http_client.post(
+                    url,
+                    json = body,
+                    headers = self._auth_headers(),
+                    timeout = self._timeout,
+                )
+                if response.status_code != 200:
+                    error_text = response.text
+                    yield _error_sse_line(
+                        response.status_code,
+                        _friendly_provider_error_text(
+                            self.provider_type,
+                            response.status_code,
+                            error_text,
+                            model = model,
+                        ),
+                        self.provider_type,
+                    )
+                    return
+                payload = response.json()
+                message = payload.get("message") if isinstance(payload, dict) else None
+                content = (
+                    message.get("content")
+                    if isinstance(message, dict) and isinstance(message.get("content"), str)
+                    else ""
+                )
+                if content:
+                    yield self._ollama_chat_chunk(model, content)
+                usage = self._ollama_usage_chunk(model, payload if isinstance(payload, dict) else {})
+                if usage:
+                    yield usage
+                yield self._ollama_chat_chunk(model, finish_reason = "stop")
+                return
+
+            async with _http_client.stream(
+                "POST",
+                url,
+                json = body,
+                headers = self._auth_headers(),
+                timeout = self._stream_timeout,
+            ) as response:
+                if response.status_code != 200:
+                    error_body = await response.aread()
+                    error_text = error_body.decode("utf-8", errors = "replace")
+                    yield _error_sse_line(
+                        response.status_code,
+                        _friendly_provider_error_text(
+                            self.provider_type,
+                            response.status_code,
+                            error_text,
+                            model = model,
+                        ),
+                        self.provider_type,
+                    )
+                    return
+
+                async for line in response.aiter_lines():
+                    if not line.strip():
+                        continue
+                    try:
+                        payload = _json.loads(line)
+                    except Exception:
+                        logger.warning("ollama.invalid_stream_line", line = line[:200])
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    error = payload.get("error")
+                    if error:
+                        yield _error_sse_line(
+                            502,
+                            _friendly_provider_error_text(
+                                self.provider_type,
+                                502,
+                                str(error),
+                                model = model,
+                            ),
+                            self.provider_type,
+                        )
+                        return
+                    message = payload.get("message")
+                    content = (
+                        message.get("content")
+                        if isinstance(message, dict) and isinstance(message.get("content"), str)
+                        else ""
+                    )
+                    if content:
+                        yield self._ollama_chat_chunk(model, content)
+                    if payload.get("done") is True:
+                        usage = self._ollama_usage_chunk(model, payload)
+                        if usage:
+                            yield usage
+                        done_reason = payload.get("done_reason")
+                        yield self._ollama_chat_chunk(
+                            model,
+                            finish_reason = done_reason if isinstance(done_reason, str) else "stop",
+                        )
+                        return
+        except httpx.ConnectError as exc:
+            logger.error("Connection error to Ollama native API: %s", exc)
+            yield _error_sse_line(
+                502,
+                "Failed to connect to Ollama. Start Ollama, then send the message again.",
+                self.provider_type,
+            )
+        except httpx.ReadTimeout as exc:
+            logger.error("Read timeout from Ollama native API: %s", exc)
+            yield _error_sse_line(
+                504,
+                "Timeout waiting for Ollama response",
+                self.provider_type,
+            )
+        except httpx.HTTPError as exc:
+            logger.error("HTTP error from Ollama native API: %s", exc)
+            yield _error_sse_line(
+                502,
+                f"Error communicating with Ollama: {exc}",
+                self.provider_type,
+            )
+
     async def stream_chat_completion(
         self,
         messages: list[dict[str, Any]],
@@ -896,6 +1154,19 @@ class ExternalProviderClient:
                 compaction_threshold,
                 tool_choice,
                 fast_mode = fast_mode,
+            ):
+                yield line
+            return
+
+        if self.provider_type == "ollama":
+            async for line in self._stream_ollama_native(
+                messages,
+                model,
+                temperature,
+                top_p,
+                max_tokens,
+                top_k,
+                stream,
             ):
                 yield line
             return
@@ -1195,18 +1466,33 @@ class ExternalProviderClient:
                                 except Exception:
                                     parsed = None
                                 if isinstance(parsed, dict):
-                                    # Mid-stream provider error event. OpenRouter
-                                    # in particular returns 200 then surfaces the
-                                    # failure as an SSE error event.
+                                    # Mid-stream provider error event. Some
+                                    # routers return 200 then surface the
+                                    # failure as an SSE error payload.
                                     if "error" in parsed:
                                         event_counts["error"] = event_counts.get("error", 0) + 1
+                                        error_message = _provider_error_message_from_payload(parsed)
                                         logger.warning(
                                             "%s SSE error event: %s",
                                             self.provider_type,
-                                            parsed.get("error"),
+                                            error_message or parsed.get("error"),
                                         )
-                                    else:
-                                        event_counts["delta"] = event_counts.get("delta", 0) + 1
+                                        error_status = _provider_stream_error_status(
+                                            self.provider_type,
+                                            error_message,
+                                        )
+                                        yield _error_sse_line(
+                                            error_status,
+                                            _friendly_provider_error_text(
+                                                self.provider_type,
+                                                error_status,
+                                                error_message or "Provider stream error",
+                                                model = model,
+                                            ),
+                                            self.provider_type,
+                                        )
+                                        return
+                                    event_counts["delta"] = event_counts.get("delta", 0) + 1
                                     # OpenRouter (and most OAI-compat providers)
                                     # report the handling model in every chunk's
                                     # `model` field. Latch the first non-empty
@@ -5985,7 +6271,7 @@ class ExternalProviderClient:
             headers = self._auth_headers(),
             timeout = self._timeout,
         )
-        response.raise_for_status()
+        _raise_for_provider_status(response, self.provider_type, model = model)
         return response.json()
 
     async def list_models(self) -> list[dict[str, Any]]:
@@ -6001,7 +6287,7 @@ class ExternalProviderClient:
                 headers = self._auth_headers(),
                 timeout = self._timeout,
             )
-            response.raise_for_status()
+            _raise_for_provider_status(response, self.provider_type)
             data = response.json()
             # Some local servers (Ollama with no models) return data: null.
             models: list[dict[str, Any]] = []
@@ -6099,7 +6385,7 @@ class ExternalProviderClient:
                 timeout = self._timeout,
             ) as response:
                 if response.status_code != 200:
-                    response.raise_for_status()
+                    _raise_for_provider_status(response, self.provider_type)
                 async for _chunk in response.aiter_bytes(chunk_size = 2048):
                     break
         except httpx.HTTPError as exc:
@@ -6208,6 +6494,56 @@ def _provider_display_name(provider_type: str) -> str:
     return str(info.get("display_name") or provider_type)
 
 
+def _provider_error_message_from_payload(payload: dict[str, Any]) -> str | None:
+    error = payload.get("error")
+    if isinstance(error, str) and error.strip():
+        return error.strip()
+    if isinstance(error, dict):
+        for key in ("message", "detail", "error", "code"):
+            value = error.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        try:
+            return _json.dumps(error, ensure_ascii = False)
+        except Exception:
+            return str(error)
+    for key in ("message", "detail"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _provider_error_message_from_raw(raw_message: str) -> str:
+    text = str(raw_message or "").strip()
+    if not text:
+        return ""
+    try:
+        payload = _json.loads(text)
+    except Exception:
+        return text
+    if isinstance(payload, dict):
+        return _provider_error_message_from_payload(payload) or text
+    return text
+
+
+def _is_huggingface_auth_error(status_code: int, message: str) -> bool:
+    lowered = message.lower()
+    has_auth_marker = any(
+        marker in lowered
+        for marker in (
+            "invalid username",
+            "invalid password",
+            "unauthorized",
+            "authentication",
+            "bad credentials",
+            "invalid token",
+            "token is invalid",
+        )
+    )
+    return has_auth_marker and (status_code in (400, 401, 403) or "token" in lowered)
+
+
 def _friendly_provider_error_text(
     provider_type: str,
     status_code: int,
@@ -6216,8 +6552,14 @@ def _friendly_provider_error_text(
     model: str | None = None,
 ) -> str:
     """Rewrite common provider errors into actionable Studio copy."""
+    message = _provider_error_message_from_raw(raw_message)
+    if provider_type == "huggingface" and _is_huggingface_auth_error(status_code, message):
+        return (
+            "Hugging Face rejected the saved token for"
+            f" '{model}'." if model else "Hugging Face rejected the saved token."
+        ) + " Set a valid hf_ token in Connections or switch to Ollama Qwen 4B."
     if status_code == 404 and model:
-        lowered = raw_message.lower()
+        lowered = message.lower()
         if "not found" in lowered or "not_found" in lowered:
             if provider_type == "ollama":
                 label = _provider_display_name(provider_type)
@@ -6232,7 +6574,41 @@ def _friendly_provider_error_text(
                     "Check that the server is running and the model is loaded, "
                     "then retry."
                 )
-    return raw_message
+    return message or raw_message
+
+
+def _raise_for_provider_status(
+    response: httpx.Response,
+    provider_type: str,
+    *,
+    model: str | None = None,
+) -> None:
+    if response.status_code < 400:
+        return
+    message = _friendly_provider_error_text(
+        provider_type,
+        response.status_code,
+        response.text,
+        model = model,
+    )
+    raise httpx.HTTPStatusError(
+        message,
+        request = response.request,
+        response = response,
+    )
+
+
+def _provider_stream_error_status(provider_type: str, message: str | None) -> int:
+    lowered = (message or "").lower()
+    if provider_type == "huggingface" and (
+        "invalid username" in lowered
+        or "invalid password" in lowered
+        or "unauthorized" in lowered
+        or "authentication" in lowered
+        or "token" in lowered
+    ):
+        return 401
+    return 502
 
 
 def _error_sse_line(status_code: int, message: str, provider_type: str) -> str:

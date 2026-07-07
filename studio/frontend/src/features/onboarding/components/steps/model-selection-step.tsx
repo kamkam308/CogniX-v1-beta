@@ -210,7 +210,7 @@ export function ModelSelectionStep() {
             <TooltipContent>
               Search Hugging Face models or pick from our recommended list.{" "}
               <a
-                href="https://unsloth.ai/docs/get-started/fine-tuning-llms-guide/what-model-should-i-use"
+                href="https://github.com/kamkam308/CogniX-v1-beta"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-primary underline"
@@ -340,7 +340,7 @@ export function ModelSelectionStep() {
                     16-bit for better quality. Full fine-tune updates all
                     weights.{" "}
                     <a
-                      href="https://unsloth.ai/docs/get-started/fine-tuning-llms-guide/lora-hyperparameters-guide"
+                      href="https://github.com/kamkam308/CogniX-v1-beta"
                       target="_blank"
                       rel="noopener noreferrer"
                       className="text-primary underline"

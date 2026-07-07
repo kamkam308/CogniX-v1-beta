@@ -354,6 +354,8 @@ export interface OpenAIChatCompletionsRequest {
   auto_heal_tool_calls?: boolean;
   max_tool_calls_per_message?: number;
   tool_call_timeout?: number;
+  /** CogniX project scope for routing/logging and project default model use. */
+  project_id?: string;
   session_id?: string;
   cancel_id?: string;
   provider_id?: string;

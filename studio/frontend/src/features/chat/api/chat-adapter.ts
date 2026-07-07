@@ -9,8 +9,12 @@ import { toast } from "@/lib/toast";
 import type { MessageTiming, ToolCallMessagePart } from "@assistant-ui/core";
 import type { ChatModelAdapter } from "@assistant-ui/react";
 import {
+  COGNIX_DEFAULT_EXTERNAL_CHECKPOINT,
+  externalProviderApiKeyStatus,
   getExternalProviderApiKey,
+  buildExternalModelId,
   isCustomProviderType,
+  isHuggingFaceProviderConnection,
   isPromptCacheTtl,
   loadExternalProviders,
   parseExternalModelId,
@@ -38,6 +42,7 @@ import {
   providerSupportsFastMode,
 } from "../provider-capabilities";
 import {
+  type CogniXRouteSnapshot,
   type PendingImageEditReference,
   type RagAutoInject,
   resolveLoadedSpeculativeSettings,
@@ -58,7 +63,6 @@ import type {
 import type { ChatModelSummary } from "../types/runtime";
 import {
   getStoredChatThread,
-  getStoredChatProject,
   listStoredChatThreads,
   updateStoredChatThread,
 } from "../utils/chat-history-storage";
@@ -69,12 +73,18 @@ import {
 } from "../utils/parse-assistant-content";
 import {
   generateAudio,
+  getProjectDefaultModel,
+  buildCogniXContextPack,
+  evaluateResponseReflection,
   listCachedGguf,
   listCachedModels,
   listGgufVariants,
   loadModel,
+  planCogniXExecution,
   streamChatCompletions,
   validateModel,
+  type ProjectDefaultModel,
+  type ResponseReflectionResult,
 } from "./chat-api";
 import {
   createOpenAIContainer,
@@ -244,6 +254,115 @@ export function isContextLimitError(message: string): boolean {
   );
 }
 
+function isProviderAuthFailure(error: unknown): boolean {
+  const message = (
+    error instanceof Error
+      ? error.message
+      : providerErrorMessageFromUnknown(error) ?? String(error ?? "")
+  ).toLowerCase();
+  const mentionsCredential =
+    message.includes("api key") ||
+    message.includes("apikey") ||
+    message.includes("token") ||
+    message.includes("credential") ||
+    message.includes("bearer");
+  const mentionsProvider =
+    message.includes("openai") ||
+    message.includes("hugging face") ||
+    message.includes("provider") ||
+    message.includes("api");
+  return (
+    message.includes("invalid username or password") ||
+    message.includes("invalid username") ||
+    message.includes("invalid password") ||
+    message.includes("bad credentials") ||
+    message.includes("invalid_api_key") ||
+    message.includes("invalid api key") ||
+    message.includes("incorrect api key") ||
+    message.includes("valid hf_ token") ||
+    message.includes("saved token") ||
+    message.includes("rejected the saved token") ||
+    (mentionsCredential &&
+      (message.includes("invalid") ||
+        message.includes("incorrect") ||
+        message.includes("missing") ||
+        message.includes("expired") ||
+        message.includes("not valid") ||
+        message.includes("rejected") ||
+        message.includes("unauthorized"))) ||
+    ((message.includes("unauthorized") ||
+      message.includes("forbidden") ||
+      message.includes("401") ||
+      message.includes("403")) &&
+      (mentionsCredential || mentionsProvider || message.includes("auth"))) ||
+    (message.includes("hugging face") &&
+      (message.includes("token") ||
+        message.includes("auth") ||
+        message.includes("credential") ||
+        message.includes("unauthorized") ||
+        message.includes("forbidden")))
+  );
+}
+
+function providerErrorMessageFromUnknown(value: unknown): string | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    if (
+      (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+      (trimmed.startsWith("[") && trimmed.endsWith("]"))
+    ) {
+      try {
+        return providerErrorMessageFromUnknown(JSON.parse(trimmed)) ?? trimmed;
+      } catch {
+        return trimmed;
+      }
+    }
+    return trimmed;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as {
+    detail?: unknown;
+    error?: unknown;
+    message?: unknown;
+  };
+  const message = providerErrorMessageFromUnknown(record.message);
+  if (message) return message;
+  const error = providerErrorMessageFromUnknown(record.error);
+  if (error) return error;
+  const detail = providerErrorMessageFromUnknown(record.detail);
+  if (detail) return detail;
+  return null;
+}
+
+function providerAuthErrorFromStreamContent(text: string): Error | null {
+  const message = providerErrorMessageFromUnknown(text);
+  if (!message) return null;
+  const error = new Error(message);
+  return isProviderAuthFailure(error) ? error : null;
+}
+
+function isOnlyProviderAuthErrorText(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (!providerAuthErrorFromStreamContent(trimmed)) return false;
+  if (
+    (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+    (trimmed.startsWith("[") && trimmed.endsWith("]"))
+  ) {
+    return true;
+  }
+  const lowered = trimmed.toLowerCase();
+  return (
+    lowered.includes("invalid username or password") ||
+    lowered.includes("hugging face rejected the saved token") ||
+    lowered.includes("hugging face requires a valid hf_ token") ||
+    lowered.includes("invalid api key") ||
+    lowered.includes("incorrect api key") ||
+    lowered.includes("invalid_api_key")
+  );
+}
+
 async function updateStoredChatThreadEventually(
   threadId: string,
   patch: Parameters<typeof updateStoredChatThread>[1],
@@ -381,6 +500,74 @@ function parseSourcesFromResult(raw: string): {
   return sources;
 }
 
+type ReflectionSourcePart = {
+  type: "source";
+  sourceType: string;
+  id: string;
+  url: string;
+  title: string;
+  metadata?: { description: string };
+};
+
+function sourcePartsForReflection(
+  sources: ReflectionSourcePart[],
+): Array<Record<string, unknown>> {
+  return sources.map((source) => ({
+    id: source.id,
+    type: source.sourceType,
+    url: source.url,
+    title: source.title,
+    description: source.metadata?.description ?? "",
+  }));
+}
+
+function promptLikelyRequiresSources(prompt: string): boolean {
+  const lowered = prompt.toLowerCase();
+  return [
+    "source",
+    "sources",
+    "citation",
+    "cite",
+    "recherche",
+    "actualité",
+    "actualite",
+    "dernière",
+    "derniere",
+    "latest",
+    "recent",
+    "news",
+    "aujourd'hui",
+    "today",
+  ].some((marker) => lowered.includes(marker));
+}
+
+function reflectionMetadataFromResult(
+  result: ResponseReflectionResult,
+): Record<string, unknown> | null {
+  const reflection = result.responseReflection;
+  const confidence = reflection?.confidence;
+  if (!reflection || !confidence) {
+    return null;
+  }
+  return {
+    reflectionVersion: reflection.reflectionVersion,
+    plannerVersion: result.plannerVersion,
+    recordId:
+      typeof result.record?.id === "string" ? result.record.id : undefined,
+    auditLogId: result.auditLogId ?? undefined,
+    confidenceScore: confidence.score,
+    confidenceLabel: confidence.label,
+    verificationRequired: confidence.verificationRequired,
+    recommendedAction: confidence.recommendedAction,
+    issueCount: Array.isArray(reflection.issues) ? reflection.issues.length : 0,
+    issueIds: Array.isArray(reflection.issues)
+      ? reflection.issues
+          .map((issue) => issue.id)
+          .filter((id): id is string => typeof id === "string" && id.length > 0)
+      : [],
+  };
+}
+
 function estimateTokenCount(text: string): number | undefined {
   const trimmed = text.trim();
   if (!trimmed) {
@@ -492,6 +679,107 @@ function collectTextParts(message: RunMessage): string[] {
   }
 
   return textParts;
+}
+
+function findLatestUserObjective(messages: RunMessages): string {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (!message || message.role !== "user") continue;
+    return collectTextParts(message).join("\n").trim();
+  }
+  return "";
+}
+
+type CogniXRouteSummary = Pick<
+  CogniXRouteSnapshot,
+  "label" | "recommendedModelLabel" | "confidence" | "executionStatus"
+>;
+
+function formatCogniXRouteSummary(route: CogniXRouteSummary | null): string {
+  if (!route) {
+    return "CogniX Auto could not classify this request yet.";
+  }
+  const confidence =
+    typeof route.confidence === "number"
+      ? ` (${Math.round(route.confidence * 100)}%)`
+      : "";
+  const status = route.executionStatus ? ` / ${route.executionStatus}` : "";
+  return `${route.label} -> ${route.recommendedModelLabel}${confidence}${status}`;
+}
+
+async function planLatestCogniXObjective(
+  messages: RunMessages,
+  options: { showToast?: boolean; projectId?: string | null } = {},
+): Promise<CogniXRouteSnapshot | null> {
+  const objective = findLatestUserObjective(messages);
+  if (!objective) {
+    return null;
+  }
+  try {
+    const plan = await planCogniXExecution({
+      objective,
+      projectId: options.projectId ?? null,
+    });
+    const classification = plan.classification;
+    const strategy = plan.executionStrategy;
+    const route: CogniXRouteSnapshot = {
+      selectedDomain: classification.selectedDomain,
+      label: classification.label,
+      recommendedModelLabel:
+        strategy.selectedModelLabel ??
+        strategy.selectedModelId ??
+        classification.recommendedModelLabel,
+      domainModelLabel:
+        strategy.domainModelLabel ?? classification.recommendedModelLabel,
+      providerId: strategy.providerId ?? null,
+      providerType: strategy.providerType ?? null,
+      baseUrl: strategy.baseUrl ?? null,
+      selectedModelId: strategy.selectedModelId ?? null,
+      selectedModelLabel: strategy.selectedModelLabel ?? null,
+      executionStatus: strategy.status,
+      executionMode: strategy.executionMode ?? plan.mode,
+      willLoadModel: strategy.willLoadModel,
+      willGenerate: strategy.willGenerate,
+      planMode: plan.mode,
+      planSteps: plan.steps.map((step) => step.label),
+      warnings: plan.warnings,
+      routerLogId: plan.logId,
+      orchestratorLogId: plan.orchestratorLogId ?? null,
+      confidence: classification.confidence,
+      needsClarification: classification.needsClarification,
+      routingMode: classification.routingMode,
+      reason: strategy.reason || classification.reason,
+      createdAt: Date.now(),
+    };
+    useChatRuntimeStore.getState().setLatestCogniXRoute(route);
+    if (options.showToast !== false) {
+      toast("CogniX Auto", {
+        description: formatCogniXRouteSummary(route),
+        duration: 2800,
+      });
+    }
+    return route;
+  } catch {
+    return null;
+  }
+}
+
+async function buildLatestCogniXContextInstruction(
+  messages: RunMessages,
+  projectId: string | null,
+): Promise<string> {
+  const objective = findLatestUserObjective(messages);
+  try {
+    const contextPack = await buildCogniXContextPack({
+      objective: objective || null,
+      projectId,
+    });
+    return typeof contextPack.systemInstruction === "string"
+      ? contextPack.systemInstruction.trim()
+      : "";
+  } catch {
+    return "";
+  }
 }
 
 function collectImageParts(
@@ -1084,21 +1372,6 @@ async function resolveUseAdapter(
   }
 }
 
-async function resolveProjectInstructions(
-  threadId: string | undefined,
-): Promise<string> {
-  const projectId = await resolveProjectId(threadId);
-  if (!projectId) {
-    return "";
-  }
-
-  const project = await getStoredChatProject(projectId).catch(() => null);
-  if (!project || project.archived) {
-    return "";
-  }
-  return project.instructions?.trim() ?? "";
-}
-
 async function resolveProjectId(
   threadId: string | undefined,
 ): Promise<string | null> {
@@ -1111,6 +1384,77 @@ async function resolveProjectId(
     return null;
   }
   return projectId;
+}
+
+async function resolveProjectDefaultModel(
+  projectId: string | null,
+): Promise<ProjectDefaultModel | null> {
+  if (!projectId) {
+    return null;
+  }
+  try {
+    return await getProjectDefaultModel(projectId);
+  } catch {
+    return null;
+  }
+}
+
+function checkpointFromProjectDefault(
+  defaultModel: ProjectDefaultModel | null,
+): string | null {
+  if (!defaultModel) {
+    return null;
+  }
+  const modelId = defaultModel.modelId.trim();
+  if (!modelId) {
+    return null;
+  }
+  const providerId = defaultModel.providerId?.trim();
+  if (providerId) {
+    return buildExternalModelId(providerId, modelId);
+  }
+  const providerType = defaultModel.providerType?.trim();
+  if (providerType) {
+    const provider = loadExternalProviders().find(
+      (item) =>
+        item.providerType === providerType &&
+        (item.models.includes(modelId) ||
+          (item.availableModels ?? []).includes(modelId)),
+    );
+    if (provider) {
+      return buildExternalModelId(provider.id, modelId);
+    }
+  }
+  return modelId;
+}
+
+function checkpointFromCogniXRoute(
+  route: CogniXRouteSnapshot | null,
+): string | null {
+  if (!route) {
+    return null;
+  }
+  const providerType = route.providerType?.trim();
+  const modelId = route.selectedModelId?.trim();
+  if (providerType !== "ollama" || !modelId) {
+    return null;
+  }
+  const providerId = route.providerId?.trim();
+  const providers = loadExternalProviders();
+  const provider =
+    (providerId
+      ? providers.find((item) => item.id === providerId)
+      : undefined) ??
+    providers.find(
+      (item) =>
+        item.providerType === "ollama" &&
+        (item.models.includes(modelId) ||
+          (item.availableModels ?? []).includes(modelId)),
+    );
+  if (!provider) {
+    return null;
+  }
+  return buildExternalModelId(provider.id, modelId);
 }
 
 async function resolveSandboxSessionId(
@@ -1309,7 +1653,8 @@ async function autoLoadSmallestModel(): Promise<{
               supportsPreserveThinking:
                 loadResp.supports_preserve_thinking ?? false,
               supportsTools: loadResp.supports_tools ?? false,
-              ...resolveToolsEnabledOnLoad(loadResp.supports_tools ?? false),
+              supportsBuiltinWebSearch: true,
+              ...resolveToolsEnabledOnLoad(loadResp.supports_tools ?? false, true),
               kvCacheDtype: loadResp.cache_type_kv ?? null,
               loadedKvCacheDtype: loadResp.cache_type_kv ?? null,
               tensorParallel: loadResp.tensor_parallel ?? false,
@@ -1377,8 +1722,9 @@ async function autoLoadSmallestModel(): Promise<{
             supportsPreserveThinking:
               sfLoadResp.supports_preserve_thinking ?? false,
             supportsTools: sfLoadResp.supports_tools ?? false,
+            supportsBuiltinWebSearch: true,
             // Parity with the GGUF branch above.
-            ...resolveToolsEnabledOnLoad(sfLoadResp.supports_tools ?? false),
+            ...resolveToolsEnabledOnLoad(sfLoadResp.supports_tools ?? false, true),
             defaultChatTemplate: sfLoadResp.chat_template ?? null,
             chatTemplateOverride: null,
             loadedChatTemplateOverride: null,
@@ -1480,7 +1826,8 @@ async function autoLoadSmallestModel(): Promise<{
         ...reasoningCapsFromLoad(loadResp),
         supportsPreserveThinking: loadResp.supports_preserve_thinking ?? false,
         supportsTools: loadResp.supports_tools ?? false,
-        ...resolveToolsEnabledOnLoad(loadResp.supports_tools ?? false),
+        supportsBuiltinWebSearch: true,
+        ...resolveToolsEnabledOnLoad(loadResp.supports_tools ?? false, true),
         kvCacheDtype: loadResp.cache_type_kv ?? null,
         loadedKvCacheDtype: loadResp.cache_type_kv ?? null,
         tensorParallel: loadResp.tensor_parallel ?? false,
@@ -1550,6 +1897,19 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
         }
       };
 
+      const ragProjectId = await resolveProjectId(resolvedThreadId);
+      const projectDefaultModel = await resolveProjectDefaultModel(ragProjectId);
+      const projectDefaultCheckpoint =
+        checkpointFromProjectDefault(projectDefaultModel);
+      if (
+        projectDefaultCheckpoint &&
+        !runtime.params.checkpoint &&
+        projectDefaultCheckpoint !== runtime.params.checkpoint
+      ) {
+        useChatRuntimeStore.getState().setCheckpoint(projectDefaultCheckpoint);
+        runtime = useChatRuntimeStore.getState();
+      }
+
       // Wait for in-progress model load before inferring.
       if (runtime.modelLoading) {
         toast.info("Waiting for model to finish loading…");
@@ -1559,6 +1919,23 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
           clearSelectedImageEditReference();
           throw error;
         }
+      }
+
+      const runtimeBeforeRoute = useChatRuntimeStore.getState();
+      const cognixRoute = await planLatestCogniXObjective(messages, {
+        showToast: !runtimeBeforeRoute.params.checkpoint,
+        projectId: ragProjectId,
+      });
+      const cognixRouteCheckpoint = projectDefaultCheckpoint
+        ? null
+        : checkpointFromCogniXRoute(cognixRoute);
+      if (
+        cognixRouteCheckpoint &&
+        !runtimeBeforeRoute.params.checkpoint &&
+        cognixRouteCheckpoint !== useChatRuntimeStore.getState().params.checkpoint
+      ) {
+        useChatRuntimeStore.getState().setCheckpoint(cognixRouteCheckpoint);
+        runtime = useChatRuntimeStore.getState();
       }
 
       if (!useChatRuntimeStore.getState().params.checkpoint) {
@@ -1580,19 +1957,33 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
             {
               description: blockedByTrustRemoteCode
                 ? "Select it from the top bar to review and approve its custom code, or pick another model."
-                : "Pick a model in the top bar, then retry.",
+                : `${formatCogniXRouteSummary(cognixRoute)} Pick a model in the top bar, then retry.`,
             },
           );
           clearSelectedImageEditReference();
-          throw new Error("Load a model first.");
+          throw new Error(
+            blockedByTrustRemoteCode
+              ? "This model needs custom code approval."
+              : `${formatCogniXRouteSummary(cognixRoute)} Load a model first.`,
+          );
         }
       }
 
       // Re-read store after auto-load / model-ready wait.
       runtime = useChatRuntimeStore.getState();
-      const { params } = runtime;
+      let params = runtime.params;
+      if (
+        projectDefaultCheckpoint &&
+        !params.checkpoint &&
+        projectDefaultCheckpoint !== params.checkpoint
+      ) {
+        useChatRuntimeStore.getState().setCheckpoint(projectDefaultCheckpoint);
+        runtime = useChatRuntimeStore.getState();
+        params = runtime.params;
+      }
       const {
         supportsTools,
+        supportsBuiltinWebSearch,
         toolsEnabled,
         codeToolsEnabled,
         imageToolsEnabled,
@@ -1607,16 +1998,16 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
         ragTopK,
         ragAutoInject,
         ragAutoInjectMinScore,
+        incognito,
       } = runtime;
       // Project sources auto-scope: a chat inside a project retrieves from the
       // project's indexed sources even when the Docs pill is off. The probe is
       // cached, so this is one round trip per project every ~30s at most.
-      const ragProjectId = await resolveProjectId(resolvedThreadId);
       const projectRagEnabled = ragProjectId
         ? await projectHasSources(ragProjectId)
         : false;
-      const externalSelection = parseExternalModelId(params.checkpoint);
-      const isExternalRequest = externalSelection !== null;
+      let externalSelection = parseExternalModelId(params.checkpoint);
+      let isExternalRequest = externalSelection !== null;
       if (
         isExternalRequest &&
         !useExternalProvidersStore.getState().connectionsEnabled
@@ -1628,19 +2019,92 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
         clearSelectedImageEditReference();
         throw new Error("Connections disabled.");
       }
-      const externalProvider = isExternalRequest
-        ? loadExternalProviders().find(
-            (provider) => provider.id === externalSelection.providerId,
+      const externalProviders = loadExternalProviders();
+      let externalProvider = isExternalRequest
+        ? externalProviders.find(
+            (provider) => provider.id === externalSelection?.providerId,
           )
         : null;
-      const externalApiKey = externalProvider
+      let externalApiKey = externalProvider
         ? getExternalProviderApiKey(externalProvider.id).trim()
         : "";
+      let externalFailureNotificationShown = false;
+      const notifyExternalProviderFailure = (
+        title: string,
+        description: string,
+        options: { allowLocalFallback?: boolean } = {},
+      ): void => {
+        externalFailureNotificationShown = true;
+        const fallbackSelection = parseExternalModelId(
+          COGNIX_DEFAULT_EXTERNAL_CHECKPOINT,
+        );
+        const canSuggestLocalFallback = Boolean(
+          options.allowLocalFallback &&
+            fallbackSelection &&
+            externalProvider?.id !== fallbackSelection.providerId &&
+            externalProviders.some(
+              (provider) => provider.id === fallbackSelection.providerId,
+            ),
+        );
+        toast.error(title, {
+          description: canSuggestLocalFallback
+            ? `${description} You can switch to local Ollama if you choose.`
+            : description,
+          duration: 8000,
+          closeButton: true,
+          ...(canSuggestLocalFallback
+            ? {
+                action: {
+                  label: "Use Ollama",
+                  onClick: () => {
+                    useChatRuntimeStore
+                      .getState()
+                      .setCheckpoint(COGNIX_DEFAULT_EXTERNAL_CHECKPOINT);
+                    toast("CogniX Auto", {
+                      description:
+                        "Ollama Qwen 4B selected. Send your message again when Ollama is running.",
+                      duration: 3500,
+                    });
+                  },
+                },
+              }
+            : {}),
+        });
+      };
+
+      if (
+        isExternalRequest &&
+        isHuggingFaceProviderConnection(externalProvider)
+      ) {
+        const keyStatus = externalProviderApiKeyStatus(
+          externalProvider,
+          externalApiKey,
+        );
+        if (keyStatus === "missing" || keyStatus === "invalid") {
+          notifyExternalProviderFailure(
+            keyStatus === "missing"
+              ? "Hugging Face token missing"
+              : "Hugging Face token invalid",
+            keyStatus === "missing"
+              ? "The selected Hugging Face connection has no saved token."
+              : "The selected Hugging Face connection rejected the saved token.",
+            { allowLocalFallback: true },
+          );
+          clearSelectedImageEditReference();
+          throw new Error(
+            keyStatus === "missing"
+              ? "Hugging Face token missing."
+              : "Hugging Face token invalid.",
+          );
+        }
+      }
 
       if (isExternalRequest && !externalProvider) {
-        toast.error("Connection not found.", {
-          description: "Open Settings → Connections and add it again.",
-        });
+        notifyExternalProviderFailure(
+          "Connection not found",
+          "Open Settings → Connections and add it again.",
+          { allowLocalFallback: true },
+        );
         clearSelectedImageEditReference();
         throw new Error("Connection not found.");
       }
@@ -1659,9 +2123,11 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
         !externalProviderIsCustom &&
         !externalProviderIsGeminiCustomBase
       ) {
-        toast.error("Missing API key for selected connection.", {
-          description: "Open Settings → Connections and set the API key again.",
-        });
+        notifyExternalProviderFailure(
+          "Missing API key for selected connection",
+          "Open Settings → Connections and set the API key again.",
+          { allowLocalFallback: true },
+        );
         clearSelectedImageEditReference();
         throw new Error("Missing connection API key.");
       }
@@ -1779,12 +2245,10 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
 
       const safeSystemPrompt =
         typeof params.systemPrompt === "string" ? params.systemPrompt : "";
-      const projectInstructions =
-        await resolveProjectInstructions(resolvedThreadId);
+      const cognixContextInstruction =
+        await buildLatestCogniXContextInstruction(messages, ragProjectId);
       const combinedSystemPrompt = [
-        projectInstructions
-          ? `<project_instructions>\n${projectInstructions}\n</project_instructions>`
-          : "",
+        cognixContextInstruction,
         safeSystemPrompt.trim(),
       ]
         .filter(Boolean)
@@ -1896,6 +2360,17 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
           supportsTools &&
           artifactsEnabled &&
           !hasOutboundImage,
+      );
+      const localWebSearchEnabledForThisTurn = Boolean(
+        !isExternalRequest &&
+          toolsEnabled &&
+          (supportsTools || supportsBuiltinWebSearch),
+      );
+      const localCodeToolsEnabledForThisTurn = Boolean(
+        !isExternalRequest && supportsTools && codeToolsEnabled,
+      );
+      const localRagEnabledForThisTurn = Boolean(
+        !isExternalRequest && supportsTools && (ragEnabled || projectRagEnabled),
       );
       const artifactInstruction = artifactsEnabled
         ? renderHtmlToolEnabledForThisTurn
@@ -2174,6 +2649,17 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
         usage?: ServerUsage;
         timings?: ServerTimings;
       } | null = null;
+      const hasSubstantiveAssistantContent = (): boolean => {
+        const visibleText = cumulativeText
+          .replace(/<think>[\s\S]*?<\/think>/g, "")
+          .replace(/<\/?think>/g, "")
+          .trim();
+        if (!visibleText) return false;
+        if (isOnlyProviderAuthErrorText(visibleText)) {
+          return false;
+        }
+        return true;
+      };
 
       // Per-run cancellation token so a delayed stop POST can't match
       // the next run on the same thread.
@@ -2226,9 +2712,11 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
           supportsPreserveThinking,
           preserveThinking,
         } = runtime;
-        const externalBackendProviderType = toExternalBackendProviderType(
-          externalProvider?.providerType,
-        );
+        const externalBackendProviderType = isHuggingFaceProviderConnection(
+          externalProvider,
+        )
+          ? "huggingface"
+          : toExternalBackendProviderType(externalProvider?.providerType);
         const externalCapabilities = getProviderCapabilities(
           externalProvider?.providerType,
         );
@@ -2491,6 +2979,7 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
                         }
                   : { thinking: { type: reasoningEnabled ? "enabled" : "disabled" } }
                 : {}),
+              ...(ragProjectId ? { project_id: ragProjectId } : {}),
             };
           }
 
@@ -2511,6 +3000,7 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
             image_base64: imageBase64,
             audio_base64: audioBase64,
             cancel_id: cancelId,
+            ...(ragProjectId ? { project_id: ragProjectId } : {}),
             ...(sandboxSessionId ? { session_id: sandboxSessionId } : {}),
             ...(useAdapter === undefined ? {} : { use_adapter: useAdapter }),
             ...(supportsReasoning
@@ -2537,27 +3027,27 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
             ...(supportsPreserveThinking
               ? { preserve_thinking: preserveThinking }
               : {}),
-            ...(supportsTools &&
-            (toolsEnabled ||
-              codeToolsEnabled ||
+            ...((localWebSearchEnabledForThisTurn ||
+              localCodeToolsEnabledForThisTurn ||
               renderHtmlToolEnabledForThisTurn ||
-              mcpEnabledForChat ||
-              ragEnabled ||
-              projectRagEnabled)
+              (supportsTools && mcpEnabledForChat) ||
+              localRagEnabledForThisTurn)
               ? {
                   enable_tools: true,
                   enabled_tools: [
                     // First so retrieval is the primary tool when Docs is on.
-                    ...(ragEnabled || projectRagEnabled
+                    ...(localRagEnabledForThisTurn
                       ? ["search_knowledge_base"]
                       : []),
-                    ...(toolsEnabled ? ["web_search"] : []),
-                    ...(codeToolsEnabled ? ["python", "terminal"] : []),
+                    ...(localWebSearchEnabledForThisTurn ? ["web_search"] : []),
+                    ...(localCodeToolsEnabledForThisTurn
+                      ? ["python", "terminal"]
+                      : []),
                     ...(renderHtmlToolEnabledForThisTurn
                       ? ["render_html"]
                       : []),
                   ],
-                  mcp_enabled: mcpEnabledForChat,
+                  mcp_enabled: supportsTools && mcpEnabledForChat,
                   // Bypass Permissions wins: never request the confirm gate
                   // while bypassing, and tell the backend to drop the sandbox.
                   confirm_tool_calls: confirmToolCalls && !bypassPermissions,
@@ -2565,7 +3055,7 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
                   // Scope: thread_id = this thread's docs, kb_id = a KB,
                   // project_id = the thread's project sources (auto-on whenever
                   // the project has indexed sources, no Docs pill needed).
-                  ...(ragEnabled || projectRagEnabled
+                  ...(localRagEnabledForThisTurn
                     ? {
                         rag_scope: {
                           ...(ragEnabled && ragSource.type === "kb"
@@ -2985,6 +3475,18 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
               const rawDelta = chunk.choices?.[0]?.delta?.content;
               // Normalize structured delta.content (mistral magistral).
               const delta = extractDeltaText(rawDelta);
+              if (
+                delta &&
+                isExternalRequest &&
+                isHuggingFaceProviderConnection(externalProvider)
+              ) {
+                const contentError = providerAuthErrorFromStreamContent(
+                  `${cumulativeText}${delta}`,
+                );
+                if (contentError) {
+                  throw contentError;
+                }
+              }
               // Latest Gemini text-part thoughtSignature for next-turn replay.
               const deltaExtraContent = (
                 chunk.choices?.[0]?.delta as
@@ -3209,6 +3711,18 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
           } catch (streamError) {
             if (
               isExternalRequest &&
+              !hasSubstantiveAssistantContent() &&
+              isProviderAuthFailure(streamError)
+            ) {
+              notifyExternalProviderFailure(
+                "Connection authentication failed",
+                providerErrorMessageFromUnknown(streamError) ??
+                  "The selected provider rejected the saved credentials.",
+                { allowLocalFallback: true },
+              );
+            }
+            if (
+              isExternalRequest &&
               !retriedWithRefreshedKey &&
               isProviderKeyRotationError(streamError)
             ) {
@@ -3238,6 +3752,31 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
             typeof tc.result === "string" ? tc.result : "",
           );
         });
+        const combinedSourceParts: ReflectionSourcePart[] = [
+          ...sourceParts,
+          ...documentCitationParts,
+        ];
+        let responseReflection: Record<string, unknown> | null = null;
+        if (!incognito && cumulativeText.trim()) {
+          try {
+            const prompt = findLatestUserObjective(messages);
+            const reflection = await evaluateResponseReflection({
+              prompt,
+              response: cumulativeText,
+              threadId: resolvedThreadId ?? null,
+              projectId: ragProjectId ?? null,
+              modelId: params.checkpoint,
+              taskType: cognixRoute?.selectedDomain ?? null,
+              requiresSources:
+                combinedSourceParts.length > 0 ||
+                promptLikelyRequiresSources(prompt),
+              responseSources: sourcePartsForReflection(combinedSourceParts),
+            });
+            responseReflection = reflectionMetadataFromResult(reflection);
+          } catch {
+            responseReflection = null;
+          }
+        }
 
         const meta = serverMetadata;
         const finalTokenCount =
@@ -3293,6 +3832,7 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
             timing: finalTiming,
             custom: {
               reasoningDuration,
+              responseReflection: responseReflection ?? undefined,
               // Persisted refusal flag driving the two-pass prune.
               anthropicRefusal: anthropicRefusalSeen || undefined,
               serverTimings: meta?.timings ?? undefined,
@@ -3327,7 +3867,7 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
                 "or start a new chat.",
               duration: 8000,
             });
-          } else {
+          } else if (!externalFailureNotificationShown) {
             toast.error("Generation failed", {
               description: msg || "Unknown error",
             });

@@ -160,11 +160,15 @@ function _inferProviderFromOpenrouterId(
 }
 
 /**
- * Whether the external provider offers a built-in web-search tool that the
- * model invokes server-side. When `true`, the chat composer's Search button
- * is available for that provider and the chat-adapter forwards
- * `enable_tools: true, enabled_tools: ["web_search"]` on the request — the
- * backend routes the call through the provider's tool schema:
+ * Whether the external provider can use web search from CogniX. Some
+ * providers expose a native hosted tool; others use CogniX's server-side
+ * `web_search` prefetch context so local/Hugging Face models receive fresh
+ * search results even when the provider has no web-search connector.
+ *
+ * When `true`, the chat composer's Search button is available and the
+ * chat-adapter forwards `enable_tools: true, enabled_tools: ["web_search"]`.
+ * The backend routes the call through the provider's tool schema when one
+ * exists:
  *   - OpenAI:     `tools: [{type: "web_search"}]` on /v1/responses
  *   - Anthropic:  `tools: [{type: "web_search_20250305", name: "web_search",
  *                           max_uses: 5}]` on /v1/messages
@@ -179,12 +183,11 @@ function _inferProviderFromOpenrouterId(
  *                 call streams the answer. Handled in
  *                 _stream_kimi_web_search on the backend.
  *
- * Mistral is intentionally excluded: their `web_search` connector lives on
- * the Agents API (`/v1/agents` + `/v1/conversations`), not chat completions,
- * and returns `"WebSearchTool connector is not supported"` if injected into
- * /v1/chat/completions. Wiring it would require a dedicated Agents streaming
- * path. Gemini's grounded-search can be added with the same pattern when
- * matching backend translation lands.
+ *
+ * For Hugging Face, Ollama, llama.cpp/vLLM, custom OpenAI-compatible
+ * endpoints, Mistral, DeepSeek and Qwen, the backend does not inject a
+ * provider-native connector. It runs CogniX `web_search` itself, shows the
+ * same search card, then adds the results to the model context.
  */
 export function providerSupportsBuiltinWebSearch(
   providerType: string | null | undefined,
@@ -211,7 +214,15 @@ export function providerSupportsBuiltinWebSearch(
     providerType === "openai" ||
     providerType === "anthropic" ||
     providerType === "openrouter" ||
-    providerType === "kimi"
+    providerType === "kimi" ||
+    providerType === "huggingface" ||
+    providerType === "ollama" ||
+    providerType === "llama_cpp" ||
+    providerType === "vllm" ||
+    providerType === "custom" ||
+    providerType === "mistral" ||
+    providerType === "deepseek" ||
+    providerType === "qwen"
   );
 }
 

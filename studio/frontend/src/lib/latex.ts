@@ -14,23 +14,275 @@
 const CURRENCY_REGEX =
   /(?<![\\$])\$(?!\$)(?=\d+(?:,\d{3})*(?:\.\d+)?[KMBkmb]?(?:\s|$|[^a-zA-Z\d]))/g;
 
+const LATEX_COMMAND_NAMES = [
+  "alpha",
+  "approx",
+  "arccos",
+  "arcsin",
+  "arctan",
+  "bar",
+  "begin",
+  "beta",
+  "big",
+  "Big",
+  "bigg",
+  "Bigg",
+  "bigl",
+  "Bigl",
+  "biggl",
+  "Biggl",
+  "bigr",
+  "Bigr",
+  "biggr",
+  "Biggr",
+  "binom",
+  "boxed",
+  "boldsymbol",
+  "cap",
+  "cdot",
+  "cdots",
+  "choose",
+  "cos",
+  "cosh",
+  "cot",
+  "csc",
+  "cup",
+  "Delta",
+  "delta",
+  "det",
+  "displaystyle",
+  "dfrac",
+  "dot",
+  "ddot",
+  "ell",
+  "end",
+  "epsilon",
+  "equiv",
+  "exists",
+  "exp",
+  "forall",
+  "frac",
+  "gamma",
+  "ge",
+  "geq",
+  "hat",
+  "infty",
+  "in",
+  "int",
+  "lambda",
+  "left",
+  "Leftarrow",
+  "Leftrightarrow",
+  "le",
+  "leq",
+  "ldots",
+  "lim",
+  "liminf",
+  "limsup",
+  "lvert",
+  "ln",
+  "log",
+  "Longleftrightarrow",
+  "Longrightarrow",
+  "mathbb",
+  "mathcal",
+  "mathfrak",
+  "mathbf",
+  "mathit",
+  "mathrm",
+  "max",
+  "min",
+  "mu",
+  "nabla",
+  "neq",
+  "notin",
+  "omega",
+  "Omega",
+  "overline",
+  "overrightarrow",
+  "partial",
+  "phi",
+  "Phi",
+  "pi",
+  "pmatrix",
+  "prime",
+  "quad",
+  "qquad",
+  "Rightarrow",
+  "rightarrow",
+  "right",
+  "rho",
+  "rm",
+  "rvert",
+  "sec",
+  "sim",
+  "simeq",
+  "sin",
+  "sinh",
+  "sqrt",
+  "subset",
+  "subseteq",
+  "sum",
+  "sup",
+  "tag",
+  "tan",
+  "tanh",
+  "tau",
+  "tfrac",
+  "text",
+  "theta",
+  "tilde",
+  "to",
+  "times",
+  "underline",
+  "varepsilon",
+  "vec",
+  "varphi",
+  "widehat",
+  "widetilde",
+];
+
+const LATEX_COMMAND_PATTERN = LATEX_COMMAND_NAMES.join("|");
+const LATEX_IDENTIFIER_PATTERN = String.raw`[A-Za-z](?:[A-Za-z0-9]|_\{?[^{}\s]+\}?|\^\{?[^{}\s]+\}?)*`;
+const LATEX_NUMERIC_IDENTIFIER_PATTERN = String.raw`\d+(?:[.,]\d+)?(?:\s*[+\-*/]\s*${LATEX_IDENTIFIER_PATTERN})?`;
+const LATEX_ASSIGNMENT_LEFT_PATTERN = String.raw`(?:${LATEX_IDENTIFIER_PATTERN}|${LATEX_NUMERIC_IDENTIFIER_PATTERN})(?:\s*/\s*(?:${LATEX_IDENTIFIER_PATTERN}|${LATEX_NUMERIC_IDENTIFIER_PATTERN}))?`;
+const LATEX_ASSIGNMENT_PATTERN = String.raw`${LATEX_ASSIGNMENT_LEFT_PATTERN}(?:\s*['’])?(?:\s*\([^()\n]{0,80}\))?\s*=`;
+const LATEX_COMMAND_START_PATTERN = String.raw`(?:${LATEX_IDENTIFIER_PATTERN}\s*;\s*)?\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])`;
+const LATEX_COMMAND_RE = new RegExp(
+  `\\\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])`,
+);
+const DELIMITED_MATH_RE =
+  /((?<!\\)\$\$[\s\S]*?(?<!\\)\$\$|(?<!\\)\$[^$\n]*?(?<!\\)\$|\\\[[\s\S]*?\\\]|\\\([^)\n]*?\\\))/g;
+const BRACKETED_BARE_LATEX_LINE_RE = new RegExp(
+  `(^|\\n)([ \\t]*)\\[\\s*([^\\n\\]]*\\\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])[^\\n\\]]*)\\s*\\](?=\\s*(?:\\n|$))`,
+  "g",
+);
+const SENTENCE_BARE_LATEX_RE = new RegExp(
+  `(^|[\\s:;,.])((?:${LATEX_COMMAND_START_PATTERN}|${LATEX_ASSIGNMENT_PATTERN})(?:\\.(?=\\d)|\\\\[,;:!]|[^\\n.!?;:,|[\\]]|\\([^()\\n]*\\)|\\{[^\\n{}]*\\})*)`,
+  "g",
+);
+const URL_IN_TEXT_RE = /\shttps?:\/\//i;
+const BARE_LATEX_MATH_CHAR_RE = /[\\^_{}=+\-*/<>]/;
+const ANY_LATEX_COMMAND_RE = /\\[a-zA-Z]+/;
+const RELATION_COMMAND_RE =
+  /\\(?:to|rightarrow|Rightarrow|Longrightarrow|Leftarrow|Leftrightarrow|Longleftrightarrow|leq?|geq?|neq|approx|sim|equiv)(?![a-zA-Z])/;
+const SUBSCRIPT_OR_SUPERSCRIPT_RE = /[A-Za-z0-9)}]\s*(?:[_^]\{?[^{}\s]+\}?)/;
+const UNICODE_MATH_SIGNAL_RE = /[∫∑∏√∞≈≠≤≥→⇒↔±×÷πθτφϕΩωαβγδλμσΔΣ]/;
+const COMPACT_EQUATION_RE =
+  /(?:^|[\s([{])(?:[A-Za-z](?:_\{?[^{}\s]+\}?|\^\{?[^{}\s]+\}?|\([^)\n]{0,80}\))*|[A-Za-z]{1,4}_\{?[^{}\s]+\}?|\\[a-zA-Z]+(?:\{[^{}\n]*\})?)\s*(?:=|<|>|≤|≥|≈|\\leq?|\\geq?|\\neq|\\approx|\\Rightarrow|\\Longrightarrow|⇒|→)/;
+const FUNCTION_EQUATION_RE =
+  /(?:^|[\s([{])(?:[A-Za-z]|\\[a-zA-Z]+)\s*\([^)\n]{1,80}\)\s*(?:=|<|>|≤|≥|≈|\\leq?|\\geq?|\\neq|\\approx)/;
+const PLAIN_FUNCTION_MATH_RE =
+  /\b(?:sin|cos|tan|ln|log|exp|lim|arctan|arcsin|arccos)\s*(?:[A-Za-z0-9({\\]|$)/;
+const COMPACT_OPERATOR_CHAIN_RE =
+  /(?:[A-Za-z0-9)}\]]|\\[a-zA-Z]+)\s*(?:[+\-*/=<>]|≤|≥|≈|⇒|→)\s*(?:[A-Za-z0-9({\\[]|[-+])/;
+const MAX_PROSE_WORDS_IN_BARE_MATH = 3;
+const LEADING_SPACE_RE = /^\s*/;
+const TRAILING_SPACE_RE = /\s*$/;
+const BACKSLASH_DISPLAY_MATH_RE = /\\\[([\s\S]*?)\\\]/g;
+const BACKSLASH_INLINE_MATH_RE = /\\\(([^)\n]*?)\\\)/g;
+const EXPLICIT_BACKSLASH_MATH_DELIMITER_RE = /\\[([]/;
+const UNESCAPED_DOLLAR_GLOBAL_RE = /(?<!\\)\$/g;
+const SPACED_TABLE_SEPARATOR_RE = /\s+\|\s+/;
+const TABLE_LINE_SPLIT_RE = /(\s+\|\s+)/;
+const UNESCAPED_PIPE_RE = /(?<!\\)\|/g;
+const TABLE_CELL_LEADING_RE = /^\s*\|\s*/;
+const TABLE_CELL_TRAILING_RE = /\s*\|\s*$/;
+const MARKDOWN_TABLE_SEPARATOR_RE = /^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*$/;
+const PROSE_WORD_RE =
+  /\b(?:abscisse|alors|aucun|atteint|avec|bas|bobine|bornes|comme|condition|correspond|courbe|dans|de|des|donc|du|en|est|et|exactement|graphique|haut|la|le|lecture|les|masse|même|meme|mobile|module|nom|on|ou|par|poulie|pour|projection|regime|régime|résultat|resultat|segment|segments|si|sur|tension|tire|une|un|valeur|vers|voir)\b/i;
+const PROSE_WORD_GLOBAL_RE =
+  /\b(?:abscisse|alors|aucun|atteint|avec|bas|bobine|bornes|comme|condition|correspond|courbe|dans|de|des|donc|du|en|est|et|exactement|graphique|haut|la|le|lecture|les|masse|même|meme|mobile|module|nom|on|ou|par|poulie|pour|projection|regime|régime|résultat|resultat|segment|segments|si|sur|tension|tire|une|un|valeur|vers|voir)\b/gi;
+const MATH_LEADING_BODY_RE = new RegExp(
+  `^\\s*(?:${LATEX_COMMAND_START_PATTERN}|${LATEX_ASSIGNMENT_PATTERN}|[A-Za-z0-9_{}\\\\^]+\\s*[+\\-*/=<>])`,
+);
+const TABLE_CELL_DISPLAYSTYLE_RE = /^\(?\s*\\displaystyle\b/;
+const NEWLINE_SPLIT_RE = /(\n)/;
+const WHITESPACE_RE = /\s/;
+const MATH_OPERATOR_CHAR_RE = /[=+\-*/<>]/;
+const DIGIT_RE = /\d/;
+const MATH_IDENTIFIER_SUFFIX_RE = /[A-Za-z0-9}_]$/;
+const MAX_INLINE_MATH_SPAN = 200;
+const DANGLING_DELIMITER_SIZE_RE =
+  /\\(?:(?:bigl|Bigl|biggl|Biggl|bigr|Bigr|biggr|Biggr)(?!\s*(?:[()[\]{}|.]|\\(?:lvert|rvert|vert|lbrace|rbrace|langle|rangle|lfloor|rfloor|lceil|rceil)))|(?:big|Big|bigg|Bigg)(?![a-zA-Z])(?!\s*(?:[()[\]{}|.]|\\(?:lvert|rvert|vert|lbrace|rbrace|langle|rangle|lfloor|rfloor|lceil|rceil))))/g;
+const ORPHAN_DISPLAY_CLOSER_RE =
+  /(^|[\n\s])((?:\\(?:boxed|displaystyle|frac|sqrt|int)[^\n$]*?))\s*\$\$(?=\s*(?:\|\||\||$))/g;
+const DOUBLE_PIPE_DISPLAY_RE = /\$\$\s+\|\|\s+/g;
+const WORD_RE = /[\p{L}]+/gu;
+const BOXED_COMMAND_BODY_PATTERN = String.raw`\\boxed\{(?:[^{}]|\{[^{}]*\})*\}`;
+const WRAPPABLE_COMMANDS_WITH_ARGUMENT_RE = new RegExp(
+  BOXED_COMMAND_BODY_PATTERN,
+  "g",
+);
+const TAGGED_BOXED_ORPHAN_RE = new RegExp(
+  String.raw`(${BOXED_COMMAND_BODY_PATTERN})\.?\s*(\\tag\{[^{}]+\})\s*\$+`,
+  "g",
+);
+const TABLE_CELL_LABELED_DISPLAY_MATH_RE = new RegExp(
+  String.raw`^(\s*)\$?([^$\\\n]*?[\p{L}][^$\\\n]*?)\s*\$\$\s*([^$\n]*\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])[^$\n]*?)\s*\$\$+\s*$`,
+  "u",
+);
+const TABLE_CELL_LABEL_COMMAND_ORPHAN_RE = new RegExp(
+  String.raw`^(\s*)([^$\\\n]*?[\p{L}][^$\\\n]*?)(\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])[^$\n]*?)\s*\$\$+\s*$`,
+  "u",
+);
+const TABLE_LINE_LABELED_DISPLAY_MATH_RE = new RegExp(
+  String.raw`(^|\|\s*)\$?([^$\\|\n]*?[\p{L}][^$\\|\n]*?)\s*\$\$\s*([^$|\n]*\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])[^$|\n]*?)\s*\$\$+(\s*)(?=\||$)`,
+  "gu",
+);
+const TABLE_LINE_LABEL_COMMAND_ORPHAN_RE = new RegExp(
+  String.raw`(^|\|\s*)([^$\\|\n]*?[\p{L}][^$\\|\n]*?)(\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])[^$|\n]*?)\s*\$\$+(\s*)(?=\||$)`,
+  "gu",
+);
+const FRAGMENTED_ENV_MATH_RE =
+  /(?<!\\)\$(\\begin\{(aligned|align|gathered|gather|cases|matrix|pmatrix|bmatrix|vmatrix)\})(?<!\\)\$([\s\S]*?)(?<!\\)\$(\\end\{\2\})(?<!\\)\$/g;
+const BARE_TAGGED_EQUATION_LINE_RE = new RegExp(
+  String.raw`(^|\n)([ \t>]*)([^$\n|]*?(?:${LATEX_COMMAND_START_PATTERN}|${LATEX_ASSIGNMENT_PATTERN})[^$\n|]*?\\tag\{[^{}]+\})(?=\s*(?:\n|$))`,
+  "g",
+);
+const SPLIT_TAGGED_INLINE_MATH_RE =
+  /(?<!\\)\$([^$\n]*\\(?:boxed|frac|sqrt|vec|dot|ddot|displaystyle)[^$\n]*?)\s*(?<!\\)\$\s*(\\tag\{[^{}]+\})(?<!\\)\$/g;
+const ESCAPED_OPEN_PAREN_RE = /^\\\(/;
+const ESCAPED_CLOSE_PAREN_RE = /\\\)$/g;
+const DANGLING_OPEN_PAREN_RE = /\s*\($/;
+const EXAMPLE_PREFIX_IN_PAREN_RE = /^(\s*(?:ex\.|exemple\s*:?)\s+)([\s\S]+)$/i;
+const EXAMPLE_PREFIX_WITH_NESTED_FORMULA_RE =
+  /^(\s*(?:ex\.|exemple\s*:?)\s*)\(([\s\S]+)\)\s*$/i;
+const FORMULA_CONNECTOR_SPLIT_RE = new RegExp(
+  String.raw`(\s+(?:et|ou|donc|avec)\s+)(?=${LATEX_ASSIGNMENT_LEFT_PATTERN}(?:\s*['’])?(?:\s*\([^()\n]{0,80}\))?\s*=)`,
+  "i",
+);
+const LATEX_SCRIPT_SUFFIX_PATTERN = String.raw`(?:_\{[^{}\s]+\}|_\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])|_[0-9A-Za-z](?![A-Za-z])|\^\{[^{}\s]+\}|\^\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])|\^[0-9A-Za-z](?![A-Za-z]))`;
+const STANDALONE_SCRIPTED_IDENTIFIER_RE = new RegExp(
+  String.raw`(^|[\s([{;:,|])((?:[A-Za-z]{1,4}|\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z]))${LATEX_SCRIPT_SUFFIX_PATTERN}+(?:\([^()\n]{0,80}\))?)`,
+  "g",
+);
+const COMPACT_RELATION_ATOM_PATTERN = String.raw`(?:\d+(?:[.,]\d+)?[A-Za-z](?:${LATEX_SCRIPT_SUFFIX_PATTERN})*|\d+(?:[.,]\d+)?|[A-Za-z](?:${LATEX_SCRIPT_SUFFIX_PATTERN})*|\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])(?:\{[^{}\n]*\})*|\([^()\n]{1,80}\))`;
+const COMPACT_RELATION_SIDE_PATTERN = String.raw`${COMPACT_RELATION_ATOM_PATTERN}(?:\s*[+\-*/]\s*${COMPACT_RELATION_ATOM_PATTERN})*`;
+const BARE_COMPACT_RELATION_RE = new RegExp(
+  String.raw`(^|[\s(;:,])(${COMPACT_RELATION_SIDE_PATTERN}\s*(?:=|<|>|≤|≥|≈|\\approx|\\Rightarrow|\\Longrightarrow|⇒|→)\s*${COMPACT_RELATION_SIDE_PATTERN})`,
+  "g",
+);
+
 /**
  * Find code-block regions (``` ... ``` and ` ... `) to skip.
  * Returns a sorted array of [start, end] index pairs.
  */
-function findCodeBlockRegions(content: string): Array<[number, number]> {
-  const regions: Array<[number, number]> = [];
+function findCodeBlockRegions(content: string): [number, number][] {
+  const regions: [number, number][] = [];
 
   // Fenced code blocks: ```...```
   const fencedRe = /```[\s\S]*?```/g;
-  let match: RegExpExecArray | null;
-  while ((match = fencedRe.exec(content)) !== null) {
+  let match: RegExpExecArray | null = fencedRe.exec(content);
+  while (match !== null) {
     regions.push([match.index, match.index + match[0].length]);
+    match = fencedRe.exec(content);
   }
 
   // Inline code: `...` (skip spans inside fenced blocks, filtered below)
   const inlineRe = /`[^`\n]+`/g;
-  while ((match = inlineRe.exec(content)) !== null) {
+  match = inlineRe.exec(content);
+  while (match !== null) {
     const start = match.index;
     const end = start + match[0].length;
     let inside = false;
@@ -43,6 +295,7 @@ function findCodeBlockRegions(content: string): Array<[number, number]> {
     if (!inside) {
       regions.push([start, end]);
     }
+    match = inlineRe.exec(content);
   }
 
   // Sort by start position for binary search.
@@ -53,10 +306,7 @@ function findCodeBlockRegions(content: string): Array<[number, number]> {
 /**
  * Binary search to check if a position falls inside any code region.
  */
-function isInCodeBlock(
-  position: number,
-  regions: Array<[number, number]>,
-): boolean {
+function isInCodeBlock(position: number, regions: [number, number][]): boolean {
   let lo = 0;
   let hi = regions.length - 1;
   while (lo <= hi) {
@@ -71,6 +321,870 @@ function isInCodeBlock(
     }
   }
   return false;
+}
+
+function processOutsideRegions(
+  content: string,
+  regions: [number, number][],
+  process: (value: string) => string,
+): string {
+  if (regions.length === 0) {
+    return process(content);
+  }
+  let out = "";
+  let cursor = 0;
+  for (const [start, end] of regions) {
+    if (cursor < start) {
+      out += process(content.slice(cursor, start));
+    }
+    out += content.slice(start, end);
+    cursor = end;
+  }
+  if (cursor < content.length) {
+    out += process(content.slice(cursor));
+  }
+  return out;
+}
+
+function processOutsideMathDelimiters(
+  content: string,
+  process: (value: string) => string,
+): string {
+  let out = "";
+  let cursor = 0;
+  DELIMITED_MATH_RE.lastIndex = 0;
+  let match: RegExpExecArray | null = DELIMITED_MATH_RE.exec(content);
+  while (match !== null) {
+    if (cursor < match.index) {
+      out += process(content.slice(cursor, match.index));
+    }
+    out += match[0];
+    cursor = match.index + match[0].length;
+    match = DELIMITED_MATH_RE.exec(content);
+  }
+  if (cursor < content.length) {
+    out += process(content.slice(cursor));
+  }
+  return out;
+}
+
+function normalizeBackslashMathDelimiters(content: string): string {
+  return content
+    .replace(BACKSLASH_DISPLAY_MATH_RE, (_match, body: string) => {
+      const trimmed = body.trim();
+      if (!trimmed) {
+        return _match;
+      }
+      return `\n\n$$\n${trimmed}\n$$\n\n`;
+    })
+    .replace(BACKSLASH_INLINE_MATH_RE, (_match, body: string) => {
+      const trimmed = body.trim();
+      if (!trimmed) {
+        return _match;
+      }
+      return `$${trimmed}$`;
+    });
+}
+
+function looksLikeBareLatexMath(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (URL_IN_TEXT_RE.test(trimmed)) {
+    return false;
+  }
+  if (LATEX_COMMAND_RE.test(trimmed)) {
+    return (
+      BARE_LATEX_MATH_CHAR_RE.test(trimmed) || RELATION_COMMAND_RE.test(trimmed)
+    );
+  }
+  if (
+    SUBSCRIPT_OR_SUPERSCRIPT_RE.test(trimmed) ||
+    UNICODE_MATH_SIGNAL_RE.test(trimmed)
+  ) {
+    return hasMathStructure(trimmed) && !looksLikeMostlyProse(trimmed);
+  }
+  if (COMPACT_EQUATION_RE.test(trimmed) || FUNCTION_EQUATION_RE.test(trimmed)) {
+    return !looksLikeMostlyProse(trimmed);
+  }
+  return (
+    PLAIN_FUNCTION_MATH_RE.test(trimmed) &&
+    COMPACT_OPERATOR_CHAIN_RE.test(trimmed) &&
+    !looksLikeMostlyProse(trimmed)
+  );
+}
+
+function hasBareMathSignal(value: string): boolean {
+  return (
+    EXPLICIT_BACKSLASH_MATH_DELIMITER_RE.test(value) ||
+    ANY_LATEX_COMMAND_RE.test(value) ||
+    SUBSCRIPT_OR_SUPERSCRIPT_RE.test(value) ||
+    UNICODE_MATH_SIGNAL_RE.test(value) ||
+    COMPACT_EQUATION_RE.test(value) ||
+    FUNCTION_EQUATION_RE.test(value)
+  );
+}
+
+function hasMathStructure(value: string): boolean {
+  return (
+    BARE_LATEX_MATH_CHAR_RE.test(value) ||
+    COMPACT_OPERATOR_CHAIN_RE.test(value) ||
+    PLAIN_FUNCTION_MATH_RE.test(value)
+  );
+}
+
+function looksLikeMostlyProse(value: string): boolean {
+  const words = value.match(WORD_RE) ?? [];
+  if (words.length <= MAX_PROSE_WORDS_IN_BARE_MATH) {
+    return false;
+  }
+  return PROSE_WORD_RE.test(value);
+}
+
+function hasOddUnescapedDollars(value: string): boolean {
+  UNESCAPED_DOLLAR_GLOBAL_RE.lastIndex = 0;
+  let count = 0;
+  while (UNESCAPED_DOLLAR_GLOBAL_RE.exec(value) !== null) {
+    count += 1;
+  }
+  return count % 2 === 1;
+}
+
+function isInsideDisplayMathAt(content: string, index: number): boolean {
+  let count = 0;
+  let cursor = 0;
+  while (cursor < index) {
+    const next = content.indexOf("$$", cursor);
+    if (next < 0 || next >= index) {
+      break;
+    }
+    if (content[next - 1] !== "\\") {
+      count += 1;
+    }
+    cursor = next + 2;
+  }
+  return count % 2 === 1;
+}
+
+function closeUnbalancedInlineMath(value: string): string {
+  if (!(hasOddUnescapedDollars(value) && hasBareMathSignal(value))) {
+    return value;
+  }
+
+  const trailing = value.match(TRAILING_SPACE_RE)?.[0] ?? "";
+  const body = value.slice(0, value.length - trailing.length);
+  return `${body}$${trailing}`;
+}
+
+function normalizeTableVerticalBars(value: string): string {
+  let nextLeft = true;
+  return value
+    .replace(/\\(bigl|Bigl|biggl|Biggl)\|/g, "\\$1\\lvert ")
+    .replace(/\\(bigr|Bigr|biggr|Biggr)\|/g, "\\$1\\rvert ")
+    .replace(/\\\|/g, "\\vert ")
+    .replace(/(?<!\\)\|/g, () => {
+      const replacement = nextLeft ? "\\lvert " : "\\rvert ";
+      nextLeft = !nextLeft;
+      return replacement;
+    });
+}
+
+function normalizeBareLatexBody(
+  value: string,
+  options: { tableCell?: boolean } = {},
+): string {
+  const withoutDanglingDelimiters = value.replace(
+    DANGLING_DELIMITER_SIZE_RE,
+    "",
+  );
+  const withoutEscapedParenCloser = withoutDanglingDelimiters
+    .replace(ESCAPED_OPEN_PAREN_RE, "(")
+    .replace(ESCAPED_CLOSE_PAREN_RE, ")");
+  return options.tableCell
+    ? normalizeTableVerticalBars(withoutEscapedParenCloser)
+    : withoutEscapedParenCloser;
+}
+
+function wrapSplitBareLatexBody(
+  body: string,
+  options: { tableCell?: boolean } = {},
+): string | null {
+  const split = body.match(FORMULA_CONNECTOR_SPLIT_RE);
+  if (!split?.index) {
+    return null;
+  }
+
+  const connector = split[1];
+  const left = body.slice(0, split.index);
+  const right = body.slice(split.index + connector.length);
+  if (!(looksLikeBareLatexMath(left) && looksLikeBareLatexMath(right))) {
+    return null;
+  }
+
+  return `${wrapInlineBareLatex(left, options)}${connector}${wrapInlineBareLatex(right, options)}`;
+}
+
+function wrapInlineBareLatex(
+  value: string,
+  options: { tableCell?: boolean } = {},
+): string {
+  const balancedValue = closeUnbalancedInlineMath(value);
+  if (balancedValue !== value) {
+    return balancedValue;
+  }
+  const trimmed = value.trim();
+  if (!(trimmed && looksLikeBareLatexMath(trimmed))) {
+    return value;
+  }
+  const leading = value.match(LEADING_SPACE_RE)?.[0] ?? "";
+  const trailing = value.match(TRAILING_SPACE_RE)?.[0] ?? "";
+  const body = normalizeBareLatexBody(
+    value.slice(leading.length, value.length - trailing.length),
+    options,
+  );
+  const splitBody = wrapSplitBareLatexBody(body, options);
+  if (splitBody !== null) {
+    return `${leading}${splitBody}${trailing}`;
+  }
+  if (
+    body.startsWith("$") ||
+    body.startsWith("\\(") ||
+    body.startsWith("\\[") ||
+    body.startsWith("\\]")
+  ) {
+    return value;
+  }
+  return `${leading}$${body}$${trailing}`;
+}
+
+function shouldWrapParenthesizedLatex(body: string): boolean {
+  const trimmed = body.trim();
+  if (!looksLikeBareLatexMath(trimmed)) {
+    return false;
+  }
+  if (MATH_LEADING_BODY_RE.test(trimmed)) {
+    return true;
+  }
+  if (!WHITESPACE_RE.test(trimmed)) {
+    return true;
+  }
+  return (
+    !PROSE_WORD_RE.test(trimmed) &&
+    (MATH_OPERATOR_CHAR_RE.test(trimmed) ||
+      RELATION_COMMAND_RE.test(trimmed) ||
+      UNICODE_MATH_SIGNAL_RE.test(trimmed))
+  );
+}
+
+function shouldSkipParenthesizedBody(
+  content: string,
+  openIndex: number,
+): boolean {
+  const previous = content
+    .slice(Math.max(0, openIndex - 8), openIndex)
+    .trimEnd();
+  const immediatePrevious = content[openIndex - 1] ?? "";
+  return (
+    (immediatePrevious !== "" &&
+      !WHITESPACE_RE.test(immediatePrevious) &&
+      MATH_IDENTIFIER_SUFFIX_RE.test(immediatePrevious)) ||
+    previous.endsWith("/") ||
+    previous.endsWith("\\Bigl") ||
+    previous.endsWith("\\bigl") ||
+    previous.endsWith("\\left")
+  );
+}
+
+function findClosingParenthesis(content: string, openIndex: number): number {
+  let depth = 0;
+  for (let i = openIndex; i < content.length; i++) {
+    const char = content[i];
+    if (char === "\\") {
+      i += 1;
+      continue;
+    }
+    if (char === "(") {
+      depth += 1;
+      continue;
+    }
+    if (char !== ")") {
+      continue;
+    }
+    depth -= 1;
+    if (depth === 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function wrapExamplePrefixedBareLatex(
+  body: string,
+  options: { tableCell?: boolean } = {},
+): string | null {
+  const nested = body.match(EXAMPLE_PREFIX_WITH_NESTED_FORMULA_RE);
+  if (nested) {
+    const [, prefix, formula] = nested;
+    if (looksLikeBareLatexMath(formula)) {
+      return `${prefix}(${wrapInlineBareLatex(formula, options)})`;
+    }
+  }
+
+  const direct = body.match(EXAMPLE_PREFIX_IN_PAREN_RE);
+  if (!direct) {
+    return null;
+  }
+  const [, prefix, formula] = direct;
+  if (!looksLikeBareLatexMath(formula)) {
+    return null;
+  }
+  return `${prefix}${wrapInlineBareLatex(formula, options)}`;
+}
+
+function wrapParenthesizedBareLatex(
+  content: string,
+  options: { tableCell?: boolean } = {},
+): string {
+  let out = "";
+  let cursor = 0;
+
+  while (cursor < content.length) {
+    const openIndex = content.indexOf("(", cursor);
+    if (openIndex < 0) {
+      out += content.slice(cursor);
+      break;
+    }
+    const closeIndex = findClosingParenthesis(content, openIndex);
+    if (closeIndex < 0) {
+      out += content.slice(cursor);
+      break;
+    }
+    if (shouldSkipParenthesizedBody(content, openIndex)) {
+      out += content.slice(cursor, closeIndex + 1);
+      cursor = closeIndex + 1;
+      continue;
+    }
+
+    const body = content.slice(openIndex + 1, closeIndex);
+    out += content.slice(cursor, openIndex + 1);
+    if (shouldWrapParenthesizedLatex(body)) {
+      out +=
+        wrapExamplePrefixedBareLatex(body, options) ??
+        wrapInlineBareLatex(body, options);
+    } else {
+      out += body.includes("(")
+        ? wrapParenthesizedBareLatex(body, options)
+        : body;
+    }
+    out += ")";
+    cursor = closeIndex + 1;
+  }
+
+  return out;
+}
+
+function isSeparatorPipe(line: string, index: number): boolean {
+  if (line[index] !== "|") {
+    return false;
+  }
+  if (line[index - 1] === "\\") {
+    return false;
+  }
+  if (index === 0 || index === line.length - 1) {
+    return true;
+  }
+  return (
+    WHITESPACE_RE.test(line[index - 1] ?? "") &&
+    WHITESPACE_RE.test(line[index + 1] ?? "")
+  );
+}
+
+function protectMathPipesInTableLine(line: string): string {
+  let nextLeft = true;
+  let out = "";
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    if (char !== "|" || isSeparatorPipe(line, i)) {
+      out += char;
+      continue;
+    }
+    out += nextLeft ? "\\lvert " : "\\rvert ";
+    nextLeft = !nextLeft;
+  }
+  return out;
+}
+
+function isSpacedMarkdownTableLine(line: string): boolean {
+  return (
+    hasBareMathSignal(line) &&
+    SPACED_TABLE_SEPARATOR_RE.test(line) &&
+    !MARKDOWN_TABLE_SEPARATOR_RE.test(line.trim())
+  );
+}
+
+function splitTableLine(line: string): string[] {
+  return line.split(TABLE_LINE_SPLIT_RE);
+}
+
+function countUnescapedPipes(line: string): number {
+  UNESCAPED_PIPE_RE.lastIndex = 0;
+  let count = 0;
+  while (UNESCAPED_PIPE_RE.exec(line) !== null) {
+    count += 1;
+  }
+  return count;
+}
+
+function splitCompactTableLine(line: string): string[] {
+  const parts: string[] = [];
+  let buffer = "";
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (char === "|" && line[index - 1] !== "\\") {
+      parts.push(buffer, "|");
+      buffer = "";
+      continue;
+    }
+    buffer += char;
+  }
+  parts.push(buffer);
+  return parts;
+}
+
+function isCompactMarkdownTableLine(line: string): boolean {
+  if (
+    !hasBareMathSignal(line) ||
+    MARKDOWN_TABLE_SEPARATOR_RE.test(line.trim())
+  ) {
+    return false;
+  }
+  if (SPACED_TABLE_SEPARATOR_RE.test(line)) {
+    return false;
+  }
+  const trimmed = line.trim();
+  if (!(trimmed.startsWith("|") || trimmed.endsWith("|"))) {
+    return false;
+  }
+  return countUnescapedPipes(line) >= 2;
+}
+
+function splitCellChrome(part: string): {
+  body: string;
+  leading: string;
+  trailing: string;
+} {
+  const leading = part.match(TABLE_CELL_LEADING_RE)?.[0] ?? "";
+  let body = part.slice(leading.length);
+  const trailing = body.match(TABLE_CELL_TRAILING_RE)?.[0] ?? "";
+  if (trailing) {
+    body = body.slice(0, body.length - trailing.length);
+  }
+  return { body, leading, trailing };
+}
+
+function normalizeMalformedTableCellMath(body: string): string {
+  const labeledDisplayMatch = body.match(TABLE_CELL_LABELED_DISPLAY_MATH_RE);
+  if (labeledDisplayMatch) {
+    const [, leading, label, math] = labeledDisplayMatch;
+    const normalizedMath = normalizeBareLatexBody(math.trim(), {
+      tableCell: true,
+    });
+    if (looksLikeBareLatexMath(normalizedMath)) {
+      return `${leading}${label.trim()} $${normalizedMath}$`;
+    }
+  }
+
+  const orphanDisplayMatch = body.match(TABLE_CELL_LABEL_COMMAND_ORPHAN_RE);
+  if (orphanDisplayMatch) {
+    const [, leading, label, math] = orphanDisplayMatch;
+    const normalizedMath = normalizeBareLatexBody(math.trim(), {
+      tableCell: true,
+    });
+    if (looksLikeBareLatexMath(normalizedMath)) {
+      return `${leading}${label.trim()} $${normalizedMath}$`;
+    }
+  }
+
+  return body;
+}
+
+function hasDelimitedMathSpan(value: string): boolean {
+  DELIMITED_MATH_RE.lastIndex = 0;
+  return DELIMITED_MATH_RE.test(value);
+}
+
+function shouldWrapWholeTableCell(body: string): boolean {
+  const trimmed = body.trim();
+  if (hasDelimitedMathSpan(trimmed)) {
+    return false;
+  }
+  if (!looksLikeBareLatexMath(trimmed)) {
+    return false;
+  }
+  return (
+    MATH_LEADING_BODY_RE.test(trimmed) ||
+    !PROSE_WORD_RE.test(trimmed) ||
+    TABLE_CELL_DISPLAYSTYLE_RE.test(trimmed)
+  );
+}
+
+function wrapTableCell(part: string): string {
+  if (!hasBareMathSignal(part)) {
+    return part;
+  }
+
+  const { body, leading, trailing } = splitCellChrome(part);
+  const normalizedBody = normalizeMalformedTableCellMath(body);
+  const closedBody = closeUnbalancedInlineMath(normalizedBody);
+  const wrappedBody = shouldWrapWholeTableCell(closedBody)
+    ? wrapInlineBareLatex(closedBody, { tableCell: true })
+    : wrapBareLatexSegments(closedBody, { tableCell: true });
+  return `${leading}${wrappedBody}${trailing}`;
+}
+
+function normalizeMalformedTableLineMath(line: string): string {
+  return line
+    .replace(
+      TABLE_LINE_LABELED_DISPLAY_MATH_RE,
+      (
+        match,
+        prefix: string,
+        label: string,
+        math: string,
+        trailing: string,
+      ) => {
+        const normalizedMath = normalizeBareLatexBody(math.trim(), {
+          tableCell: true,
+        });
+        if (!looksLikeBareLatexMath(normalizedMath)) {
+          return match;
+        }
+        return `${prefix}${label.trim()} $${normalizedMath}$${trailing}`;
+      },
+    )
+    .replace(
+      TABLE_LINE_LABEL_COMMAND_ORPHAN_RE,
+      (
+        match,
+        prefix: string,
+        label: string,
+        math: string,
+        trailing: string,
+      ) => {
+        const normalizedMath = normalizeBareLatexBody(math.trim(), {
+          tableCell: true,
+        });
+        if (!looksLikeBareLatexMath(normalizedMath)) {
+          return match;
+        }
+        return `${prefix}${label.trim()} $${normalizedMath}$${trailing}`;
+      },
+    );
+}
+
+function wrapSpacedMarkdownTableLines(content: string): string {
+  return content
+    .split(NEWLINE_SPLIT_RE)
+    .map((part) => {
+      if (part === "\n" || !hasBareMathSignal(part)) {
+        return part;
+      }
+
+      const normalizedLine = normalizeMalformedTableLineMath(part);
+      if (!isSpacedMarkdownTableLine(normalizedLine)) {
+        if (!isCompactMarkdownTableLine(normalizedLine)) {
+          return normalizedLine;
+        }
+        return splitCompactTableLine(normalizedLine)
+          .map((cellOrSeparator, index) =>
+            index % 2 === 1 ? cellOrSeparator : wrapTableCell(cellOrSeparator),
+          )
+          .join("");
+      }
+
+      const protectedLine = protectMathPipesInTableLine(normalizedLine);
+      return splitTableLine(protectedLine)
+        .map((cellOrSeparator, index) =>
+          index % 2 === 1 ? cellOrSeparator : wrapTableCell(cellOrSeparator),
+        )
+        .join("");
+    })
+    .join("");
+}
+
+function normalizeOrphanDisplayClosers(content: string): string {
+  return content
+    .replace(
+      ORPHAN_DISPLAY_CLOSER_RE,
+      (match, prefix: string, body: string, offset: number) => {
+        if (isInsideDisplayMathAt(content, offset)) {
+          return match;
+        }
+        if (!looksLikeBareLatexMath(body)) {
+          return match;
+        }
+        return `${prefix}$$\n${normalizeBareLatexBody(body.trim())}\n$$`;
+      },
+    )
+    .replace(DOUBLE_PIPE_DISPLAY_RE, () => "$$\n\n");
+}
+
+function normalizeFragmentedDelimitedMath(content: string): string {
+  return content
+    .replace(
+      FRAGMENTED_ENV_MATH_RE,
+      (
+        _match,
+        begin: string,
+        _environment: string,
+        body: string,
+        end: string,
+      ) => {
+        const normalizedBody = body.replace(UNESCAPED_DOLLAR_GLOBAL_RE, "");
+        return `\n\n$$\n${begin}${normalizedBody.trim() ? ` ${normalizedBody.trim()} ` : ""}${end}\n$$\n\n`;
+      },
+    )
+    .replace(
+      SPLIT_TAGGED_INLINE_MATH_RE,
+      (_match, body: string, tag: string) =>
+        `\n\n$$\n${normalizeBareLatexBody(`${body.trim()}${tag}`)}\n$$\n\n`,
+    );
+}
+
+function formatDisplayMathBlock(prefix: string, body: string): string {
+  const normalizedBody = normalizeBareLatexBody(body.trim());
+  if (prefix.includes(">")) {
+    return `${prefix}$$\n${prefix}${normalizedBody}\n${prefix}$$`;
+  }
+  return `${prefix}$$\n${normalizedBody}\n${prefix}$$`;
+}
+
+function normalizeBareTaggedEquationLines(content: string): string {
+  return content.replace(
+    BARE_TAGGED_EQUATION_LINE_RE,
+    (match, lineStart: string, prefix: string, body: string) => {
+      if (!looksLikeBareLatexMath(body)) {
+        return match;
+      }
+      return `${lineStart}${formatDisplayMathBlock(prefix, body)}`;
+    },
+  );
+}
+
+function wrapWrappableCommandExpressions(content: string): string {
+  return content.replace(WRAPPABLE_COMMANDS_WITH_ARGUMENT_RE, (match) =>
+    looksLikeBareLatexMath(match) ? wrapInlineBareLatex(match) : match,
+  );
+}
+
+function normalizeTaggedBoxedOrphans(content: string): string {
+  return content.replace(
+    TAGGED_BOXED_ORPHAN_RE,
+    (_match, body: string, tag: string) =>
+      `\n$$\n${normalizeBareLatexBody(`${body}${tag}`)}\n$$`,
+  );
+}
+
+function wrapStandaloneScriptedIdentifiers(
+  content: string,
+  options: { tableCell?: boolean } = {},
+): string {
+  return content.replace(
+    STANDALONE_SCRIPTED_IDENTIFIER_RE,
+    (match, prefix: string, body: string) => {
+      if (!looksLikeBareLatexMath(body)) {
+        return match;
+      }
+      return `${prefix}${wrapInlineBareLatex(body, options)}`;
+    },
+  );
+}
+
+function isInsideBalancedBraces(value: string, index: number): boolean {
+  let depth = 0;
+  for (let i = 0; i < index; i += 1) {
+    const char = value[i];
+    if (char === "\\") {
+      i += 1;
+      continue;
+    }
+    if (char === "{") {
+      depth += 1;
+    } else if (char === "}" && depth > 0) {
+      depth -= 1;
+    }
+  }
+  return depth > 0;
+}
+
+function splitLeadingFormulaFromTrailingProse(
+  body: string,
+): { formula: string; prose: string } | null {
+  PROSE_WORD_GLOBAL_RE.lastIndex = 0;
+  let match: RegExpExecArray | null = PROSE_WORD_GLOBAL_RE.exec(body);
+  while (match !== null) {
+    if (match.index > 0 && !isInsideBalancedBraces(body, match.index)) {
+      const formulaPrefix = body.slice(0, match.index);
+      const danglingOpenParen =
+        formulaPrefix.match(DANGLING_OPEN_PAREN_RE)?.[0] ?? "";
+      const formula = danglingOpenParen
+        ? formulaPrefix.slice(
+            0,
+            formulaPrefix.length - danglingOpenParen.length,
+          )
+        : formulaPrefix;
+      const prose = `${danglingOpenParen}${body.slice(match.index)}`;
+      if (looksLikeBareLatexMath(formula)) {
+        return { formula, prose };
+      }
+    }
+    match = PROSE_WORD_GLOBAL_RE.exec(body);
+  }
+  return null;
+}
+
+function wrapTrailingProseBareLatex(
+  content: string,
+  options: { tableCell?: boolean } = {},
+): string {
+  const withParentheses = wrapParenthesizedBareLatex(content, options);
+  return withParentheses.replace(
+    SENTENCE_BARE_LATEX_RE,
+    (match, prefix: string, body: string) => {
+      const nestedSplit = splitLeadingFormulaFromTrailingProse(body);
+      const formula = nestedSplit?.formula ?? body;
+      const prose = nestedSplit?.prose ?? "";
+      if (!looksLikeBareLatexMath(formula)) {
+        return match;
+      }
+      return `${prefix}${wrapInlineBareLatex(formula, options)}${prose}`;
+    },
+  );
+}
+
+function wrapSentenceBareLatexBody(
+  body: string,
+  options: { tableCell?: boolean } = {},
+): string {
+  const split = splitLeadingFormulaFromTrailingProse(body);
+  if (!split) {
+    return wrapInlineBareLatex(body, options);
+  }
+  return `${wrapInlineBareLatex(split.formula, options)}${wrapTrailingProseBareLatex(
+    split.prose,
+    options,
+  )}`;
+}
+
+function wrapCompactRelationSegments(
+  content: string,
+  options: { tableCell?: boolean } = {},
+): string {
+  return content.replace(
+    BARE_COMPACT_RELATION_RE,
+    (match, prefix: string, body: string) => {
+      if (looksLikeMostlyProse(body) || !hasMathStructure(body)) {
+        return match;
+      }
+      return `${prefix}$${normalizeBareLatexBody(body, options)}$`;
+    },
+  );
+}
+
+function wrapBareLatexSegments(
+  content: string,
+  options: { tableCell?: boolean } = {},
+): string {
+  const normalizedDelimiters = normalizeBackslashMathDelimiters(content);
+
+  const withDisplayBlocks = processOutsideMathDelimiters(
+    normalizedDelimiters,
+    (segment) =>
+      segment.replace(
+        BRACKETED_BARE_LATEX_LINE_RE,
+        (match, prefix: string, indent: string, body: string) => {
+          if (!looksLikeBareLatexMath(body)) {
+            return match;
+          }
+          return `${prefix}${indent}$$\n${body.trim()}\n$$`;
+        },
+      ),
+  );
+
+  const withCommandExpressions = processOutsideMathDelimiters(
+    withDisplayBlocks,
+    wrapWrappableCommandExpressions,
+  );
+
+  const withParentheses = processOutsideMathDelimiters(
+    withCommandExpressions,
+    (segment) => wrapParenthesizedBareLatex(segment, options),
+  );
+
+  const withSentenceMath = processOutsideMathDelimiters(
+    withParentheses,
+    (segment) =>
+      segment.replace(
+        SENTENCE_BARE_LATEX_RE,
+        (match, prefix: string, body: string) => {
+          if (!looksLikeBareLatexMath(body)) {
+            return match;
+          }
+          return `${prefix}${wrapSentenceBareLatexBody(body, options)}`;
+        },
+      ),
+  );
+
+  const withCompactRelations = processOutsideMathDelimiters(
+    withSentenceMath,
+    (segment) => wrapCompactRelationSegments(segment, options),
+  );
+
+  return processOutsideMathDelimiters(withCompactRelations, (segment) =>
+    wrapStandaloneScriptedIdentifiers(segment, options),
+  );
+}
+
+function wrapBareLaTeX(content: string): string {
+  if (!hasBareMathSignal(content)) {
+    return content;
+  }
+  const normalizedInitialClosers = normalizeOrphanDisplayClosers(content);
+  const normalizedFragments = normalizeFragmentedDelimitedMath(
+    normalizedInitialClosers,
+  );
+  const normalizedTaggedBoxedOrphans = processOutsideMathDelimiters(
+    normalizedFragments,
+    normalizeTaggedBoxedOrphans,
+  );
+  const normalizedTaggedEquations = processOutsideMathDelimiters(
+    normalizedTaggedBoxedOrphans,
+    normalizeBareTaggedEquationLines,
+  );
+  const withInitialDisplayClosers = processOutsideMathDelimiters(
+    normalizedTaggedEquations,
+    normalizeOrphanDisplayClosers,
+  );
+  const withTableRows = wrapSpacedMarkdownTableLines(withInitialDisplayClosers);
+  const normalizedDisplayClosers = processOutsideMathDelimiters(
+    withTableRows,
+    normalizeOrphanDisplayClosers,
+  );
+  return wrapBareLatexSegments(normalizedDisplayClosers);
+}
+
+function escapeCurrencyDollars(content: string): string {
+  const codeRegions = findCodeBlockRegions(content);
+  return content.replace(CURRENCY_REGEX, (match, offset) => {
+    if (isInCodeBlock(offset, codeRegions)) {
+      return match;
+    }
+    if (hasInlineMathCloser(content, offset)) {
+      return match;
+    }
+    return `\\${match}`;
+  });
 }
 
 /** A whitespace-free token that looks purely like currency, e.g. `5`, `1,000`, `5.99`, `100K`, `3.5M`. */
@@ -119,16 +1233,54 @@ const SIMPLE_MATH_RE =
  *   - `$1,000$`     -> NOT math (single currency-like token)
  */
 function looksLikeMathBody(body: string): boolean {
-  if (LATEX_CHAR_RE.test(body)) return true;
+  if (LATEX_CHAR_RE.test(body)) {
+    return true;
+  }
   const trimmed = body.trim().replace(TRAIL_PUNCT_RE, "");
-  if (!trimmed) return false;
-  if (CURRENCY_BODY_RE.test(trimmed)) return false;
+  if (!trimmed) {
+    return false;
+  }
+  if (CURRENCY_BODY_RE.test(trimmed)) {
+    return false;
+  }
   // Numeric-only operator forms: `2 + 2`, `100 < 200`, `1,000 - 500`.
   // Recognised without requiring a lone-variable letter.
-  if (SIMPLE_MATH_RE.test(trimmed)) return true;
-  if (!/\s/.test(trimmed)) return true;
-  if (!MATH_OP_RE.test(trimmed)) return false;
+  if (SIMPLE_MATH_RE.test(trimmed)) {
+    return true;
+  }
+  if (!WHITESPACE_RE.test(trimmed)) {
+    return true;
+  }
+  if (!MATH_OP_RE.test(trimmed)) {
+    return false;
+  }
   return LONE_LETTER_RE.test(trimmed);
+}
+
+function isBoldWrappedMath(
+  content: string,
+  openIndex: number,
+  closeIndex: number,
+): boolean {
+  if (openIndex < 2) {
+    return false;
+  }
+  const wrapper = content[openIndex - 1];
+  return (
+    (wrapper === "*" || wrapper === "_") &&
+    content[openIndex - 2] === wrapper &&
+    content[closeIndex + 1] === wrapper &&
+    content[closeIndex + 2] === wrapper
+  );
+}
+
+function isInlineMathCloserCandidate(content: string, index: number): boolean {
+  return (
+    content[index] === "$" &&
+    content[index - 1] !== "\\" &&
+    content[index + 1] !== "$" &&
+    !DIGIT_RE.test(content[index + 1] ?? "")
+  );
 }
 
 /**
@@ -140,13 +1292,15 @@ function looksLikeMathBody(body: string): boolean {
  * and the heuristic would otherwise reject prose-shaped bodies like "90 - x".
  */
 function hasInlineMathCloser(content: string, offset: number): boolean {
-  const MAX_SPAN = 200;
-  const limit = Math.min(content.length, offset + 1 + MAX_SPAN);
+  const limit = Math.min(content.length, offset + 1 + MAX_INLINE_MATH_SPAN);
   for (let i = offset + 1; i < limit; i++) {
     const c = content[i];
-    if (c === "\n") return false;
-    if (c !== "$") continue;
-    if (content[i - 1] === "\\") continue;
+    if (c === "\n") {
+      return false;
+    }
+    if (c !== "$" || content[i - 1] === "\\") {
+      continue;
+    }
     if (content[i + 1] === "$") {
       i++;
       continue;
@@ -154,19 +1308,11 @@ function hasInlineMathCloser(content: string, offset: number): boolean {
     // A `$` followed by a digit is more likely another currency token than
     // the closer. Keep scanning so prose like `$5 + a $10 add-on` doesn't
     // pair the two currency markers as a math span.
-    if (/\d/.test(content[i + 1] ?? "")) {
+    if (!isInlineMathCloserCandidate(content, i)) {
       continue;
     }
-    if (offset >= 2) {
-      const op = content[offset - 1];
-      if (
-        (op === "*" || op === "_") &&
-        content[offset - 2] === op &&
-        content[i + 1] === op &&
-        content[i + 2] === op
-      ) {
-        return true;
-      }
+    if (isBoldWrappedMath(content, offset, i)) {
+      return true;
     }
     return looksLikeMathBody(content.slice(offset + 1, i));
   }
@@ -185,17 +1331,12 @@ function hasInlineMathCloser(content: string, offset: number): boolean {
  * - Currency inside code blocks/spans is untouched
  */
 export function preprocessLaTeX(content: string): string {
-  if (!content.includes("$")) return content;
-
-  const codeRegions = findCodeBlockRegions(content);
-
-  return content.replace(CURRENCY_REGEX, (match, offset) => {
-    if (isInCodeBlock(offset, codeRegions)) {
-      return match;
-    }
-    if (hasInlineMathCloser(content, offset)) {
-      return match;
-    }
-    return "\\" + match;
-  });
+  const currencySafeContent = escapeCurrencyDollars(content);
+  const codeRegions = findCodeBlockRegions(currencySafeContent);
+  const withBareLatex = processOutsideRegions(
+    currencySafeContent,
+    codeRegions,
+    wrapBareLaTeX,
+  );
+  return withBareLatex;
 }

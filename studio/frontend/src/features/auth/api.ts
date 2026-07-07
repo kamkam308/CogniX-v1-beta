@@ -2,6 +2,7 @@
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
 import { apiUrl, isTauri } from "@/lib/api-base";
+import { fetchDeviceType } from "@/config/env";
 import {
   clearAuthTokens,
   getAuthToken,
@@ -132,6 +133,7 @@ export async function refreshSession(): Promise<boolean> {
       if (getRefreshToken() !== refreshToken) return false;
       storeAuthTokens(payload.access_token, payload.refresh_token);
       setMustChangePassword(payload.must_change_password ?? false);
+      void fetchDeviceType({ force: true }).catch(() => undefined);
       return true;
     } catch {
       return false;
@@ -175,7 +177,7 @@ export async function authFetch(
           "You appear to be offline. Check your network connection and try again.",
         );
       }
-      throw new Error("Unsloth isn't running -- please relaunch it.");
+      throw new Error("CogniX isn't running -- please relaunch it.");
     }
     throw err;
   }

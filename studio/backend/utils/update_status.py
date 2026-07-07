@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
-"""Web update status helpers for browser-served Unsloth Studio.
+"""Web update status helpers for browser-served CogniX.
 
 Side-effect light: no network work at import time or from /api/health.
 The PyPI check is lazy, cached, and only for PyPI-managed installs.
@@ -28,7 +28,7 @@ PYPI_TIMEOUT_SECONDS = 3
 PYPI_RESPONSE_MAX_BYTES = 5 * 1024 * 1024
 PYPI_SUCCESS_TTL_SECONDS = 12 * 60 * 60
 PYPI_FAILURE_TTL_SECONDS = 60 * 60
-RELEASE_NOTES_URL = "https://unsloth.ai/docs/new/changelog"
+RELEASE_NOTES_URL = "https://github.com/kamkam308/CogniX-v1-beta/releases"
 DISABLE_ENV_VAR = "UNSLOTH_DISABLE_UPDATE_CHECK"
 
 LOCAL_INSTALL_SOURCES = {"editable", "local_path", "vcs", "local_repo"}

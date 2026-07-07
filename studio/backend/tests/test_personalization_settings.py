@@ -66,22 +66,22 @@ def test_valid_avatar_and_shape():
 
 def test_bundled_avatar_url_allowed():
     p = PersonalizationPayload.model_validate(
-        {"profile": {"avatarDataUrl": "/Sloth%20emojis/large%20sloth%20yay.png"}}
+        {"profile": {"avatarDataUrl": "/cognix-logo.png"}}
     )
-    assert p.profile.avatarDataUrl == "/Sloth%20emojis/large%20sloth%20yay.png"
+    assert p.profile.avatarDataUrl == "/cognix-logo.png"
 
 
 def test_bundled_avatar_subpath_allowed():
     p = PersonalizationPayload.model_validate(
-        {"profile": {"avatarDataUrl": "/studio/Sloth%20emojis/large%20sloth%20yay.png"}}
+        {"profile": {"avatarDataUrl": "/studio/cognix-logo.png"}}
     )
-    assert "Sloth%20emojis" in p.profile.avatarDataUrl
+    assert "cognix-logo.png" in p.profile.avatarDataUrl
 
 
 def test_bundled_avatar_traversal_rejected():
     with pytest.raises(ValidationError):
         PersonalizationPayload.model_validate(
-            {"profile": {"avatarDataUrl": "/Sloth%20emojis/../secret.png"}}
+            {"profile": {"avatarDataUrl": "/assets/../secret.png"}}
         )
 
 
@@ -130,7 +130,7 @@ def test_personalization_route_roundtrip_real_shape(monkeypatch):
         "profile": {
             "displayName": "Mike",
             "nickname": "M",
-            "avatarDataUrl": "/Sloth%20emojis/large%20sloth%20yay.png",
+            "avatarDataUrl": "/cognix-logo.png",
             "avatarShape": "rounded",
         },
         "appearance": {"theme": "dark", "language": "en"},

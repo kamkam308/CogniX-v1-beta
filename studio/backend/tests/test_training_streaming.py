@@ -30,6 +30,10 @@ def _load_route_module(name: str, relative_path: str):
     return module
 
 
+def _allow_training_operator(training_route):
+    return patch.object(training_route.auth_storage, "is_training_operator", return_value = True)
+
+
 class _Tokenizer:
     eos_token = "</s>"
     chat_template = "{{ messages }}"
@@ -219,7 +223,9 @@ def test_streaming_start_rejects_train_on_completions_before_backend_start():
         start_training = lambda **kwargs: pytest.fail("backend should not start"),
     )
 
-    with patch.object(training_route, "get_training_backend", return_value = backend):
+    with _allow_training_operator(training_route), patch.object(
+        training_route, "get_training_backend", return_value = backend
+    ):
         with pytest.raises(HTTPException) as exc_info:
             asyncio.run(training_route.start_training(request, current_subject = "test-user"))
 
@@ -251,7 +257,9 @@ def test_streaming_start_requires_separate_eval_split(eval_split):
         start_training = lambda **kwargs: pytest.fail("backend should not start"),
     )
 
-    with patch.object(training_route, "get_training_backend", return_value = backend):
+    with _allow_training_operator(training_route), patch.object(
+        training_route, "get_training_backend", return_value = backend
+    ):
         with pytest.raises(HTTPException) as exc_info:
             asyncio.run(training_route.start_training(request, current_subject = "test-user"))
 
@@ -279,7 +287,9 @@ def test_streaming_start_rejects_missing_max_steps():
         start_training = lambda **kwargs: pytest.fail("backend should not start"),
     )
 
-    with patch.object(training_route, "get_training_backend", return_value = backend):
+    with _allow_training_operator(training_route), patch.object(
+        training_route, "get_training_backend", return_value = backend
+    ):
         with pytest.raises(HTTPException) as exc_info:
             asyncio.run(training_route.start_training(request, current_subject = "test-user"))
 
@@ -311,7 +321,9 @@ def test_streaming_start_rejects_embedding_models():
         start_training = lambda **kwargs: pytest.fail("backend should not start"),
     )
 
-    with patch.object(training_route, "get_training_backend", return_value = backend):
+    with _allow_training_operator(training_route), patch.object(
+        training_route, "get_training_backend", return_value = backend
+    ):
         with pytest.raises(HTTPException) as exc_info:
             asyncio.run(training_route.start_training(request, current_subject = "test-user"))
 
@@ -354,7 +366,9 @@ def test_streaming_start_accepts_raw_text_and_cpt(training_type, format_type):
         start_training = _start_training,
     )
 
-    with patch.object(training_route, "get_training_backend", return_value = backend):
+    with _allow_training_operator(training_route), patch.object(
+        training_route, "get_training_backend", return_value = backend
+    ):
         with patch.object(training_route, "load_model_defaults", return_value = {}):
             response = asyncio.run(
                 training_route.start_training(request, current_subject = "test-user")
@@ -394,7 +408,9 @@ def test_streaming_start_happy_path_reaches_backend():
         start_training = _start_training,
     )
 
-    with patch.object(training_route, "get_training_backend", return_value = backend):
+    with _allow_training_operator(training_route), patch.object(
+        training_route, "get_training_backend", return_value = backend
+    ):
         with patch.object(training_route, "load_model_defaults", return_value = {}):
             response = asyncio.run(
                 training_route.start_training(request, current_subject = "test-user")
@@ -461,7 +477,9 @@ def test_streaming_start_rejects_local_datasets():
         start_training = lambda **kwargs: pytest.fail("backend should not start"),
     )
 
-    with patch.object(training_route, "get_training_backend", return_value = backend):
+    with _allow_training_operator(training_route), patch.object(
+        training_route, "get_training_backend", return_value = backend
+    ):
         with pytest.raises(HTTPException) as exc_info:
             asyncio.run(training_route.start_training(request, current_subject = "test-user"))
 

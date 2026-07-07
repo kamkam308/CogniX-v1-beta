@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod backend_identity;
 mod commands;
 mod desktop_auth;
 mod desktop_backend_owner;
@@ -74,11 +75,11 @@ fn setup_logging() {
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-fn setup_custom_titlebar(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+fn setup_native_window_frame(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let window = app.get_webview_window("main").ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "main window not found")
     })?;
-    window.set_decorations(false)?;
+    window.set_decorations(true)?;
     Ok(())
 }
 
@@ -107,7 +108,7 @@ fn cleanup_child_processes(app: &tauri::AppHandle) {
 }
 
 fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    let open = MenuItemBuilder::with_id("open", "Open Studio").build(app)?;
+    let open = MenuItemBuilder::with_id("open", "Open CogniX").build(app)?;
     let toggle = MenuItemBuilder::with_id("toggle", "Start/Stop Server").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
     let menu = MenuBuilder::new(app)
@@ -116,7 +117,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     TrayIconBuilder::new()
         .menu(&menu)
-        .tooltip("Unsloth Studio (Desktop)")
+        .tooltip("CogniX")
         .icon(app.default_window_icon().unwrap().clone())
         .on_menu_event(move |app, event| match event.id().as_ref() {
             "open" => {
@@ -166,7 +167,7 @@ fn main() {
     let _ = fix_path_env::fix();
 
     setup_logging();
-    info!("Unsloth Studio desktop app starting");
+    info!("CogniX desktop app starting");
     windows_job::initialize();
 
     tauri::Builder::default()
@@ -224,7 +225,7 @@ fn main() {
         ])
         .setup(|app| {
             #[cfg(any(target_os = "windows", target_os = "linux"))]
-            setup_custom_titlebar(app)?;
+            setup_native_window_frame(app)?;
             setup_tray(app)?;
             Ok(())
         })

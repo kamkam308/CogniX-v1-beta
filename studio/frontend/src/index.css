@@ -509,6 +509,16 @@
 			background-position: 0% 0%;
 		}
 	}
+
+	@keyframes cognix-thinking-sheen {
+		0% {
+			background-position: 140% 50%;
+		}
+
+		100% {
+			background-position: -40% 50%;
+		}
+	}
 }
 
 @layer base {
@@ -568,6 +578,17 @@
 
 	.nav-icon-btn {
 		@apply inline-flex h-7 w-7 items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring;
+	}
+
+	.cognix-logo-mark {
+		filter: none;
+		transform: scale(1.04);
+		transform-origin: center;
+	}
+
+	.dark .cognix-logo-mark,
+	html.dark .cognix-logo-mark {
+		filter: brightness(0) saturate(100%) invert(1) contrast(1.08);
 	}
 
 	/* Standard icon size — drives every nav/menu/action-bar icon
@@ -1349,6 +1370,35 @@
 		font-weight: 500;
 	}
 
+	.cognix-thinking-indicator {
+		position: relative;
+		display: inline-block;
+		overflow: hidden;
+		color: var(--muted-foreground);
+		font-size: 0.875rem;
+		font-weight: 500;
+		letter-spacing: 0;
+	}
+
+	.cognix-thinking-indicator::after {
+		content: "Thinking";
+		position: absolute;
+		inset: 0;
+		background: linear-gradient(
+			100deg,
+			transparent 0%,
+			transparent 36%,
+			var(--foreground) 50%,
+			transparent 64%,
+			transparent 100%
+		);
+		background-size: 260% 100%;
+		background-clip: text;
+		color: transparent;
+		animation: cognix-thinking-sheen 1.45s ease-in-out infinite;
+		-webkit-background-clip: text;
+	}
+
 	/* Right-side Thinking pill (toggle or dropdown). pl-2 matches the left
 	   pills so the hover X is not pushed in too far. */
 	.unsloth-thinking-pill {
@@ -1798,6 +1848,45 @@
 		--shiki-dark-bg: transparent;
 		background: var(--color-code-block);
 		border: 1px solid oklch(1 0 0 / 0.08);
+	}
+
+	@keyframes cognix-stream-token-in {
+		0% {
+			opacity: 0;
+			transform: translate3d(0, 0.32em, 0);
+			filter: blur(2px);
+		}
+
+		56% {
+			opacity: 0.78;
+			transform: translate3d(0, 0.08em, 0);
+			filter: blur(0.45px);
+		}
+
+		100% {
+			opacity: 1;
+			transform: translate3d(0, 0, 0);
+			filter: blur(0);
+		}
+	}
+
+	.aui-thread-root .aui-assistant-message-content [data-sd-animate] {
+		animation: cognix-stream-token-in 360ms var(--ease-out-quart) both;
+		will-change: opacity, transform, filter;
+	}
+
+	.aui-thread-root
+		.aui-assistant-message-content
+		:where(
+			.katex,
+			table,
+			[data-streamdown="code-block"],
+			[data-streamdown="code-block"] *
+		)
+		[data-sd-animate] {
+		animation: none !important;
+		filter: none !important;
+		transform: none !important;
 	}
 
 	/* Streamdown code-block stability hardening.

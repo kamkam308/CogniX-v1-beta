@@ -18,6 +18,7 @@ from core.inference import external_provider as ep_mod
 from core.inference.external_provider import (
     ExternalProviderClient,
     _build_usage_chunk,
+    _friendly_provider_error_text,
 )
 
 
@@ -152,6 +153,14 @@ def _make_custom_client() -> ExternalProviderClient:
     )
 
 
+def _make_huggingface_client(api_key: str = "hf_testtoken123") -> ExternalProviderClient:
+    return ExternalProviderClient(
+        provider_type = "huggingface",
+        base_url = "https://router.huggingface.co/v1",
+        api_key = api_key,
+    )
+
+
 def _anthropic_sse(events: list[dict]) -> bytes:
     chunks: list[str] = []
     for event in events:
@@ -233,6 +242,145 @@ def test_custom_provider_uses_chat_completions_without_auth_key(monkeypatch):
     assert any("ok" in line for line in lines)
 
 
+def test_huggingface_401_stream_uses_actionable_error(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers.get("authorization") == "Bearer hf_testtoken123"
+        return httpx.Response(
+            401,
+            json = {"error": "Invalid username or password."},
+        )
+
+    _mock_http_client(monkeypatch, handler)
+
+    async def run():
+        client = _make_huggingface_client()
+        lines = await _collect(
+            client.stream_chat_completion(
+                messages = [{"role": "user", "content": "ping"}],
+                model = "deepseek-ai/DeepSeek-V4-Pro",
+                temperature = 0.7,
+                top_p = 0.95,
+                max_tokens = 64,
+            )
+        )
+        await client.close()
+        return lines
+
+    lines = _drive(run())
+    joined = "\n".join(lines)
+    assert "Hugging Face rejected the saved token" in joined
+    assert "Ollama Qwen 4B" in joined
+    assert "Invalid username or password" not in joined
+
+
+def test_huggingface_400_stream_uses_actionable_error(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers.get("authorization") == "Bearer hf_testtoken123"
+        return httpx.Response(
+            400,
+            json = {"error": "Invalid username or password."},
+        )
+
+    _mock_http_client(monkeypatch, handler)
+
+    async def run():
+        client = _make_huggingface_client()
+        lines = await _collect(
+            client.stream_chat_completion(
+                messages = [{"role": "user", "content": "ping"}],
+                model = "deepseek-ai/DeepSeek-V4-Pro",
+                temperature = 0.7,
+                top_p = 0.95,
+                max_tokens = 64,
+            )
+        )
+        await client.close()
+        return lines
+
+    lines = _drive(run())
+    joined = "\n".join(lines)
+    assert "Hugging Face rejected the saved token" in joined
+    assert "deepseek-ai/DeepSeek-V4-Pro" in joined
+    assert "Invalid username or password" not in joined
+
+
+def test_huggingface_200_sse_error_is_normalized(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers.get("authorization") == "Bearer hf_testtoken123"
+        return httpx.Response(
+            200,
+            content = b'data: {"error":"Invalid username or password."}\n\n',
+            headers = {"content-type": "text/event-stream"},
+        )
+
+    _mock_http_client(monkeypatch, handler)
+
+    async def run():
+        client = _make_huggingface_client()
+        lines = await _collect(
+            client.stream_chat_completion(
+                messages = [{"role": "user", "content": "ping"}],
+                model = "deepseek-ai/DeepSeek-V4-Pro",
+                temperature = 0.7,
+                top_p = 0.95,
+                max_tokens = 64,
+            )
+        )
+        await client.close()
+        return lines
+
+    lines = _drive(run())
+    joined = "\n".join(lines)
+    assert "Hugging Face rejected the saved token" in joined
+    assert "deepseek-ai/DeepSeek-V4-Pro" in joined
+    assert "Invalid username or password" not in joined
+
+
+def test_huggingface_friendly_error_for_auth_failures():
+    text = _friendly_provider_error_text(
+        "huggingface",
+        401,
+        '{"error":"Invalid username or password."}',
+        model = "deepseek-ai/DeepSeek-V4-Pro",
+    )
+    assert "deepseek-ai/DeepSeek-V4-Pro" in text
+    assert "hf_ token" in text
+
+
+def test_huggingface_chat_completion_auth_error_is_actionable(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers.get("authorization") == "Bearer hf_testtoken123"
+        return httpx.Response(
+            400,
+            json = {"error": "Invalid username or password."},
+        )
+
+    _mock_http_client(monkeypatch, handler)
+
+    async def run():
+        client = _make_huggingface_client()
+        try:
+            await client.chat_completion(
+                messages = [{"role": "user", "content": "ping"}],
+                model = "deepseek-ai/DeepSeek-V4-Pro",
+                temperature = 0.0,
+                top_p = 1.0,
+                max_tokens = 1,
+            )
+        except httpx.HTTPStatusError as exc:
+            await client.close()
+            return str(exc), exc.response.status_code
+        await client.close()
+        raise AssertionError("Expected Hugging Face auth failure")
+
+    message, status_code = _drive(run())
+    assert status_code == 400
+    assert "Hugging Face rejected the saved token" in message
+    assert "deepseek-ai/DeepSeek-V4-Pro" in message
+    assert '{"error"' not in message
+    assert "Invalid username or password" not in message
+
+
 def test_custom_provider_test_endpoint_probes_chat_completion(monkeypatch):
     import importlib.util
     import sys
@@ -245,6 +393,7 @@ def test_custom_provider_test_endpoint_probes_chat_completion(monkeypatch):
     providers_route = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = providers_route
     spec.loader.exec_module(providers_route)
+    monkeypatch.setattr(providers_route.auth_storage, "is_admin", lambda subject: True)
 
     captured: dict = {}
 
@@ -295,6 +444,7 @@ def test_custom_provider_test_endpoint_requires_model_id(monkeypatch):
     providers_route = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = providers_route
     spec.loader.exec_module(providers_route)
+    monkeypatch.setattr(providers_route.auth_storage, "is_admin", lambda subject: True)
 
     class _FakeClient:
         def __init__(self, **kwargs):

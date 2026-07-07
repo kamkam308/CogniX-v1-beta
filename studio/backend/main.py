@@ -12,6 +12,8 @@ from pathlib import Path as _Path
 import asyncio
 from dataclasses import asdict
 
+from auth import storage as auth_storage
+
 # Suppress C-level dependency warnings globally
 os.environ["PYTHONWARNINGS"] = "ignore"
 
@@ -235,6 +237,7 @@ def _read_studio_install_id() -> str:
 
 
 _STUDIO_ROOT_ID_CACHE: str = _read_studio_install_id()
+CLOUD_TRAINING_PROVIDERS = ["google_colab", "kaggle", "cloud_gpu"]
 
 
 def _studio_root_id() -> str:
@@ -243,6 +246,42 @@ def _studio_root_id() -> str:
     Empty when no installer token is present; the launcher treats "" as
     "accept any healthy backend"."""
     return _STUDIO_ROOT_ID_CACHE
+
+
+def build_training_access_payload(subject: str) -> dict[str, object]:
+    profile = auth_storage.get_user_profile(subject) or {}
+    has_cloud_training = auth_storage.has_ceo_training_entitlement(subject, profile)
+    cloud_training_unlocked = bool(has_cloud_training)
+    local_training_available = not bool(_hw_module.CHAT_ONLY)
+    local_gpu_bypass_allowed = cloud_training_unlocked
+    local_gpu_required = not local_training_available and not local_gpu_bypass_allowed
+    training_access = "locked"
+    training_mode = "locked"
+    training_mode_unlocked = False
+    if cloud_training_unlocked and local_training_available:
+        training_access = "local_plus_cloud_ceo"
+        training_mode = "local_plus_cloud"
+        training_mode_unlocked = True
+    elif cloud_training_unlocked:
+        training_access = "cloud_ceo"
+        training_mode = "cloud"
+        training_mode_unlocked = True
+    elif local_training_available:
+        training_access = "local"
+        training_mode = "local"
+        training_mode_unlocked = True
+    return {
+        "cloud_training_unlocked": cloud_training_unlocked,
+        "cloud_training_providers": CLOUD_TRAINING_PROVIDERS,
+        "training_access": training_access,
+        "training_mode": training_mode,
+        "training_mode_unlocked": training_mode_unlocked,
+        "training_local_available": local_training_available,
+        "training_cloud_available": cloud_training_unlocked,
+        "training_local_gpu_required": local_gpu_required,
+        "training_local_gpu_bypass_allowed": local_gpu_bypass_allowed,
+        "training_default_cloud_target": CLOUD_TRAINING_PROVIDERS[0] if cloud_training_unlocked else None,
+    }
 
 
 # Fix broken Windows registry MIME types: some installs map .js to text/plain,
@@ -1471,12 +1510,14 @@ async def health_check(request: Request):
     if not subject:
         return base
 
+    training_access = build_training_access_payload(subject)
     platform_map = {"darwin": "mac", "win32": "windows", "linux": "linux"}
     device_type = platform_map.get(sys.platform, sys.platform)
     return {
         **base,
         # Why chat_only is set. This fingerprints the host, so keep it authed.
         "chat_only_reason": getattr(_hw_module, "CHAT_ONLY_REASON", None),
+        **training_access,
         "version": UNSLOTH_VERSION,
         "studio_version": STUDIO_VERSION,
         "device_type": device_type,
@@ -1509,7 +1550,7 @@ def studio_download_transport_capabilities(_current_subject: str = Depends(get_c
 
 @app.post("/api/shutdown")
 async def shutdown_server(request: Request, current_subject: str = Depends(get_current_jwt_subject)):
-    """Gracefully shut down the Unsloth Studio server.
+    """Gracefully shut down the CogniX server.
 
     Called by the frontend quit dialog so users can stop the server from the UI
     without the CLI or killing the process manually.
@@ -1634,7 +1675,8 @@ def _inject_bootstrap(html_bytes: bytes, app: FastAPI):
     import json as _json
     import secrets as _secrets
 
-    if not storage.requires_password_change(storage.DEFAULT_ADMIN_USERNAME):
+    admin_username = storage.get_default_admin_username()
+    if not storage.requires_password_change(admin_username):
         return html_bytes, None
 
     bootstrap_pw = getattr(app.state, "bootstrap_password", None)
@@ -1643,7 +1685,7 @@ def _inject_bootstrap(html_bytes: bytes, app: FastAPI):
 
     payload = _json.dumps(
         {
-            "username": storage.DEFAULT_ADMIN_USERNAME,
+            "username": admin_username,
             "password": bootstrap_pw,
         }
     )

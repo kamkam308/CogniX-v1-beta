@@ -17,7 +17,7 @@ import {
   NewReleasesIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { SettingsRow } from "../components/settings-row";
 import { SettingsSection } from "../components/settings-section";
 import { StudioVersionSection } from "../components/studio-version-section";
@@ -25,6 +25,7 @@ import {
   type UpdateInstallSource,
   UpdateStudioInstructions,
 } from "../components/update-studio-instructions";
+import { useSettingsDialogStore } from "../stores/settings-dialog-store";
 
 type ApiObject = Record<string, unknown>;
 
@@ -76,6 +77,11 @@ export function AboutTab() {
   const deviceType = usePlatformStore((s) => s.deviceType);
   const defaultShell = deviceType === "windows" ? "windows" : "unix";
   const hw = useHardwareInfo();
+  const updateSectionRef = useRef<HTMLDivElement | null>(null);
+  const scrollTarget = useSettingsDialogStore((s) => s.scrollTarget);
+  const consumeScrollTarget = useSettingsDialogStore(
+    (s) => s.consumeScrollTarget,
+  );
   const [shutdownOpen, setShutdownOpen] = useState(false);
   const [installSource, setInstallSource] = useState<
     UpdateInstallSource | "loading"
@@ -95,6 +101,20 @@ export function AboutTab() {
     };
   }, []);
 
+  useEffect(() => {
+    if (scrollTarget !== "about-updates") {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      updateSectionRef.current?.scrollIntoView({
+        block: "start",
+        behavior: "smooth",
+      });
+      consumeScrollTarget("about-updates");
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [consumeScrollTarget, scrollTarget]);
+
   return (
     <div className="flex flex-col gap-6">
       <header className="flex flex-col gap-1">
@@ -106,19 +126,21 @@ export function AboutTab() {
         </p>
       </header>
 
-      {/* llama.cpp row lives in the shared version section so it sits with the
-          Unsloth/Package rows; the prop keeps it About-only (General passes none). */}
+      {/* llama.cpp row lives in the shared version section; the prop keeps it
+          About-only (General passes none). */}
       <StudioVersionSection llamaCppVersion={hw.llamaCpp} />
 
-      <SettingsSection title={t("settings.about.updates")}>
-        <div className="py-2">
-          <UpdateStudioInstructions
-            defaultShell={defaultShell}
-            installSource={isTauri ? null : installSource}
-            showTitle={false}
-          />
-        </div>
-      </SettingsSection>
+      <div ref={updateSectionRef} className="scroll-mt-5">
+        <SettingsSection title={t("settings.about.updates")}>
+          <div className="py-2">
+            <UpdateStudioInstructions
+              defaultShell={defaultShell}
+              installSource={isTauri ? null : installSource}
+              showTitle={false}
+            />
+          </div>
+        </SettingsSection>
+      </div>
 
       {hw.gpus.length > 0 || hw.cuda || hw.rocm ? (
         <SettingsSection title={t("settings.about.hardware")}>
@@ -158,19 +180,19 @@ export function AboutTab() {
       <SettingsSection title={t("settings.about.help")}>
         <SettingsRow label={t("settings.about.documentation")}>
           <a
-            href="https://unsloth.ai/docs"
+            href="https://github.com/kamkam308/CogniX-v1-beta"
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground"
           >
             <HugeiconsIcon icon={Book03Icon} className="size-3.5" />
-            unsloth.ai/docs
+            CogniX GitHub
             <HugeiconsIcon icon={ArrowUpRight01Icon} className="size-3" />
           </a>
         </SettingsRow>
         <SettingsRow label={t("settings.about.releaseNotes")}>
           <a
-            href="https://unsloth.ai/docs/new/changelog"
+            href="https://github.com/kamkam308/CogniX-v1-beta/releases"
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground"
@@ -182,7 +204,7 @@ export function AboutTab() {
         </SettingsRow>
         <SettingsRow label={t("settings.about.feedback")}>
           <a
-            href="https://github.com/unslothai/unsloth/issues"
+            href="https://github.com/kamkam308/CogniX-v1-beta/issues"
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground"
@@ -203,7 +225,7 @@ export function AboutTab() {
           description={t("settings.about.license.studioDescription")}
         >
           <a
-            href="https://github.com/unslothai/unsloth/blob/main/studio/LICENSE.AGPL-3.0"
+            href="https://github.com/kamkam308/CogniX-v1-beta/blob/main/studio/LICENSE.AGPL-3.0"
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-1 font-mono text-xs font-medium text-muted-foreground hover:text-foreground"
@@ -217,7 +239,7 @@ export function AboutTab() {
           description={t("settings.about.license.libraryDescription")}
         >
           <a
-            href="https://github.com/unslothai/unsloth/blob/main/LICENSE"
+            href="https://github.com/kamkam308/CogniX-v1-beta/blob/main/LICENSE"
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-1 font-mono text-xs font-medium text-muted-foreground hover:text-foreground"

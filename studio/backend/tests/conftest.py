@@ -29,7 +29,7 @@ if str(_backend_root) not in sys.path:
 def pytest_addoption(parser):
     group = parser.getgroup(
         "unsloth-e2e",
-        "Unsloth Studio end-to-end test options",
+        "CogniX end-to-end test options",
     )
     group.addoption(
         "--unsloth-model",

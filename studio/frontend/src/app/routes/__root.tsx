@@ -9,6 +9,7 @@ import {
   SettingsDialog,
   useSettingsDialogStore,
 } from "@/features/settings";
+import { initializeAccentColor } from "@/features/settings/stores/accent-color-store";
 import {
   ChatPage,
   clearNewChatDraft,
@@ -16,6 +17,7 @@ import {
   type ChatSearch,
 } from "@/features/chat";
 import { RemoteCodeConsentDialog } from "@/features/security";
+import { CogniXCommandPalette } from "@/features/cognix-modules/command-palette";
 import { useTrainingUnloadGuard } from "@/features/training";
 import { useExportRuntimeLifecycle } from "@/features/export";
 import { hasAuthToken } from "@/features/auth";
@@ -62,18 +64,34 @@ function PersonalizationSyncMount() {
   return null;
 }
 
+function AccentColorMount() {
+  useLayoutEffect(() => {
+    initializeAccentColor();
+  }, []);
+  return null;
+}
+
 const CHAT_ONLY_ALLOWED = new Set([
   "/",
   "/chat",
   "/projects",
   "/hub",
+  "/pulse",
+  "/library",
+  "/scheduled",
+  "/apps",
+  "/gpts",
+  "/images",
+  "/codex",
   "/login",
   "/signup",
   "/change-password",
 ]);
 
-function isChatOnlyAllowed(pathname: string): boolean {
+function isChatOnlyAllowed(pathname: string, trainingAccessible = false): boolean {
   if (CHAT_ONLY_ALLOWED.has(pathname)) return true;
+  if (pathname === "/admin" || pathname.startsWith("/admin/")) return true;
+  if (trainingAccessible && (pathname === "/studio" || pathname.startsWith("/studio/"))) return true;
   if (pathname === "/data-recipes" || pathname.startsWith("/data-recipes/")) return true;
   return false;
 }
@@ -83,25 +101,32 @@ export const Route = createRootRoute({
     // Fetch platform info before the chat-only guard. fetchDeviceType caches,
     // so later navigations are instant.
     await fetchDeviceType();
-    const chatOnly = usePlatformStore.getState().isChatOnly();
-    if (chatOnly && !isChatOnlyAllowed(location.pathname)) {
+    const platform = usePlatformStore.getState();
+    const chatOnly = platform.isChatOnly();
+    if (chatOnly && !isChatOnlyAllowed(location.pathname, platform.isTrainingAccessible())) {
       throw redirect({ to: "/chat" });
     }
   },
   component: RootLayout,
 });
 
-const HIDDEN_NAVBAR_ROUTES = ["/onboarding", "/login", "/change-password"];
+const HIDDEN_NAVBAR_ROUTES = ["/onboarding", "/login", "/signup", "/change-password"];
+const AUTH_FLOW_ROUTES = new Set(["/login", "/signup"]);
 
 // Fallback when no matched route declares a `staticData.title`.
-const DEFAULT_DOCUMENT_TITLE = "Unsloth Studio";
+const DEFAULT_DOCUMENT_TITLE = "CogniX";
 
 function RootLayout() {
   const t = useT();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const hideNavbar = HIDDEN_NAVBAR_ROUTES.includes(pathname);
+  const isMarketingRoute = pathname === "/";
+  const hideNavbar = isMarketingRoute || HIDDEN_NAVBAR_ROUTES.includes(pathname);
+  const isAuthFlowRoute = AUTH_FLOW_ROUTES.has(pathname);
+  const hiddenRouteKey = isMarketingRoute ? "marketing" : isAuthFlowRoute ? "auth-flow" : pathname;
   // Exact match: a prefix would treat /chatty as chat, hiding its not-found UI.
   const isChatRoute = pathname === "/chat";
+  const isCodexRoute = pathname === "/codex";
+  const isChatSurfaceRoute = isChatRoute || isCodexRoute;
   const { pinned, setPinned, togglePinned } = useSidebarPin();
   const navigate = useNavigate();
 
@@ -124,22 +149,23 @@ function RootLayout() {
       compare: rawCompare,
       new: rawNew,
       project: rawProject,
+      codex: isCodexRoute || undefined,
     }),
-    [rawThread, rawCompare, rawNew, rawProject],
+    [isCodexRoute, rawThread, rawCompare, rawNew, rawProject],
   );
   // Freeze the last /chat search and latch "mounted" via render-phase setState
   // (React's "adjust state during render" pattern), avoiding effects/refs.
   const [frozenChatSearch, setFrozenChatSearch] =
     useState<ChatSearch>(liveChatSearch);
-  const [chatMounted, setChatMounted] = useState(isChatRoute);
-  if (isChatRoute && frozenChatSearch !== liveChatSearch) {
+  const [chatMounted, setChatMounted] = useState(isChatSurfaceRoute);
+  if (isChatSurfaceRoute && frozenChatSearch !== liveChatSearch) {
     setFrozenChatSearch(liveChatSearch);
   }
-  if (isChatRoute && !chatMounted) {
+  if (isChatSurfaceRoute && !chatMounted) {
     setChatMounted(true);
   }
-  const chatSearch = isChatRoute ? liveChatSearch : frozenChatSearch;
-  const shouldMountChat = isChatRoute || chatMounted;
+  const chatSearch = isChatSurfaceRoute ? liveChatSearch : frozenChatSearch;
+  const shouldMountChat = isChatSurfaceRoute || chatMounted;
 
   useTrainingUnloadGuard();
   // Global export driver: streams worker logs and tracks status from any route
@@ -196,7 +222,7 @@ function RootLayout() {
   }, [navigate]);
 
   useEffect(() => {
-    if (isChatRoute) return;
+    if (isChatSurfaceRoute) return;
     const chatRuntime = useChatRuntimeStore.getState();
     // A URL-less chat's provider is keyed off the active thread id; clearing it
     // mid-generation would remount and cancel the stream. Only reset when idle.
@@ -211,31 +237,44 @@ function RootLayout() {
     // but keep the transfer running in the manager, like a Hub download.
     if (chatRuntime.pendingSelection)
       chatRuntime.abandonStagedModel({ keepDownload: true });
-  }, [isChatRoute]);
+  }, [isChatSurfaceRoute]);
 
   return (
     <AppProvider>
+      <AccentColorMount />
       <PersonalizationSyncMount />
       <SettingsDialog />
       <RemoteCodeConsentDialog />
+      <CogniXCommandPalette />
       {hideNavbar ? (
-        <main className="flex-1">
-          <Suspense fallback={<RouteFallback />}>
-            <Outlet />
-          </Suspense>
+        <main className={`flex-1 ${isMarketingRoute ? "overflow-y-auto" : "overflow-hidden"}`}>
+          <AnimatePresence initial={false} mode={isAuthFlowRoute ? "popLayout" : "wait"}>
+            <motion.div
+              key={hiddenRouteKey}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.18, ease: [0.215, 0.61, 0.355, 1] }}
+              className="flex min-h-full flex-1 flex-col"
+            >
+              <Suspense fallback={<RouteFallback />}>
+                <Outlet />
+              </Suspense>
+            </motion.div>
+          </AnimatePresence>
         </main>
       ) : (
         <SidebarProvider
           pinned={pinned}
           setPinned={setPinned}
           togglePinned={togglePinned}
-          className="!min-h-0 h-[calc(100dvh-var(--studio-titlebar-height,0px))] overflow-hidden"
+          className="!min-h-0 h-dvh overflow-hidden"
         >
           <AppSidebar />
-          <SidebarInset className={isChatRoute ? "overflow-hidden" : "overflow-y-auto"}>
+          <SidebarInset className={isChatSurfaceRoute ? "overflow-hidden" : "overflow-y-auto"}>
             <Navbar />
             <div
-              className={`relative flex min-h-0 min-w-0 flex-1 basis-0 flex-col ${isChatRoute ? "overflow-hidden" : "overflow-visible"} ${isChatRoute ? "" : "pt-14 md:pt-0"}`}
+              className={`relative flex min-h-0 min-w-0 flex-1 basis-0 flex-col ${isChatSurfaceRoute ? "overflow-hidden" : "overflow-visible"} ${isChatSurfaceRoute ? "" : "pt-14 md:pt-0"}`}
             >
               {/* Stays mounted across navigation so an in-flight generation is
                   not cancelled when leaving /chat; hidden (not unmounted) off-route.
@@ -244,13 +283,13 @@ function RootLayout() {
               {shouldMountChat && (
                 <div
                   className={
-                    isChatRoute
+                    isChatSurfaceRoute
                       ? "flex min-h-0 min-w-0 flex-1 basis-0 flex-col overflow-hidden"
                       : "hidden"
                   }
-                  inert={!isChatRoute || undefined}
+                  inert={!isChatSurfaceRoute || undefined}
                 >
-                  <ChatPage search={chatSearch} active={isChatRoute} />
+                  <ChatPage search={chatSearch} active={isChatSurfaceRoute} />
                 </div>
               )}
               {/* Use mode="popLayout" instead of "wait" to prevent UI freezes when
@@ -258,7 +297,7 @@ function RootLayout() {
                   "popLayout" allows the new route to mount immediately while the
                   old one animates out, avoiding blocking on expensive exit renders.
                   See issue #5850. */}
-              {!isChatRoute && (
+              {!isChatSurfaceRoute && (
                 <AnimatePresence initial={false} mode="popLayout">
                   <motion.div
                     key={pathname}

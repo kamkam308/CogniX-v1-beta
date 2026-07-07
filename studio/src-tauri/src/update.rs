@@ -61,8 +61,8 @@ fn spawn_update(
         cmd.env_remove("PYTHONPATH");
     }
 
-    // Tauri manages the legacy root; scrub so 'unsloth studio update' targets
-    // the same install the desktop app uses, not an inherited custom root.
+    // Tauri manages the legacy root; scrub overrides so the managed updater
+    // targets the same install the desktop app uses.
     cmd.env_remove("UNSLOTH_STUDIO_HOME");
     cmd.env_remove("STUDIO_HOME");
     // Signal to unsloth_cli that this update was initiated by the Tauri
@@ -236,7 +236,7 @@ fn run_backend_update_with_terminal_events(
     let bin = match crate::process::find_unsloth_binary() {
         Some(bin) => bin,
         None => {
-            let msg = "Unsloth binary not found. Cannot run update.".to_string();
+            let msg = "CogniX managed runtime not found. Cannot run update.".to_string();
             diagnostics::finish_attempt(&diagnostics, &attempt, None, false, Some(msg.clone()));
             clear_current_attempt(&state);
             return Err(msg);

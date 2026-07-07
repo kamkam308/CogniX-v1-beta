@@ -33,9 +33,9 @@ export interface ChannelPreset {
 export const CHANNEL_PRESETS: readonly ChannelPreset[] = [
   {
     id: "unsloth-trending",
-    label: "Unsloth Trending",
+    label: "CogniX Trending",
     icon: SparklesIcon,
-    hint: "Most trending models published by Unsloth.",
+    hint: "Most trending models published by CogniX.",
     owner: "unsloth",
     tags: ["gguf"],
     format: "gguf",
@@ -43,9 +43,9 @@ export const CHANNEL_PRESETS: readonly ChannelPreset[] = [
   },
   {
     id: "unsloth-latest",
-    label: "Latest Unsloth",
+    label: "Latest CogniX",
     icon: NewReleasesIcon,
-    hint: "Freshly released models from the Unsloth channel.",
+    hint: "Freshly released models from the CogniX channel.",
     owner: "unsloth",
     format: "all",
     // Newest by creation date so the feed shows freshly released models, not
@@ -91,7 +91,7 @@ export const CHANNEL_TO_SECTION: Record<ChannelId, HubSection> = {
 
 export const HUB_SECTION_TITLE: Record<HubSection, string> = {
   trending: "Trending Now",
-  latest: "Latest Unsloth Models",
+  latest: "Latest CogniX Models",
   finetune: "Fine-tune Ready",
 };
 

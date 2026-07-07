@@ -38,8 +38,8 @@ import {
   useScrollThreadToBottom,
 } from "@/components/assistant-ui/use-intent-aware-autoscroll";
 import { Button } from "@/components/ui/button";
-import { MascotImg } from "@/components/mascot-img";
 import { Spinner } from "@/components/ui/spinner";
+import { Badge } from "@/components/assistant-ui/badge";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -52,9 +52,29 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import {
   CHAT_HISTORY_UPDATED_EVENT,
+  analyzeToolDiscovery,
+  createDebatePlan,
+  createDraftGenerationPlan,
   forkChatThread,
   getForkCount,
+  listDebateSessions,
+  listResponseReflectionEvaluations,
+  listResponseVariants,
+  listToolRecommendations,
+  type DebatePlan,
+  type DebateSessionRecord,
+  type DraftGenerationPlan,
+  type ResponseReflectionRecord,
+  type ResponseVariantRecord,
+  type StoredToolRecommendationRecord,
+  type ToolDiscoveryPlan,
+  type ToolDiscoveryRecommendation,
 } from "@/features/chat/api/chat-api";
 import { sentAudioNames } from "@/features/chat/api/chat-adapter";
 import {
@@ -91,7 +111,7 @@ import { listThreadDocuments } from "@/features/rag/api/rag-api";
 import { ThreadDocumentsBar } from "@/features/rag/components/thread-documents-bar";
 import { KnowledgeBaseComposerButton } from "@/features/rag/components/knowledge-base-composer-button";
 import { DocumentPreviewMount } from "@/features/rag/components/document-preview-mount";
-import { useUserProfileStore } from "@/features/profile/stores/user-profile-store";
+import { useEffectiveProfile } from "@/features/profile";
 import { applyQwenThinkingParams } from "@/features/chat/utils/qwen-params";
 import { isTauri } from "@/lib/api-base";
 import { copyToClipboard } from "@/lib/copy-to-clipboard";
@@ -133,6 +153,7 @@ import { useNavigate } from "@tanstack/react-router";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
+  ChevronDownIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   Columns2Icon,
@@ -143,8 +164,10 @@ import {
   MoreHorizontalIcon,
   PlusIcon,
   RefreshCwIcon,
+  ScaleIcon,
   SquareIcon,
   TerminalIcon,
+  WrenchIcon,
   XIcon,
 } from "lucide-react";
 import {
@@ -742,7 +765,8 @@ export const Thread: FC<{
   hideComposer?: boolean;
   hideWelcome?: boolean;
   targetThreadId?: string;
-}> = ({ hideComposer, hideWelcome, targetThreadId }) => {
+  composerAccessory?: ReactNode;
+}> = ({ hideComposer, hideWelcome, targetThreadId, composerAccessory }) => {
   // Intent-aware autoscroll replaces assistant-ui's built-in autoscroll to
   // prevent the streaming-mutation race that snaps the viewport back to the
   // bottom while the user scrolls up (see the hook for the full explanation).
@@ -975,7 +999,11 @@ export const Thread: FC<{
               <AuiIf
                 condition={({ thread }) => thread.isEmpty && !thread.isLoading}
               >
-                <ThreadWelcome hideComposer={hideComposer} threadId={threadId} />
+                <ThreadWelcome
+                  hideComposer={hideComposer}
+                  threadId={threadId}
+                  composerAccessory={composerAccessory}
+                />
               </AuiIf>
             )}
 
@@ -1038,6 +1066,7 @@ export const Thread: FC<{
                 disabled={isComposerAttachPending}
                 threadId={threadId}
                 onHeightChange={setComposerHeight}
+                composerAccessory={composerAccessory}
               />
             </AuiIf>
           )}
@@ -1156,7 +1185,8 @@ const ThreadComposerDock: FC<{
   disabled?: boolean;
   threadId?: string | null;
   onHeightChange?: (height: number | null) => void;
-}> = ({ disabled, threadId, onHeightChange }) => {
+  composerAccessory?: ReactNode;
+}> = ({ disabled, threadId, onHeightChange, composerAccessory }) => {
   const { overlay } = useGeneratedImageOverlay();
   const activeThreadId = useChatRuntimeStore((s) => s.activeThreadId);
   const threadListItemId = useAuiState(
@@ -1222,6 +1252,7 @@ const ThreadComposerDock: FC<{
             disabled={disabled}
             threadId={threadId}
             menuSide="top"
+            accessory={composerAccessory}
           />
         </div>
         {showModelDisclaimer && (
@@ -1245,11 +1276,11 @@ const ThreadScrollToBottom: FC = () => {
   const scrollToBottom = useScrollThreadToBottom();
   return (
     <TooltipIconButton
-      tooltip="Scroll to bottom"
+      tooltip="Aller en bas"
       variant="outline"
       onClick={() => scrollToBottom("auto")}
       className={cn(
-        "aui-thread-scroll-to-bottom pointer-events-auto rounded-full p-4 bg-background hover:bg-accent dark:bg-background dark:hover:bg-accent",
+        "aui-thread-scroll-to-bottom pointer-events-auto size-10 rounded-full border-border/70 bg-background/90 p-0 shadow-md backdrop-blur transition-all hover:bg-accent dark:bg-background/90 dark:hover:bg-accent",
         isAtBottom && "invisible pointer-events-none",
       )}
     >
@@ -1261,43 +1292,38 @@ const ThreadScrollToBottom: FC = () => {
 const pickRandom = <T,>(arr: T[]): T =>
   arr[Math.floor(Math.random() * arr.length)];
 
-// Each greeting carries its matching sloth picture so a line always shows the
-// same mascot. Greeting varies by local time; name-bearing lines drop the
-// name when none is set.
-type Welcome = { text: string; sloth: string };
+type Welcome = { text: string };
 const DEFAULT_WELCOME: Welcome = {
-  text: "What’s on your mind today?",
-  sloth: "sloth magnify final.png",
+  text: "What is on your mind today?",
 };
 
 function buildWelcome(hour: number, name: string): Welcome {
-  const g = (text: string, sloth: string): Welcome => ({ text, sloth });
-  // Use the name on ~a third of lines (only direct salutations where it reads
-  // naturally); the rest stay name-free so greetings don't feel repetitive.
+  const g = (text: string): Welcome => ({ text });
+  const withName = (text: string, fallback = text): Welcome =>
+    g(name ? `${text}, ${name}` : fallback);
   const base: Welcome[] = [
-    g(name ? `Good to see you, ${name}` : "Good to see you", "large sloth wave.png"),
-    g("Ready when you are", "large sloth thumbs.png"),
+    g(name ? `Good to see you, ${name}` : "Good to see you"),
+    withName("Ready when you are"),
     DEFAULT_WELCOME,
-    g("How can I help?", "sloth sir large.png"),
+    g(name ? `How can I help, ${name}?` : "How can I help?"),
   ];
   if (hour >= 4 && hour < 9) {
-    const morning = g(name ? `Good morning, ${name}` : "Good morning", "large sloth drink.png");
+    const morning = g(name ? `Good morning, ${name}` : "Good morning");
     return pickRandom([...base, morning]);
   }
   if (hour >= 17 && hour < 23) {
     const evening: Welcome[] = [
-      g(name ? `Good evening, ${name}` : "Good evening", "sloth shy large.png"),
-      g("What’s on for tonight?", "large sloth glasses.png"),
+      g(name ? `Good evening, ${name}` : "Good evening"),
+      g(name ? `What is on for tonight, ${name}?` : "What is on for tonight?"),
     ];
-    // Lean toward an evening line, but a base greeting can still appear.
     return pickRandom(Math.random() < 0.75 ? evening : base);
   }
   if (hour >= 23 || hour < 4) {
     return pickRandom([
-      g("Night owl mode?", "large sloth glasses.png"),
-      g("Late night ideas?", "large sloth yay.png"),
-      g("Up late with an idea?", "large sloth heart.png"),
-      g(name ? `The night shift begins, ${name}` : "The night shift begins", "large sloth drink.png"),
+      g(name ? `Night owl mode, ${name}?` : "Night owl mode?"),
+      g(name ? `Late night ideas, ${name}?` : "Late night ideas?"),
+      g(name ? `Up late with an idea, ${name}?` : "Up late with an idea?"),
+      g(name ? `The night shift begins, ${name}` : "The night shift begins"),
     ]);
   }
   return pickRandom(base);
@@ -1306,30 +1332,22 @@ function buildWelcome(hour: number, name: string): Welcome {
 const ThreadWelcome: FC<{
   hideComposer?: boolean;
   threadId?: string | null;
-}> = ({ hideComposer, threadId }) => {
+  composerAccessory?: ReactNode;
+}> = ({ hideComposer, threadId, composerAccessory }) => {
   const incognito = useChatRuntimeStore((s) => s.incognito);
-  const displayName = useUserProfileStore((s) => s.displayName);
-  const nickname = useUserProfileStore((s) => s.nickname);
+  const { addressName } = useEffectiveProfile();
   const [welcome, setWelcome] = useState<Welcome>(DEFAULT_WELCOME);
 
   useEffect(() => {
-    // Prefer the nickname; otherwise first name only. Blank falls back to none.
-    const name = nickname.trim() || (displayName.trim().split(/\s+/)[0] ?? "");
+    const name = addressName.trim().split(/\s+/)[0] ?? "";
     setWelcome(buildWelcome(new Date().getHours(), name));
-  }, [displayName, nickname]);
-
-  const currentEmojiSrc = `Sloth emojis/${welcome.sloth}`;
+  }, [addressName]);
 
   return (
     <div className="aui-thread-welcome-root mx-auto my-auto flex w-full max-w-(--thread-max-width) grow flex-col">
       <div className="aui-thread-welcome-center flex w-full grow flex-col items-center justify-start pt-[27.5vh]">
         <div className="aui-thread-welcome-message flex w-full flex-col justify-center gap-9 px-4">
-          {/* Center the greeting (sloth + title) over the composer. */}
           <div className="flex flex-row items-center justify-center gap-[15px]">
-            <MascotImg
-              src={currentEmojiSrc}
-              className="size-[44px] -translate-y-[2px]"
-            />
             <h1 className="aui-thread-welcome-message-inner unsloth-welcome-title fade-in slide-in-from-bottom-1 animate-in text-3xl tracking-[-0.02em] duration-200">
               {incognito ? "Temporary chat" : welcome.text}
             </h1>
@@ -1340,7 +1358,12 @@ const ThreadWelcome: FC<{
               disappears when you leave.
             </p>
           )}
-          {!hideComposer && <ComposerAnimated threadId={threadId} />}
+          {!hideComposer && (
+            <ComposerAnimated
+              threadId={threadId}
+              accessory={composerAccessory}
+            />
+          )}
         </div>
       </div>
     </div>
@@ -1363,11 +1386,17 @@ const ComposerAnimated: FC<{
   placeholder?: string;
   threadId?: string | null;
   menuSide?: "top" | "bottom";
-}> = ({ disabled, threadId, menuSide }) => {
+  accessory?: ReactNode;
+}> = ({ disabled, threadId, menuSide, accessory }) => {
   return (
     <div className="relative mx-auto min-w-0 w-full max-w-[46rem]">
       <div className="relative z-10 w-full">
-        <Composer disabled={disabled} threadId={threadId} menuSide={menuSide} />
+        <Composer
+          disabled={disabled}
+          threadId={threadId}
+          menuSide={menuSide}
+          accessory={accessory}
+        />
       </div>
     </div>
   );
@@ -1402,7 +1431,8 @@ const Composer: FC<{
   placeholder?: string;
   threadId?: string | null;
   menuSide?: "top" | "bottom";
-}> = ({ disabled, threadId, menuSide }) => {
+  accessory?: ReactNode;
+}> = ({ disabled, threadId, menuSide, accessory }) => {
   const aui = useAui();
   const pageDragging = useContext(PageDragContext);
   const { overlay, closeOverlay } = useGeneratedImageOverlay();
@@ -1878,6 +1908,11 @@ const Composer: FC<{
           dir="auto"
           {...inputProps}
         />
+        {accessory ? (
+          <div className="flex min-w-0 shrink-0 items-center">
+            {accessory}
+          </div>
+        ) : null}
         <ComposerRightControls
           disabled={
             disabled ||
@@ -3484,7 +3519,7 @@ const GeneratingIndicator: FC = () => {
   if (!show) {
     return null;
   }
-  return <span className="text-sm text-muted-foreground">Generating...</span>;
+  return <span className="cognix-thinking-indicator">Thinking</span>;
 };
 
 // Placeholder when stop fires before any visible content (e.g. mid-think).
@@ -3546,6 +3581,703 @@ const DiffusionCanvas: FC = () => {
       <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap px-3 py-2 font-mono text-[12.5px] leading-relaxed text-foreground/90">
         {canvas.text}
       </pre>
+    </div>
+  );
+};
+
+type ResponseReflectionMetadata = {
+  recordId?: string;
+  confidenceScore?: number;
+  confidenceLabel?: string;
+  verificationRequired?: boolean;
+  recommendedAction?: string;
+  issueCount?: number;
+  issueIds?: string[];
+  createdAt?: string | null;
+  source?: "message" | "stored";
+};
+
+type DraftVariantPanelStatus = "loading" | "loaded" | "error";
+
+type DraftVariantPanelState = {
+  status: DraftVariantPanelStatus;
+  plan?: DraftGenerationPlan | null;
+  variants?: ResponseVariantRecord[];
+  message?: string | null;
+};
+
+type DebatePanelStatus = "loading" | "loaded" | "error";
+
+type DebatePanelState = {
+  status: DebatePanelStatus;
+  plan?: DebatePlan | null;
+  session?: DebateSessionRecord | null;
+  sessions?: DebateSessionRecord[];
+  message?: string | null;
+};
+
+type ToolDiscoveryPanelStatus = "loading" | "loaded" | "error";
+
+type ToolDiscoveryPanelState = {
+  status: ToolDiscoveryPanelStatus;
+  plan?: ToolDiscoveryPlan | null;
+  recommendations?: StoredToolRecommendationRecord[];
+  message?: string | null;
+};
+
+const useDraftVariantPanelStore = create<{
+  byMessageId: Record<string, DraftVariantPanelState>;
+  setPanelState: (messageId: string, state: DraftVariantPanelState) => void;
+}>((set) => ({
+  byMessageId: {},
+  setPanelState: (messageId, state) =>
+    set((current) => ({
+      byMessageId: {
+        ...current.byMessageId,
+        [messageId]: state,
+      },
+    })),
+}));
+
+const useDebatePanelStore = create<{
+  byMessageId: Record<string, DebatePanelState>;
+  setPanelState: (messageId: string, state: DebatePanelState) => void;
+}>((set) => ({
+  byMessageId: {},
+  setPanelState: (messageId, state) =>
+    set((current) => ({
+      byMessageId: {
+        ...current.byMessageId,
+        [messageId]: state,
+      },
+    })),
+}));
+
+const useToolDiscoveryPanelStore = create<{
+  byMessageId: Record<string, ToolDiscoveryPanelState>;
+  setPanelState: (messageId: string, state: ToolDiscoveryPanelState) => void;
+}>((set) => ({
+  byMessageId: {},
+  setPanelState: (messageId, state) =>
+    set((current) => ({
+      byMessageId: {
+        ...current.byMessageId,
+        [messageId]: state,
+      },
+    })),
+}));
+
+function asResponseReflectionMetadata(
+  value: unknown,
+): ResponseReflectionMetadata | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as ResponseReflectionMetadata;
+}
+
+function responseReflectionMetadataFromRecord(
+  record: ResponseReflectionRecord | undefined,
+): ResponseReflectionMetadata | null {
+  if (!record) return null;
+  const confidence = record.evaluation?.confidence;
+  const issues = Array.isArray(record.issues)
+    ? record.issues
+    : Array.isArray(record.evaluation?.issues)
+      ? record.evaluation.issues
+      : [];
+  const confidenceScore =
+    typeof record.confidenceScore === "number"
+      ? record.confidenceScore
+      : typeof confidence?.score === "number"
+        ? confidence.score
+        : undefined;
+  const confidenceLabel =
+    typeof record.confidenceLabel === "string" && record.confidenceLabel
+      ? record.confidenceLabel
+      : confidence?.label;
+  const recommendedAction =
+    typeof record.recommendedAction === "string" &&
+    record.recommendedAction.length > 0
+      ? record.recommendedAction
+      : confidence?.recommendedAction;
+  const verificationRequired =
+    typeof record.verificationRequired === "boolean"
+      ? record.verificationRequired
+      : typeof record.verificationRequired === "number"
+        ? record.verificationRequired !== 0
+        : confidence?.verificationRequired;
+
+  if (confidenceScore == null && !confidenceLabel && !recommendedAction) {
+    return null;
+  }
+
+  return {
+    recordId: record.id,
+    confidenceScore,
+    confidenceLabel,
+    verificationRequired,
+    recommendedAction,
+    issueCount: issues.length,
+    issueIds: issues
+      .map((issue) => issue.id)
+      .filter((id): id is string => typeof id === "string" && id.length > 0),
+    createdAt: record.createdAt ?? null,
+    source: "stored",
+  };
+}
+
+function reflectionBadgeVariant(
+  reflection: ResponseReflectionMetadata,
+): "success" | "warning" | "destructive" | "muted" {
+  const label = reflection.confidenceLabel?.toLowerCase();
+  if (label === "high" && !reflection.verificationRequired) return "success";
+  if (label === "low" || reflection.verificationRequired) return "destructive";
+  if (label === "medium") return "warning";
+  return "muted";
+}
+
+function reflectionBadgeText(reflection: ResponseReflectionMetadata): string {
+  const label = reflection.confidenceLabel?.toLowerCase();
+  if (label === "high") return "Reliability: high";
+  if (label === "low") return "Verification recommended";
+  if (label === "medium") return "Reliability: medium";
+  return "Reliability checked";
+}
+
+function reflectionActionText(action: string | undefined): string {
+  switch (action) {
+    case "accept":
+      return "Answer can be accepted.";
+    case "light_review_recommended":
+      return "Light review recommended.";
+    case "second_pass_recommended":
+      return "Second pass recommended.";
+    case "verify_with_sources":
+      return "Source verification recommended.";
+    case "regenerate_response":
+      return "Regeneration recommended.";
+    default:
+      return action ? `Action: ${action}.` : "";
+  }
+}
+
+const ResponseReflectionBadge: FC = () => {
+  const messageId = useAuiState(({ message }) => message.id);
+  const localReflection = useAuiState(({ message }) =>
+    asResponseReflectionMetadata(
+      (message.metadata?.custom as Record<string, unknown> | undefined)
+        ?.responseReflection,
+    ),
+  );
+  const [storedReflectionResult, setStoredReflectionResult] = useState<{
+    messageId: string;
+    reflection: ResponseReflectionMetadata | null;
+  } | null>(null);
+  const hasLocalReflection = Boolean(localReflection);
+
+  useEffect(() => {
+    if (hasLocalReflection || !messageId) {
+      return;
+    }
+    let cancelled = false;
+    void listResponseReflectionEvaluations(messageId)
+      .then((evaluations) => {
+        if (cancelled) return;
+        setStoredReflectionResult({
+          messageId,
+          reflection: responseReflectionMetadataFromRecord(evaluations[0]),
+        });
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setStoredReflectionResult({ messageId, reflection: null });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [hasLocalReflection, messageId]);
+
+  const storedReflection =
+    storedReflectionResult?.messageId === messageId
+      ? storedReflectionResult.reflection
+      : null;
+  const reflection =
+    localReflection ? { ...localReflection, source: "message" as const } : storedReflection;
+  if (!reflection) return null;
+
+  const score =
+    typeof reflection.confidenceScore === "number"
+      ? `${Math.round(reflection.confidenceScore * 100)}%`
+      : "n/a";
+  const issues =
+    typeof reflection.issueCount === "number"
+      ? `${reflection.issueCount} issue${reflection.issueCount === 1 ? "" : "s"}`
+      : "issues unknown";
+  const action = reflectionActionText(reflection.recommendedAction);
+  const source =
+    reflection.source === "stored" ? " Loaded from stored CogniX evaluation." : "";
+
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2">
+      <Badge
+        variant={reflectionBadgeVariant(reflection)}
+        size="sm"
+        title={`CogniX response self-reflection. Confidence: ${score}. ${issues}. ${action}${source}`}
+        className="rounded-full text-[11px]"
+      >
+        {reflectionBadgeText(reflection)}
+      </Badge>
+    </div>
+  );
+};
+
+function unwrapExportedThreadMessage(message: unknown): unknown {
+  if (!message || typeof message !== "object") return "";
+  const nested = (message as { message?: unknown }).message;
+  return nested && typeof nested === "object" ? nested : message;
+}
+
+function exportedMessageText(message: unknown): string {
+  const threadMessage = unwrapExportedThreadMessage(message);
+  if (!threadMessage || typeof threadMessage !== "object") return "";
+  const content = (threadMessage as { content?: unknown }).content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => {
+      if (!part || typeof part !== "object") return "";
+      const record = part as Record<string, unknown>;
+      if (typeof record.text === "string") return record.text;
+      if (typeof record.markdown === "string") return record.markdown;
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+function latestUserPromptBeforeMessage(exportedThread: unknown, messageId: string): string {
+  const messages =
+    exportedThread &&
+    typeof exportedThread === "object" &&
+    Array.isArray((exportedThread as { messages?: unknown }).messages)
+      ? ((exportedThread as { messages: unknown[] }).messages)
+      : [];
+  const messageIndex = messages.findIndex(
+    (message) => {
+      const threadMessage = unwrapExportedThreadMessage(message);
+      return (
+        threadMessage &&
+        typeof threadMessage === "object" &&
+        (threadMessage as { id?: unknown }).id === messageId
+      );
+    },
+  );
+  const scanEnd = messageIndex >= 0 ? messageIndex - 1 : messages.length - 1;
+  for (let index = scanEnd; index >= 0; index -= 1) {
+    const message = messages[index];
+    const threadMessage = unwrapExportedThreadMessage(message);
+    if (
+      threadMessage &&
+      typeof threadMessage === "object" &&
+      (threadMessage as { role?: unknown }).role === "user"
+    ) {
+      const text = exportedMessageText(threadMessage);
+      if (text) return text;
+    }
+  }
+  return "";
+}
+
+function draftVariantLabel(value: string | null | undefined): string {
+  if (!value) return "Variant";
+  return value
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+const ResponseDraftVariantsPanel: FC = () => {
+  const messageId = useAuiState(({ message }) => message.id);
+  const panel = useDraftVariantPanelStore(
+    (state) => state.byMessageId[messageId],
+  );
+  if (!panel) return null;
+
+  const plannedVariants = panel.plan?.variants ?? [];
+  const storedVariants = panel.variants ?? [];
+  const generationCount =
+    panel.plan?.costPlan?.estimatedGenerationCount ?? plannedVariants.length;
+  const safePlan =
+    panel.plan?.sideEffects?.generation === false &&
+    panel.plan?.sideEffects?.networkModelCall === false;
+
+  return (
+    <div
+      data-testid="cognix-draft-variants-panel"
+      className="mt-2 max-w-full rounded-2xl border border-border/70 bg-muted/25 px-3 py-2 text-xs text-muted-foreground"
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-medium text-foreground">Draft variants</span>
+        <Badge variant={panel.status === "error" ? "destructive" : "outline"} size="sm">
+          {panel.status === "loading"
+            ? "planning"
+            : panel.status === "error"
+              ? "error"
+              : storedVariants.length > 0
+                ? `${storedVariants.length} stored`
+                : `${generationCount} planned`}
+        </Badge>
+        {safePlan && (
+          <Badge variant="muted" size="sm">
+            no direct model call
+          </Badge>
+        )}
+      </div>
+      {panel.status === "loading" ? (
+        <p className="mt-1">Preparing style profiles through CogniX Core.</p>
+      ) : panel.status === "error" ? (
+        <p className="mt-1">{panel.message ?? "Draft planner unavailable."}</p>
+      ) : storedVariants.length > 0 ? (
+        <div className="mt-2 grid gap-2">
+          {storedVariants.slice(0, 3).map((variant) => (
+            <div
+              key={variant.id}
+              className="rounded-xl border border-border/60 bg-background/70 px-2.5 py-2"
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-medium text-foreground">
+                  {variant.title || draftVariantLabel(variant.variantType)}
+                </span>
+                <Badge variant="secondary" size="sm">
+                  {draftVariantLabel(variant.variantType)}
+                </Badge>
+              </div>
+              {variant.content && (
+                <p className="mt-1 line-clamp-2 text-foreground/80">
+                  {variant.content}
+                </p>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {plannedVariants.map((variant) => (
+            <Badge key={variant.id} variant="secondary" size="sm">
+              {variant.label || draftVariantLabel(variant.variantType)}
+            </Badge>
+          ))}
+        </div>
+      )}
+      {panel.status === "loaded" && plannedVariants.length > 0 && storedVariants.length === 0 && (
+        <p className="mt-2">
+          Planned only. Generation must continue through backend orchestration and explicit user action.
+        </p>
+      )}
+    </div>
+  );
+};
+
+function debateRoleLabel(
+  plan: DebatePlan | null | undefined,
+  roleId: string | null | undefined,
+): string {
+  if (!roleId) return "Agent";
+  const role = (plan?.roles ?? []).find((item) => item.id === roleId);
+  return role?.label || draftVariantLabel(roleId);
+}
+
+const ResponseDebatePanel: FC = () => {
+  const messageId = useAuiState(({ message }) => message.id);
+  const panel = useDebatePanelStore((state) => state.byMessageId[messageId]);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  if (!panel) return null;
+
+  const activeSession = panel.session ?? panel.sessions?.[0] ?? null;
+  const plan = panel.plan ?? activeSession?.plan ?? null;
+  const rounds = plan?.rounds ?? activeSession?.rounds ?? [];
+  const outputs = activeSession?.outputs ?? [];
+  const synthesis =
+    outputs.find((output) => output.outputType === "synthesis") ??
+    outputs.find((output) => output.roleId === "synthesizer") ??
+    null;
+  const plannedRoundCount =
+    plan?.summary?.plannedRoundCount ?? rounds.length;
+  const roleCount = plan?.summary?.roleCount ?? plan?.roles?.length ?? 0;
+  const safePlan =
+    plan?.displayContract?.rawChainOfThoughtVisible === false &&
+    plan?.sideEffects?.generation === false &&
+    plan?.sideEffects?.networkModelCall === false;
+
+  return (
+    <div
+      data-testid="cognix-debate-panel"
+      className="mt-2 max-w-full rounded-2xl border border-border/70 bg-muted/25 px-3 py-2 text-xs text-muted-foreground"
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-medium text-foreground">Internal debate</span>
+        <Badge variant={panel.status === "error" ? "destructive" : "outline"} size="sm">
+          {panel.status === "loading"
+            ? "planning"
+            : panel.status === "error"
+              ? "error"
+              : `${plannedRoundCount} planned`}
+        </Badge>
+        {roleCount > 0 && (
+          <Badge variant="secondary" size="sm">
+            {roleCount} roles
+          </Badge>
+        )}
+        {safePlan && (
+          <Badge variant="muted" size="sm">
+            public summaries only
+          </Badge>
+        )}
+      </div>
+      {panel.status === "loading" ? (
+        <p className="mt-1">Preparing a bounded CogniX debate plan.</p>
+      ) : panel.status === "error" ? (
+        <p className="mt-1">{panel.message ?? "Debate planner unavailable."}</p>
+      ) : (
+        <>
+          <p className="mt-2 text-foreground/85">
+            {synthesis?.publicSummary ||
+              "Debate plan ready. CogniX will keep one clean answer visible and hide internal rounds until explicitly expanded."}
+          </p>
+          <Collapsible open={detailsOpen} onOpenChange={setDetailsOpen}>
+            <CollapsibleTrigger asChild>
+              <button
+                type="button"
+                className="mt-2 flex items-center gap-1.5 rounded-full text-xs font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <ChevronDownIcon
+                  className={cn(
+                    "size-3.5 transition-transform duration-200",
+                    !detailsOpen && "-rotate-90",
+                  )}
+                />
+                Debate details
+              </button>
+            </CollapsibleTrigger>
+            <CollapsibleContent className="mt-2 space-y-1.5 data-[state=closed]:animate-out data-[state=open]:animate-in data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0">
+              {outputs.length > 0 ? (
+                outputs.slice(0, 5).map((output) => (
+                  <div
+                    key={output.id}
+                    className="rounded-xl border border-border/60 bg-background/65 px-2.5 py-2"
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium text-foreground">
+                        {debateRoleLabel(plan, output.roleId)}
+                      </span>
+                      <Badge variant="secondary" size="sm">
+                        {draftVariantLabel(output.outputType)}
+                      </Badge>
+                    </div>
+                    <p className="mt-1 line-clamp-2 text-foreground/80">
+                      {output.publicSummary}
+                    </p>
+                  </div>
+                ))
+              ) : rounds.length > 0 ? (
+                rounds.map((round) => (
+                  <div
+                    key={round.id}
+                    className="rounded-xl border border-border/60 bg-background/65 px-2.5 py-2"
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium text-foreground">
+                        {debateRoleLabel(plan, round.roleId)}
+                      </span>
+                      <Badge variant="secondary" size="sm">
+                        {round.label}
+                      </Badge>
+                    </div>
+                    {round.purpose && (
+                      <p className="mt-1 line-clamp-2 text-foreground/80">
+                        {round.purpose}
+                      </p>
+                    )}
+                  </div>
+                ))
+              ) : (
+                <p>No debate rounds are available yet.</p>
+              )}
+            </CollapsibleContent>
+          </Collapsible>
+          {safePlan && (
+            <p className="mt-2">
+              Raw chain-of-thought is hidden; only bounded public arguments and the final synthesis are shown.
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+};
+
+function toolRecommendationFromStored(
+  record: StoredToolRecommendationRecord,
+): ToolDiscoveryRecommendation {
+  return {
+    ...(record.recommendation ?? {}),
+    id: record.id,
+    toolId: record.recommendation?.toolId ?? record.toolId ?? undefined,
+    toolName: record.recommendation?.toolName ?? record.toolName ?? undefined,
+    category: record.recommendation?.category ?? record.category ?? undefined,
+    needId: record.recommendation?.needId ?? record.needId ?? undefined,
+    reason: record.recommendation?.reason ?? record.reason ?? undefined,
+    confidence:
+      record.recommendation?.confidence ??
+      (typeof record.confidence === "number" ? record.confidence : undefined),
+    status: record.recommendation?.status ?? record.status ?? undefined,
+  };
+}
+
+function toolDiscoveryStatusVariant(
+  status: string | null | undefined,
+): ComponentProps<typeof Badge>["variant"] {
+  switch (status) {
+    case "installed":
+      return "success";
+    case "connector_disabled":
+      return "warning";
+    case "ignored":
+      return "muted";
+    case "recommended":
+      return "info";
+    default:
+      return "outline";
+  }
+}
+
+function toolDiscoveryStatusLabel(status: string | null | undefined): string {
+  switch (status) {
+    case "installed":
+      return "installed";
+    case "connector_disabled":
+      return "connector disabled";
+    case "ignored":
+      return "ignored";
+    case "recommended":
+      return "recommended";
+    default:
+      return status ? draftVariantLabel(status) : "suggested";
+  }
+}
+
+const ResponseToolDiscoveryPanel: FC = () => {
+  const messageId = useAuiState(({ message }) => message.id);
+  const panel = useToolDiscoveryPanelStore(
+    (state) => state.byMessageId[messageId],
+  );
+  if (!panel) return null;
+
+  const storedRecommendations = panel.recommendations ?? [];
+  const planRecommendations = panel.plan?.recommendations ?? [];
+  const recommendations =
+    storedRecommendations.length > 0
+      ? storedRecommendations.map(toolRecommendationFromStored)
+      : planRecommendations;
+  const recommendationCount =
+    panel.plan?.summary?.recommendationCount ?? recommendations.length;
+  const needCount = panel.plan?.summary?.needCount ?? panel.plan?.needs?.length ?? 0;
+  const safePlan =
+    panel.plan?.summary?.automaticInstallAllowed === false &&
+    panel.plan?.sideEffects?.installation === false &&
+    panel.plan?.sideEffects?.toolExecution === false;
+
+  return (
+    <div
+      data-testid="cognix-tool-discovery-panel"
+      className="mt-2 max-w-full rounded-2xl border border-border/70 bg-muted/25 px-3 py-2 text-xs text-muted-foreground"
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-medium text-foreground">Tool discovery</span>
+        <Badge variant={panel.status === "error" ? "destructive" : "outline"} size="sm">
+          {panel.status === "loading"
+            ? "analyzing"
+            : panel.status === "error"
+              ? "error"
+              : `${recommendationCount} recommended`}
+        </Badge>
+        {needCount > 0 && (
+          <Badge variant="secondary" size="sm">
+            {needCount} needs
+          </Badge>
+        )}
+        {safePlan && (
+          <Badge variant="muted" size="sm">
+            no auto install
+          </Badge>
+        )}
+      </div>
+      {panel.status === "loading" ? (
+        <p className="mt-1">Analyzing the project signals through CogniX Core.</p>
+      ) : panel.status === "error" ? (
+        <p className="mt-1">{panel.message ?? "Tool discovery unavailable."}</p>
+      ) : recommendations.length > 0 ? (
+        <div className="mt-2 grid gap-2">
+          {recommendations.slice(0, 3).map((recommendation, index) => {
+            const confidence =
+              typeof recommendation.confidence === "number"
+                ? `${Math.round(recommendation.confidence * 100)}%`
+                : null;
+            return (
+              <div
+                key={recommendation.id ?? recommendation.toolId ?? `tool-${index}`}
+                className="rounded-xl border border-border/60 bg-background/70 px-2.5 py-2"
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium text-foreground">
+                    {recommendation.toolName ||
+                      draftVariantLabel(recommendation.toolId)}
+                  </span>
+                  <Badge
+                    variant={toolDiscoveryStatusVariant(recommendation.status)}
+                    size="sm"
+                  >
+                    {toolDiscoveryStatusLabel(recommendation.status)}
+                  </Badge>
+                  {recommendation.category && (
+                    <Badge variant="secondary" size="sm">
+                      {draftVariantLabel(recommendation.category)}
+                    </Badge>
+                  )}
+                  {confidence && (
+                    <Badge variant="muted" size="sm">
+                      {confidence}
+                    </Badge>
+                  )}
+                </div>
+                {recommendation.reason && (
+                  <p className="mt-1 line-clamp-2 text-foreground/80">
+                    {recommendation.reason}
+                  </p>
+                )}
+                {recommendation.installHint && (
+                  <p className="mt-1 line-clamp-1">
+                    {recommendation.installHint}
+                  </p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <p className="mt-1">
+          No extra tool need was detected for this message yet.
+        </p>
+      )}
+      {panel.status === "loaded" && (
+        <p className="mt-2">
+          Suggestions only. Activation or installation stays behind CogniX permissions and explicit validation.
+        </p>
+      )}
     </div>
   );
 };
@@ -3680,6 +4412,10 @@ const AssistantMessage: FC = () => {
             <RagSourcesGroup />
             <MessageHtmlArtifacts />
             <MessageError />
+            <ResponseReflectionBadge />
+            <ResponseDraftVariantsPanel />
+            <ResponseDebatePanel />
+            <ResponseToolDiscoveryPanel />
           </>
         )}
       </div>
@@ -3888,6 +4624,243 @@ const EditAssistantMessageButton: FC = () => {
   );
 };
 
+const DraftVariantsMenuItem: FC = () => {
+  const aui = useAui();
+  const messageId = useAuiState(({ message }) => message.id);
+  const isRunning = useAuiState(({ thread }) => thread.isRunning);
+  const setPanelState = useDraftVariantPanelStore((state) => state.setPanelState);
+  const [pending, setPending] = useState(false);
+
+  const handleDraftVariants = async () => {
+    const remoteId = aui.threadListItem().getState().remoteId;
+    const responseText = aui.message().getCopyText().trim();
+    if (!responseText) {
+      toast.error("Cannot plan variants for an empty response");
+      return;
+    }
+    const exportedThread = aui.thread().export();
+    const prompt =
+      latestUserPromptBeforeMessage(exportedThread, messageId) ||
+      `Create response variants for this CogniX answer:\n\n${responseText}`;
+    const runtime = useChatRuntimeStore.getState();
+    setPending(true);
+    setPanelState(messageId, {
+      status: "loading",
+      plan: null,
+      variants: [],
+      message: "Preparing draft variants.",
+    });
+    try {
+      const [planResult, variants] = await Promise.all([
+        createDraftGenerationPlan({
+          prompt,
+          requestedVariants: ["quick", "detailed", "technical"],
+          maxVariants: 3,
+          taskType: "general",
+          includeRanking: true,
+          messageId,
+          threadId: remoteId ?? null,
+          projectId: runtime.activeProjectId ?? null,
+          modelId: runtime.params.checkpoint ?? null,
+        }),
+        listResponseVariants(messageId).catch(() => []),
+      ]);
+      setPanelState(messageId, {
+        status: "loaded",
+        plan: planResult.draftGenerationPlan,
+        variants,
+        message: "Draft planner ready.",
+      });
+      toast.success("Draft variants planned");
+    } catch (error) {
+      setPanelState(messageId, {
+        status: "error",
+        plan: null,
+        variants: [],
+        message:
+          error instanceof Error ? error.message : "Draft planner unavailable.",
+      });
+      toast.error("Draft variants unavailable", {
+        description: error instanceof Error ? error.message : undefined,
+      });
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <ActionBarMorePrimitive.Item
+      disabled={isRunning || pending}
+      onSelect={() => void handleDraftVariants()}
+      className="aui-action-bar-more-item flex cursor-pointer select-none items-center gap-2 rounded-[12px] px-3 py-2 text-sm outline-none hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50"
+    >
+      <Columns2Icon strokeWidth={1.75} className="size-icon" />
+      {pending ? "Planning drafts" : "Draft variants"}
+    </ActionBarMorePrimitive.Item>
+  );
+};
+
+const InternalDebateMenuItem: FC = () => {
+  const aui = useAui();
+  const messageId = useAuiState(({ message }) => message.id);
+  const isRunning = useAuiState(({ thread }) => thread.isRunning);
+  const setPanelState = useDebatePanelStore((state) => state.setPanelState);
+  const [pending, setPending] = useState(false);
+
+  const handleInternalDebate = async () => {
+    const remoteId = aui.threadListItem().getState().remoteId;
+    const responseText = aui.message().getCopyText().trim();
+    if (!responseText) {
+      toast.error("Cannot plan debate for an empty response");
+      return;
+    }
+    const exportedThread = aui.thread().export();
+    const prompt =
+      latestUserPromptBeforeMessage(exportedThread, messageId) ||
+      `Prepare a CogniX internal debate for this answer:\n\n${responseText}`;
+    const runtime = useChatRuntimeStore.getState();
+    setPending(true);
+    setPanelState(messageId, {
+      status: "loading",
+      plan: null,
+      session: null,
+      sessions: [],
+      message: "Preparing internal debate.",
+    });
+    try {
+      const [planResult, sessions] = await Promise.all([
+        createDebatePlan({
+          prompt,
+          requestedRoles: ["advocate", "critic", "domain_expert", "synthesizer"],
+          maxRounds: 4,
+          taskType: "general",
+          messageId,
+          threadId: remoteId ?? null,
+          projectId: runtime.activeProjectId ?? null,
+          modelId: runtime.params.checkpoint ?? null,
+          createSession: true,
+        }),
+        listDebateSessions(messageId).catch(() => []),
+      ]);
+      setPanelState(messageId, {
+        status: "loaded",
+        plan: planResult.debatePlan,
+        session: planResult.session ?? null,
+        sessions: planResult.session ? [planResult.session, ...sessions] : sessions,
+        message: "Internal debate ready.",
+      });
+      toast.success("Internal debate planned");
+    } catch (error) {
+      setPanelState(messageId, {
+        status: "error",
+        plan: null,
+        session: null,
+        sessions: [],
+        message:
+          error instanceof Error ? error.message : "Debate planner unavailable.",
+      });
+      toast.error("Internal debate unavailable", {
+        description: error instanceof Error ? error.message : undefined,
+      });
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <ActionBarMorePrimitive.Item
+      disabled={isRunning || pending}
+      onSelect={() => void handleInternalDebate()}
+      className="aui-action-bar-more-item flex cursor-pointer select-none items-center gap-2 rounded-[12px] px-3 py-2 text-sm outline-none hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50"
+    >
+      <ScaleIcon strokeWidth={1.75} className="size-icon" />
+      {pending ? "Planning debate" : "Internal debate"}
+    </ActionBarMorePrimitive.Item>
+  );
+};
+
+const ToolDiscoveryMenuItem: FC = () => {
+  const aui = useAui();
+  const messageId = useAuiState(({ message }) => message.id);
+  const isRunning = useAuiState(({ thread }) => thread.isRunning);
+  const setPanelState = useToolDiscoveryPanelStore((state) => state.setPanelState);
+  const [pending, setPending] = useState(false);
+
+  const handleToolDiscovery = async () => {
+    const responseText = aui.message().getCopyText().trim();
+    if (!responseText) {
+      toast.error("Cannot discover tools for an empty response");
+      return;
+    }
+    const exportedThread = aui.thread().export();
+    const prompt = latestUserPromptBeforeMessage(exportedThread, messageId);
+    const objective = [
+      prompt ? `User need:\n${prompt}` : null,
+      `CogniX response context:\n${responseText.slice(0, 1600)}`,
+    ]
+      .filter(Boolean)
+      .join("\n\n")
+      .slice(0, 3800);
+    const runtime = useChatRuntimeStore.getState();
+    setPending(true);
+    setPanelState(messageId, {
+      status: "loading",
+      plan: null,
+      recommendations: [],
+      message: "Analyzing tool needs.",
+    });
+    try {
+      const result = await analyzeToolDiscovery({
+        objective,
+        projectId: runtime.activeProjectId ?? null,
+        projectType: "general",
+        installedToolIds: [],
+        storeRecommendations: true,
+        recordInstalledSnapshot: false,
+      });
+      const storedRecommendations =
+        result.storedRecommendations && result.storedRecommendations.length > 0
+          ? result.storedRecommendations
+          : runtime.activeProjectId
+            ? await listToolRecommendations({
+                projectId: runtime.activeProjectId,
+              }).catch(() => [])
+            : [];
+      setPanelState(messageId, {
+        status: "loaded",
+        plan: result.toolDiscoveryPlan,
+        recommendations: storedRecommendations,
+        message: "Tool discovery ready.",
+      });
+      toast.success("Tool discovery ready");
+    } catch (error) {
+      setPanelState(messageId, {
+        status: "error",
+        plan: null,
+        recommendations: [],
+        message:
+          error instanceof Error ? error.message : "Tool discovery unavailable.",
+      });
+      toast.error("Tool discovery unavailable", {
+        description: error instanceof Error ? error.message : undefined,
+      });
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <ActionBarMorePrimitive.Item
+      disabled={isRunning || pending}
+      onSelect={() => void handleToolDiscovery()}
+      className="aui-action-bar-more-item flex cursor-pointer select-none items-center gap-2 rounded-[12px] px-3 py-2 text-sm outline-none hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50"
+    >
+      <WrenchIcon strokeWidth={1.75} className="size-icon" />
+      {pending ? "Discovering tools" : "Discover tools"}
+    </ActionBarMorePrimitive.Item>
+  );
+};
+
 const AssistantActionBar: FC = () => {
   const { forkMessage, forkDisabled } = useForkMessageAction();
 
@@ -3928,6 +4901,9 @@ const AssistantActionBar: FC = () => {
             <GitBranchIcon strokeWidth={1.75} className="size-icon" />
             Fork in new chat
           </ActionBarMorePrimitive.Item>
+          <DraftVariantsMenuItem />
+          <InternalDebateMenuItem />
+          <ToolDiscoveryMenuItem />
           <ActionBarPrimitive.ExportMarkdown asChild={true}>
             <ActionBarMorePrimitive.Item className="aui-action-bar-more-item flex cursor-pointer select-none items-center gap-2 rounded-[12px] px-3 py-2 text-sm outline-none hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground">
               <HugeiconsIcon

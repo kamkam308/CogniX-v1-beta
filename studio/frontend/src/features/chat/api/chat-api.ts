@@ -26,7 +26,7 @@ import type {
   ValidateModelResponse,
 } from "../types/api";
 
-export const CHAT_HISTORY_UPDATED_EVENT = "unsloth-chat-history-updated";
+export const CHAT_HISTORY_UPDATED_EVENT = "cognix-chat-history-updated";
 
 export function notifyChatHistoryUpdated(): void {
   if (typeof window !== "undefined") {
@@ -36,6 +36,8 @@ export function notifyChatHistoryUpdated(): void {
 
 function parseErrorText(status: number, body: unknown): string {
   if (body && typeof body === "object") {
+    const providerError = parseProviderErrorText(body);
+    if (providerError) return providerError;
     const detail = (body as { detail?: unknown }).detail;
     const formatted = formatFastApiDetail(detail);
     if (formatted) return formatted;
@@ -43,6 +45,35 @@ function parseErrorText(status: number, body: unknown): string {
     if (typeof message === "string" && message) return message;
   }
   return `Request failed (${status})`;
+}
+
+function parseProviderErrorText(value: unknown): string | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    if (
+      (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+      (trimmed.startsWith("[") && trimmed.endsWith("]"))
+    ) {
+      try {
+        return parseProviderErrorText(JSON.parse(trimmed)) ?? trimmed;
+      } catch {
+        return trimmed;
+      }
+    }
+    return trimmed;
+  }
+  if (!value || typeof value !== "object") return null;
+  const record = value as {
+    detail?: unknown;
+    error?: unknown;
+    message?: unknown;
+  };
+  return (
+    parseProviderErrorText(record.message) ??
+    parseProviderErrorText(record.error) ??
+    parseProviderErrorText(record.detail)
+  );
 }
 
 async function parseJsonOrThrow<T>(response: Response): Promise<T> {
@@ -83,6 +114,3306 @@ export async function getApiMonitorEntry(id: string): Promise<ApiMonitorEntry> {
     `/api/inference/monitor/${encodeURIComponent(id)}`,
   );
   return parseJsonOrThrow<ApiMonitorEntry>(response);
+}
+
+export interface CogniXRouterClassification {
+  selectedDomain: string;
+  label: string;
+  recommendedModelLabel: string;
+  confidence: number;
+  needsClarification: boolean;
+  scores: Record<string, number>;
+  routingMode: string;
+  reason: string;
+}
+
+export interface CogniXExecutionStep {
+  id: string;
+  label: string;
+  status: string;
+  detail: string;
+}
+
+export interface CogniXExecutionStrategy {
+  status: string;
+  executionMode?: string | null;
+  providerId?: string | null;
+  providerType?: string | null;
+  providerName?: string | null;
+  baseUrl?: string | null;
+  selectedModelId?: string | null;
+  selectedModelLabel?: string | null;
+  domainModelLabel?: string | null;
+  requiresModelLoad: boolean;
+  willLoadModel: boolean;
+  willGenerate: boolean;
+  reason: string;
+}
+
+export interface CogniXExecutionPlan {
+  username: string;
+  orchestratorVersion: string;
+  mode: "dry_run" | string;
+  objectiveExcerpt: string;
+  classification: CogniXRouterClassification;
+  executionStrategy: CogniXExecutionStrategy;
+  steps: CogniXExecutionStep[];
+  warnings: string[];
+  sideEffects: {
+    modelLoad: boolean;
+    generation: boolean;
+    networkModelCall: boolean;
+    cacheMode: string;
+  };
+  logId: string | number | null;
+  orchestratorLogId?: string | number | null;
+}
+
+export interface CogniXDecisionReason {
+  code?: string;
+  label?: string;
+  detail?: string;
+  confidence?: number | null;
+  evidence?: Record<string, unknown>;
+}
+
+export interface CogniXDecisionExplanation {
+  title?: string;
+  summary?: string;
+  answer?: string;
+  question?: string | null;
+  sourceType?: string;
+  sourceId?: string | null;
+  decisionType?: string;
+  reasonCodes?: CogniXDecisionReason[];
+  trace?: Record<string, unknown>;
+  display?: Record<string, unknown>;
+}
+
+export interface CogniXDecisionExplainResult {
+  username: string;
+  decisionExplanation: CogniXDecisionExplanation;
+  storedDecision?: Record<string, unknown> | null;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
+export interface CogniXContextSection {
+  id: string;
+  label: string;
+  source: string;
+  priority: number;
+  content: string;
+  charCount: number;
+  included: boolean;
+  truncated: boolean;
+}
+
+export interface CogniXContextPack {
+  username: string;
+  contextManagerVersion: string;
+  mode: string;
+  projectId: string | null;
+  objectiveExcerpt: string;
+  sections: CogniXContextSection[];
+  systemInstruction: string;
+  includedSectionIds: string[];
+  warnings: string[];
+  auditLogId?: string | null;
+  sideEffects: {
+    modelLoad: boolean;
+    generation: boolean;
+    networkModelCall: boolean;
+  };
+}
+
+export async function classifyCogniXObjective(payload: {
+  objective: string;
+  projectType?: string | null;
+}): Promise<{
+  username: string;
+  classification: CogniXRouterClassification;
+  logId: string | number | null;
+}> {
+  const response = await authFetch("/api/cognix/router/classify", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      objective: payload.objective,
+      project_type: payload.projectType ?? null,
+    }),
+  });
+  return parseJsonOrThrow(response);
+}
+
+export async function buildCogniXContextPack(payload: {
+  objective?: string | null;
+  projectId?: string | null;
+}): Promise<CogniXContextPack> {
+  const response = await authFetch("/api/cognix/context/pack", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      objective: payload.objective ?? null,
+      project_id: payload.projectId ?? null,
+    }),
+  });
+  return parseJsonOrThrow(response);
+}
+
+export interface ContextGraphVisualToken {
+  colorToken?: string;
+  icon?: string;
+}
+
+export interface ContextGraphNode {
+  id: string;
+  type: string;
+  label: string;
+  source?: string;
+  weight?: number;
+  visual?: ContextGraphVisualToken;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ContextGraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  type: string;
+  label?: string;
+  weight?: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ContextGraphSnapshot {
+  contextGraphVersion?: string;
+  entityExtractorVersion?: string;
+  relationBuilderVersion?: string;
+  mode?: string;
+  projectId?: string | null;
+  projectName?: string | null;
+  projectType?: string | null;
+  nodes?: ContextGraphNode[];
+  edges?: ContextGraphEdge[];
+  summary?: {
+    nodeCount?: number;
+    edgeCount?: number;
+    conceptCount?: number;
+    documentCount?: number;
+    chatCount?: number;
+    fileCount?: number;
+    modelCount?: number;
+    toolCount?: number;
+  };
+  displayContract?: Record<string, unknown>;
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface StoredContextGraphSnapshot {
+  id: string;
+  projectId?: string | null;
+  title?: string | null;
+  graph?: ContextGraphSnapshot;
+  nodeCount?: number | null;
+  edgeCount?: number | null;
+  createdAt?: string | null;
+}
+
+export interface ContextGraphBuildResult {
+  username: string;
+  contextGraph: ContextGraphSnapshot;
+  snapshot?: StoredContextGraphSnapshot | null;
+  auditLogId?: string | null;
+  warnings?: string[];
+  sideEffects?: Record<string, unknown>;
+}
+
+export async function buildContextGraph(payload: {
+  projectId?: string | null;
+  projectName?: string | null;
+  projectType?: string | null;
+  messages?: Array<Record<string, unknown>> | null;
+  documents?: Array<Record<string, unknown>> | null;
+  files?: unknown[] | null;
+  decisions?: unknown[] | null;
+  tasks?: unknown[] | null;
+  models?: unknown[] | null;
+  tools?: unknown[] | null;
+  includeProjectThreads?: boolean;
+  storeSnapshot?: boolean;
+}): Promise<ContextGraphBuildResult> {
+  const response = await authFetch("/api/cognix/context/graph/build", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseJsonOrThrow<ContextGraphBuildResult>(response);
+}
+
+export async function listContextGraphSnapshots(payload?: {
+  projectId?: string | null;
+}): Promise<StoredContextGraphSnapshot[]> {
+  const params = new URLSearchParams();
+  if (payload?.projectId) params.set("project_id", payload.projectId);
+  const query = params.toString() ? `?${params.toString()}` : "";
+  const response = await authFetch(`/api/cognix/context/graph/snapshots${query}`);
+  const body = await parseJsonOrThrow<{
+    snapshots?: StoredContextGraphSnapshot[];
+  }>(response);
+  return body.snapshots ?? [];
+}
+
+export type WorkflowStepType =
+  | "user_action"
+  | "tool_call"
+  | "model_call"
+  | "parameters"
+  | "output"
+  | "export"
+  | "approval"
+  | string;
+
+export interface WorkflowStepInput {
+  stepType: WorkflowStepType;
+  label: string;
+  toolName?: string | null;
+  modelId?: string | null;
+  parameters?: Record<string, unknown>;
+  outputSummary?: string | null;
+  requiresApproval?: boolean;
+}
+
+export interface WorkflowStepRecord extends WorkflowStepInput {
+  id?: string | null;
+  workflowId?: string | null;
+  stepIndex: number;
+  willExecuteNow?: boolean;
+  step?: Record<string, unknown>;
+  createdAt?: string | null;
+}
+
+export interface WorkflowTemplate {
+  id: string;
+  workflowType: string;
+  label: string;
+  steps: WorkflowStepInput[];
+}
+
+export interface WorkflowRecord {
+  id: string;
+  projectId?: string | null;
+  title: string;
+  objective?: string | null;
+  workflowType: string;
+  status?: "active" | "disabled" | "archived" | string;
+  shareStatus?: "private" | "shared" | string;
+  metadata?: Record<string, unknown>;
+  steps?: WorkflowStepRecord[];
+  stepCount?: number | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface WorkflowRecordingPlan {
+  workflowRecorderVersion?: string;
+  workflowTemplateManagerVersion?: string;
+  mode?: string;
+  workflow?: Partial<WorkflowRecord>;
+  steps?: WorkflowStepRecord[];
+  summary?: Record<string, unknown>;
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface WorkflowRunPlanStep {
+  stepId?: string | null;
+  stepIndex: number;
+  stepType?: WorkflowStepType;
+  label?: string | null;
+  requiresApproval?: boolean;
+  willExecuteNow?: boolean;
+  blockedSideEffects?: string[];
+}
+
+export interface WorkflowRunPlan {
+  workflowRunnerVersion?: string;
+  mode?: string;
+  workflowId?: string | null;
+  runMode?: "dry_run" | "simulation" | string;
+  inputs?: Record<string, unknown>;
+  orderedSteps?: WorkflowRunPlanStep[];
+  summary?: Record<string, unknown>;
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface WorkflowRunRecord {
+  id: string;
+  workflowId?: string | null;
+  status?: string | null;
+  runMode?: string | null;
+  runPlan?: WorkflowRunPlan;
+  logs?: Array<Record<string, unknown>>;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface WorkflowExportBundle {
+  username?: string;
+  workflow: WorkflowRecord;
+  runs?: WorkflowRunRecord[];
+  exportedAt?: string;
+}
+
+export interface WorkflowRecordResult {
+  recordingPlan: WorkflowRecordingPlan;
+  workflow: WorkflowRecord | null;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
+export interface WorkflowUpdateResult {
+  workflow: WorkflowRecord;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
+export interface WorkflowRunPlanResult {
+  runPlan: WorkflowRunPlan;
+  run: WorkflowRunRecord;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
+export type TimelineEventType =
+  | "model_selected"
+  | "architecture_decision"
+  | "document_added"
+  | "fine_tuning_started"
+  | "critical_error"
+  | "business_decision";
+
+export interface TimelineEventRecord {
+  id: string;
+  projectId?: string | null;
+  eventType: TimelineEventType;
+  title: string;
+  summary?: string | null;
+  sourceType?: string | null;
+  sourceId?: string | null;
+  importance?: "normal" | "high" | string;
+  metadata?: Record<string, unknown>;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface TimelineEventPlan {
+  timelineVersion?: string;
+  eventClassifierVersion?: string;
+  mode?: string;
+  projectId?: string | null;
+  event?: Omit<TimelineEventRecord, "id" | "createdAt" | "updatedAt">;
+  classification?: {
+    eventType?: TimelineEventType | string;
+    confidence?: number;
+    matchedSignals?: string[];
+  };
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface TimelineEventResult {
+  timelineEventPlan: TimelineEventPlan;
+  event: TimelineEventRecord | null;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
+export type SimulationType =
+  | "business"
+  | "user"
+  | "server"
+  | "database"
+  | "workflow";
+
+export interface SimulationMetric {
+  id: string;
+  label: string;
+  value: number;
+  unit: string;
+  severity: "low" | "medium" | "high" | string;
+}
+
+export interface SimulationFinding {
+  id: string;
+  label?: string;
+  message?: string;
+  severity: "low" | "medium" | "high" | string;
+}
+
+export interface SimulationPlan {
+  simulationEngineVersion?: string;
+  syntheticUserGeneratorVersion?: string;
+  loadScenarioRunnerVersion?: string;
+  reportGeneratorVersion?: string;
+  mode?: string;
+  projectId?: string | null;
+  projectType?: string | null;
+  scenario: {
+    simulationType: SimulationType;
+    userCount: number;
+    durationMinutes: number;
+    description: string;
+    constraints: string[];
+  };
+  syntheticAgents: {
+    plannedCount: number;
+    profiles: string[];
+    willRunNow?: boolean;
+  };
+  queuePlan: {
+    queueRequired?: boolean;
+    queueId?: string | null;
+    jobType?: string | null;
+    willEnqueueNow?: boolean;
+    reason?: string | null;
+  };
+  metrics: SimulationMetric[];
+  report: {
+    title?: string;
+    dashboardSimple?: boolean;
+    risks: SimulationFinding[];
+    bottlenecks: SimulationFinding[];
+    recommendations: string[];
+    summary: {
+      estimatedLatencyMs?: number;
+      estimatedCostUsd?: number;
+      highestMetricSeverity?: "low" | "medium" | "high" | string;
+      queueRequired?: boolean;
+    };
+  };
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface SimulationRunRecord {
+  id: string;
+  projectId?: string | null;
+  projectType?: string | null;
+  simulationType: SimulationType;
+  scenario: string;
+  userCount: number;
+  durationMinutes: number;
+  status?: string | null;
+  plan: SimulationPlan;
+  report: SimulationPlan["report"];
+  metrics: SimulationMetric[];
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface SimulationRunResult {
+  simulationPlan: SimulationPlan;
+  run: SimulationRunRecord | null;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
+export type SandboxTargetType =
+  | "feature"
+  | "model"
+  | "tool"
+  | "code_change"
+  | "config_change";
+
+export interface SandboxCheck {
+  id: string;
+  label: string;
+  required?: boolean;
+}
+
+export interface SandboxPipelineStep {
+  id: string;
+  service: string;
+  status: string;
+  willExecuteNow?: boolean;
+  detail?: string;
+}
+
+export interface SandboxRisk {
+  id: string;
+  severity: "low" | "medium" | "high" | string;
+  active?: boolean;
+}
+
+export interface SandboxPlan {
+  sandboxManagerVersion?: string;
+  isolatedRuntimeVersion?: string;
+  experimentRunnerVersion?: string;
+  rollbackServiceVersion?: string;
+  mode?: string;
+  username?: string | null;
+  projectId?: string | null;
+  projectType?: string | null;
+  target: {
+    type: SandboxTargetType;
+    objective: string;
+    changeSummary: string;
+    durationMinutes: number;
+  };
+  isolation: {
+    ephemeral?: boolean;
+    minimalConfigOnly?: boolean;
+    minimalConfigKeys: string[];
+    productionSecretsAccessible?: boolean;
+    productionDatabaseWritable?: boolean;
+    networkAllowedByDefault?: boolean;
+    rawDatasetCopyAllowed?: boolean;
+  };
+  checks: SandboxCheck[];
+  pipeline: SandboxPipelineStep[];
+  rollbackPlan: {
+    defaultAction?: string;
+    deleteSandboxOnFailure?: boolean;
+    promotionRequiresApproval?: boolean;
+    productionRollbackWillExecuteNow?: boolean;
+  };
+  report: {
+    title?: string;
+    status?: string;
+    riskLevel: "low" | "medium" | "high" | string;
+    badge?: string;
+    summary: {
+      checkCount?: number;
+      requiresHumanApproval?: boolean;
+      productionSecretsAccessible?: boolean;
+      autoPromotionAllowed?: boolean;
+    };
+    risks: SandboxRisk[];
+    recommendations: string[];
+  };
+  queuePlan: {
+    queueRequired?: boolean;
+    queueId?: string | null;
+    jobType?: string | null;
+    willEnqueueNow?: boolean;
+    reason?: string | null;
+  };
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface SandboxRunRecord {
+  id: string;
+  sandboxId?: string | null;
+  projectId?: string | null;
+  targetType: SandboxTargetType;
+  objective: string;
+  changeSummary: string;
+  status?: string | null;
+  plan: SandboxPlan;
+  pipeline: SandboxPipelineStep[];
+  sandbox?: {
+    id?: string | null;
+    status?: string | null;
+    badgeLabel?: string | null;
+  } | null;
+  reportRecord?: {
+    id?: string | null;
+    riskLevel?: string | null;
+    report?: SandboxPlan["report"];
+  } | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface SandboxPlanResult {
+  sandboxPlan: SandboxPlan;
+  run: SandboxRunRecord | null;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function asOptionalRecord(
+  value: unknown,
+): Record<string, unknown> | undefined {
+  const record = asRecord(value);
+  return Object.keys(record).length > 0 ? record : undefined;
+}
+
+function maybeString(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return null;
+}
+
+function stringValue(value: unknown, fallback = ""): string {
+  return maybeString(value) ?? fallback;
+}
+
+function numberValue(value: unknown, fallback = 0): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return fallback;
+}
+
+function boolValue(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function parseRecordJson(value: unknown): Record<string, unknown> | undefined {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  try {
+    return asOptionalRecord(JSON.parse(value));
+  } catch {
+    return undefined;
+  }
+}
+
+function parseArrayJson(value: unknown): unknown[] | undefined {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeWorkflowStep(
+  value: unknown,
+  fallbackIndex = 0,
+): WorkflowStepRecord {
+  const raw = asRecord(value);
+  const nestedStep = asRecord(raw.step);
+  return {
+    id: maybeString(raw.id),
+    workflowId: maybeString(raw.workflowId ?? raw.workflow_id),
+    stepIndex: numberValue(
+      raw.stepIndex ?? raw.step_index ?? nestedStep.stepIndex,
+      fallbackIndex,
+    ),
+    stepType: stringValue(
+      raw.stepType ?? raw.step_type ?? nestedStep.stepType,
+      "user_action",
+    ),
+    label: stringValue(raw.label ?? nestedStep.label, `Step ${fallbackIndex + 1}`),
+    toolName: maybeString(raw.toolName ?? raw.tool_name ?? nestedStep.toolName),
+    modelId: maybeString(raw.modelId ?? raw.model_id ?? nestedStep.modelId),
+    parameters:
+      parseRecordJson(raw.parameters ?? raw.parameters_json) ??
+      parseRecordJson(nestedStep.parameters) ??
+      {},
+    outputSummary: maybeString(
+      raw.outputSummary ?? raw.output_summary ?? nestedStep.outputSummary,
+    ),
+    requiresApproval: boolValue(
+      raw.requiresApproval ?? nestedStep.requiresApproval,
+    ),
+    willExecuteNow: boolValue(raw.willExecuteNow ?? nestedStep.willExecuteNow),
+    step: asOptionalRecord(raw.step),
+    createdAt: maybeString(raw.createdAt ?? raw.created_at),
+  };
+}
+
+function normalizeWorkflow(value: unknown): WorkflowRecord {
+  const raw = asRecord(value);
+  const steps = Array.isArray(raw.steps)
+    ? raw.steps.map((step, index) => normalizeWorkflowStep(step, index))
+    : undefined;
+  return {
+    id: stringValue(raw.id),
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    title: stringValue(raw.title, "Workflow CogniX"),
+    objective: maybeString(raw.objective),
+    workflowType: stringValue(raw.workflowType ?? raw.workflow_type, "custom"),
+    status: stringValue(raw.status, "active"),
+    shareStatus: stringValue(raw.shareStatus ?? raw.share_status, "private"),
+    metadata:
+      parseRecordJson(raw.metadata) ?? parseRecordJson(raw.metadata_json) ?? {},
+    steps,
+    stepCount: numberValue(raw.stepCount ?? raw.step_count, steps?.length ?? 0),
+    createdAt: maybeString(raw.createdAt ?? raw.created_at),
+    updatedAt: maybeString(raw.updatedAt ?? raw.updated_at),
+  };
+}
+
+function normalizeTimelineEventType(value: unknown): TimelineEventType {
+  const candidate = maybeString(value);
+  if (
+    candidate === "model_selected" ||
+    candidate === "architecture_decision" ||
+    candidate === "document_added" ||
+    candidate === "fine_tuning_started" ||
+    candidate === "critical_error" ||
+    candidate === "business_decision"
+  ) {
+    return candidate;
+  }
+  return "architecture_decision";
+}
+
+function normalizeTimelineEventPlanEvent(
+  value: unknown,
+): Omit<TimelineEventRecord, "id" | "createdAt" | "updatedAt"> {
+  const raw = asRecord(value);
+  return {
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    eventType: normalizeTimelineEventType(raw.eventType ?? raw.event_type),
+    title: stringValue(raw.title, "Timeline event"),
+    summary: maybeString(raw.summary),
+    sourceType: maybeString(raw.sourceType ?? raw.source_type),
+    sourceId: maybeString(raw.sourceId ?? raw.source_id),
+    importance: stringValue(raw.importance, "normal"),
+    metadata: parseRecordJson(raw.metadata ?? raw.metadataJson) ?? {},
+  };
+}
+
+function normalizeTimelineEvent(value: unknown): TimelineEventRecord {
+  const raw = asRecord(value);
+  return {
+    id: stringValue(raw.id),
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    eventType: normalizeTimelineEventType(raw.eventType ?? raw.event_type),
+    title: stringValue(raw.title, "Timeline event"),
+    summary: maybeString(raw.summary),
+    sourceType: maybeString(raw.sourceType ?? raw.source_type),
+    sourceId: maybeString(raw.sourceId ?? raw.source_id),
+    importance: stringValue(raw.importance, "normal"),
+    metadata:
+      parseRecordJson(raw.metadata ?? raw.metadataJson) ??
+      parseRecordJson(raw.metadata_json) ??
+      {},
+    createdAt: maybeString(raw.createdAt ?? raw.created_at),
+    updatedAt: maybeString(raw.updatedAt ?? raw.updated_at),
+  };
+}
+
+function normalizeTimelineEventPlan(value: unknown): TimelineEventPlan {
+  const raw = asRecord(value);
+  const classification = asRecord(raw.classification);
+  return {
+    timelineVersion: maybeString(raw.timelineVersion) ?? undefined,
+    eventClassifierVersion:
+      maybeString(raw.eventClassifierVersion) ?? undefined,
+    mode: maybeString(raw.mode) ?? undefined,
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    event: normalizeTimelineEventPlanEvent(raw.event),
+    classification: {
+      eventType: maybeString(classification.eventType) ?? undefined,
+      confidence: numberValue(classification.confidence, 0),
+      matchedSignals: Array.isArray(classification.matchedSignals)
+        ? classification.matchedSignals
+            .map((signal) => stringValue(signal).trim())
+            .filter(Boolean)
+        : [],
+    },
+    sideEffects: parseRecordJson(raw.sideEffects) ?? {},
+  };
+}
+
+function normalizeSimulationType(value: unknown): SimulationType {
+  const candidate = maybeString(value)?.toLowerCase();
+  if (
+    candidate === "business" ||
+    candidate === "user" ||
+    candidate === "server" ||
+    candidate === "database" ||
+    candidate === "workflow"
+  ) {
+    return candidate;
+  }
+  return "business";
+}
+
+function normalizeSimulationMetric(value: unknown): SimulationMetric {
+  const raw = asRecord(value);
+  const metadata = parseRecordJson(raw.metadata ?? raw.metadataJson) ?? {};
+  return {
+    id: stringValue(raw.id ?? raw.metricKey ?? raw.metric_key ?? metadata.id, "metric"),
+    label: stringValue(raw.label ?? metadata.label, "Metric"),
+    value: numberValue(raw.value ?? raw.metricValue ?? raw.metric_value ?? metadata.value, 0),
+    unit: stringValue(raw.unit ?? metadata.unit),
+    severity: stringValue(raw.severity ?? metadata.severity, "low"),
+  };
+}
+
+function normalizeSimulationFinding(value: unknown): SimulationFinding {
+  const raw = asRecord(value);
+  return {
+    id: stringValue(raw.id, "finding"),
+    label: maybeString(raw.label) ?? undefined,
+    message: maybeString(raw.message) ?? undefined,
+    severity: stringValue(raw.severity, "low"),
+  };
+}
+
+function normalizeSimulationPlan(value: unknown): SimulationPlan {
+  const raw = asRecord(value);
+  const scenario = asRecord(raw.scenario);
+  const syntheticAgents = asRecord(raw.syntheticAgents);
+  const queuePlan = asRecord(raw.queuePlan);
+  const report = asRecord(raw.report);
+  const summary = asRecord(report.summary);
+  return {
+    simulationEngineVersion:
+      maybeString(raw.simulationEngineVersion) ?? undefined,
+    syntheticUserGeneratorVersion:
+      maybeString(raw.syntheticUserGeneratorVersion) ?? undefined,
+    loadScenarioRunnerVersion:
+      maybeString(raw.loadScenarioRunnerVersion) ?? undefined,
+    reportGeneratorVersion:
+      maybeString(raw.reportGeneratorVersion) ?? undefined,
+    mode: maybeString(raw.mode) ?? undefined,
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    projectType: maybeString(raw.projectType ?? raw.project_type),
+    scenario: {
+      simulationType: normalizeSimulationType(
+        scenario.simulationType ?? scenario.simulation_type,
+      ),
+      userCount: numberValue(scenario.userCount ?? scenario.user_count, 10),
+      durationMinutes: numberValue(
+        scenario.durationMinutes ?? scenario.duration_minutes,
+        15,
+      ),
+      description: stringValue(scenario.description, "Simulation CogniX"),
+      constraints: Array.isArray(scenario.constraints)
+        ? scenario.constraints.map((item) => stringValue(item)).filter(Boolean)
+        : [],
+    },
+    syntheticAgents: {
+      plannedCount: numberValue(syntheticAgents.plannedCount, 0),
+      profiles: Array.isArray(syntheticAgents.profiles)
+        ? syntheticAgents.profiles.map((item) => stringValue(item)).filter(Boolean)
+        : [],
+      willRunNow: boolValue(syntheticAgents.willRunNow),
+    },
+    queuePlan: {
+      queueRequired: boolValue(queuePlan.queueRequired),
+      queueId: maybeString(queuePlan.queueId),
+      jobType: maybeString(queuePlan.jobType),
+      willEnqueueNow: boolValue(queuePlan.willEnqueueNow),
+      reason: maybeString(queuePlan.reason),
+    },
+    metrics: Array.isArray(raw.metrics)
+      ? raw.metrics.map(normalizeSimulationMetric)
+      : [],
+    report: {
+      title: maybeString(report.title) ?? undefined,
+      dashboardSimple: boolValue(report.dashboardSimple),
+      risks: Array.isArray(report.risks)
+        ? report.risks.map(normalizeSimulationFinding)
+        : [],
+      bottlenecks: Array.isArray(report.bottlenecks)
+        ? report.bottlenecks.map(normalizeSimulationFinding)
+        : [],
+      recommendations: Array.isArray(report.recommendations)
+        ? report.recommendations.map((item) => stringValue(item)).filter(Boolean)
+        : [],
+      summary: {
+        estimatedLatencyMs: numberValue(summary.estimatedLatencyMs, 0),
+        estimatedCostUsd: numberValue(summary.estimatedCostUsd, 0),
+        highestMetricSeverity:
+          maybeString(summary.highestMetricSeverity) ?? undefined,
+        queueRequired: boolValue(summary.queueRequired),
+      },
+    },
+    sideEffects: parseRecordJson(raw.sideEffects) ?? {},
+  };
+}
+
+function normalizeSimulationRun(value: unknown): SimulationRunRecord {
+  const raw = asRecord(value);
+  const plan =
+    parseRecordJson(raw.plan ?? raw.planJson ?? raw.plan_json) ??
+    asRecord(raw.plan);
+  const normalizedPlan = normalizeSimulationPlan(plan);
+  const report =
+    parseRecordJson(raw.report ?? raw.reportJson ?? raw.report_json) ??
+    normalizedPlan.report;
+  const metrics = Array.isArray(raw.metrics)
+    ? raw.metrics.map(normalizeSimulationMetric)
+    : normalizedPlan.metrics;
+  return {
+    id: stringValue(raw.id),
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    projectType: maybeString(raw.projectType ?? raw.project_type),
+    simulationType: normalizeSimulationType(
+      raw.simulationType ?? raw.simulation_type ?? normalizedPlan.scenario.simulationType,
+    ),
+    scenario: stringValue(raw.scenario, normalizedPlan.scenario.description),
+    userCount: numberValue(raw.userCount ?? raw.user_count, normalizedPlan.scenario.userCount),
+    durationMinutes: numberValue(
+      raw.durationMinutes ?? raw.duration_minutes,
+      normalizedPlan.scenario.durationMinutes,
+    ),
+    status: maybeString(raw.status),
+    plan: normalizedPlan,
+    report: normalizeSimulationPlan({ ...normalizedPlan, report }).report,
+    metrics,
+    createdAt: maybeString(raw.createdAt ?? raw.created_at),
+    updatedAt: maybeString(raw.updatedAt ?? raw.updated_at),
+  };
+}
+
+function normalizeSandboxTargetType(value: unknown): SandboxTargetType {
+  const candidate = maybeString(value)?.toLowerCase().replace(/[-\s]+/g, "_");
+  if (
+    candidate === "feature" ||
+    candidate === "model" ||
+    candidate === "tool" ||
+    candidate === "code_change" ||
+    candidate === "config_change"
+  ) {
+    return candidate;
+  }
+  return "feature";
+}
+
+function normalizeSandboxCheck(value: unknown): SandboxCheck {
+  const raw = asRecord(value);
+  return {
+    id: stringValue(raw.id, "check"),
+    label: stringValue(raw.label, "Check"),
+    required: boolValue(raw.required),
+  };
+}
+
+function normalizeSandboxPipelineStep(value: unknown): SandboxPipelineStep {
+  const raw = asRecord(value);
+  return {
+    id: stringValue(raw.id, "step"),
+    service: stringValue(raw.service, "SandboxManager"),
+    status: stringValue(raw.status, "planned"),
+    willExecuteNow: boolValue(raw.willExecuteNow ?? raw.will_execute_now),
+    detail: maybeString(raw.detail) ?? undefined,
+  };
+}
+
+function normalizeSandboxRisk(value: unknown): SandboxRisk {
+  const raw = asRecord(value);
+  return {
+    id: stringValue(raw.id, "risk"),
+    severity: stringValue(raw.severity, "low"),
+    active: boolValue(raw.active),
+  };
+}
+
+function normalizeSandboxPlan(value: unknown): SandboxPlan {
+  const raw = asRecord(value);
+  const target = asRecord(raw.target);
+  const isolation = asRecord(raw.isolation);
+  const rollbackPlan = asRecord(raw.rollbackPlan);
+  const report = asRecord(raw.report);
+  const summary = asRecord(report.summary);
+  const queuePlan = asRecord(raw.queuePlan);
+  return {
+    sandboxManagerVersion: maybeString(raw.sandboxManagerVersion) ?? undefined,
+    isolatedRuntimeVersion:
+      maybeString(raw.isolatedRuntimeVersion) ?? undefined,
+    experimentRunnerVersion:
+      maybeString(raw.experimentRunnerVersion) ?? undefined,
+    rollbackServiceVersion:
+      maybeString(raw.rollbackServiceVersion) ?? undefined,
+    mode: maybeString(raw.mode) ?? undefined,
+    username: maybeString(raw.username),
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    projectType: maybeString(raw.projectType ?? raw.project_type),
+    target: {
+      type: normalizeSandboxTargetType(target.type),
+      objective: stringValue(target.objective, "Tester en sandbox"),
+      changeSummary: stringValue(
+        target.changeSummary ?? target.change_summary,
+        "Modification a tester",
+      ),
+      durationMinutes: numberValue(
+        target.durationMinutes ?? target.duration_minutes,
+        30,
+      ),
+    },
+    isolation: {
+      ephemeral: boolValue(isolation.ephemeral),
+      minimalConfigOnly: boolValue(
+        isolation.minimalConfigOnly ?? isolation.minimal_config_only,
+      ),
+      minimalConfigKeys: Array.isArray(isolation.minimalConfigKeys)
+        ? isolation.minimalConfigKeys
+            .map((item) => stringValue(item))
+            .filter(Boolean)
+        : [],
+      productionSecretsAccessible: boolValue(
+        isolation.productionSecretsAccessible ??
+          isolation.production_secrets_accessible,
+      ),
+      productionDatabaseWritable: boolValue(
+        isolation.productionDatabaseWritable ??
+          isolation.production_database_writable,
+      ),
+      networkAllowedByDefault: boolValue(
+        isolation.networkAllowedByDefault ??
+          isolation.network_allowed_by_default,
+      ),
+      rawDatasetCopyAllowed: boolValue(
+        isolation.rawDatasetCopyAllowed ?? isolation.raw_dataset_copy_allowed,
+      ),
+    },
+    checks: Array.isArray(raw.checks)
+      ? raw.checks.map(normalizeSandboxCheck)
+      : [],
+    pipeline: Array.isArray(raw.pipeline)
+      ? raw.pipeline.map(normalizeSandboxPipelineStep)
+      : [],
+    rollbackPlan: {
+      defaultAction: maybeString(
+        rollbackPlan.defaultAction ?? rollbackPlan.default_action,
+      ) ?? undefined,
+      deleteSandboxOnFailure: boolValue(
+        rollbackPlan.deleteSandboxOnFailure ??
+          rollbackPlan.delete_sandbox_on_failure,
+      ),
+      promotionRequiresApproval: boolValue(
+        rollbackPlan.promotionRequiresApproval ??
+          rollbackPlan.promotion_requires_approval,
+      ),
+      productionRollbackWillExecuteNow: boolValue(
+        rollbackPlan.productionRollbackWillExecuteNow ??
+          rollbackPlan.production_rollback_will_execute_now,
+      ),
+    },
+    report: {
+      title: maybeString(report.title) ?? undefined,
+      status: maybeString(report.status) ?? undefined,
+      riskLevel: stringValue(report.riskLevel ?? report.risk_level, "low"),
+      badge: maybeString(report.badge) ?? undefined,
+      summary: {
+        checkCount: numberValue(summary.checkCount ?? summary.check_count, 0),
+        requiresHumanApproval: boolValue(
+          summary.requiresHumanApproval ?? summary.requires_human_approval,
+        ),
+        productionSecretsAccessible: boolValue(
+          summary.productionSecretsAccessible ??
+            summary.production_secrets_accessible,
+        ),
+        autoPromotionAllowed: boolValue(
+          summary.autoPromotionAllowed ?? summary.auto_promotion_allowed,
+        ),
+      },
+      risks: Array.isArray(report.risks)
+        ? report.risks.map(normalizeSandboxRisk)
+        : [],
+      recommendations: Array.isArray(report.recommendations)
+        ? report.recommendations.map((item) => stringValue(item)).filter(Boolean)
+        : [],
+    },
+    queuePlan: {
+      queueRequired: boolValue(queuePlan.queueRequired),
+      queueId: maybeString(queuePlan.queueId),
+      jobType: maybeString(queuePlan.jobType),
+      willEnqueueNow: boolValue(queuePlan.willEnqueueNow),
+      reason: maybeString(queuePlan.reason),
+    },
+    sideEffects: parseRecordJson(raw.sideEffects) ?? {},
+  };
+}
+
+function normalizeSandboxRun(value: unknown): SandboxRunRecord {
+  const raw = asRecord(value);
+  const plan =
+    parseRecordJson(raw.plan ?? raw.planJson ?? raw.plan_json) ??
+    asRecord(raw.plan);
+  const normalizedPlan = normalizeSandboxPlan(plan);
+  const pipeline =
+    parseArrayJson(raw.pipeline ?? raw.pipelineJson ?? raw.pipeline_json) ??
+    normalizedPlan.pipeline;
+  const sandbox = asRecord(raw.sandbox);
+  const reportRecord = asRecord(raw.reportRecord ?? raw.report_record);
+  const report =
+    parseRecordJson(
+      reportRecord.report ?? reportRecord.reportJson ?? reportRecord.report_json,
+    ) ?? normalizedPlan.report;
+  return {
+    id: stringValue(raw.id),
+    sandboxId: maybeString(raw.sandboxId ?? raw.sandbox_id),
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    targetType: normalizeSandboxTargetType(
+      raw.targetType ?? raw.target_type ?? normalizedPlan.target.type,
+    ),
+    objective: stringValue(raw.objective, normalizedPlan.target.objective),
+    changeSummary: stringValue(
+      raw.changeSummary ?? raw.change_summary,
+      normalizedPlan.target.changeSummary,
+    ),
+    status: maybeString(raw.status),
+    plan: normalizedPlan,
+    pipeline: pipeline.map(normalizeSandboxPipelineStep),
+    sandbox: Object.keys(sandbox).length
+      ? {
+          id: maybeString(sandbox.id),
+          status: maybeString(sandbox.status),
+          badgeLabel: maybeString(sandbox.badgeLabel ?? sandbox.badge_label),
+        }
+      : null,
+    reportRecord: Object.keys(reportRecord).length
+      ? {
+          id: maybeString(reportRecord.id),
+          riskLevel: maybeString(
+            reportRecord.riskLevel ?? reportRecord.risk_level,
+          ),
+          report: normalizeSandboxPlan({ ...normalizedPlan, report }).report,
+        }
+      : {
+          riskLevel: normalizedPlan.report.riskLevel,
+          report: normalizedPlan.report,
+        },
+    createdAt: maybeString(raw.createdAt ?? raw.created_at),
+    updatedAt: maybeString(raw.updatedAt ?? raw.updated_at),
+  };
+}
+
+function normalizeWorkflowRunPlanStep(
+  value: unknown,
+  fallbackIndex = 0,
+): WorkflowRunPlanStep {
+  const raw = asRecord(value);
+  return {
+    stepId: maybeString(raw.stepId ?? raw.step_id),
+    stepIndex: numberValue(raw.stepIndex ?? raw.step_index, fallbackIndex),
+    stepType: maybeString(raw.stepType ?? raw.step_type) ?? "user_action",
+    label: maybeString(raw.label),
+    requiresApproval: boolValue(raw.requiresApproval),
+    willExecuteNow: boolValue(raw.willExecuteNow),
+    blockedSideEffects: Array.isArray(raw.blockedSideEffects)
+      ? raw.blockedSideEffects.map((item) => stringValue(item)).filter(Boolean)
+      : [],
+  };
+}
+
+function normalizeWorkflowRunPlan(value: unknown): WorkflowRunPlan {
+  const raw = asRecord(value);
+  return {
+    workflowRunnerVersion: maybeString(raw.workflowRunnerVersion) ?? undefined,
+    mode: maybeString(raw.mode) ?? undefined,
+    workflowId: maybeString(raw.workflowId ?? raw.workflow_id),
+    runMode: maybeString(raw.runMode ?? raw.run_mode) ?? "dry_run",
+    inputs: parseRecordJson(raw.inputs) ?? {},
+    orderedSteps: Array.isArray(raw.orderedSteps)
+      ? raw.orderedSteps.map((step, index) =>
+          normalizeWorkflowRunPlanStep(step, index),
+        )
+      : [],
+    summary: parseRecordJson(raw.summary) ?? {},
+    sideEffects: parseRecordJson(raw.sideEffects) ?? {},
+  };
+}
+
+function normalizeWorkflowRun(value: unknown): WorkflowRunRecord {
+  const raw = asRecord(value);
+  return {
+    id: stringValue(raw.id),
+    workflowId: maybeString(raw.workflowId ?? raw.workflow_id),
+    status: maybeString(raw.status),
+    runMode: maybeString(raw.runMode ?? raw.run_mode),
+    runPlan: normalizeWorkflowRunPlan(raw.runPlan ?? raw.run_plan_json),
+    logs: Array.isArray(raw.logs)
+      ? raw.logs.map((log) => asRecord(log))
+      : undefined,
+    createdAt: maybeString(raw.createdAt ?? raw.created_at),
+    updatedAt: maybeString(raw.updatedAt ?? raw.updated_at),
+  };
+}
+
+function normalizeWorkflowTemplate(value: unknown): WorkflowTemplate {
+  const raw = asRecord(value);
+  return {
+    id: stringValue(raw.id),
+    workflowType: stringValue(raw.workflowType ?? raw.workflow_type, "custom"),
+    label: stringValue(raw.label, "Workflow"),
+    steps: Array.isArray(raw.steps)
+      ? raw.steps.map((step, index) => normalizeWorkflowStep(step, index))
+      : [],
+  };
+}
+
+export async function listWorkflowTemplates(): Promise<WorkflowTemplate[]> {
+  const response = await authFetch("/api/cognix/workflows/templates");
+  const body = await parseJsonOrThrow<{
+    templateRegistry?: { templates?: unknown[] };
+  }>(response);
+  return (body.templateRegistry?.templates ?? []).map(normalizeWorkflowTemplate);
+}
+
+export async function listTimelineEvents(payload?: {
+  projectId?: string | null;
+  eventType?: TimelineEventType | null;
+  query?: string | null;
+}): Promise<TimelineEventRecord[]> {
+  const params = new URLSearchParams();
+  if (payload?.projectId) params.set("project_id", payload.projectId);
+  if (payload?.eventType) params.set("event_type", payload.eventType);
+  if (payload?.query?.trim()) params.set("query", payload.query.trim());
+  const query = params.toString();
+  const response = await authFetch(
+    `/api/cognix/timeline/events${query ? `?${query}` : ""}`,
+  );
+  const body = await parseJsonOrThrow<{ events?: unknown[] }>(response);
+  return (body.events ?? []).map(normalizeTimelineEvent);
+}
+
+export async function createTimelineEvent(payload: {
+  projectId?: string | null;
+  eventType?: TimelineEventType | null;
+  title: string;
+  summary?: string | null;
+  sourceType?: string | null;
+  sourceId?: string | null;
+  metadata?: Record<string, unknown>;
+  storeEvent?: boolean;
+}): Promise<TimelineEventResult> {
+  const response = await authFetch("/api/cognix/timeline/events", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      projectId: payload.projectId ?? null,
+      eventType: payload.eventType ?? null,
+      title: payload.title,
+      summary: payload.summary ?? null,
+      sourceType: payload.sourceType ?? null,
+      sourceId: payload.sourceId ?? null,
+      metadata: payload.metadata ?? {},
+      storeEvent: payload.storeEvent ?? true,
+    }),
+  });
+  const body = await parseJsonOrThrow<{
+    timelineEventPlan?: unknown;
+    event?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    timelineEventPlan: normalizeTimelineEventPlan(body.timelineEventPlan),
+    event: body.event ? normalizeTimelineEvent(body.event) : null,
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function listSimulationRuns(payload?: {
+  projectId?: string | null;
+  simulationType?: SimulationType | null;
+  query?: string | null;
+}): Promise<SimulationRunRecord[]> {
+  const params = new URLSearchParams();
+  if (payload?.projectId) params.set("project_id", payload.projectId);
+  if (payload?.simulationType) {
+    params.set("simulation_type", payload.simulationType);
+  }
+  if (payload?.query?.trim()) params.set("query", payload.query.trim());
+  const query = params.toString();
+  const response = await authFetch(
+    `/api/cognix/simulations/runs${query ? `?${query}` : ""}`,
+  );
+  const body = await parseJsonOrThrow<{ runs?: unknown[] }>(response);
+  return (body.runs ?? []).map(normalizeSimulationRun);
+}
+
+export async function createSimulationRun(payload: {
+  projectId?: string | null;
+  projectType?: string | null;
+  simulationType: SimulationType;
+  userCount: number;
+  scenario: string;
+  durationMinutes: number;
+  constraints?: string[];
+  storeRun?: boolean;
+}): Promise<SimulationRunResult> {
+  const response = await authFetch("/api/cognix/simulations/runs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      projectId: payload.projectId ?? null,
+      projectType: payload.projectType ?? null,
+      simulationType: payload.simulationType,
+      userCount: payload.userCount,
+      scenario: payload.scenario,
+      durationMinutes: payload.durationMinutes,
+      constraints: payload.constraints ?? [],
+      storeRun: payload.storeRun ?? true,
+    }),
+  });
+  const body = await parseJsonOrThrow<{
+    simulationPlan?: unknown;
+    run?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    simulationPlan: normalizeSimulationPlan(body.simulationPlan),
+    run: body.run ? normalizeSimulationRun(body.run) : null,
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function getSimulationRun(
+  runId: string,
+): Promise<SimulationRunRecord> {
+  const response = await authFetch(
+    `/api/cognix/simulations/runs/${encodeURIComponent(runId)}`,
+  );
+  const body = await parseJsonOrThrow<{ run?: unknown }>(response);
+  return normalizeSimulationRun(body.run);
+}
+
+export async function listSandboxRuns(payload?: {
+  projectId?: string | null;
+  targetType?: SandboxTargetType | null;
+  query?: string | null;
+}): Promise<SandboxRunRecord[]> {
+  const params = new URLSearchParams();
+  if (payload?.projectId) params.set("project_id", payload.projectId);
+  if (payload?.targetType) params.set("target_type", payload.targetType);
+  if (payload?.query?.trim()) params.set("query", payload.query.trim());
+  const query = params.toString();
+  const response = await authFetch(
+    `/api/cognix/sandbox/runs${query ? `?${query}` : ""}`,
+  );
+  const body = await parseJsonOrThrow<{ runs?: unknown[] }>(response);
+  return (body.runs ?? []).map(normalizeSandboxRun);
+}
+
+export async function createSandboxPlan(payload: {
+  projectId?: string | null;
+  projectType?: string | null;
+  targetType: SandboxTargetType;
+  objective: string;
+  changeSummary: string;
+  requestedChecks?: string[];
+  durationMinutes: number;
+  storeRun?: boolean;
+}): Promise<SandboxPlanResult> {
+  const response = await authFetch("/api/cognix/sandbox/plans", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      projectId: payload.projectId ?? null,
+      projectType: payload.projectType ?? null,
+      targetType: payload.targetType,
+      objective: payload.objective,
+      changeSummary: payload.changeSummary,
+      requestedChecks: payload.requestedChecks ?? [],
+      durationMinutes: payload.durationMinutes,
+      storeRun: payload.storeRun ?? true,
+    }),
+  });
+  const body = await parseJsonOrThrow<{
+    sandboxPlan?: unknown;
+    run?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    sandboxPlan: normalizeSandboxPlan(body.sandboxPlan),
+    run: body.run ? normalizeSandboxRun(body.run) : null,
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function getSandboxRun(runId: string): Promise<SandboxRunRecord> {
+  const response = await authFetch(
+    `/api/cognix/sandbox/runs/${encodeURIComponent(runId)}`,
+  );
+  const body = await parseJsonOrThrow<{ run?: unknown }>(response);
+  return normalizeSandboxRun(body.run);
+}
+
+export async function listWorkflows(payload?: {
+  includeDisabled?: boolean;
+}): Promise<WorkflowRecord[]> {
+  const query = payload?.includeDisabled ? "?include_disabled=true" : "";
+  const response = await authFetch(`/api/cognix/workflows${query}`);
+  const body = await parseJsonOrThrow<{ workflows?: unknown[] }>(response);
+  return (body.workflows ?? []).map(normalizeWorkflow);
+}
+
+export async function getWorkflow(workflowId: string): Promise<WorkflowRecord> {
+  const response = await authFetch(
+    `/api/cognix/workflows/${encodeURIComponent(workflowId)}`,
+  );
+  const body = await parseJsonOrThrow<{ workflow?: unknown }>(response);
+  return normalizeWorkflow(body.workflow);
+}
+
+export async function recordWorkflow(payload: {
+  title?: string | null;
+  objective?: string | null;
+  workflowType?: string | null;
+  projectId?: string | null;
+  steps?: WorkflowStepInput[];
+  metadata?: Record<string, unknown>;
+  storeWorkflow?: boolean;
+}): Promise<WorkflowRecordResult> {
+  const response = await authFetch("/api/cognix/workflows/record", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: payload.title ?? null,
+      objective: payload.objective ?? null,
+      workflowType: payload.workflowType ?? null,
+      projectId: payload.projectId ?? null,
+      steps: payload.steps ?? [],
+      metadata: payload.metadata ?? {},
+      storeWorkflow: payload.storeWorkflow ?? true,
+    }),
+  });
+  const body = await parseJsonOrThrow<{
+    recordingPlan?: WorkflowRecordingPlan;
+    workflow?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    recordingPlan: body.recordingPlan ?? {},
+    workflow: body.workflow ? normalizeWorkflow(body.workflow) : null,
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function updateWorkflow(
+  workflowId: string,
+  payload: {
+    title?: string | null;
+    objective?: string | null;
+    status?: "active" | "disabled" | "archived" | null;
+    shareStatus?: "private" | "shared" | null;
+  },
+): Promise<WorkflowUpdateResult> {
+  const response = await authFetch(
+    `/api/cognix/workflows/${encodeURIComponent(workflowId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  const body = await parseJsonOrThrow<{
+    workflow?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    workflow: normalizeWorkflow(body.workflow),
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function deleteWorkflow(workflowId: string): Promise<void> {
+  const response = await authFetch(
+    `/api/cognix/workflows/${encodeURIComponent(workflowId)}`,
+    { method: "DELETE" },
+  );
+  await parseJsonOrThrow<unknown>(response);
+}
+
+export async function exportWorkflowBundle(
+  workflowId: string,
+): Promise<WorkflowExportBundle> {
+  const response = await authFetch(
+    `/api/cognix/workflows/${encodeURIComponent(workflowId)}/export`,
+  );
+  const body = await parseJsonOrThrow<{ workflowExport?: unknown }>(response);
+  const bundle = asRecord(body.workflowExport);
+  return {
+    username: maybeString(bundle.username) ?? undefined,
+    workflow: normalizeWorkflow(bundle.workflow),
+    runs: Array.isArray(bundle.runs)
+      ? bundle.runs.map(normalizeWorkflowRun)
+      : [],
+    exportedAt: maybeString(bundle.exportedAt) ?? undefined,
+  };
+}
+
+export async function buildWorkflowRunPlan(payload: {
+  workflowId: string;
+  runMode?: "dry_run" | "simulation";
+  inputs?: Record<string, unknown>;
+}): Promise<WorkflowRunPlanResult> {
+  const response = await authFetch(
+    `/api/cognix/workflows/${encodeURIComponent(payload.workflowId)}/run-plan`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runMode: payload.runMode ?? "dry_run",
+        inputs: payload.inputs ?? {},
+      }),
+    },
+  );
+  const body = await parseJsonOrThrow<{
+    runPlan?: unknown;
+    run?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    runPlan: normalizeWorkflowRunPlan(body.runPlan),
+    run: normalizeWorkflowRun(body.run),
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function listWorkflowRuns(
+  workflowId: string,
+): Promise<WorkflowRunRecord[]> {
+  const response = await authFetch(
+    `/api/cognix/workflows/${encodeURIComponent(workflowId)}/runs`,
+  );
+  const body = await parseJsonOrThrow<{ runs?: unknown[] }>(response);
+  return (body.runs ?? []).map(normalizeWorkflowRun);
+}
+
+export interface CompressionEvaluation {
+  originalTokenCount?: number;
+  compressedTokenCount?: number;
+  reductionRatio?: number;
+  retainedKeywordRatio?: number;
+  retainedObjectiveRatio?: number;
+  lostInfoRisk?: "low" | "medium" | "high" | string;
+  qualityGate?: Record<string, unknown>;
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface PromptCompressionSummary {
+  originalTokenCount?: number;
+  compressedTokenCount?: number;
+  targetTokenCount?: number;
+  reductionRatio?: number;
+  badge?: string | null;
+  lostInfoRisk?: "low" | "medium" | "high" | string;
+  messageCount?: number;
+  summarizedMessageCount?: number;
+  retainedRecentMessageCount?: number;
+  rawHistoryIncluded?: boolean;
+  redactionCount?: number;
+}
+
+export interface PromptCompressionPlan {
+  promptCompressionVersion?: string;
+  contextRankerVersion?: string;
+  compressionEvaluatorVersion?: string;
+  mode?: string;
+  projectId?: string | null;
+  objective?: string | null;
+  targetTokens?: number;
+  contextHash?: string;
+  ranking?: Array<Record<string, unknown>>;
+  selectedSentenceIndexes?: number[];
+  compressedContext?: string;
+  evaluation?: CompressionEvaluation;
+  summary?: PromptCompressionSummary;
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface ConversationSummaryPlan extends PromptCompressionPlan {
+  conversationSummaryContractVersion?: string;
+  recentMessageLimit?: number;
+  conversationSummary?: {
+    summaryText?: string;
+    summaryRequired?: boolean;
+    readyForContextInjection?: boolean;
+    summarizedMessageCount?: number;
+    retainedRecentMessageCount?: number;
+    redactionMarkers?: string[];
+  };
+  recentMessages?: Array<Record<string, unknown>>;
+  boundaryContract?: Record<string, unknown>;
+  policy?: Record<string, unknown>;
+}
+
+export interface CompressedContextRecord {
+  id: string;
+  projectId?: string | null;
+  contextHash?: string | null;
+  objectiveExcerpt?: string | null;
+  originalTokenCount?: number | null;
+  compressedTokenCount?: number | null;
+  reductionRatio?: number | null;
+  compressedContext?: string;
+  ranking?: Array<Record<string, unknown>>;
+  evaluation?: CompressionEvaluation;
+  status?: "active" | "deleted" | string;
+  logs?: Array<Record<string, unknown>>;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface PromptCompressionResult {
+  compressionPlan: PromptCompressionPlan;
+  compressedContext: CompressedContextRecord | null;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
+export interface ConversationSummaryResult {
+  conversationSummaryPlan: ConversationSummaryPlan;
+  compressedContext: CompressedContextRecord | null;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
+function normalizeCompressionEvaluation(value: unknown): CompressionEvaluation {
+  const raw = asRecord(value);
+  return {
+    originalTokenCount: numberValue(raw.originalTokenCount, 0),
+    compressedTokenCount: numberValue(raw.compressedTokenCount, 0),
+    reductionRatio: numberValue(raw.reductionRatio, 0),
+    retainedKeywordRatio: numberValue(raw.retainedKeywordRatio, 0),
+    retainedObjectiveRatio: numberValue(raw.retainedObjectiveRatio, 0),
+    lostInfoRisk: maybeString(raw.lostInfoRisk) ?? undefined,
+    qualityGate: parseRecordJson(raw.qualityGate) ?? {},
+    sideEffects: parseRecordJson(raw.sideEffects) ?? {},
+  };
+}
+
+function normalizePromptCompressionSummary(
+  value: unknown,
+): PromptCompressionSummary {
+  const raw = asRecord(value);
+  return {
+    originalTokenCount: numberValue(raw.originalTokenCount, 0),
+    compressedTokenCount: numberValue(raw.compressedTokenCount, 0),
+    targetTokenCount: numberValue(raw.targetTokenCount, 0),
+    reductionRatio: numberValue(raw.reductionRatio, 0),
+    badge: maybeString(raw.badge),
+    lostInfoRisk: maybeString(raw.lostInfoRisk) ?? undefined,
+    messageCount: numberValue(raw.messageCount, 0),
+    summarizedMessageCount: numberValue(raw.summarizedMessageCount, 0),
+    retainedRecentMessageCount: numberValue(raw.retainedRecentMessageCount, 0),
+    rawHistoryIncluded: boolValue(raw.rawHistoryIncluded),
+    redactionCount: numberValue(raw.redactionCount, 0),
+  };
+}
+
+function normalizePromptCompressionPlan(
+  value: unknown,
+): PromptCompressionPlan {
+  const raw = asRecord(value);
+  return {
+    promptCompressionVersion:
+      maybeString(raw.promptCompressionVersion) ?? undefined,
+    contextRankerVersion: maybeString(raw.contextRankerVersion) ?? undefined,
+    compressionEvaluatorVersion:
+      maybeString(raw.compressionEvaluatorVersion) ?? undefined,
+    mode: maybeString(raw.mode) ?? undefined,
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    objective: maybeString(raw.objective),
+    targetTokens: numberValue(raw.targetTokens ?? raw.target_tokens, 0),
+    contextHash: maybeString(raw.contextHash ?? raw.context_hash) ?? undefined,
+    ranking: Array.isArray(raw.ranking)
+      ? raw.ranking.map((item) => asRecord(item))
+      : [],
+    selectedSentenceIndexes: Array.isArray(raw.selectedSentenceIndexes)
+      ? raw.selectedSentenceIndexes
+          .map((item) => numberValue(item, -1))
+          .filter((item) => item >= 0)
+      : [],
+    compressedContext:
+      maybeString(raw.compressedContext ?? raw.compressed_context) ?? "",
+    evaluation: normalizeCompressionEvaluation(raw.evaluation),
+    summary: normalizePromptCompressionSummary(raw.summary),
+    sideEffects: parseRecordJson(raw.sideEffects) ?? {},
+  };
+}
+
+function normalizeConversationSummaryPlan(
+  value: unknown,
+): ConversationSummaryPlan {
+  const raw = asRecord(value);
+  const base = normalizePromptCompressionPlan(raw);
+  const conversationSummary = asRecord(raw.conversationSummary);
+  return {
+    ...base,
+    conversationSummaryContractVersion:
+      maybeString(raw.conversationSummaryContractVersion) ?? undefined,
+    recentMessageLimit: numberValue(raw.recentMessageLimit, 0),
+    conversationSummary: {
+      summaryText: maybeString(conversationSummary.summaryText) ?? undefined,
+      summaryRequired: boolValue(conversationSummary.summaryRequired),
+      readyForContextInjection: boolValue(
+        conversationSummary.readyForContextInjection,
+      ),
+      summarizedMessageCount: numberValue(
+        conversationSummary.summarizedMessageCount,
+        0,
+      ),
+      retainedRecentMessageCount: numberValue(
+        conversationSummary.retainedRecentMessageCount,
+        0,
+      ),
+      redactionMarkers: Array.isArray(conversationSummary.redactionMarkers)
+        ? conversationSummary.redactionMarkers
+            .map((item) => stringValue(item))
+            .filter(Boolean)
+        : [],
+    },
+    recentMessages: Array.isArray(raw.recentMessages)
+      ? raw.recentMessages.map((item) => asRecord(item))
+      : [],
+    boundaryContract: parseRecordJson(raw.boundaryContract) ?? {},
+    policy: parseRecordJson(raw.policy) ?? {},
+  };
+}
+
+function normalizeCompressedContext(value: unknown): CompressedContextRecord {
+  const raw = asRecord(value);
+  const logs = Array.isArray(raw.logs)
+    ? raw.logs.map((log) => asRecord(log))
+    : undefined;
+  return {
+    id: stringValue(raw.id),
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    contextHash: maybeString(raw.contextHash ?? raw.context_hash),
+    objectiveExcerpt: maybeString(
+      raw.objectiveExcerpt ?? raw.objective_excerpt,
+    ),
+    originalTokenCount: numberValue(
+      raw.originalTokenCount ?? raw.original_token_count,
+      0,
+    ),
+    compressedTokenCount: numberValue(
+      raw.compressedTokenCount ?? raw.compressed_token_count,
+      0,
+    ),
+    reductionRatio: numberValue(raw.reductionRatio ?? raw.reduction_ratio, 0),
+    compressedContext:
+      maybeString(raw.compressedContext ?? raw.compressed_context) ?? "",
+    ranking: Array.isArray(raw.ranking)
+      ? raw.ranking.map((item) => asRecord(item))
+      : [],
+    evaluation: normalizeCompressionEvaluation(raw.evaluation),
+    status: maybeString(raw.status) ?? "active",
+    logs,
+    createdAt: maybeString(raw.createdAt ?? raw.created_at),
+    updatedAt: maybeString(raw.updatedAt ?? raw.updated_at),
+  };
+}
+
+export async function createPromptCompressionPlan(payload: {
+  context: string;
+  objective?: string | null;
+  projectId?: string | null;
+  targetTokens?: number;
+  storeContext?: boolean;
+}): Promise<PromptCompressionResult> {
+  const response = await authFetch("/api/cognix/prompt-compression/plan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      context: payload.context,
+      objective: payload.objective ?? null,
+      projectId: payload.projectId ?? null,
+      targetTokens: payload.targetTokens ?? 500,
+      storeContext: payload.storeContext ?? true,
+    }),
+  });
+  const body = await parseJsonOrThrow<{
+    compressionPlan?: unknown;
+    compressedContext?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    compressionPlan: normalizePromptCompressionPlan(body.compressionPlan),
+    compressedContext: body.compressedContext
+      ? normalizeCompressedContext(body.compressedContext)
+      : null,
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function createConversationSummaryPlan(payload: {
+  messages: Array<Record<string, unknown>>;
+  objective?: string | null;
+  projectId?: string | null;
+  targetTokens?: number;
+  recentMessageLimit?: number;
+  storeContext?: boolean;
+}): Promise<ConversationSummaryResult> {
+  const response = await authFetch(
+    "/api/cognix/prompt-compression/conversation-summary-plan",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messages: payload.messages,
+        objective: payload.objective ?? null,
+        projectId: payload.projectId ?? null,
+        targetTokens: payload.targetTokens ?? 420,
+        recentMessageLimit: payload.recentMessageLimit ?? 6,
+        storeContext: payload.storeContext ?? true,
+      }),
+    },
+  );
+  const body = await parseJsonOrThrow<{
+    conversationSummaryPlan?: unknown;
+    compressedContext?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    conversationSummaryPlan: normalizeConversationSummaryPlan(
+      body.conversationSummaryPlan,
+    ),
+    compressedContext: body.compressedContext
+      ? normalizeCompressedContext(body.compressedContext)
+      : null,
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function listCompressedContexts(payload?: {
+  includeDeleted?: boolean;
+  projectId?: string | null;
+}): Promise<CompressedContextRecord[]> {
+  const params = new URLSearchParams();
+  if (payload?.includeDeleted) params.set("include_deleted", "true");
+  if (payload?.projectId) params.set("projectId", payload.projectId);
+  const query = params.toString();
+  const response = await authFetch(
+    `/api/cognix/prompt-compression/contexts${query ? `?${query}` : ""}`,
+  );
+  const body = await parseJsonOrThrow<{ contexts?: unknown[] }>(response);
+  return (body.contexts ?? []).map(normalizeCompressedContext);
+}
+
+export async function deleteCompressedContext(contextId: string): Promise<void> {
+  const response = await authFetch(
+    `/api/cognix/prompt-compression/contexts/${encodeURIComponent(contextId)}`,
+    { method: "DELETE" },
+  );
+  await parseJsonOrThrow<unknown>(response);
+}
+
+export interface ContextHeatmapEntry {
+  id?: string | null;
+  projectId?: string | null;
+  chunkId: string;
+  sourceType?: string | null;
+  sourceId?: string | null;
+  title?: string | null;
+  utilityScore?: number;
+  usageCount?: number;
+  responseCount?: number;
+  citationCount?: number;
+  copiedTermCount?: number;
+  ageDays?: number;
+  bucket?: "very_useful" | "low_usage" | "archive_candidate" | string;
+  label?: string | null;
+  recommendedAction?: "keep" | "review" | "archive" | "deprioritize" | string;
+  themeToken?: string | null;
+  matchedObjectiveTerms?: string[];
+  signals?: Record<string, unknown>;
+  entry?: Record<string, unknown>;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface ContextUsageStat {
+  id?: string | null;
+  projectId?: string | null;
+  chunkId: string;
+  sourceType?: string | null;
+  sourceId?: string | null;
+  usageCount?: number;
+  responseCount?: number;
+  citationCount?: number;
+  utilityScore?: number;
+  metadata?: Record<string, unknown>;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface ContextHeatmapPlan {
+  usageTrackerVersion?: string;
+  heatmapGeneratorVersion?: string;
+  memoryGarbageCollectorVersion?: string;
+  mode?: string;
+  projectId?: string | null;
+  objective?: string | null;
+  entries?: ContextHeatmapEntry[];
+  summary?: {
+    chunkCount?: number;
+    bucketCounts?: Record<string, number>;
+    averageUtilityScore?: number;
+    archiveCandidateCount?: number;
+    automaticArchiveWillRun?: boolean;
+  };
+  garbageCollectorPlan?: {
+    candidateChunkIds?: string[];
+    recommendedAction?: string;
+    automaticArchiveAllowed?: boolean;
+    automaticDeleteAllowed?: boolean;
+    requiresHumanConfirmation?: boolean;
+  };
+  display?: Record<string, unknown>;
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface ContextHeatmapPlanResult {
+  contextHeatmapPlan: ContextHeatmapPlan;
+  storedHeatmapEntries: ContextHeatmapEntry[];
+  storedUsageStats: ContextUsageStat[];
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
+export interface DatasetBuilderSource {
+  sourceId: string;
+  sourceType?: string | null;
+  title?: string | null;
+  tokenCount?: number;
+  sensitiveTermCount?: number;
+}
+
+export interface DatasetBuilderExample {
+  id: string;
+  datasetId?: string | null;
+  instruction: string;
+  input: string;
+  output: string;
+  metadata: {
+    sourceId?: string | null;
+    sourceType?: string | null;
+    sourceTitle?: string | null;
+    chunkIndex?: number;
+    format?: string | null;
+    dataUsedPreview?: string | null;
+    requiresHumanReview?: boolean;
+  } & Record<string, unknown>;
+  qualityScore: number;
+  qualityLabel?: string | null;
+  status?: string | null;
+  matchedObjectiveTerms: string[];
+  sensitiveTerms: string[];
+  tokenCount?: number;
+}
+
+export interface DatasetBuilderPlan {
+  datasetBuilderVersion?: string;
+  syntheticExampleGeneratorVersion?: string;
+  qualityFilterVersion?: string;
+  exportServiceVersion?: string;
+  mode?: string;
+  username?: string | null;
+  projectId?: string | null;
+  dataset: {
+    datasetId: string;
+    objective?: string | null;
+    format?: string | null;
+    status?: string | null;
+    exampleCount: number;
+    readyExampleCount: number;
+    reviewExampleCount: number;
+    filteredExampleCount?: number;
+  };
+  dataSources: DatasetBuilderSource[];
+  examples: DatasetBuilderExample[];
+  qualitySummary: {
+    averageQualityScore: number;
+    readyExampleCount: number;
+    reviewExampleCount: number;
+    filteredExampleCount: number;
+    sensitiveSourceCount: number;
+  };
+  exportPlan: {
+    format?: string | null;
+    previewJsonl?: string | null;
+    willWriteFile?: boolean;
+    willUploadDataset?: boolean;
+    requiresHumanReview?: boolean;
+  };
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface GeneratedDatasetRecord {
+  id: string;
+  projectId?: string | null;
+  objectiveExcerpt?: string | null;
+  outputFormat?: string | null;
+  status?: string | null;
+  exampleCount: number;
+  readyExampleCount: number;
+  reviewExampleCount: number;
+  qualitySummary: DatasetBuilderPlan["qualitySummary"];
+  dataSources: DatasetBuilderSource[];
+  exportPlan: DatasetBuilderPlan["exportPlan"];
+  examples: DatasetBuilderExample[];
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface DatasetBuilderPlanResult {
+  datasetBuilderPlan: DatasetBuilderPlan;
+  generatedDataset?: GeneratedDatasetRecord | null;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
+export interface ProjectDnaModelRef {
+  modelId: string;
+  label: string;
+}
+
+export interface ProjectDnaToolRef {
+  toolId: string;
+  label: string;
+}
+
+export interface ProjectDnaDecision {
+  decisionKey?: string;
+  title: string;
+  rationale?: string;
+  status?: string;
+}
+
+export interface ProjectDnaProfile {
+  username?: string | null;
+  projectId?: string | null;
+  projectName?: string | null;
+  objective?: string | null;
+  context?: string | null;
+  responseStyle?: string | null;
+  preferredModels: ProjectDnaModelRef[];
+  allowedTools: ProjectDnaToolRef[];
+  constraints: string[];
+  decisions: ProjectDnaDecision[];
+  sectionStates: Record<string, string>;
+  completion: {
+    readySectionCount: number;
+    totalSectionCount: number;
+    readySectionIds: string[];
+    score: number;
+  };
+  dnaHash?: string | null;
+}
+
+export interface ProjectDnaInjectionPlan {
+  contextInjectorVersion?: string;
+  channelId?: string;
+  status?: string;
+  includedSectionIds: string[];
+  priority?: number;
+  maxTokens?: number;
+  willInjectNow?: boolean;
+  contextManagerCompatible?: boolean;
+  rawHistoryAllowed?: boolean;
+  reason?: string;
+}
+
+export interface ProjectDnaPlan {
+  projectDnaServiceVersion?: string;
+  profileBuilderVersion?: string;
+  contextInjectorVersion?: string;
+  mode?: string;
+  projectId?: string | null;
+  status?: string;
+  profile: ProjectDnaProfile;
+  contextInjectionPlan: ProjectDnaInjectionPlan;
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface ProjectDnaRecord {
+  id?: string | null;
+  projectId?: string | null;
+  objective?: string | null;
+  context?: string | null;
+  responseStyle?: string | null;
+  preferredModels: ProjectDnaModelRef[];
+  allowedTools: ProjectDnaToolRef[];
+  dna: ProjectDnaPlan | null;
+  dnaHash?: string | null;
+  status?: string | null;
+  constraints?: string[];
+  decisions?: ProjectDnaDecision[];
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface ProjectDnaResult {
+  projectDnaPlan: ProjectDnaPlan;
+  projectDna?: ProjectDnaRecord | null;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
+export interface ProjectDnaPayload {
+  projectId: string;
+  objective?: string | null;
+  context?: string | null;
+  responseStyle?: string | null;
+  preferredModels?: Array<string | ProjectDnaModelRef>;
+  allowedTools?: Array<string | ProjectDnaToolRef>;
+  constraints?: string[];
+  decisions?: Array<string | ProjectDnaDecision>;
+  storeDna?: boolean;
+}
+
+function normalizeStringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value
+        .map((item) => {
+          const record = asRecord(item);
+          return stringValue(
+            record.label ?? record.title ?? record.value ?? item,
+          ).trim();
+        })
+        .filter(Boolean)
+    : [];
+}
+
+function normalizeProjectDnaModels(value: unknown): ProjectDnaModelRef[] {
+  return Array.isArray(value)
+    ? value
+        .map((item) => {
+          const record = asRecord(item);
+          const modelId = stringValue(record.modelId ?? record.id ?? item).trim();
+          const label = stringValue(record.label ?? record.name ?? modelId, modelId).trim();
+          return modelId ? { modelId, label: label || modelId } : null;
+        })
+        .filter((item): item is ProjectDnaModelRef => Boolean(item))
+    : [];
+}
+
+function normalizeProjectDnaTools(value: unknown): ProjectDnaToolRef[] {
+  return Array.isArray(value)
+    ? value
+        .map((item) => {
+          const record = asRecord(item);
+          const toolId = stringValue(record.toolId ?? record.id ?? item).trim();
+          const label = stringValue(record.label ?? record.name ?? toolId, toolId).trim();
+          return toolId ? { toolId, label: label || toolId } : null;
+        })
+        .filter((item): item is ProjectDnaToolRef => Boolean(item))
+    : [];
+}
+
+function normalizeProjectDnaDecisions(value: unknown): ProjectDnaDecision[] {
+  return Array.isArray(value)
+    ? value
+        .map((item): ProjectDnaDecision | null => {
+          const record = asRecord(item);
+          const title = stringValue(record.title ?? record.decision ?? item).trim();
+          if (!title) return null;
+          return {
+            decisionKey: maybeString(record.decisionKey ?? record.decision_key) ?? undefined,
+            title,
+            rationale: maybeString(record.rationale ?? record.reason) ?? undefined,
+            status: maybeString(record.status) ?? undefined,
+          };
+        })
+        .filter((item): item is ProjectDnaDecision => Boolean(item))
+    : [];
+}
+
+function normalizeProjectDnaProfile(value: unknown): ProjectDnaProfile {
+  const raw = asRecord(value);
+  const completion = asRecord(raw.completion);
+  const sectionStates = asRecord(raw.sectionStates);
+  return {
+    username: maybeString(raw.username),
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    projectName: maybeString(raw.projectName ?? raw.project_name),
+    objective: maybeString(raw.objective),
+    context: maybeString(raw.context),
+    responseStyle: maybeString(raw.responseStyle ?? raw.response_style),
+    preferredModels: normalizeProjectDnaModels(
+      raw.preferredModels ?? raw.preferred_models,
+    ),
+    allowedTools: normalizeProjectDnaTools(raw.allowedTools ?? raw.allowed_tools),
+    constraints: normalizeStringList(raw.constraints),
+    decisions: normalizeProjectDnaDecisions(raw.decisions),
+    sectionStates: Object.fromEntries(
+      Object.entries(sectionStates).map(([key, status]) => [
+        key,
+        stringValue(status, "missing_optional"),
+      ]),
+    ),
+    completion: {
+      readySectionCount: numberValue(completion.readySectionCount, 0),
+      totalSectionCount: numberValue(completion.totalSectionCount, 0),
+      readySectionIds: normalizeStringList(completion.readySectionIds),
+      score: numberValue(completion.score, 0),
+    },
+    dnaHash: maybeString(raw.dnaHash ?? raw.dna_hash),
+  };
+}
+
+function normalizeProjectDnaInjectionPlan(value: unknown): ProjectDnaInjectionPlan {
+  const raw = asRecord(value);
+  return {
+    contextInjectorVersion: maybeString(raw.contextInjectorVersion) ?? undefined,
+    channelId: maybeString(raw.channelId) ?? undefined,
+    status: maybeString(raw.status) ?? undefined,
+    includedSectionIds: normalizeStringList(raw.includedSectionIds),
+    priority: numberValue(raw.priority, 0),
+    maxTokens: numberValue(raw.maxTokens, 0),
+    willInjectNow: boolValue(raw.willInjectNow),
+    contextManagerCompatible: boolValue(raw.contextManagerCompatible),
+    rawHistoryAllowed: boolValue(raw.rawHistoryAllowed),
+    reason: maybeString(raw.reason) ?? undefined,
+  };
+}
+
+function normalizeProjectDnaPlan(value: unknown): ProjectDnaPlan {
+  const raw = asRecord(value);
+  return {
+    projectDnaServiceVersion:
+      maybeString(raw.projectDnaServiceVersion) ?? undefined,
+    profileBuilderVersion: maybeString(raw.profileBuilderVersion) ?? undefined,
+    contextInjectorVersion: maybeString(raw.contextInjectorVersion) ?? undefined,
+    mode: maybeString(raw.mode) ?? undefined,
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    status: maybeString(raw.status) ?? undefined,
+    profile: normalizeProjectDnaProfile(raw.profile),
+    contextInjectionPlan: normalizeProjectDnaInjectionPlan(
+      raw.contextInjectionPlan,
+    ),
+    sideEffects: parseRecordJson(raw.sideEffects) ?? {},
+  };
+}
+
+function normalizeProjectDnaRecord(value: unknown): ProjectDnaRecord {
+  const raw = asRecord(value);
+  const dna = parseRecordJson(raw.dna ?? raw.dnaJson ?? raw.dna_json);
+  const constraints = raw.constraints ?? raw.activeConstraints;
+  const decisions = raw.decisions ?? raw.activeDecisions;
+  return {
+    id: maybeString(raw.id),
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    objective: maybeString(raw.objective),
+    context: maybeString(raw.context),
+    responseStyle: maybeString(raw.responseStyle ?? raw.response_style),
+    preferredModels: normalizeProjectDnaModels(
+      raw.preferredModels ?? raw.preferred_models,
+    ),
+    allowedTools: normalizeProjectDnaTools(raw.allowedTools ?? raw.allowed_tools),
+    dna: dna ? normalizeProjectDnaPlan(dna) : null,
+    dnaHash: maybeString(raw.dnaHash ?? raw.dna_hash),
+    status: maybeString(raw.status),
+    constraints: normalizeStringList(constraints),
+    decisions: normalizeProjectDnaDecisions(decisions),
+    createdAt: maybeString(raw.createdAt ?? raw.created_at),
+    updatedAt: maybeString(raw.updatedAt ?? raw.updated_at),
+  };
+}
+
+function normalizeContextHeatmapEntry(value: unknown): ContextHeatmapEntry {
+  const raw = asRecord(value);
+  const entry = parseRecordJson(raw.entry ?? raw.entryJson) ?? {};
+  const merged = { ...entry, ...raw };
+  return {
+    id: maybeString(raw.id),
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    chunkId: stringValue(merged.chunkId ?? merged.chunk_id),
+    sourceType: maybeString(merged.sourceType ?? merged.source_type),
+    sourceId: maybeString(merged.sourceId ?? merged.source_id),
+    title: maybeString(merged.title),
+    utilityScore: numberValue(merged.utilityScore ?? merged.utility_score, 0),
+    usageCount: numberValue(merged.usageCount ?? merged.usage_count, 0),
+    responseCount: numberValue(merged.responseCount ?? merged.response_count, 0),
+    citationCount: numberValue(merged.citationCount ?? merged.citation_count, 0),
+    copiedTermCount: numberValue(
+      merged.copiedTermCount ?? merged.copied_term_count,
+      0,
+    ),
+    ageDays: numberValue(merged.ageDays ?? merged.age_days, 0),
+    bucket: maybeString(merged.bucket) ?? "low_usage",
+    label: maybeString(merged.label),
+    recommendedAction: maybeString(
+      merged.recommendedAction ?? merged.recommended_action,
+    ) ?? "review",
+    themeToken: maybeString(merged.themeToken ?? merged.theme_token),
+    matchedObjectiveTerms: Array.isArray(merged.matchedObjectiveTerms)
+      ? merged.matchedObjectiveTerms.map((item) => stringValue(item)).filter(Boolean)
+      : [],
+    signals: parseRecordJson(merged.signals) ?? {},
+    entry,
+    createdAt: maybeString(raw.createdAt ?? raw.created_at),
+    updatedAt: maybeString(raw.updatedAt ?? raw.updated_at),
+  };
+}
+
+function normalizeContextUsageStat(value: unknown): ContextUsageStat {
+  const raw = asRecord(value);
+  return {
+    id: maybeString(raw.id),
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    chunkId: stringValue(raw.chunkId ?? raw.chunk_id),
+    sourceType: maybeString(raw.sourceType ?? raw.source_type),
+    sourceId: maybeString(raw.sourceId ?? raw.source_id),
+    usageCount: numberValue(raw.usageCount ?? raw.usage_count, 0),
+    responseCount: numberValue(raw.responseCount ?? raw.response_count, 0),
+    citationCount: numberValue(raw.citationCount ?? raw.citation_count, 0),
+    utilityScore: numberValue(raw.utilityScore ?? raw.utility_score, 0),
+    metadata: parseRecordJson(raw.metadata ?? raw.metadataJson) ?? {},
+    createdAt: maybeString(raw.createdAt ?? raw.created_at),
+    updatedAt: maybeString(raw.updatedAt ?? raw.updated_at),
+  };
+}
+
+function normalizeContextHeatmapPlan(value: unknown): ContextHeatmapPlan {
+  const raw = asRecord(value);
+  const summary = asRecord(raw.summary);
+  const bucketCounts = asRecord(summary.bucketCounts);
+  const garbageCollectorPlan = asRecord(raw.garbageCollectorPlan);
+  return {
+    usageTrackerVersion: maybeString(raw.usageTrackerVersion) ?? undefined,
+    heatmapGeneratorVersion: maybeString(raw.heatmapGeneratorVersion) ?? undefined,
+    memoryGarbageCollectorVersion:
+      maybeString(raw.memoryGarbageCollectorVersion) ?? undefined,
+    mode: maybeString(raw.mode) ?? undefined,
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    objective: maybeString(raw.objective),
+    entries: Array.isArray(raw.entries)
+      ? raw.entries.map(normalizeContextHeatmapEntry)
+      : [],
+    summary: {
+      chunkCount: numberValue(summary.chunkCount, 0),
+      bucketCounts: Object.fromEntries(
+        Object.entries(bucketCounts).map(([key, count]) => [
+          key,
+          numberValue(count, 0),
+        ]),
+      ),
+      averageUtilityScore: numberValue(summary.averageUtilityScore, 0),
+      archiveCandidateCount: numberValue(summary.archiveCandidateCount, 0),
+      automaticArchiveWillRun: boolValue(summary.automaticArchiveWillRun),
+    },
+    garbageCollectorPlan: {
+      candidateChunkIds: Array.isArray(garbageCollectorPlan.candidateChunkIds)
+        ? garbageCollectorPlan.candidateChunkIds
+            .map((item) => stringValue(item))
+            .filter(Boolean)
+        : [],
+      recommendedAction:
+        maybeString(garbageCollectorPlan.recommendedAction) ?? undefined,
+      automaticArchiveAllowed: boolValue(
+        garbageCollectorPlan.automaticArchiveAllowed,
+      ),
+      automaticDeleteAllowed: boolValue(
+        garbageCollectorPlan.automaticDeleteAllowed,
+      ),
+      requiresHumanConfirmation: boolValue(
+        garbageCollectorPlan.requiresHumanConfirmation,
+      ),
+    },
+    display: parseRecordJson(raw.display) ?? {},
+    sideEffects: parseRecordJson(raw.sideEffects) ?? {},
+  };
+}
+
+function normalizeDatasetBuilderSource(value: unknown): DatasetBuilderSource {
+  const raw = asRecord(value);
+  return {
+    sourceId: stringValue(raw.sourceId ?? raw.source_id, "source"),
+    sourceType: maybeString(raw.sourceType ?? raw.source_type),
+    title: maybeString(raw.title),
+    tokenCount: numberValue(raw.tokenCount ?? raw.token_count, 0),
+    sensitiveTermCount: numberValue(
+      raw.sensitiveTermCount ?? raw.sensitive_term_count,
+      0,
+    ),
+  };
+}
+
+function normalizeDatasetBuilderExample(value: unknown): DatasetBuilderExample {
+  const raw = asRecord(value);
+  const metadata = parseRecordJson(raw.metadata ?? raw.metadataJson) ?? {};
+  return {
+    id: stringValue(raw.id, "example"),
+    datasetId: maybeString(raw.datasetId ?? raw.dataset_id),
+    instruction: stringValue(raw.instruction),
+    input: stringValue(raw.input),
+    output: stringValue(raw.output),
+    metadata: {
+      ...metadata,
+      sourceId: maybeString(metadata.sourceId ?? metadata.source_id),
+      sourceType: maybeString(metadata.sourceType ?? metadata.source_type),
+      sourceTitle: maybeString(metadata.sourceTitle ?? metadata.source_title),
+      chunkIndex: numberValue(metadata.chunkIndex ?? metadata.chunk_index, 0),
+      format: maybeString(metadata.format),
+      dataUsedPreview: maybeString(
+        metadata.dataUsedPreview ?? metadata.data_used_preview,
+      ),
+      requiresHumanReview:
+        boolValue(
+          metadata.requiresHumanReview ?? metadata.requires_human_review,
+        ) ?? false,
+    },
+    qualityScore: numberValue(raw.qualityScore ?? raw.quality_score, 0),
+    qualityLabel: maybeString(raw.qualityLabel ?? raw.quality_label),
+    status: maybeString(raw.status),
+    matchedObjectiveTerms: normalizeStringList(raw.matchedObjectiveTerms),
+    sensitiveTerms: normalizeStringList(raw.sensitiveTerms),
+    tokenCount: numberValue(raw.tokenCount ?? raw.token_count, 0),
+  };
+}
+
+function normalizeDatasetQualitySummary(
+  value: unknown,
+): DatasetBuilderPlan["qualitySummary"] {
+  const raw = asRecord(value);
+  return {
+    averageQualityScore: numberValue(raw.averageQualityScore, 0),
+    readyExampleCount: numberValue(raw.readyExampleCount, 0),
+    reviewExampleCount: numberValue(raw.reviewExampleCount, 0),
+    filteredExampleCount: numberValue(raw.filteredExampleCount, 0),
+    sensitiveSourceCount: numberValue(raw.sensitiveSourceCount, 0),
+  };
+}
+
+function normalizeDatasetExportPlan(
+  value: unknown,
+): DatasetBuilderPlan["exportPlan"] {
+  const raw = asRecord(value);
+  return {
+    format: maybeString(raw.format),
+    previewJsonl: maybeString(raw.previewJsonl),
+    willWriteFile: boolValue(raw.willWriteFile) ?? false,
+    willUploadDataset: boolValue(raw.willUploadDataset) ?? false,
+    requiresHumanReview: boolValue(raw.requiresHumanReview) ?? false,
+  };
+}
+
+function normalizeDatasetBuilderPlan(value: unknown): DatasetBuilderPlan {
+  const raw = asRecord(value);
+  const dataset = asRecord(raw.dataset);
+  return {
+    datasetBuilderVersion: maybeString(raw.datasetBuilderVersion) ?? undefined,
+    syntheticExampleGeneratorVersion:
+      maybeString(raw.syntheticExampleGeneratorVersion) ?? undefined,
+    qualityFilterVersion: maybeString(raw.qualityFilterVersion) ?? undefined,
+    exportServiceVersion: maybeString(raw.exportServiceVersion) ?? undefined,
+    mode: maybeString(raw.mode) ?? undefined,
+    username: maybeString(raw.username),
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    dataset: {
+      datasetId: stringValue(dataset.datasetId ?? dataset.dataset_id, "dataset"),
+      objective: maybeString(dataset.objective),
+      format: maybeString(dataset.format),
+      status: maybeString(dataset.status),
+      exampleCount: numberValue(dataset.exampleCount, 0),
+      readyExampleCount: numberValue(dataset.readyExampleCount, 0),
+      reviewExampleCount: numberValue(dataset.reviewExampleCount, 0),
+      filteredExampleCount: numberValue(dataset.filteredExampleCount, 0),
+    },
+    dataSources: Array.isArray(raw.dataSources)
+      ? raw.dataSources.map(normalizeDatasetBuilderSource)
+      : [],
+    examples: Array.isArray(raw.examples)
+      ? raw.examples.map(normalizeDatasetBuilderExample)
+      : [],
+    qualitySummary: normalizeDatasetQualitySummary(raw.qualitySummary),
+    exportPlan: normalizeDatasetExportPlan(raw.exportPlan),
+    sideEffects: parseRecordJson(raw.sideEffects) ?? {},
+  };
+}
+
+function normalizeGeneratedDataset(value: unknown): GeneratedDatasetRecord {
+  const raw = asRecord(value);
+  const qualitySummary =
+    parseRecordJson(raw.qualitySummary ?? raw.quality_summary_json) ??
+    asRecord(raw.qualitySummary);
+  const dataSources =
+    parseArrayJson(raw.dataSources ?? raw.data_sources_json) ??
+    (Array.isArray(raw.dataSources) ? raw.dataSources : []);
+  const exportPlan =
+    parseRecordJson(raw.exportPlan ?? raw.export_plan_json) ??
+    asRecord(raw.exportPlan);
+  return {
+    id: stringValue(raw.id, "dataset"),
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    objectiveExcerpt: maybeString(raw.objectiveExcerpt ?? raw.objective_excerpt),
+    outputFormat: maybeString(raw.outputFormat ?? raw.output_format),
+    status: maybeString(raw.status),
+    exampleCount: numberValue(raw.exampleCount ?? raw.example_count, 0),
+    readyExampleCount: numberValue(
+      raw.readyExampleCount ?? raw.ready_example_count,
+      0,
+    ),
+    reviewExampleCount: numberValue(
+      raw.reviewExampleCount ?? raw.review_example_count,
+      0,
+    ),
+    qualitySummary: normalizeDatasetQualitySummary(qualitySummary),
+    dataSources: dataSources.map(normalizeDatasetBuilderSource),
+    exportPlan: normalizeDatasetExportPlan(exportPlan),
+    examples: Array.isArray(raw.examples)
+      ? raw.examples.map(normalizeDatasetBuilderExample)
+      : [],
+    createdAt: maybeString(raw.createdAt ?? raw.created_at),
+    updatedAt: maybeString(raw.updatedAt ?? raw.updated_at),
+  };
+}
+
+export async function getProjectDna(
+  projectId: string,
+): Promise<ProjectDnaRecord | null> {
+  const response = await authFetch(
+    `/api/cognix/projects/${encodeURIComponent(projectId)}/dna`,
+  );
+  const body = await parseJsonOrThrow<{
+    projectDna?: unknown;
+  }>(response);
+  return body.projectDna ? normalizeProjectDnaRecord(body.projectDna) : null;
+}
+
+export async function upsertProjectDna(
+  payload: ProjectDnaPayload,
+): Promise<ProjectDnaResult> {
+  const response = await authFetch(
+    `/api/cognix/projects/${encodeURIComponent(payload.projectId)}/dna`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        objective: payload.objective ?? null,
+        context: payload.context ?? null,
+        responseStyle: payload.responseStyle ?? null,
+        preferredModels: payload.preferredModels ?? [],
+        allowedTools: payload.allowedTools ?? [],
+        constraints: payload.constraints ?? [],
+        decisions: payload.decisions ?? [],
+        storeDna: payload.storeDna ?? true,
+      }),
+    },
+  );
+  const body = await parseJsonOrThrow<{
+    projectDnaPlan?: unknown;
+    projectDna?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    projectDnaPlan: normalizeProjectDnaPlan(body.projectDnaPlan),
+    projectDna: body.projectDna
+      ? normalizeProjectDnaRecord(body.projectDna)
+      : null,
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function createProjectDnaInjectionPlan(
+  payload: ProjectDnaPayload,
+): Promise<ProjectDnaResult> {
+  const response = await authFetch(
+    `/api/cognix/projects/${encodeURIComponent(payload.projectId)}/dna/injection-plan`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        objective: payload.objective ?? null,
+        context: payload.context ?? null,
+        responseStyle: payload.responseStyle ?? null,
+        preferredModels: payload.preferredModels ?? [],
+        allowedTools: payload.allowedTools ?? [],
+        constraints: payload.constraints ?? [],
+        decisions: payload.decisions ?? [],
+        storeDna: false,
+      }),
+    },
+  );
+  const body = await parseJsonOrThrow<{
+    projectDnaPlan?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    projectDnaPlan: normalizeProjectDnaPlan(body.projectDnaPlan),
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function createContextHeatmapPlan(payload: {
+  contextChunks: Array<Record<string, unknown>>;
+  responseUsage?: Array<Record<string, unknown>>;
+  objective?: string | null;
+  projectId?: string | null;
+  storeHeatmap?: boolean;
+}): Promise<ContextHeatmapPlanResult> {
+  const response = await authFetch("/api/cognix/context/heatmap/plan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contextChunks: payload.contextChunks,
+      responseUsage: payload.responseUsage ?? [],
+      objective: payload.objective ?? null,
+      projectId: payload.projectId ?? null,
+      storeHeatmap: payload.storeHeatmap ?? true,
+    }),
+  });
+  const body = await parseJsonOrThrow<{
+    contextHeatmapPlan?: unknown;
+    storedHeatmapEntries?: unknown[];
+    storedUsageStats?: unknown[];
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    contextHeatmapPlan: normalizeContextHeatmapPlan(body.contextHeatmapPlan),
+    storedHeatmapEntries: (body.storedHeatmapEntries ?? []).map(
+      normalizeContextHeatmapEntry,
+    ),
+    storedUsageStats: (body.storedUsageStats ?? []).map(normalizeContextUsageStat),
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function listContextHeatmapEntries(payload?: {
+  projectId?: string | null;
+}): Promise<{
+  entries: ContextHeatmapEntry[];
+  usageStats: ContextUsageStat[];
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}> {
+  const params = new URLSearchParams();
+  if (payload?.projectId) params.set("project_id", payload.projectId);
+  const query = params.toString();
+  const response = await authFetch(
+    `/api/cognix/context/heatmap/entries${query ? `?${query}` : ""}`,
+  );
+  const body = await parseJsonOrThrow<{
+    entries?: unknown[];
+    usageStats?: unknown[];
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    entries: (body.entries ?? []).map(normalizeContextHeatmapEntry),
+    usageStats: (body.usageStats ?? []).map(normalizeContextUsageStat),
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function createDatasetBuilderPlan(payload: {
+  documents: Array<Record<string, unknown>>;
+  objective?: string | null;
+  outputFormat?: "jsonl" | "alpaca_json" | "chatml_jsonl" | string;
+  maxExamples?: number;
+  projectId?: string | null;
+  storeDataset?: boolean;
+}): Promise<DatasetBuilderPlanResult> {
+  const response = await authFetch("/api/cognix/datasets/plan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      documents: payload.documents,
+      objective: payload.objective ?? null,
+      outputFormat: payload.outputFormat ?? "jsonl",
+      maxExamples: payload.maxExamples ?? 50,
+      projectId: payload.projectId ?? null,
+      storeDataset: payload.storeDataset ?? true,
+    }),
+  });
+  const body = await parseJsonOrThrow<{
+    datasetBuilderPlan?: unknown;
+    generatedDataset?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    datasetBuilderPlan: normalizeDatasetBuilderPlan(body.datasetBuilderPlan),
+    generatedDataset: body.generatedDataset
+      ? normalizeGeneratedDataset(body.generatedDataset)
+      : null,
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function listGeneratedDatasets(payload?: {
+  projectId?: string | null;
+}): Promise<{
+  datasets: GeneratedDatasetRecord[];
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}> {
+  const params = new URLSearchParams();
+  if (payload?.projectId) params.set("project_id", payload.projectId);
+  const query = params.toString();
+  const response = await authFetch(
+    `/api/cognix/datasets${query ? `?${query}` : ""}`,
+  );
+  const body = await parseJsonOrThrow<{
+    datasets?: unknown[];
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    datasets: (body.datasets ?? []).map(normalizeGeneratedDataset),
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export type LiveMemoryCategory =
+  | "preference"
+  | "project"
+  | "skill"
+  | "organization"
+  | "general"
+  | string;
+
+export interface LiveMemoryVersionRecord {
+  id?: string | null;
+  memoryId?: string | null;
+  versionNumber?: number;
+  category?: LiveMemoryCategory;
+  title?: string;
+  content?: string;
+  changeReason?: string | null;
+  metadata?: Record<string, unknown>;
+  createdAt?: string | null;
+}
+
+export interface LiveMemoryAuditLog {
+  id?: string | null;
+  memoryId?: string | null;
+  action?: string | null;
+  actorUsername?: string | null;
+  metadata?: Record<string, unknown>;
+  createdAt?: string | null;
+}
+
+export interface LiveMemoryItem {
+  id: string;
+  projectId?: string | null;
+  category: LiveMemoryCategory;
+  title: string;
+  content: string;
+  status: "active" | "disabled" | "deleted" | string;
+  sensitive: boolean;
+  currentVersion: number;
+  metadata: Record<string, unknown>;
+  versions: LiveMemoryVersionRecord[];
+  auditLogs: LiveMemoryAuditLog[];
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface LiveMemoryMutationResult {
+  memory: LiveMemoryItem | null;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
+export interface MemoryCleanupSuggestion {
+  id?: string | null;
+  projectId?: string | null;
+  memoryId: string;
+  title: string;
+  category: string;
+  reasonCode: string;
+  recommendedAction: string;
+  confidence: number;
+  detail?: string | null;
+  duplicateOf?: string | null;
+  conflictId?: string | null;
+  requiresReview?: boolean;
+  rollbackPlan?: Record<string, unknown>;
+  status?: string | null;
+  createdAt?: string | null;
+}
+
+export interface MemoryConflict {
+  id?: string | null;
+  projectId?: string | null;
+  conflictId?: string | null;
+  memoryIds: string[];
+  conflictType?: string | null;
+  preferenceKey?: string | null;
+  summary?: string | null;
+  requiresReview?: boolean;
+  rollbackRequired?: boolean;
+  status?: string | null;
+  createdAt?: string | null;
+}
+
+export interface MemoryCleanupPlan {
+  memoryGarbageCollectorVersion?: string;
+  memoryConflictResolverVersion?: string;
+  usageTrackerVersion?: string;
+  mode?: string;
+  projectId?: string | null;
+  suggestions: MemoryCleanupSuggestion[];
+  conflicts: MemoryConflict[];
+  summary?: {
+    memoryCount?: number;
+    suggestionCount?: number;
+    archiveCandidateCount?: number;
+    mergeCandidateCount?: number;
+    conflictCount?: number;
+    reviewMessage?: string | null;
+    automaticCleanupWillRun?: boolean;
+  };
+  reviewPolicy?: Record<string, unknown>;
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface MemoryCleanupPlanResult {
+  memoryCleanupPlan: MemoryCleanupPlan;
+  storedSuggestions: MemoryCleanupSuggestion[];
+  storedConflicts: MemoryConflict[];
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
+function normalizeLiveMemoryVersion(
+  value: unknown,
+): LiveMemoryVersionRecord {
+  const raw = asRecord(value);
+  return {
+    id: maybeString(raw.id),
+    memoryId: maybeString(raw.memoryId ?? raw.memory_id),
+    versionNumber: numberValue(raw.versionNumber ?? raw.version_number, 0),
+    category: maybeString(raw.category) ?? "general",
+    title: maybeString(raw.title) ?? "",
+    content: maybeString(raw.content) ?? "",
+    changeReason: maybeString(raw.changeReason ?? raw.change_reason),
+    metadata: parseRecordJson(raw.metadata ?? raw.metadataJson) ?? {},
+    createdAt: maybeString(raw.createdAt ?? raw.created_at),
+  };
+}
+
+function normalizeLiveMemoryAuditLog(value: unknown): LiveMemoryAuditLog {
+  const raw = asRecord(value);
+  return {
+    id: maybeString(raw.id),
+    memoryId: maybeString(raw.memoryId ?? raw.memory_id),
+    action: maybeString(raw.action),
+    actorUsername: maybeString(raw.actorUsername ?? raw.actor_username),
+    metadata: parseRecordJson(raw.metadata ?? raw.metadataJson) ?? {},
+    createdAt: maybeString(raw.createdAt ?? raw.created_at),
+  };
+}
+
+function normalizeLiveMemoryItem(value: unknown): LiveMemoryItem {
+  const raw = asRecord(value);
+  return {
+    id: stringValue(raw.id),
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    category: maybeString(raw.category) ?? "general",
+    title: maybeString(raw.title) ?? "Memory",
+    content: maybeString(raw.content) ?? "",
+    status: maybeString(raw.status) ?? "active",
+    sensitive: boolValue(raw.sensitive) ?? false,
+    currentVersion: numberValue(raw.currentVersion ?? raw.current_version, 1),
+    metadata: parseRecordJson(raw.metadata ?? raw.metadataJson) ?? {},
+    versions: Array.isArray(raw.versions)
+      ? raw.versions.map(normalizeLiveMemoryVersion)
+      : [],
+    auditLogs: Array.isArray(raw.auditLogs)
+      ? raw.auditLogs.map(normalizeLiveMemoryAuditLog)
+      : [],
+    createdAt: maybeString(raw.createdAt ?? raw.created_at),
+    updatedAt: maybeString(raw.updatedAt ?? raw.updated_at),
+  };
+}
+
+function normalizeMemoryCleanupSuggestion(
+  value: unknown,
+): MemoryCleanupSuggestion {
+  const raw = asRecord(value);
+  const embedded = parseRecordJson(raw.suggestion ?? raw.suggestionJson) ?? {};
+  const merged = { ...embedded, ...raw };
+  return {
+    id: maybeString(raw.id),
+    projectId: maybeString(merged.projectId ?? merged.project_id),
+    memoryId: stringValue(merged.memoryId ?? merged.memory_id),
+    title: maybeString(merged.title) ?? "Memory",
+    category: maybeString(merged.category) ?? "general",
+    reasonCode: maybeString(merged.reasonCode ?? merged.reason_code) ?? "review",
+    recommendedAction:
+      maybeString(merged.recommendedAction ?? merged.recommended_action) ??
+      "review",
+    confidence: numberValue(merged.confidence, 0),
+    detail: maybeString(merged.detail),
+    duplicateOf: maybeString(merged.duplicateOf ?? merged.duplicate_of),
+    conflictId: maybeString(merged.conflictId ?? merged.conflict_id),
+    requiresReview: boolValue(merged.requiresReview) ?? true,
+    rollbackPlan: parseRecordJson(merged.rollbackPlan) ?? {},
+    status: maybeString(merged.status),
+    createdAt: maybeString(merged.createdAt ?? merged.created_at),
+  };
+}
+
+function normalizeMemoryConflict(value: unknown): MemoryConflict {
+  const raw = asRecord(value);
+  const embedded = parseRecordJson(raw.conflict ?? raw.conflictJson) ?? {};
+  const merged = { ...embedded, ...raw };
+  const memoryIds = merged.memoryIds ?? merged.memory_ids ?? raw.memoryIds;
+  return {
+    id: maybeString(raw.id),
+    projectId: maybeString(merged.projectId ?? merged.project_id),
+    conflictId: maybeString(merged.conflictId ?? merged.conflict_id),
+    memoryIds: Array.isArray(memoryIds)
+      ? memoryIds.map((item) => stringValue(item)).filter(Boolean)
+      : [],
+    conflictType: maybeString(merged.conflictType ?? merged.conflict_type),
+    preferenceKey: maybeString(merged.preferenceKey ?? merged.preference_key),
+    summary: maybeString(merged.summary),
+    requiresReview: boolValue(merged.requiresReview) ?? true,
+    rollbackRequired: boolValue(merged.rollbackRequired) ?? true,
+    status: maybeString(merged.status),
+    createdAt: maybeString(merged.createdAt ?? merged.created_at),
+  };
+}
+
+function normalizeMemoryCleanupPlan(value: unknown): MemoryCleanupPlan {
+  const raw = asRecord(value);
+  const summary = asRecord(raw.summary);
+  return {
+    memoryGarbageCollectorVersion:
+      maybeString(raw.memoryGarbageCollectorVersion) ?? undefined,
+    memoryConflictResolverVersion:
+      maybeString(raw.memoryConflictResolverVersion) ?? undefined,
+    usageTrackerVersion: maybeString(raw.usageTrackerVersion) ?? undefined,
+    mode: maybeString(raw.mode) ?? undefined,
+    projectId: maybeString(raw.projectId ?? raw.project_id),
+    suggestions: Array.isArray(raw.suggestions)
+      ? raw.suggestions.map(normalizeMemoryCleanupSuggestion)
+      : [],
+    conflicts: Array.isArray(raw.conflicts)
+      ? raw.conflicts.map(normalizeMemoryConflict)
+      : [],
+    summary: {
+      memoryCount: numberValue(summary.memoryCount, 0),
+      suggestionCount: numberValue(summary.suggestionCount, 0),
+      archiveCandidateCount: numberValue(summary.archiveCandidateCount, 0),
+      mergeCandidateCount: numberValue(summary.mergeCandidateCount, 0),
+      conflictCount: numberValue(summary.conflictCount, 0),
+      reviewMessage: maybeString(summary.reviewMessage),
+      automaticCleanupWillRun: boolValue(summary.automaticCleanupWillRun),
+    },
+    reviewPolicy: parseRecordJson(raw.reviewPolicy) ?? {},
+    sideEffects: parseRecordJson(raw.sideEffects) ?? {},
+  };
+}
+
+export async function listLiveMemoryItems(payload?: {
+  projectId?: string | null;
+  category?: string | null;
+  query?: string | null;
+  includeDisabled?: boolean;
+}): Promise<LiveMemoryItem[]> {
+  const params = new URLSearchParams();
+  if (payload?.projectId) params.set("project_id", payload.projectId);
+  if (payload?.category) params.set("category", payload.category);
+  if (payload?.query) params.set("query", payload.query);
+  if (payload?.includeDisabled) params.set("include_disabled", "true");
+  const query = params.toString();
+  const response = await authFetch(
+    `/api/cognix/memory/editor/items${query ? `?${query}` : ""}`,
+  );
+  const body = await parseJsonOrThrow<{ items?: unknown[] }>(response);
+  return (body.items ?? []).map(normalizeLiveMemoryItem);
+}
+
+export async function createLiveMemoryItem(payload: {
+  title: string;
+  content: string;
+  category?: string;
+  projectId?: string | null;
+  sensitive?: boolean;
+  confirmedSensitiveControl?: boolean;
+  metadata?: Record<string, unknown>;
+  storeMemory?: boolean;
+}): Promise<LiveMemoryMutationResult> {
+  const response = await authFetch("/api/cognix/memory/editor/items", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: payload.title,
+      content: payload.content,
+      category: payload.category ?? "general",
+      projectId: payload.projectId ?? null,
+      sensitive: payload.sensitive ?? false,
+      confirmedSensitiveControl: payload.confirmedSensitiveControl ?? false,
+      metadata: payload.metadata ?? {},
+      storeMemory: payload.storeMemory ?? true,
+    }),
+  });
+  const body = await parseJsonOrThrow<{
+    memory?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    memory: body.memory ? normalizeLiveMemoryItem(body.memory) : null,
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function updateLiveMemoryItem(
+  memoryId: string,
+  payload: {
+    title?: string | null;
+    content?: string | null;
+    category?: string | null;
+    reason?: string | null;
+  },
+): Promise<LiveMemoryMutationResult> {
+  const response = await authFetch(
+    `/api/cognix/memory/editor/items/${encodeURIComponent(memoryId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: payload.title ?? null,
+        content: payload.content ?? null,
+        category: payload.category ?? null,
+        reason: payload.reason ?? null,
+      }),
+    },
+  );
+  const body = await parseJsonOrThrow<{
+    memory?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    memory: body.memory ? normalizeLiveMemoryItem(body.memory) : null,
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function disableLiveMemoryItem(
+  memoryId: string,
+  reason?: string,
+): Promise<LiveMemoryMutationResult> {
+  const response = await authFetch(
+    `/api/cognix/memory/editor/items/${encodeURIComponent(memoryId)}/disable`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: reason ?? "memory_review_disabled" }),
+    },
+  );
+  const body = await parseJsonOrThrow<{
+    memory?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    memory: body.memory ? normalizeLiveMemoryItem(body.memory) : null,
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function mergeLiveMemoryItems(payload: {
+  sourceIds: string[];
+  title?: string | null;
+  category?: string | null;
+  disableSources?: boolean;
+  metadata?: Record<string, unknown>;
+}): Promise<LiveMemoryMutationResult> {
+  const response = await authFetch("/api/cognix/memory/editor/merge", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sourceIds: payload.sourceIds,
+      title: payload.title ?? null,
+      category: payload.category ?? null,
+      disableSources: payload.disableSources ?? true,
+      metadata: payload.metadata ?? {},
+    }),
+  });
+  const body = await parseJsonOrThrow<{
+    memory?: unknown;
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    memory: body.memory ? normalizeLiveMemoryItem(body.memory) : null,
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function createMemoryCleanupPlan(payload: {
+  memories: Array<Record<string, unknown>>;
+  usageEntries?: Array<Record<string, unknown>>;
+  projectId?: string | null;
+  storeSuggestions?: boolean;
+}): Promise<MemoryCleanupPlanResult> {
+  const response = await authFetch("/api/cognix/memory/cleanup/plan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      memories: payload.memories,
+      usageEntries: payload.usageEntries ?? [],
+      projectId: payload.projectId ?? null,
+      storeSuggestions: payload.storeSuggestions ?? true,
+    }),
+  });
+  const body = await parseJsonOrThrow<{
+    memoryCleanupPlan?: unknown;
+    storedSuggestions?: unknown[];
+    storedConflicts?: unknown[];
+    auditLogId?: string | null;
+    sideEffects?: Record<string, unknown>;
+    plannerVersion?: string;
+  }>(response);
+  return {
+    memoryCleanupPlan: normalizeMemoryCleanupPlan(body.memoryCleanupPlan),
+    storedSuggestions: (body.storedSuggestions ?? []).map(
+      normalizeMemoryCleanupSuggestion,
+    ),
+    storedConflicts: (body.storedConflicts ?? []).map(normalizeMemoryConflict),
+    auditLogId: body.auditLogId,
+    sideEffects: body.sideEffects,
+    plannerVersion: body.plannerVersion,
+  };
+}
+
+export async function listMemoryCleanupSuggestions(payload?: {
+  projectId?: string | null;
+  limit?: number;
+}): Promise<MemoryCleanupSuggestion[]> {
+  const params = new URLSearchParams();
+  if (payload?.projectId) params.set("project_id", payload.projectId);
+  if (payload?.limit) params.set("limit", String(payload.limit));
+  const query = params.toString();
+  const response = await authFetch(
+    `/api/cognix/memory/cleanup/suggestions${query ? `?${query}` : ""}`,
+  );
+  const body = await parseJsonOrThrow<{ suggestions?: unknown[] }>(response);
+  return (body.suggestions ?? []).map(normalizeMemoryCleanupSuggestion);
+}
+
+export async function listMemoryConflicts(payload?: {
+  projectId?: string | null;
+  limit?: number;
+}): Promise<MemoryConflict[]> {
+  const params = new URLSearchParams();
+  if (payload?.projectId) params.set("project_id", payload.projectId);
+  if (payload?.limit) params.set("limit", String(payload.limit));
+  const query = params.toString();
+  const response = await authFetch(
+    `/api/cognix/memory/cleanup/conflicts${query ? `?${query}` : ""}`,
+  );
+  const body = await parseJsonOrThrow<{ conflicts?: unknown[] }>(response);
+  return (body.conflicts ?? []).map(normalizeMemoryConflict);
+}
+
+export async function planCogniXExecution(payload: {
+  objective: string;
+  projectType?: string | null;
+  projectId?: string | null;
+}): Promise<CogniXExecutionPlan> {
+  const response = await authFetch("/api/cognix/orchestrator/plan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      objective: payload.objective,
+      project_type: payload.projectType ?? null,
+      project_id: payload.projectId ?? null,
+    }),
+  });
+  return parseJsonOrThrow(response);
+}
+
+export async function explainCogniXDecision(payload: {
+  sourceType?: "orchestrator_log" | "router_log" | "manual";
+  sourceId?: string | null;
+  projectId?: string | null;
+  question?: string | null;
+  decision?: Record<string, unknown> | null;
+  storeDecision?: boolean;
+}): Promise<CogniXDecisionExplainResult> {
+  const response = await authFetch("/api/cognix/decisions/explain", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sourceType: payload.sourceType ?? "manual",
+      sourceId: payload.sourceId ?? null,
+      projectId: payload.projectId ?? null,
+      question: payload.question ?? null,
+      decision: payload.decision ?? null,
+      storeDecision: payload.storeDecision ?? true,
+    }),
+  });
+  return parseJsonOrThrow<CogniXDecisionExplainResult>(response);
 }
 
 export async function loadModel(
@@ -234,6 +3565,508 @@ export interface DownloadProgressResponse {
    * Null when nothing has been written to the cache for this repo.
    */
   cache_path: string | null;
+}
+
+export interface ProjectDefaultModel {
+  projectId: string;
+  ownerUsername?: string;
+  modelId: string;
+  label: string;
+  providerType?: string | null;
+  providerId?: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ResponseReflectionConfidence {
+  score?: number;
+  label?: "high" | "medium" | "low" | string;
+  verificationRequired?: boolean;
+  recommendedAction?: string;
+}
+
+export interface ResponseReflectionIssue {
+  id?: string;
+  severity?: string;
+  label?: string;
+  detail?: string;
+  evidence?: Record<string, unknown>;
+}
+
+export interface ResponseReflectionEvaluation {
+  reflectionVersion?: string;
+  mode?: string;
+  taskType?: string;
+  modelId?: string | null;
+  confidence?: ResponseReflectionConfidence;
+  issues?: ResponseReflectionIssue[];
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface ResponseReflectionResult {
+  username: string;
+  responseReflection: ResponseReflectionEvaluation;
+  record?: Record<string, unknown> | null;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
+export interface ResponseReflectionRecord {
+  id: string;
+  messageId?: string | null;
+  threadId?: string | null;
+  projectId?: string | null;
+  modelId?: string | null;
+  confidenceScore?: number | null;
+  confidenceLabel?: string | null;
+  verificationRequired?: boolean | number | null;
+  recommendedAction?: string | null;
+  issues?: ResponseReflectionIssue[];
+  evaluation?: ResponseReflectionEvaluation;
+  createdAt?: string | null;
+}
+
+export async function evaluateResponseReflection(payload: {
+  prompt: string;
+  response: string;
+  messageId?: string | null;
+  threadId?: string | null;
+  projectId?: string | null;
+  modelId?: string | null;
+  taskType?: string | null;
+  requiresSources?: boolean;
+  responseSources?: Array<Record<string, unknown>>;
+}): Promise<ResponseReflectionResult> {
+  const response = await authFetch("/api/cognix/reflection/evaluate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseJsonOrThrow<ResponseReflectionResult>(response);
+}
+
+export async function listResponseReflectionEvaluations(
+  messageId?: string | null,
+): Promise<ResponseReflectionRecord[]> {
+  const query = messageId
+    ? `?${new URLSearchParams({ message_id: messageId }).toString()}`
+    : "";
+  const response = await authFetch(`/api/cognix/reflection/evaluations${query}`);
+  const body = await parseJsonOrThrow<{
+    evaluations?: ResponseReflectionRecord[];
+  }>(response);
+  return body.evaluations ?? [];
+}
+
+export interface DraftStyleProfile {
+  id: string;
+  label: string;
+  tone?: string;
+  targetLength?: string;
+  bestFor?: string[];
+  instruction?: string;
+}
+
+export interface DraftPlanVariant {
+  id: string;
+  variantType: string;
+  label: string;
+  status?: string;
+  styleProfile?: DraftStyleProfile;
+  promptInstruction?: string;
+  requiresBackendGeneration?: boolean;
+  willGenerateNow?: boolean;
+  willStoreVariant?: boolean;
+}
+
+export interface DraftGenerationPlan {
+  draftGenerationVersion?: string;
+  styleProfileRegistryVersion?: string;
+  mode?: string;
+  messageId?: string | null;
+  projectId?: string | null;
+  modelId?: string | null;
+  taskType?: string;
+  selectedVariantTypes?: string[];
+  variants?: DraftPlanVariant[];
+  rankingPlan?: Record<string, unknown>;
+  costPlan?: {
+    estimatedGenerationCount?: number;
+    requiresExplicitUserAction?: boolean;
+    defaultSingleDraftStillAllowed?: boolean;
+  };
+  policies?: Record<string, unknown>;
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface DraftGenerationPlanResult {
+  username: string;
+  draftGenerationPlan: DraftGenerationPlan;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
+export interface ResponseVariantRecord {
+  id: string;
+  messageId?: string | null;
+  threadId?: string | null;
+  projectId?: string | null;
+  variantType?: string | null;
+  title?: string | null;
+  content?: string | null;
+  modelId?: string | null;
+  rankingScore?: number | null;
+  metadata?: Record<string, unknown>;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export async function createDraftGenerationPlan(payload: {
+  prompt: string;
+  requestedVariants?: string[] | null;
+  maxVariants?: number;
+  taskType?: string | null;
+  includeRanking?: boolean;
+  messageId?: string | null;
+  threadId?: string | null;
+  projectId?: string | null;
+  modelId?: string | null;
+}): Promise<DraftGenerationPlanResult> {
+  const response = await authFetch("/api/cognix/drafts/plan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseJsonOrThrow<DraftGenerationPlanResult>(response);
+}
+
+export async function listResponseVariants(
+  messageId?: string | null,
+): Promise<ResponseVariantRecord[]> {
+  const query = messageId
+    ? `?${new URLSearchParams({ message_id: messageId }).toString()}`
+    : "";
+  const response = await authFetch(`/api/cognix/drafts/variants${query}`);
+  const body = await parseJsonOrThrow<{
+    variants?: ResponseVariantRecord[];
+  }>(response);
+  return body.variants ?? [];
+}
+
+export interface DebateRoleProfile {
+  id: string;
+  label: string;
+  displayRole?: string;
+  purpose?: string;
+  visibility?: string;
+}
+
+export interface DebatePlanRound {
+  id: string;
+  roundIndex?: number;
+  roleId: string;
+  label: string;
+  purpose?: string;
+  publicPrompt?: string;
+  status?: string;
+  requiresBackendGeneration?: boolean;
+  willGenerateNow?: boolean;
+}
+
+export interface DebatePlan {
+  debateOrchestratorVersion?: string;
+  debateRoleRegistryVersion?: string;
+  mode?: string;
+  messageId?: string | null;
+  projectId?: string | null;
+  modelId?: string | null;
+  taskType?: string;
+  objectiveExcerpt?: string;
+  roles?: DebateRoleProfile[];
+  rounds?: DebatePlanRound[];
+  summary?: {
+    roleCount?: number;
+    plannedRoundCount?: number;
+    maxRounds?: number;
+    finalRoundId?: string;
+  };
+  displayContract?: Record<string, unknown>;
+  policies?: Record<string, unknown>;
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface DebateSessionRoundRecord extends DebatePlanRound {
+  sessionId?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface DebateOutputRecord {
+  id: string;
+  sessionId?: string | null;
+  roundId?: string | null;
+  roleId?: string | null;
+  outputType?: "argument" | "critique" | "reply" | "synthesis" | "note" | string;
+  publicSummary?: string | null;
+  content?: string | null;
+  modelId?: string | null;
+  metadata?: Record<string, unknown>;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface DebateSessionRecord {
+  id: string;
+  messageId?: string | null;
+  threadId?: string | null;
+  projectId?: string | null;
+  prompt?: string | null;
+  plan?: DebatePlan | null;
+  rounds?: DebateSessionRoundRecord[];
+  outputs?: DebateOutputRecord[];
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface DebatePlanResult {
+  username: string;
+  debatePlan: DebatePlan;
+  session?: DebateSessionRecord | null;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+  plannerVersion?: string;
+}
+
+export async function createDebatePlan(payload: {
+  prompt: string;
+  requestedRoles?: string[] | null;
+  maxRounds?: number;
+  taskType?: string | null;
+  messageId?: string | null;
+  threadId?: string | null;
+  projectId?: string | null;
+  modelId?: string | null;
+  createSession?: boolean;
+}): Promise<DebatePlanResult> {
+  const response = await authFetch("/api/cognix/debate/plan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseJsonOrThrow<DebatePlanResult>(response);
+}
+
+export async function listDebateSessions(
+  messageId?: string | null,
+): Promise<DebateSessionRecord[]> {
+  const query = messageId
+    ? `?${new URLSearchParams({ message_id: messageId }).toString()}`
+    : "";
+  const response = await authFetch(`/api/cognix/debate/sessions${query}`);
+  const body = await parseJsonOrThrow<{
+    sessions?: DebateSessionRecord[];
+  }>(response);
+  return body.sessions ?? [];
+}
+
+export interface ToolDiscoveryNeed {
+  needId?: string;
+  label?: string;
+  description?: string;
+  confidence?: number;
+  toolIds?: string[];
+}
+
+export interface ToolDiscoveryRecommendation {
+  id?: string;
+  toolId?: string;
+  toolName?: string;
+  category?: string;
+  needId?: string;
+  needs?: ToolDiscoveryNeed[];
+  reason?: string;
+  confidence?: number;
+  status?: string;
+  capabilities?: string[];
+  installHint?: string | null;
+  connectorBacked?: boolean;
+  actions?: {
+    primary?: string;
+    ignoreAllowed?: boolean;
+    automaticInstallAllowed?: boolean;
+    requiresHumanConfirmation?: boolean;
+  };
+  guardrails?: Record<string, unknown>;
+}
+
+export interface ToolDiscoveryPlan {
+  toolDiscoveryVersion?: string;
+  capabilityRegistryVersion?: string;
+  mode?: string;
+  projectId?: string | null;
+  projectType?: string | null;
+  projectName?: string | null;
+  objectiveExcerpt?: string;
+  needs?: ToolDiscoveryNeed[];
+  recommendations?: ToolDiscoveryRecommendation[];
+  summary?: {
+    needCount?: number;
+    recommendationCount?: number;
+    installedMatchCount?: number;
+    connectorDisabledCount?: number;
+    automaticInstallAllowed?: boolean;
+  };
+  policies?: Record<string, unknown>;
+  sideEffects?: Record<string, unknown>;
+}
+
+export interface StoredToolRecommendationRecord {
+  id: string;
+  projectId?: string | null;
+  needId?: string | null;
+  toolId?: string | null;
+  toolName?: string | null;
+  category?: string | null;
+  reason?: string | null;
+  status?: string | null;
+  confidence?: number | null;
+  ignored?: boolean;
+  recommendation?: ToolDiscoveryRecommendation;
+  recommendationJson?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface ToolDiscoveryAnalyzeResult {
+  username: string;
+  toolDiscoveryPlan: ToolDiscoveryPlan;
+  storedRecommendations?: StoredToolRecommendationRecord[];
+  installedTools?: Array<Record<string, unknown>>;
+  auditLogId?: string | null;
+  sideEffects?: Record<string, unknown>;
+}
+
+export async function analyzeToolDiscovery(payload: {
+  objective?: string | null;
+  projectId?: string | null;
+  projectType?: string | null;
+  projectName?: string | null;
+  fileNames?: string[] | null;
+  documents?: Array<Record<string, unknown>> | null;
+  tags?: string[] | null;
+  installedToolIds?: string[] | null;
+  storeRecommendations?: boolean;
+  recordInstalledSnapshot?: boolean;
+}): Promise<ToolDiscoveryAnalyzeResult> {
+  const response = await authFetch("/api/cognix/tools/discovery/analyze", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseJsonOrThrow<ToolDiscoveryAnalyzeResult>(response);
+}
+
+export async function listToolRecommendations(payload?: {
+  projectId?: string | null;
+  includeIgnored?: boolean;
+}): Promise<StoredToolRecommendationRecord[]> {
+  const params = new URLSearchParams();
+  if (payload?.projectId) params.set("project_id", payload.projectId);
+  if (payload?.includeIgnored) params.set("include_ignored", "true");
+  const query = params.toString() ? `?${params.toString()}` : "";
+  const response = await authFetch(`/api/cognix/tools/recommendations${query}`);
+  const body = await parseJsonOrThrow<{
+    recommendations?: StoredToolRecommendationRecord[];
+  }>(response);
+  return body.recommendations ?? [];
+}
+
+export interface ProjectSkillRecord {
+  id: string;
+  skillId?: string | null;
+  projectId?: string | null;
+  modelId?: string | null;
+  displayName?: string | null;
+  objective?: string | null;
+  effectiveAllowedTools?: string[];
+}
+
+export interface ProjectDirectiveRecord {
+  id: string;
+  directiveId?: string | null;
+  projectId?: string | null;
+  modelId?: string | null;
+  directiveType?: string | null;
+  content?: string | null;
+  priority?: number | null;
+}
+
+export async function createProjectSkill(payload: {
+  projectId: string;
+  displayName: string;
+  objective?: string | null;
+  instructions?: string | null;
+  modelId?: string | null;
+  allowedTools?: string[];
+}): Promise<ProjectSkillRecord | null> {
+  const response = await authFetch(
+    `/api/cognix/projects/${encodeURIComponent(payload.projectId)}/skills`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        displayName: payload.displayName,
+        objective: payload.objective ?? null,
+        instructions: payload.instructions ?? null,
+        modelId: payload.modelId ?? null,
+        allowedTools: payload.allowedTools ?? [],
+      }),
+    },
+  );
+  const body = await parseJsonOrThrow<{
+    projectSkill: ProjectSkillRecord | null;
+  }>(response);
+  return body.projectSkill;
+}
+
+export async function createProjectDirective(payload: {
+  projectId: string;
+  content: string;
+  directiveType?: string | null;
+  priority?: number;
+  modelId?: string | null;
+}): Promise<ProjectDirectiveRecord | null> {
+  const response = await authFetch(
+    `/api/cognix/projects/${encodeURIComponent(payload.projectId)}/directives`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: payload.content,
+        directiveType: payload.directiveType ?? "style",
+        priority: payload.priority ?? 50,
+        modelId: payload.modelId ?? null,
+      }),
+    },
+  );
+  const body = await parseJsonOrThrow<{
+    projectDirective: ProjectDirectiveRecord | null;
+  }>(response);
+  return body.projectDirective;
+}
+
+export async function getProjectDefaultModel(
+  projectId: string,
+): Promise<ProjectDefaultModel | null> {
+  const response = await authFetch(
+    `/api/cognix/projects/${encodeURIComponent(projectId)}/default-model`,
+  );
+  const body = await parseJsonOrThrow<{
+    defaultModel: ProjectDefaultModel | null;
+  }>(response);
+  return body.defaultModel;
 }
 
 export async function getDownloadProgress(
@@ -563,6 +4396,109 @@ export async function deleteChatProject(
   notifyChatHistoryUpdated();
 }
 
+export interface ChatProjectBridgeLink {
+  id: string;
+  projectId: string;
+  threadId: string;
+  linkType: "conversation" | "answer_share" | "approval_context";
+  source: string;
+  status: string;
+  metadata?: Record<string, unknown>;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface MessageTaskRecord {
+  id: string;
+  projectId: string;
+  threadId?: string | null;
+  messageId?: string | null;
+  title: string;
+  sourceText: string;
+  status: "open" | "in_progress" | "done" | "blocked";
+  priority: "low" | "medium" | "high" | "critical";
+  approvalRequestId?: string | null;
+  metadata?: Record<string, unknown>;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface ChatProjectBridgeResponse {
+  links: ChatProjectBridgeLink[];
+  tasks: MessageTaskRecord[];
+  summary: {
+    linkCount: number;
+    taskCount: number;
+    openTaskCount: number;
+  };
+}
+
+export async function getChatProjectBridge(
+  args: {
+    projectId?: string;
+    threadId?: string;
+  } = {},
+): Promise<ChatProjectBridgeResponse> {
+  const params = new URLSearchParams();
+  if (args.projectId) params.set("project_id", args.projectId);
+  if (args.threadId) params.set("thread_id", args.threadId);
+  const qs = params.toString();
+  const response = await authFetch(
+    `/api/cognix/chat-project-bridge${qs ? `?${qs}` : ""}`,
+  );
+  const data = await parseJsonOrThrow<ChatProjectBridgeResponse>(response);
+  return {
+    links: Array.isArray(data.links) ? data.links : [],
+    tasks: Array.isArray(data.tasks) ? data.tasks : [],
+    summary: {
+      linkCount: Number(data.summary?.linkCount ?? 0),
+      taskCount: Number(data.summary?.taskCount ?? 0),
+      openTaskCount: Number(data.summary?.openTaskCount ?? 0),
+    },
+  };
+}
+
+export async function createChatProjectBridgeLink(payload: {
+  projectId: string;
+  threadId: string;
+  linkType?: "conversation" | "answer_share" | "approval_context";
+  source?: "chat" | "project" | "manual";
+  metadata?: Record<string, unknown>;
+}): Promise<ChatProjectBridgeLink> {
+  const response = await authFetch("/api/cognix/chat-project-bridge/links", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...payload, storeLink: true }),
+  });
+  const data = await parseJsonOrThrow<{ link: ChatProjectBridgeLink }>(
+    response,
+  );
+  return data.link;
+}
+
+export async function createMessageTask(payload: {
+  projectId: string;
+  threadId?: string | null;
+  messageId?: string | null;
+  title?: string | null;
+  sourceText: string;
+  priority?: "low" | "medium" | "high" | "critical";
+  status?: "open" | "in_progress" | "done" | "blocked";
+  requireApproval?: boolean;
+  metadata?: Record<string, unknown>;
+}): Promise<MessageTaskRecord> {
+  const response = await authFetch(
+    "/api/cognix/chat-project-bridge/message-tasks",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...payload, storeTask: true }),
+    },
+  );
+  const data = await parseJsonOrThrow<{ task: MessageTaskRecord }>(response);
+  return data.task;
+}
+
 export async function listChatMessages(
   threadId: string,
 ): Promise<MessageRecord[]> {
@@ -872,9 +4808,9 @@ export async function* streamChatCompletions(
 
       const parsed = JSON.parse(dataText) as
         | OpenAIChatChunk
-        | { type?: string; content?: string; error?: { message?: string } };
+        | { type?: string; content?: string; error?: unknown };
       if ("error" in parsed && parsed.error) {
-        throw new Error(parsed.error.message || "Stream error");
+        throw new Error(parseProviderErrorText(parsed) || "Stream error");
       }
       // Tool status events are custom SSE payloads, not OpenAI chunks
       if ("type" in parsed && parsed.type === "tool_status") {

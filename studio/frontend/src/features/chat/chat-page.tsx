@@ -8,6 +8,10 @@ import {
   type ModelOption,
   ModelSelector,
 } from "@/components/assistant-ui/model-selector";
+import {
+  loadRememberedLoadSettings,
+  rememberedLoadSettingsKey,
+} from "@/components/assistant-ui/model-selector/remembered-load-settings";
 import { ProjectComposer, Thread } from "@/components/assistant-ui/thread";
 import { CopyableErrorChip } from "@/components/ui/copyable-error-chip";
 import {
@@ -17,11 +21,12 @@ import {
 } from "@/components/ui/resizable";
 import { useSidebar } from "@/components/ui/sidebar";
 import { Tooltip, TooltipContent } from "@/components/ui/tooltip";
-import { useLatestRef } from "@/features/hub/hooks/use-latest-ref";
+import { authFetch } from "@/features/auth";
 import {
   DOWNLOAD_KIND,
   downloadManager,
 } from "@/features/hub/download-manager";
+import { useLatestRef } from "@/features/hub/hooks/use-latest-ref";
 import {
   type NativeIntent,
   NativeModelChip,
@@ -32,11 +37,14 @@ import {
   useNativePathLeasesSupported,
 } from "@/features/native-intents";
 import { ProjectSourcesPanel } from "@/features/rag/components/project-sources-panel";
+import { useSettingsDialogStore } from "@/features/settings";
 import { GuidedTour, useGuidedTourController } from "@/features/tour";
+import { useDeveloperOptions } from "@/hooks/use-developer-mode";
 import { isTauri } from "@/lib/api-base";
 import { toast } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import {
+  AiBrain03Icon,
   BubbleChatTemporaryIcon,
   Folder02Icon,
   LayoutAlignRightIcon,
@@ -46,7 +54,9 @@ import { useNavigate } from "@tanstack/react-router";
 import { Tooltip as TooltipPrimitive } from "radix-ui";
 import {
   type CSSProperties,
+  type MouseEvent,
   type ReactElement,
+  type ReactNode,
   memo,
   useCallback,
   useEffect,
@@ -55,7 +65,11 @@ import {
   useState,
 } from "react";
 import type { PanelImperativeHandle } from "react-resizable-panels";
-import { listLocalModels } from "./api/chat-api";
+import {
+  type CogniXDecisionExplanation,
+  explainCogniXDecision,
+  listLocalModels,
+} from "./api/chat-api";
 import { ArtifactSurface } from "./artifacts/artifact-surface";
 import {
   clearAutoOpenedArtifacts,
@@ -63,12 +77,32 @@ import {
   useSelectedChatArtifact,
 } from "./artifacts/store";
 import type { ChatArtifact, ChatArtifactSurface } from "./artifacts/types";
+import { BypassPermissionsConfirmDialog } from "./bypass-permissions-menu-item";
 import { ChatSettingsPanel } from "./chat-settings-sheet";
 import { ContextUsageBar } from "./components/context-usage-bar";
+import { CostOptimizerChip } from "./components/cost-optimizer-chip";
 import { ModelLoadInlineStatus } from "./components/model-load-status";
+import { ProjectContextGraphPanel } from "./components/project-context-graph-panel";
+import { ProjectContextHeatmapPanel } from "./components/project-context-heatmap-panel";
+import { ProjectDatasetBuilderPanel } from "./components/project-dataset-builder-panel";
+import { ProjectDnaPanel } from "./components/project-dna-panel";
+import { ProjectMemoryReviewPanel } from "./components/project-memory-review-panel";
+import { ProjectPromptCompressionPanel } from "./components/project-prompt-compression-panel";
+import { ProjectSandboxPanel } from "./components/project-sandbox-panel";
+import { ProjectSimulationPanel } from "./components/project-simulation-panel";
 import { ProjectSwitcher } from "./components/project-switcher";
+import { ProjectTimelinePanel } from "./components/project-timeline-panel";
+import { ProjectWorkflowRecorderPanel } from "./components/project-workflow-recorder-panel";
 import {
+  COGNIX_CODEX_DEFAULT_MODEL_ID,
+  COGNIX_CODEX_MODEL_IDS,
+  COGNIX_OLLAMA_BASE_URL,
+  COGNIX_OLLAMA_MODEL_ID,
+  COGNIX_OLLAMA_PROVIDER_ID,
+  COGNIX_OLLAMA_PROVIDER_NAME,
+  type ExternalProviderConfig,
   buildExternalModelId,
+  isCogniXCodexModelId,
   isExternalModelId,
   parseExternalModelId,
 } from "./external-providers";
@@ -105,7 +139,7 @@ import {
   RegisterCompareHandle,
   SharedComposer,
 } from "./shared-composer";
-import { BypassPermissionsConfirmDialog } from "./bypass-permissions-menu-item";
+import { useChatPreferencesStore } from "./stores/chat-preferences-store";
 import {
   CHAT_CODE_TOOLS_ENABLED_KEY,
   CHAT_IMAGE_TOOLS_ENABLED_KEY,
@@ -117,8 +151,11 @@ import {
   pendingSelectionMatches,
   useChatRuntimeStore,
 } from "./stores/chat-runtime-store";
-import type { PendingModelSelection } from "./stores/chat-runtime-store";
-import { useChatPreferencesStore } from "./stores/chat-preferences-store";
+import type {
+  CogniXRouteSnapshot,
+  PendingModelSelection,
+  ReasoningEffort,
+} from "./stores/chat-runtime-store";
 import { useExternalProvidersStore } from "./stores/external-providers-store";
 import { buildChatTourSteps } from "./tour";
 import type { ChatView, MessageRecord } from "./types";
@@ -144,6 +181,386 @@ const EXTERNAL_PROVIDER_DROPDOWN_ORDER: Record<string, number> = {
 
 function getExternalProviderDropdownRank(providerType: string): number {
   return EXTERNAL_PROVIDER_DROPDOWN_ORDER[providerType] ?? 2;
+}
+
+function pickStrongestReasoningEffort(
+  levels: readonly ReasoningEffort[],
+): ReasoningEffort {
+  for (const effort of ["xhigh", "max", "high", "medium", "low"] as const) {
+    if (levels.includes(effort)) return effort;
+  }
+  return levels[0] ?? "medium";
+}
+
+type CogniXAutoRecommendation = {
+  readiness?: string;
+  modelLabel?: string | null;
+  providerName?: string | null;
+  providerType?: string | null;
+  confidence?: number | null;
+  reason?: string | null;
+};
+
+type CogniXAutoStrategy = {
+  phase?: string;
+  roadmapPhase?: string;
+  recommendation?: CogniXAutoRecommendation;
+};
+
+type OllamaTagsResponse = {
+  models?: Array<{
+    name?: unknown;
+    model?: unknown;
+  }>;
+};
+
+function ollamaNativeTagsUrl(baseUrl: string): string {
+  const trimmed = baseUrl.trim().replace(/\/+$/, "");
+  const nativeRoot = trimmed.endsWith("/v1") ? trimmed.slice(0, -3) : trimmed;
+  return `${nativeRoot}/api/tags`;
+}
+
+function modelIdFromOllamaTag(tag: { name?: unknown; model?: unknown }):
+  | string
+  | null {
+  const value = typeof tag.model === "string" ? tag.model : tag.name;
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  return normalized ? normalized : null;
+}
+
+function mergeOllamaModelsIntoProviders(
+  providers: ExternalProviderConfig[],
+  modelIds: string[],
+): ExternalProviderConfig[] {
+  const mergedModelIds = Array.from(
+    new Set([COGNIX_OLLAMA_MODEL_ID, ...modelIds].filter(Boolean)),
+  );
+  const existingIndex = providers.findIndex(
+    (provider) => provider.id === COGNIX_OLLAMA_PROVIDER_ID,
+  );
+  const now = Date.now();
+  const existing = existingIndex >= 0 ? providers[existingIndex] : null;
+  const nextProvider: ExternalProviderConfig = {
+    ...(existing ?? {
+      createdAt: now,
+    }),
+    id: COGNIX_OLLAMA_PROVIDER_ID,
+    providerType: "ollama",
+    name: existing?.name || COGNIX_OLLAMA_PROVIDER_NAME,
+    baseUrl: existing?.baseUrl || COGNIX_OLLAMA_BASE_URL,
+    models: mergedModelIds,
+    availableModels: mergedModelIds,
+    updatedAt: now,
+  };
+  if (existingIndex < 0) return [nextProvider, ...providers];
+  const next = [...providers];
+  next[existingIndex] = nextProvider;
+  return next;
+}
+
+function providersHaveSameOllamaModels(
+  current: ExternalProviderConfig[],
+  next: ExternalProviderConfig[],
+): boolean {
+  const currentProvider = current.find(
+    (provider) => provider.id === COGNIX_OLLAMA_PROVIDER_ID,
+  );
+  const nextProvider = next.find(
+    (provider) => provider.id === COGNIX_OLLAMA_PROVIDER_ID,
+  );
+  return (
+    JSON.stringify(currentProvider?.models ?? []) ===
+      JSON.stringify(nextProvider?.models ?? []) &&
+    JSON.stringify(currentProvider?.availableModels ?? []) ===
+      JSON.stringify(nextProvider?.availableModels ?? [])
+  );
+}
+
+function formatCogniXConfidence(value: number | null | undefined): string {
+  return typeof value === "number" && Number.isFinite(value)
+    ? `${Math.round(value * 100)}%`
+    : "pending";
+}
+
+function cognixReadinessLabel(value: string | undefined): string {
+  switch (value) {
+    case "ready":
+      return "Ready";
+    case "ready_with_caution":
+      return "Caution";
+    case "model_missing":
+      return "Missing";
+    case "service_unreachable":
+      return "Offline";
+    case "setup_required":
+      return "Setup";
+    case "hardware_blocked":
+      return "Blocked";
+    case "needs_clarification":
+      return "Clarify";
+    case "needs_setup":
+      return "Setup";
+    case "blocked":
+      return "Blocked";
+    default:
+      return value || "Checking";
+  }
+}
+
+function cognixReadinessTone(value: string | undefined): string {
+  if (value === "ready") {
+    return "border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
+  }
+  if (value === "ready_with_caution") {
+    return "border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-300";
+  }
+  if (value === "needs_clarification") {
+    return "border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-300";
+  }
+  if (!value) {
+    return "border-border/70 bg-muted/40 text-muted-foreground";
+  }
+  return "border-destructive/25 bg-destructive/10 text-destructive";
+}
+
+function cognixDecisionSource(route: CogniXRouteSnapshot | null): {
+  sourceType: "orchestrator_log" | "router_log" | "manual";
+  sourceId: string | null;
+  decision: Record<string, unknown> | null;
+} | null {
+  if (!route) return null;
+
+  if (route.orchestratorLogId) {
+    return {
+      sourceType: "orchestrator_log",
+      sourceId: String(route.orchestratorLogId),
+      decision: null,
+    };
+  }
+  if (route.routerLogId) {
+    return {
+      sourceType: "router_log",
+      sourceId: String(route.routerLogId),
+      decision: null,
+    };
+  }
+
+  return {
+    sourceType: "manual",
+    sourceId: null,
+    decision: {
+      selectedDomain: route.selectedDomain,
+      domain: route.selectedDomain,
+      modelId: route.selectedModelId ?? route.recommendedModelLabel,
+      modelLabel: route.recommendedModelLabel,
+      providerType: route.providerType ?? null,
+      status: route.executionStatus ?? "unknown",
+      confidence: route.confidence,
+      warnings: route.warnings ?? [],
+      sideEffects: {
+        modelLoad: Boolean(route.willLoadModel),
+        generation: Boolean(route.willGenerate),
+        networkModelCall:
+          Boolean(route.willGenerate) && route.providerType !== "ollama",
+      },
+    },
+  };
+}
+
+function CogniXAutoChip({ active }: { active: boolean }): ReactElement | null {
+  const openSettings = useSettingsDialogStore((state) => state.openDialog);
+  const latestRoute = useChatRuntimeStore((state) => state.latestCogniXRoute);
+  const activeProjectId = useChatRuntimeStore((state) => state.activeProjectId);
+  const [strategy, setStrategy] = useState<CogniXAutoStrategy | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [decisionExplanation, setDecisionExplanation] =
+    useState<CogniXDecisionExplanation | null>(null);
+  const [decisionLoading, setDecisionLoading] = useState(false);
+  const [decisionError, setDecisionError] = useState<string | null>(null);
+  const decisionSource = useMemo(
+    () => cognixDecisionSource(latestRoute),
+    [latestRoute],
+  );
+  const decisionSourceKey = decisionSource
+    ? `${decisionSource.sourceType}:${decisionSource.sourceId ?? "manual"}:${latestRoute?.createdAt ?? ""}`
+    : "none";
+
+  useEffect(() => {
+    if (!active) return;
+    let cancelled = false;
+    void authFetch("/api/cognix/strategy")
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error("CogniX strategy unavailable");
+        }
+        const body = (await response.json()) as CogniXAutoStrategy;
+        if (!cancelled) {
+          setStrategy(body);
+          setFailed(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setFailed(true);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [active]);
+
+  useEffect(() => {
+    setDecisionExplanation(null);
+    setDecisionError(null);
+    setDecisionLoading(false);
+  }, [decisionSourceKey]);
+
+  const explainLatestDecision = useCallback(
+    async (event: MouseEvent<HTMLButtonElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!decisionSource) {
+        setDecisionError("Aucune decision CogniX n'est disponible.");
+        return;
+      }
+      setDecisionLoading(true);
+      setDecisionError(null);
+      try {
+        const result = await explainCogniXDecision({
+          sourceType: decisionSource.sourceType,
+          sourceId: decisionSource.sourceId,
+          projectId: activeProjectId,
+          question: "Pourquoi ce modele ou cette strategie ?",
+          decision: decisionSource.decision,
+          storeDecision: true,
+        });
+        setDecisionExplanation(result.decisionExplanation);
+      } catch (err: unknown) {
+        setDecisionError(
+          err instanceof Error
+            ? err.message
+            : "Explication indisponible pour cette decision.",
+        );
+      } finally {
+        setDecisionLoading(false);
+      }
+    },
+    [activeProjectId, decisionSource],
+  );
+
+  if (!active) return null;
+
+  const recommendation = strategy?.recommendation;
+  const readiness =
+    latestRoute?.executionStatus ??
+    (failed ? "service_unreachable" : recommendation?.readiness);
+  const readinessLabel = cognixReadinessLabel(readiness);
+  const modelLabel =
+    latestRoute?.recommendedModelLabel ??
+    recommendation?.modelLabel ??
+    "CogniX Auto";
+  const confidence = formatCogniXConfidence(
+    latestRoute?.confidence ?? recommendation?.confidence,
+  );
+  const tooltipDetail = failed
+    ? "CogniX Core is not reachable right now."
+    : (latestRoute?.reason ??
+      recommendation?.reason ??
+      strategy?.roadmapPhase ??
+      "CogniX Core is checking the local strategy.");
+  const modeLabel = latestRoute ? latestRoute.label : "Auto";
+  const planDetail = latestRoute?.planSteps?.slice(0, 3).join(" / ");
+
+  return (
+    <Tooltip>
+      <TooltipPrimitive.Trigger asChild={true}>
+        <button
+          type="button"
+          onClick={() => openSettings("cognix-core")}
+          className={cn(
+            "flex h-[34px] max-w-[46vw] items-center gap-1.5 rounded-full border px-2.5 text-[12px] font-medium transition-colors hover:bg-nav-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:max-w-[260px]",
+            cognixReadinessTone(readiness),
+          )}
+          aria-label={`CogniX Auto: ${modeLabel}, ${modelLabel}, ${readinessLabel}, ${confidence}`}
+        >
+          <HugeiconsIcon
+            icon={AiBrain03Icon}
+            strokeWidth={1.75}
+            className="size-3.5 shrink-0"
+          />
+          <span className="hidden shrink-0 sm:inline">CogniX Auto</span>
+          <span className="hidden text-muted-foreground sm:inline">/</span>
+          <span className="min-w-0 truncate">
+            {latestRoute ? `${modeLabel}: ${modelLabel}` : modelLabel}
+          </span>
+          <span className="hidden shrink-0 text-muted-foreground md:inline">
+            {confidence}
+          </span>
+        </button>
+      </TooltipPrimitive.Trigger>
+      <TooltipContent
+        side="bottom"
+        sideOffset={6}
+        variant="rich"
+        className="max-w-[360px]"
+      >
+        <div className="flex flex-col gap-1">
+          <span className="font-medium">
+            {latestRoute
+              ? `${modeLabel} / ${modelLabel}`
+              : `${readinessLabel} / ${modelLabel}`}
+          </span>
+          {latestRoute ? (
+            <span className="text-xs text-muted-foreground">
+              Plan {latestRoute.planMode ?? "dry_run"} / {readinessLabel} /{" "}
+              {confidence} confidence
+            </span>
+          ) : null}
+          {planDetail ? (
+            <span className="text-xs text-muted-foreground">{planDetail}</span>
+          ) : null}
+          <span className="text-xs text-muted-foreground">{tooltipDetail}</span>
+          {latestRoute ? (
+            <button
+              type="button"
+              onClick={explainLatestDecision}
+              disabled={decisionLoading}
+              className="mt-1 w-fit rounded-full px-0 text-left text-xs font-semibold text-white/90 underline underline-offset-4 outline-none transition-colors hover:text-white focus-visible:ring-2 focus-visible:ring-white/60 disabled:opacity-60"
+            >
+              {decisionLoading
+                ? "Analyse de la decision..."
+                : "Pourquoi cette decision ?"}
+            </button>
+          ) : null}
+          {decisionError ? (
+            <span className="text-xs text-red-200">{decisionError}</span>
+          ) : null}
+          {decisionExplanation ? (
+            <div className="mt-2 flex flex-col gap-1 border-t border-border/40 pt-2">
+              <span className="text-xs font-semibold">
+                {decisionExplanation.title ?? "Explication de decision"}
+              </span>
+              <span className="text-xs text-muted-foreground">
+                {decisionExplanation.summary ?? decisionExplanation.answer}
+              </span>
+              {decisionExplanation.reasonCodes
+                ?.slice(0, 2)
+                .map((reason, index) => (
+                  <span
+                    key={reason.code ?? reason.label ?? `reason-${index}`}
+                    className="text-[11px] leading-snug text-muted-foreground"
+                  >
+                    {reason.label ? `${reason.label}: ` : ""}
+                    {reason.detail}
+                  </span>
+                ))}
+            </div>
+          ) : null}
+        </div>
+      </TooltipContent>
+    </Tooltip>
+  );
 }
 
 function normalizeModelRef(value: string | null | undefined): string {
@@ -208,6 +625,7 @@ const SingleContent = memo(function SingleContent({
   artifact,
   artifactSurface,
   onCloseArtifact,
+  composerAccessory,
 }: {
   threadId?: string;
   newThreadNonce?: string;
@@ -215,6 +633,7 @@ const SingleContent = memo(function SingleContent({
   artifact?: ChatArtifact | null;
   artifactSurface: ChatArtifactSurface;
   onCloseArtifact: () => void;
+  composerAccessory?: ReactNode;
 }): ReactElement {
   const openArtifact = useChatArtifactsStore((state) => state.openArtifact);
   const activeThreadId = useChatRuntimeStore((state) => state.activeThreadId);
@@ -288,7 +707,11 @@ const SingleContent = memo(function SingleContent({
 
   const threadPane = (
     <div className="flex min-h-0 min-w-0 flex-1 basis-0 flex-col overflow-hidden">
-      <Thread hideWelcome={Boolean(threadId)} targetThreadId={threadId} />
+      <Thread
+        hideWelcome={Boolean(threadId)}
+        targetThreadId={threadId}
+        composerAccessory={composerAccessory}
+      />
     </div>
   );
 
@@ -873,7 +1296,16 @@ function ProjectLanding({
   const navigate = useNavigate();
   const activeThreadId = useChatRuntimeStore((s) => s.activeThreadId);
   const initialActiveThreadRef = useRef<string | null>(null);
-  const [projectTab, setProjectTab] = useState<"chats" | "sources">("chats");
+  const [projectTab, setProjectTab] = useState<
+    | "chats"
+    | "sources"
+    | "contextGraph"
+    | "dataset"
+    | "timeline"
+    | "simulation"
+    | "sandbox"
+    | "workflows"
+  >("chats");
   const [pendingNewThreadId, setPendingNewThreadId] = useState<string | null>(
     null,
   );
@@ -986,7 +1418,7 @@ function ProjectLanding({
               placeholder={`New chat in ${projectName}`}
             />
 
-            <div className="mt-9 flex items-center gap-2">
+            <div className="mt-9 flex flex-wrap items-center gap-2">
               <button
                 type="button"
                 onClick={() => setProjectTab("chats")}
@@ -1006,10 +1438,112 @@ function ProjectLanding({
                   New
                 </span>
               </button>
+              <button
+                type="button"
+                onClick={() => setProjectTab("contextGraph")}
+                data-active={projectTab === "contextGraph"}
+                className="h-10 rounded-full px-5 text-[14px] font-semibold transition-colors data-[active=true]:bg-muted data-[active=true]:text-foreground data-[active=false]:text-muted-foreground data-[active=false]:hover:bg-nav-surface-hover"
+              >
+                Context Graph
+              </button>
+              <button
+                type="button"
+                onClick={() => setProjectTab("dataset")}
+                data-active={projectTab === "dataset"}
+                className="h-10 rounded-full px-5 text-[14px] font-semibold transition-colors data-[active=true]:bg-muted data-[active=true]:text-foreground data-[active=false]:text-muted-foreground data-[active=false]:hover:bg-nav-surface-hover"
+              >
+                Dataset
+              </button>
+              <button
+                type="button"
+                onClick={() => setProjectTab("timeline")}
+                data-active={projectTab === "timeline"}
+                className="h-10 rounded-full px-5 text-[14px] font-semibold transition-colors data-[active=true]:bg-muted data-[active=true]:text-foreground data-[active=false]:text-muted-foreground data-[active=false]:hover:bg-nav-surface-hover"
+              >
+                Timeline
+              </button>
+              <button
+                type="button"
+                onClick={() => setProjectTab("simulation")}
+                data-active={projectTab === "simulation"}
+                className="h-10 rounded-full px-5 text-[14px] font-semibold transition-colors data-[active=true]:bg-muted data-[active=true]:text-foreground data-[active=false]:text-muted-foreground data-[active=false]:hover:bg-nav-surface-hover"
+              >
+                Simulation
+              </button>
+              <button
+                type="button"
+                onClick={() => setProjectTab("sandbox")}
+                data-active={projectTab === "sandbox"}
+                className="h-10 rounded-full px-5 text-[14px] font-semibold transition-colors data-[active=true]:bg-muted data-[active=true]:text-foreground data-[active=false]:text-muted-foreground data-[active=false]:hover:bg-nav-surface-hover"
+              >
+                Sandbox
+              </button>
+              <button
+                type="button"
+                onClick={() => setProjectTab("workflows")}
+                data-active={projectTab === "workflows"}
+                className="h-10 rounded-full px-5 text-[14px] font-semibold transition-colors data-[active=true]:bg-muted data-[active=true]:text-foreground data-[active=false]:text-muted-foreground data-[active=false]:hover:bg-nav-surface-hover"
+              >
+                Workflows
+              </button>
             </div>
 
             {projectTab === "sources" ? (
               <ProjectSourcesPanel projectId={projectId} />
+            ) : projectTab === "contextGraph" ? (
+              <>
+                <ProjectDnaPanel
+                  projectId={projectId}
+                  projectName={projectName}
+                  items={items}
+                />
+                <ProjectMemoryReviewPanel
+                  projectId={projectId}
+                  projectName={projectName}
+                />
+                <ProjectContextGraphPanel
+                  projectId={projectId}
+                  projectName={projectName}
+                  items={items}
+                />
+                <ProjectPromptCompressionPanel
+                  projectId={projectId}
+                  projectName={projectName}
+                  items={items}
+                />
+                <ProjectContextHeatmapPanel
+                  projectId={projectId}
+                  projectName={projectName}
+                  items={items}
+                />
+              </>
+            ) : projectTab === "dataset" ? (
+              <ProjectDatasetBuilderPanel
+                projectId={projectId}
+                projectName={projectName}
+                items={items}
+              />
+            ) : projectTab === "timeline" ? (
+              <ProjectTimelinePanel
+                projectId={projectId}
+                projectName={projectName}
+                items={items}
+              />
+            ) : projectTab === "simulation" ? (
+              <ProjectSimulationPanel
+                projectId={projectId}
+                projectName={projectName}
+              />
+            ) : projectTab === "sandbox" ? (
+              <ProjectSandboxPanel
+                projectId={projectId}
+                projectName={projectName}
+              />
+            ) : projectTab === "workflows" ? (
+              <ProjectWorkflowRecorderPanel
+                projectId={projectId}
+                projectName={projectName}
+              />
             ) : (
               <div className="mt-8 flex flex-col gap-1">
                 {items.map((item) => {
@@ -1059,14 +1593,18 @@ export type ChatSearch = {
   compare?: string;
   new?: string;
   project?: string;
+  codex?: boolean;
 };
 
-export function validateChatSearch(search: Record<string, unknown>): ChatSearch {
+export function validateChatSearch(
+  search: Record<string, unknown>,
+): ChatSearch {
   return {
     thread: typeof search.thread === "string" ? search.thread : undefined,
     compare: typeof search.compare === "string" ? search.compare : undefined,
     new: typeof search.new === "string" ? search.new : undefined,
     project: typeof search.project === "string" ? search.project : undefined,
+    codex: search.codex === true || search.codex === "true" || undefined,
   };
 }
 
@@ -1079,9 +1617,16 @@ export function ChatPage({
   active,
 }: { search: ChatSearch; active: boolean }): ReactElement {
   const navigate = useNavigate();
+  const isCodexMode = search.codex === true;
 
   const settingsOpen = useChatRuntimeStore((s) => s.settingsPanelOpen);
   const setSettingsOpen = useChatRuntimeStore((s) => s.setSettingsPanelOpen);
+  const [developerOptions] = useDeveloperOptions();
+  useEffect(() => {
+    if (!developerOptions.rightSidebar && settingsOpen) {
+      setSettingsOpen(false);
+    }
+  }, [developerOptions.rightSidebar, settingsOpen, setSettingsOpen]);
   // Deferred-load staging: downloads a staged GGUF (if needed) and reads its
   // header context so the sheet can show the context slider before the load.
   // autoLoad picks instead load the cached file as soon as the download ends;
@@ -1143,6 +1688,50 @@ export function ChatPage({
   useEffect(() => {
     void hydratePersistedSettings();
   }, [hydratePersistedSettings]);
+
+  useEffect(() => {
+    if (!active || !connectionsEnabled) return;
+    const ollamaProvider =
+      externalProviders.find(
+        (provider) => provider.id === COGNIX_OLLAMA_PROVIDER_ID,
+      ) ??
+      externalProviders.find((provider) => provider.providerType === "ollama");
+    const baseUrl = ollamaProvider?.baseUrl || COGNIX_OLLAMA_BASE_URL;
+    const controller = new AbortController();
+
+    void fetch(ollamaNativeTagsUrl(baseUrl), {
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`Ollama inventory failed: ${response.status}`);
+        }
+        return (await response.json()) as OllamaTagsResponse;
+      })
+      .then((payload) => {
+        const modelIds = Array.from(
+          new Set(
+            (payload.models ?? []).map(modelIdFromOllamaTag).filter(Boolean),
+          ),
+        ) as string[];
+        if (modelIds.length === 0) return;
+        const latestProviders = useExternalProvidersStore.getState().providers;
+        const nextProviders = mergeOllamaModelsIntoProviders(
+          latestProviders,
+          modelIds,
+        );
+        if (providersHaveSameOllamaModels(latestProviders, nextProviders)) {
+          return;
+        }
+        setExternalProviders(nextProviders);
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        console.debug("CogniX Ollama inventory unavailable", error);
+      });
+
+    return () => controller.abort();
+  }, [active, connectionsEnabled, externalProviders, setExternalProviders]);
 
   useEffect(() => {
     // Skip while off-route: ChatPage stays mounted, and toast+navigate here would
@@ -1277,11 +1866,17 @@ export function ChatPage({
   // Load a cached autoLoad pick once its download finishes. The sheet was never
   // opened, so on a load failure just drop the orphaned staged knobs.
   autoLoadStagedRef.current = (pending) => {
+    const remembered = loadRememberedLoadSettings(
+      rememberedLoadSettingsKey(pending),
+    );
+    if (remembered) {
+      useChatRuntimeStore.getState().applyRememberedLoadSettings(remembered);
+    }
     void selectModel({
       ...pending,
       isDownloaded: true,
       forceReload: true,
-      keepSpeculative: false,
+      keepSpeculative: remembered != null,
       throwOnError: true,
     }).catch(() => {
       const store = useChatRuntimeStore.getState();
@@ -1453,10 +2048,12 @@ export function ChatPage({
         : state.reasoningEnabled,
       supportsPreserveThinking: false,
       // External models have no local tool runtime, so `supportsTools` is
-      // false. The `supportsBuiltin*` flags cover providers that run tools
-      // server-side: WebSearch lights the Search pill (OpenAI/Anthropic/
-      // OpenRouter/Kimi), CodeExecution the Code pill (Claude 4.x, gpt-5.5),
-      // ImageGeneration the Images pill (OpenAI cloud Responses-API only).
+      // false. The `supportsBuiltin*` flags cover server-side capabilities:
+      // native hosted tools where providers expose them, or CogniX-managed
+      // web_search context for Hugging Face/Ollama/custom-compatible models.
+      // CodeExecution lights the Code pill (Claude 4.x, gpt-5.5), and
+      // ImageGeneration lights the Images pill (OpenAI cloud Responses-API
+      // plus Gemini image families).
       supportsTools: false,
       supportsBuiltinWebSearch,
       supportsBuiltinCodeExecution,
@@ -1633,9 +2230,10 @@ export function ChatPage({
   }, [chatContextKey, detachStaged]);
 
   const hasActiveModel = Boolean(inferenceParams.checkpoint);
-  // Load immediately, or — when "Load on selection" is off — stage the pick so
-  // its load options can be set first. Shared by the main selector, native
-  // drag-drop/picker, and the dropped-file chip (the Hub stages via the store).
+  // External providers (including local Ollama) are only selected here: their
+  // runtime is contacted by the first streamed message, so picking them never
+  // pre-loads anything. Native/GGUF models stage by default so local work starts
+  // when the user explicitly sends or presses Load.
   const stageOrLoad = useCallback(
     async (selection: SelectedModelInput) => {
       const store = useChatRuntimeStore.getState();
@@ -1644,14 +2242,19 @@ export function ChatPage({
       // else -- cached picks, local/native files, LoRA, external -- loads now.
       const wantManagerDownload =
         isDownloadableHubRepo(selection) && !selection.isDownloaded;
-      if (
-        (!hasGgufSource(selection) && !wantManagerDownload) ||
-        (store.loadOnSelection && selection.isDownloaded)
-      ) {
+      if (!hasGgufSource(selection) && !wantManagerDownload) {
         // Detach any staged pick first so its edited knobs don't leak into this
         // immediate load. Detach (not abandon) keeps its download running.
         detachStaged();
-        await selectModel(selection);
+        const remembered = hasGgufSource(selection)
+          ? loadRememberedLoadSettings(rememberedLoadSettingsKey(selection))
+          : null;
+        if (remembered) {
+          store.applyRememberedLoadSettings(remembered);
+        }
+        await selectModel(
+          remembered ? { ...selection, keepSpeculative: true } : selection,
+        );
         return;
       }
       // Loads can't queue behind each other, but a download is independent: if
@@ -1674,7 +2277,8 @@ export function ChatPage({
           !!loadingModel &&
           normalizeModelRef(loadingModel.id) ===
             normalizeModelRef(selection.id) &&
-          (loadingModel.ggufVariant ?? null) === (selection.ggufVariant ?? null);
+          (loadingModel.ggufVariant ?? null) ===
+            (selection.ggufVariant ?? null);
         if (isLoadingThisPick) {
           toast.info("This model is already loading", {
             description: "It's downloading as part of the load in progress.",
@@ -1854,6 +2458,13 @@ export function ChatPage({
           selectedProvider?.providerType === "openrouter" &&
           selectedExternal?.modelId === "openrouter/free";
         store.setCheckpoint(value, null);
+        if (selectedProvider?.providerType === "ollama") {
+          toast.info("Ollama model selected", {
+            description:
+              "CogniX will contact Ollama when you send your first message.",
+            duration: 3500,
+          });
+        }
         const supportsBuiltinWebSearch = providerSupportsBuiltinWebSearch(
           selectedProvider?.providerType,
           selectedExternal?.modelId,
@@ -1922,10 +2533,11 @@ export function ChatPage({
               : true
             : store.reasoningEnabled,
           supportsPreserveThinking: false,
-          // External models have no local tool runtime → supportsTools false.
+          // External models have no local tool runtime, so supportsTools false.
           // The supportsBuiltin* flags carry server-side capability per pill:
-          // Search, Code (Claude 4.x + gpt-5.5), Images (OpenAI cloud
-          // Responses-API).
+          // Search via provider-native tools or CogniX web_search context,
+          // Code (Claude 4.x + gpt-5.5), Images (OpenAI cloud Responses-API
+          // plus Gemini image families).
           supportsTools: false,
           supportsBuiltinWebSearch,
           supportsBuiltinCodeExecution,
@@ -2156,6 +2768,29 @@ export function ChatPage({
         ),
     [externalProvidersForChat, lastOpenRouterChosenModel],
   );
+  const codexOpenAIProvider = useMemo(
+    () =>
+      externalProvidersForChat.find(
+        (provider) => provider.providerType === "openai",
+      ) ?? null,
+    [externalProvidersForChat],
+  );
+  const codexExternalModels = useMemo<ExternalModelOption[]>(() => {
+    if (!codexOpenAIProvider) return [];
+    return COGNIX_CODEX_MODEL_IDS.map((model) => ({
+      id: buildExternalModelId(codexOpenAIProvider.id, model),
+      name: model,
+      providerId: codexOpenAIProvider.id,
+      providerName: "Codex",
+      providerType: codexOpenAIProvider.providerType,
+    }));
+  }, [codexOpenAIProvider]);
+  const codexDefaultCheckpoint = codexOpenAIProvider
+    ? buildExternalModelId(
+        codexOpenAIProvider.id,
+        COGNIX_CODEX_DEFAULT_MODEL_ID,
+      )
+    : null;
 
   const [localModels, setLocalModels] = useState<LoraModelOption[]>([]);
 
@@ -2220,6 +2855,67 @@ export function ChatPage({
     }));
     return [...fromLoras, ...localModels];
   }, [lorasFromStore, localModels]);
+
+  const modelSelectorModels = isCodexMode ? [] : models;
+  const modelSelectorLoraModels = isCodexMode ? [] : loraModels;
+  const modelSelectorExternalModels = isCodexMode
+    ? codexExternalModels
+    : externalModels;
+  const activeCodexSelection = parseExternalModelId(inferenceParams.checkpoint);
+  const activeCodexProviderMatches =
+    activeCodexSelection != null &&
+    activeCodexSelection.providerId === codexOpenAIProvider?.id &&
+    isCogniXCodexModelId(activeCodexSelection.modelId);
+  const codexModelSelectorValue =
+    isCodexMode && !activeCodexProviderMatches
+      ? (codexDefaultCheckpoint ?? "")
+      : inferenceParams.checkpoint;
+
+  useEffect(() => {
+    if (
+      !active ||
+      !isCodexMode ||
+      !codexOpenAIProvider ||
+      !codexDefaultCheckpoint
+    ) {
+      return;
+    }
+    const state = useChatRuntimeStore.getState();
+    const currentSelection = parseExternalModelId(state.params.checkpoint);
+    const currentIsCodex =
+      currentSelection?.providerId === codexOpenAIProvider.id &&
+      isCogniXCodexModelId(currentSelection.modelId);
+    const targetModelId = currentIsCodex
+      ? currentSelection.modelId
+      : COGNIX_CODEX_DEFAULT_MODEL_ID;
+    if (!currentIsCodex) {
+      handleCheckpointChange(codexDefaultCheckpoint, {
+        source: "external",
+        isLora: false,
+      });
+    }
+    const reasoningCaps = getExternalReasoningCapabilities(
+      codexOpenAIProvider.providerType,
+      targetModelId,
+      {
+        isReasoningProvider: codexOpenAIProvider.isReasoningModel === true,
+        baseUrl: codexOpenAIProvider.baseUrl,
+      },
+    );
+    if (!reasoningCaps.supportsReasoning) return;
+    useChatRuntimeStore.setState({
+      reasoningEnabled: true,
+      reasoningEffort: pickStrongestReasoningEffort(
+        reasoningCaps.reasoningEffortLevels,
+      ),
+    });
+  }, [
+    active,
+    codexDefaultCheckpoint,
+    codexOpenAIProvider,
+    handleCheckpointChange,
+    isCodexMode,
+  ]);
 
   useEffect(() => {
     if (getTrainingCompareHandoff()) return;
@@ -2336,324 +3032,361 @@ export function ChatPage({
     selectedArtifact &&
       (view.mode === "compare" || artifactSurface === "overlay"),
   );
+  const codexComposerAccessory =
+    isCodexMode && view.mode !== "compare" ? (
+      <ModelSelector
+        models={modelSelectorModels}
+        loraModels={modelSelectorLoraModels}
+        externalModels={modelSelectorExternalModels}
+        value={codexModelSelectorValue}
+        onValueChange={handleCheckpointChange}
+        deleteDisabled={modelOperationInProgress}
+        variant="muted"
+        size="sm"
+        open={active && modelSelectorOpen}
+        onOpenChange={handleModelSelectorOpenChange}
+        contentDataTour="codex-model-selector-popover"
+        showCloudIndicator={true}
+        className="max-w-[38vw] sm:max-w-[13.5rem] !h-8 !pl-2.5 !pr-1.5"
+      />
+    ) : null;
 
   return (
     // Provides `active` to ChatRuntimeProvider (drops the message views/composers
     // while off-route, keeping the runtime alive) and to the compare chrome.
     <ChatActiveContext.Provider value={active}>
-    <div className="flex min-h-0 min-w-0 flex-1 basis-0 bg-background overflow-hidden">
-      {/* Portaled surfaces render to document.body, escaping the parent's hidden
+      <div className="flex min-h-0 min-w-0 flex-1 basis-0 bg-background overflow-hidden">
+        {/* Portaled surfaces render to document.body, escaping the parent's hidden
           wrapper, so gate them on `active` to keep them off other tabs. */}
-      {active && <GuidedTour {...tour.tourProps} />}
-      {/* Single app-level mount for the Bypass permissions warning. It is driven
+        {active && <GuidedTour {...tour.tourProps} />}
+        {/* Single app-level mount for the Bypass permissions warning. It is driven
           by global store state, so it must live at one stable root (not inside a
           Composer) -- otherwise Compare mode's multiple composers would each
           render their own copy and the shared-composer menu would have none. It
           also portals to body, so gate it on `active` like the tour above. */}
-      {active && <BypassPermissionsConfirmDialog />}
-      <div className="relative flex min-h-0 min-w-0 flex-1 basis-0 flex-col overflow-hidden">
-        <NativeModelDropOverlay state={nativeModelDropState} />
-        {/* Fade under the top bar so messages dissolve as they scroll
+        {active && <BypassPermissionsConfirmDialog />}
+        <div className="relative flex min-h-0 min-w-0 flex-1 basis-0 flex-col overflow-hidden">
+          <NativeModelDropOverlay state={nativeModelDropState} />
+          {/* Fade under the top bar so messages dissolve as they scroll
             beneath it, instead of a hard cut. */}
-        {view.mode !== "compare" && (
-          <div
-            aria-hidden={true}
-            className="pointer-events-none absolute left-0 right-[10px] top-[48px] z-20 h-6 bg-gradient-to-b from-background to-[rgb(from_var(--background)_r_g_b/0)]"
-          />
-        )}
-        <div
-          className={cn(
-            "absolute top-0 left-0 right-[10px] z-30 flex h-[48px] shrink-0 items-start pt-[11px] pr-2 bg-background",
-            isMobile ? "pl-12 pr-1.5" : "pl-2",
-            view.mode === "compare" &&
-              "right-[10px] left-auto w-auto bg-transparent pl-0 pr-2",
+          {view.mode !== "compare" && (
+            <div
+              aria-hidden={true}
+              className="pointer-events-none absolute left-0 right-[10px] top-[48px] z-20 h-6 bg-gradient-to-b from-background to-[rgb(from_var(--background)_r_g_b/0)]"
+            />
           )}
-        >
-          <div className="flex items-center gap-1">
-            {view.mode !== "compare" && (
-              <ModelSelector
-                models={models}
-                loraModels={loraModels}
-                externalModels={externalModels}
-                value={inferenceParams.checkpoint}
-                activeGgufVariant={activeGgufVariant}
-                onValueChange={handleCheckpointChange}
-                onEject={handleEject}
-                onFoldersChange={refreshLocalModels}
-                onPickLocalModel={isTauri ? chooseNativeModel : undefined}
-                onModelsChange={refreshModelLists}
-                deleteDisabled={modelOperationInProgress}
-                variant="ghost"
-                open={active && modelSelectorOpen}
-                onOpenChange={handleModelSelectorOpenChange}
-                triggerDataTour="chat-model-selector"
-                contentDataTour="chat-model-selector-popover"
-                showCloudIndicator={isExternalModel}
-                className="max-w-[62vw] !pr-3 sm:max-w-none !h-[34px]"
-              />
+          <div
+            className={cn(
+              "absolute top-0 left-0 right-[10px] z-30 flex h-[48px] shrink-0 items-start pt-[11px] pr-2 bg-background",
+              isMobile ? "pl-12 pr-1.5" : "pl-2",
+              view.mode === "compare" &&
+                "right-[10px] left-auto w-auto bg-transparent pl-0 pr-2",
             )}
-            {view.mode !== "compare" && currentProjectId && (
-              <nav
-                aria-label="Project location"
-                className="flex h-[34px] min-w-0 items-center gap-1.5 self-center text-[13.5px] tracking-nav text-muted-foreground"
-              >
-                <ProjectSwitcher
-                  currentProject={currentProject}
-                  projects={projects}
-                  isLoading={projectsLoading}
-                  onSelectProject={openProjectLanding}
-                  onViewAllProjects={openProjectsList}
+          >
+            <div className="flex items-center gap-1">
+              {view.mode !== "compare" && !isCodexMode && (
+                <ModelSelector
+                  models={modelSelectorModels}
+                  loraModels={modelSelectorLoraModels}
+                  externalModels={modelSelectorExternalModels}
+                  value={inferenceParams.checkpoint}
+                  activeGgufVariant={activeGgufVariant}
+                  onValueChange={handleCheckpointChange}
+                  onEject={handleEject}
+                  onFoldersChange={refreshLocalModels}
+                  onPickLocalModel={isTauri ? chooseNativeModel : undefined}
+                  onModelsChange={refreshModelLists}
+                  deleteDisabled={modelOperationInProgress}
+                  variant="ghost"
+                  open={active && modelSelectorOpen}
+                  onOpenChange={handleModelSelectorOpenChange}
+                  triggerDataTour="chat-model-selector"
+                  contentDataTour="chat-model-selector-popover"
+                  showCloudIndicator={isExternalModel}
+                  className="max-w-[62vw] !pr-3 sm:max-w-none !h-[34px]"
                 />
-                {currentProject && activeThreadId ? (
-                  <>
-                    <span className="shrink-0" aria-hidden={true}>
-                      /
-                    </span>
-                    <span className="min-w-0 truncate">
-                      {currentChatTitle ?? "New chat"}
-                    </span>
-                  </>
-                ) : null}
-              </nav>
-            )}
-            {pendingNativeModelIntent && view.mode !== "compare" ? (
-              <NativeModelChip
-                intent={pendingNativeModelIntent}
-                nativeReadsDisabled={!nativePathLeasesSupported}
-                onLoad={(selection) => stageOrLoad(selection)}
-              />
-            ) : null}
-            {loadingModel && loadToastDismissed ? (
-              <ModelLoadInlineStatus
-                label={
-                  loadProgress?.phase === "starting"
-                    ? "Starting model…"
-                    : loadingModel.isDownloaded || loadingModel.isCachedLora
-                      ? "Loading model…"
-                      : "Downloading model…"
-                }
-                title={
-                  loadingModel.isDownloaded
-                    ? `Loading ${loadingModel.displayName} from cache.`
-                    : loadingModel.isCachedLora
-                      ? `Loading ${loadingModel.displayName} into memory.`
-                      : `Loading ${loadingModel.displayName}. This may include downloading.`
-                }
-                progressPercent={loadProgress?.percent}
-                progressLabel={loadProgress?.label}
-                onStop={cancelLoading}
-              />
-            ) : null}
-            {!loadingModel && modelsError ? (
-              <div
-                className="relative top-0.5 pl-0.5"
-                role="status"
-                aria-live="polite"
-              >
-                <CopyableErrorChip message={modelsError} />
-              </div>
-            ) : null}
-          </div>
-          <div className="ml-auto flex items-center gap-2">
-            {view.mode === "single" && contextUsage ? (
-              <ContextUsageBar
-                used={contextUsage.totalTokens}
-                // null on external providers; the bar handles that.
-                total={ggufContextLength}
-                cached={contextUsage.cachedTokens}
-                cacheWrites={contextUsage.cacheWriteTokens}
-                promptTokens={contextUsage.promptTokens}
-                completionTokens={contextUsage.completionTokens}
-                className="h-[34px]"
-              />
-            ) : null}
-            {view.mode === "single" && (
-              <Tooltip>
-                <TooltipPrimitive.Trigger asChild={true}>
-                  <button
-                    type="button"
-                    onClick={toggleIncognito}
-                    className={cn(
-                      "flex h-[34px] w-[34px] cursor-pointer items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                      incognito
-                        ? "bg-primary/10 text-primary hover:bg-primary/15"
-                        : "text-nav-fg hover:bg-nav-surface-hover hover:text-black dark:hover:text-white",
-                    )}
-                    aria-label={incognitoLabel}
-                    aria-pressed={incognito}
-                  >
-                    <HugeiconsIcon
-                      icon={BubbleChatTemporaryIcon}
-                      strokeWidth={1.75}
-                      className="size-icon"
-                    />
-                  </button>
-                </TooltipPrimitive.Trigger>
-                <TooltipContent
-                  side="bottom"
-                  sideOffset={6}
-                  className="tooltip-compact"
+              )}
+              {view.mode !== "compare" ? (
+                isCodexMode ? null : (
+                  <CogniXAutoChip active={active} />
+                )
+              ) : null}
+              {view.mode !== "compare" && currentProjectId && (
+                <nav
+                  aria-label="Project location"
+                  className="flex h-[34px] min-w-0 items-center gap-1.5 self-center text-[13.5px] tracking-nav text-muted-foreground"
                 >
-                  {incognitoLabel}
-                </TooltipContent>
-              </Tooltip>
-            )}
-            {!settingsOpen && (
-              <Tooltip>
-                <TooltipPrimitive.Trigger asChild={true}>
-                  <button
-                    type="button"
-                    onClick={() => setSettingsOpen(true)}
-                    className="flex h-[34px] w-[34px] translate-x-[2px] cursor-pointer items-center justify-center rounded-full text-nav-fg transition-colors hover:bg-nav-surface-hover hover:text-black dark:hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    aria-label="Open run settings"
-                    data-tour="chat-settings"
-                  >
-                    <HugeiconsIcon
-                      icon={LayoutAlignRightIcon}
-                      strokeWidth={1.75}
-                      className="size-icon"
-                    />
-                  </button>
-                </TooltipPrimitive.Trigger>
-                <TooltipContent
-                  side="bottom"
-                  sideOffset={6}
-                  className="tooltip-compact"
+                  <ProjectSwitcher
+                    currentProject={currentProject}
+                    projects={projects}
+                    isLoading={projectsLoading}
+                    onSelectProject={openProjectLanding}
+                    onViewAllProjects={openProjectsList}
+                  />
+                  {currentProject && activeThreadId ? (
+                    <>
+                      <span className="shrink-0" aria-hidden={true}>
+                        /
+                      </span>
+                      <span className="min-w-0 truncate">
+                        {currentChatTitle ?? "New chat"}
+                      </span>
+                    </>
+                  ) : null}
+                </nav>
+              )}
+              {pendingNativeModelIntent && view.mode !== "compare" ? (
+                <NativeModelChip
+                  intent={pendingNativeModelIntent}
+                  nativeReadsDisabled={!nativePathLeasesSupported}
+                  onLoad={(selection) => stageOrLoad(selection)}
+                />
+              ) : null}
+              {loadingModel && loadToastDismissed ? (
+                <ModelLoadInlineStatus
+                  label={
+                    loadProgress?.phase === "starting"
+                      ? "Starting model…"
+                      : loadingModel.isDownloaded || loadingModel.isCachedLora
+                        ? "Loading model…"
+                        : "Downloading model…"
+                  }
+                  title={
+                    loadingModel.isDownloaded
+                      ? `Loading ${loadingModel.displayName} from cache.`
+                      : loadingModel.isCachedLora
+                        ? `Loading ${loadingModel.displayName} into memory.`
+                        : `Loading ${loadingModel.displayName}. This may include downloading.`
+                  }
+                  progressPercent={loadProgress?.percent}
+                  progressLabel={loadProgress?.label}
+                  onStop={cancelLoading}
+                />
+              ) : null}
+              {!loadingModel && modelsError ? (
+                <div
+                  className="relative top-0.5 pl-0.5"
+                  role="status"
+                  aria-live="polite"
                 >
-                  Open run settings
-                </TooltipContent>
-              </Tooltip>
-            )}
+                  <CopyableErrorChip message={modelsError} />
+                </div>
+              ) : null}
+            </div>
+            <div className="ml-auto flex items-center gap-2">
+              {view.mode === "single" ? (
+                <CostOptimizerChip
+                  active={active}
+                  checkpoint={inferenceParams.checkpoint}
+                  isExternalModel={isExternalModel}
+                  providerName={activeExternalProvider?.name ?? null}
+                  providerType={activeExternalProviderType}
+                  projectId={currentProjectId}
+                  projectName={currentProject?.name ?? null}
+                  threadTitle={currentChatTitle ?? null}
+                  contextUsage={contextUsage}
+                />
+              ) : null}
+              {view.mode === "single" && contextUsage ? (
+                <ContextUsageBar
+                  used={contextUsage.totalTokens}
+                  // null on external providers; the bar handles that.
+                  total={ggufContextLength}
+                  cached={contextUsage.cachedTokens}
+                  cacheWrites={contextUsage.cacheWriteTokens}
+                  promptTokens={contextUsage.promptTokens}
+                  completionTokens={contextUsage.completionTokens}
+                  className="h-[34px]"
+                />
+              ) : null}
+              {view.mode === "single" && (
+                <Tooltip>
+                  <TooltipPrimitive.Trigger asChild={true}>
+                    <button
+                      type="button"
+                      onClick={toggleIncognito}
+                      className={cn(
+                        "flex h-[34px] w-[34px] cursor-pointer items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                        incognito
+                          ? "bg-primary/10 text-primary hover:bg-primary/15"
+                          : "text-nav-fg hover:bg-nav-surface-hover hover:text-black dark:hover:text-white",
+                      )}
+                      aria-label={incognitoLabel}
+                      aria-pressed={incognito}
+                    >
+                      <HugeiconsIcon
+                        icon={BubbleChatTemporaryIcon}
+                        strokeWidth={1.75}
+                        className="size-icon"
+                      />
+                    </button>
+                  </TooltipPrimitive.Trigger>
+                  <TooltipContent
+                    side="bottom"
+                    sideOffset={6}
+                    className="tooltip-compact"
+                  >
+                    {incognitoLabel}
+                  </TooltipContent>
+                </Tooltip>
+              )}
+              {developerOptions.rightSidebar && !settingsOpen && (
+                <Tooltip>
+                  <TooltipPrimitive.Trigger asChild={true}>
+                    <button
+                      type="button"
+                      onClick={() => setSettingsOpen(true)}
+                      className="flex h-[34px] w-[34px] translate-x-[2px] cursor-pointer items-center justify-center rounded-full text-nav-fg transition-colors hover:bg-nav-surface-hover hover:text-black dark:hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      aria-label="Open run settings"
+                      data-tour="chat-settings"
+                    >
+                      <HugeiconsIcon
+                        icon={LayoutAlignRightIcon}
+                        strokeWidth={1.75}
+                        className="size-icon"
+                      />
+                    </button>
+                  </TooltipPrimitive.Trigger>
+                  <TooltipContent
+                    side="bottom"
+                    sideOffset={6}
+                    className="tooltip-compact"
+                  >
+                    Open run settings
+                  </TooltipContent>
+                </Tooltip>
+              )}
+            </div>
           </div>
+
+          {view.mode === "project" ? (
+            <ProjectLanding
+              key={view.projectId}
+              projectId={view.projectId}
+              projectName={currentProject?.name ?? "Project"}
+              items={currentProjectItems}
+            />
+          ) : view.mode === "single" ? (
+            // Keyed by project only (not thread / new-chat nonce) so switching threads or
+            // starting a New Chat reuses the same provider and switches in place. This keeps
+            // an in-flight generation streaming in the background (assistant-ui keeps every
+            // alive thread's runtime mounted) instead of remounting the provider and cutting
+            // it off; returning to that thread reattaches the live run rather than reloading
+            // a half-saved one.
+            <SingleContent
+              key={view.projectId ?? "single"}
+              threadId={view.threadId}
+              newThreadNonce={view.newThreadNonce}
+              projectId={view.projectId}
+              artifact={selectedArtifact}
+              artifactSurface={artifactSurface}
+              onCloseArtifact={closeArtifactSurface}
+              composerAccessory={codexComposerAccessory}
+            />
+          ) : (
+            <CompareContent
+              key={view.pairId}
+              pairId={view.pairId}
+              projectId={view.projectId}
+              models={models}
+              loraModels={loraModels}
+              externalModels={externalModels}
+              onFoldersChange={refreshLocalModels}
+              onModelsChange={refreshModelLists}
+              deleteDisabled={modelOperationInProgress}
+              onExitCompare={exitCompare}
+            />
+          )}
+
+          {active && showArtifactOverlay && selectedArtifact ? (
+            <ArtifactSurface
+              artifact={selectedArtifact}
+              variant="overlay"
+              onClose={closeArtifactSurface}
+            />
+          ) : null}
         </div>
 
-        {view.mode === "project" ? (
-          <ProjectLanding
-            key={view.projectId}
-            projectId={view.projectId}
-            projectName={currentProject?.name ?? "Project"}
-            items={currentProjectItems}
-          />
-        ) : view.mode === "single" ? (
-          // Keyed by project only (not thread / new-chat nonce) so switching threads or
-          // starting a New Chat reuses the same provider and switches in place. This keeps
-          // an in-flight generation streaming in the background (assistant-ui keeps every
-          // alive thread's runtime mounted) instead of remounting the provider and cutting
-          // it off; returning to that thread reattaches the live run rather than reloading
-          // a half-saved one.
-          <SingleContent
-            key={view.projectId ?? "single"}
-            threadId={view.threadId}
-            newThreadNonce={view.newThreadNonce}
-            projectId={view.projectId}
-            artifact={selectedArtifact}
-            artifactSurface={artifactSurface}
-            onCloseArtifact={closeArtifactSurface}
-          />
-        ) : (
-          <CompareContent
-            key={view.pairId}
-            pairId={view.pairId}
-            projectId={view.projectId}
-            models={models}
-            loraModels={loraModels}
-            externalModels={externalModels}
-            onFoldersChange={refreshLocalModels}
-            onModelsChange={refreshModelLists}
-            deleteDisabled={modelOperationInProgress}
-            onExitCompare={exitCompare}
-          />
-        )}
-
-        {active && showArtifactOverlay && selectedArtifact ? (
-          <ArtifactSurface
-            artifact={selectedArtifact}
-            variant="overlay"
-            onClose={closeArtifactSurface}
-          />
-        ) : null}
-      </div>
-
-      <ChatSettingsPanel
-        open={active && settingsOpen}
-        onOpenChange={(open) => {
-          setSettingsOpen(open);
-          // Closing the sheet abandons a staged (not-yet-loaded) pick: cancel its
-          // download and revert the staged knobs so nothing lingers as a dirty
-          // edit (or a background download) on the loaded model.
-          if (!open) abandonStaged();
-        }}
-        params={inferenceParams}
-        onParamsChange={setInferenceParams}
-        isExternalModel={isExternalModel}
-        providerCapabilities={activeProviderCapabilities}
-        activeExternalProvider={activeExternalProvider}
-        onExternalProviderChange={(updatedProvider) => {
-          setExternalProviders(
-            externalProviders.map((provider) =>
-              provider.id === updatedProvider.id ? updatedProvider : provider,
-            ),
-          );
-        }}
-        externalProviderType={activeExternalProviderType}
-        loadingModel={loadingModel}
-        onReloadModel={() => {
-          const state = useChatRuntimeStore.getState();
-          if (state.params.checkpoint) {
-            selectModel({
-              id: state.params.checkpoint,
-              ggufVariant: state.activeGgufVariant ?? undefined,
-              forceReload: true,
-              isDownloaded: true,
-              loadingDescription: "Reloading with updated chat template.",
-            });
-          }
-        }}
-        onLoadPendingModel={() => {
-          const pending = useChatRuntimeStore.getState().pendingSelection;
-          if (!pending) return;
-          const keyAtLoad = chatContextKey;
-          // forceReload: the staged model isn't loaded yet, so bypass the
-          // same-checkpoint dedupe. keepSpeculative: honor the speculative mode
-          // set on the sidebar.
-          void selectModel({
-            ...pending,
-            forceReload: true,
-            keepSpeculative: true,
-            throwOnError: true,
-          }).catch(() => {
-            // Recoverable failure (expired token, gated repo, OOM…): the pick is
-            // cleared only on success, so it normally stays staged with edited
-            // knobs intact — nothing to restore.
-            const store = useChatRuntimeStore.getState();
-            // Still staged (this pick, or a newer one queued meanwhile): leave it.
-            if (store.pendingSelection) return;
-            // Cleared mid-load (sheet closed / switched chats). Re-stage only if
-            // the staged-load is still wanted: same chat context, sheet still
-            // open, page still mounted.
-            const stillWanted =
-              mountedRef.current &&
-              store.settingsPanelOpen &&
-              chatContextKeyRef.current === keyAtLoad;
-            if (stillWanted) {
-              store.setPendingSelection(pending);
-            } else {
-              // Abandoned (closed the sheet / switched chats / left chat): drop
-              // the orphaned staged knob edits so they don't linger as dirty
-              // settings over the loaded model.
-              store.resetModelSettingsToLoaded();
+        <ChatSettingsPanel
+          open={active && developerOptions.rightSidebar && settingsOpen}
+          onOpenChange={(open) => {
+            setSettingsOpen(open);
+            // Closing the sheet abandons a staged (not-yet-loaded) pick: cancel its
+            // download and revert the staged knobs so nothing lingers as a dirty
+            // edit (or a background download) on the loaded model.
+            if (!open) abandonStaged();
+          }}
+          params={inferenceParams}
+          onParamsChange={setInferenceParams}
+          isExternalModel={isExternalModel}
+          providerCapabilities={activeProviderCapabilities}
+          activeExternalProvider={activeExternalProvider}
+          onExternalProviderChange={(updatedProvider) => {
+            setExternalProviders(
+              externalProviders.map((provider) =>
+                provider.id === updatedProvider.id ? updatedProvider : provider,
+              ),
+            );
+          }}
+          externalProviderType={activeExternalProviderType}
+          loadingModel={loadingModel}
+          onReloadModel={() => {
+            const state = useChatRuntimeStore.getState();
+            if (state.params.checkpoint) {
+              selectModel({
+                id: state.params.checkpoint,
+                ggufVariant: state.activeGgufVariant ?? undefined,
+                forceReload: true,
+                isDownloaded: true,
+                loadingDescription: "Reloading with updated chat template.",
+              });
             }
-          });
-        }}
-        stagedDownloadFraction={stagedDownload.progress?.fraction ?? null}
-        onCancelStagedDownload={() =>
-          stagedDownload.cancelDownload(
-            useChatRuntimeStore.getState().pendingSelection?.ggufVariant ??
-              null,
-          )
-        }
-      />
-    </div>
+          }}
+          onLoadPendingModel={() => {
+            const pending = useChatRuntimeStore.getState().pendingSelection;
+            if (!pending) return;
+            const keyAtLoad = chatContextKey;
+            // forceReload: the staged model isn't loaded yet, so bypass the
+            // same-checkpoint dedupe. keepSpeculative: honor the speculative mode
+            // set on the sidebar.
+            void selectModel({
+              ...pending,
+              forceReload: true,
+              keepSpeculative: true,
+              throwOnError: true,
+            }).catch(() => {
+              // Recoverable failure (expired token, gated repo, OOM…): the pick is
+              // cleared only on success, so it normally stays staged with edited
+              // knobs intact — nothing to restore.
+              const store = useChatRuntimeStore.getState();
+              // Still staged (this pick, or a newer one queued meanwhile): leave it.
+              if (store.pendingSelection) return;
+              // Cleared mid-load (sheet closed / switched chats). Re-stage only if
+              // the staged-load is still wanted: same chat context, sheet still
+              // open, page still mounted.
+              const stillWanted =
+                mountedRef.current &&
+                store.settingsPanelOpen &&
+                chatContextKeyRef.current === keyAtLoad;
+              if (stillWanted) {
+                store.setPendingSelection(pending);
+              } else {
+                // Abandoned (closed the sheet / switched chats / left chat): drop
+                // the orphaned staged knob edits so they don't linger as dirty
+                // settings over the loaded model.
+                store.resetModelSettingsToLoaded();
+              }
+            });
+          }}
+          stagedDownloadFraction={stagedDownload.progress?.fraction ?? null}
+          onCancelStagedDownload={() =>
+            stagedDownload.cancelDownload(
+              useChatRuntimeStore.getState().pendingSelection?.ggufVariant ??
+                null,
+            )
+          }
+        />
+      </div>
     </ChatActiveContext.Provider>
   );
 }

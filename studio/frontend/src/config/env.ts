@@ -2,6 +2,7 @@
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
 import { apiUrl } from "@/lib/api-base";
+import { getStoredAuthToken } from "@/features/auth/token-storage";
 import { create } from "zustand";
 
 export const env = {
@@ -14,6 +15,40 @@ export const env = {
 // Platform / device type
 
 export type DeviceType = "mac" | "windows" | "linux" | string;
+type TrainingAccess = "locked" | "local" | "cloud_ceo" | "local_plus_cloud_ceo" | string;
+type TrainingMode = "locked" | "local" | "cloud" | "local_plus_cloud" | string;
+
+type TrainingCapabilitySnapshot = {
+  trainingLocalAvailable?: boolean;
+  trainingCloudAvailable?: boolean;
+  cloudTrainingUnlocked?: boolean;
+  trainingAccess?: TrainingAccess | null;
+  trainingModeUnlocked?: boolean;
+};
+
+export function isCloudTrainingAccess(access: TrainingAccess | null | undefined): boolean {
+  return access === "cloud_ceo" || access === "local_plus_cloud_ceo";
+}
+
+export function hasCloudTrainingCapability(state: TrainingCapabilitySnapshot): boolean {
+  return (
+    state.trainingCloudAvailable === true ||
+    state.cloudTrainingUnlocked === true ||
+    isCloudTrainingAccess(state.trainingAccess)
+  );
+}
+
+export function isTrainingModeUnlocked(state: TrainingCapabilitySnapshot): boolean {
+  return (
+    state.trainingModeUnlocked === true ||
+    state.trainingLocalAvailable === true ||
+    hasCloudTrainingCapability(state)
+  );
+}
+
+export function isCloudOnlyTrainingMode(state: TrainingCapabilitySnapshot): boolean {
+  return state.trainingLocalAvailable !== true && hasCloudTrainingCapability(state);
+}
 
 interface PlatformState {
   deviceType: DeviceType;
@@ -27,8 +62,16 @@ interface PlatformState {
   cloudflareUrl: string | null;
   serverUrl: string | null;
   secure: boolean;
+  cloudTrainingUnlocked: boolean;
+  cloudTrainingProviders: string[];
+  trainingAccess: TrainingAccess;
+  trainingMode: TrainingMode;
+  trainingModeUnlocked: boolean;
+  trainingLocalAvailable: boolean;
+  trainingCloudAvailable: boolean;
   fetched: boolean;
   isChatOnly: () => boolean;
+  isTrainingAccessible: () => boolean;
 }
 
 // Client-side fallback when backend isn't ready yet.
@@ -50,8 +93,18 @@ export const usePlatformStore = create<PlatformState>()((_, get) => ({
   cloudflareUrl: null,
   serverUrl: null,
   secure: false,
+  cloudTrainingUnlocked: false,
+  cloudTrainingProviders: [],
+  trainingAccess: "local",
+  trainingMode: localDeviceType === "mac" ? "locked" : "local",
+  trainingModeUnlocked: localDeviceType !== "mac",
+  trainingLocalAvailable: localDeviceType !== "mac",
+  trainingCloudAvailable: false,
   fetched: false,
   isChatOnly: () => get().chatOnly,
+  isTrainingAccessible: () => {
+    return isTrainingModeUnlocked(get());
+  },
 }));
 
 // `force` re-reads /api/health even if cached, to pick up a late-arriving tunnel URL.
@@ -62,13 +115,10 @@ export async function fetchDeviceType(options?: {
   if (fetched && !options?.force) return usePlatformStore.getState().deviceType;
 
   try {
-    // /api/health only reports the server's device_type to authed callers.
-    // Read the token from storage directly: importing features/auth here
-    // would be an import cycle (auth/session imports this store).
-    const token =
-      typeof window === "undefined"
-        ? null
-        : sessionStorage.getItem("unsloth_auth_token");
+    // /api/health only reports training entitlements to authed callers. Use
+    // the same token migration helper as authFetch so legacy localStorage
+    // sessions still unlock CEO cloud training before local GPU checks run.
+    const token = getStoredAuthToken();
     const res = await fetch(apiUrl("/api/health"), {
       headers: token ? { Authorization: `Bearer ${token}` } : undefined,
     });
@@ -80,10 +130,39 @@ export async function fetchDeviceType(options?: {
         cloudflare_url?: string | null;
         server_url?: string | null;
         secure?: boolean;
+        cloud_training_unlocked?: boolean;
+        cloud_training_providers?: string[];
+        training_access?: string;
+        training_mode?: string;
+        training_mode_unlocked?: boolean;
+        training_local_available?: boolean;
+        training_cloud_available?: boolean;
       };
       const deviceType = data.device_type ?? detectLocalPlatform();
       const chatOnly = data.chat_only ?? false;
       const chatOnlyReason = data.chat_only_reason ?? null;
+      const trainingAccess = data.training_access ?? "local";
+      const cloudTrainingProviders = Array.isArray(data.cloud_training_providers)
+        ? data.cloud_training_providers.filter((item): item is string => typeof item === "string")
+        : [];
+      const cloudTrainingUnlocked =
+        data.cloud_training_unlocked === true ||
+        isCloudTrainingAccess(trainingAccess);
+      const trainingModeUnlocked =
+        data.training_mode_unlocked ??
+        isTrainingModeUnlocked({
+          trainingLocalAvailable: data.training_local_available ?? !chatOnly,
+          trainingCloudAvailable: data.training_cloud_available ?? cloudTrainingUnlocked,
+          cloudTrainingUnlocked,
+          trainingAccess,
+        });
+      const trainingMode =
+        data.training_mode ??
+        (
+          data.training_local_available ?? !chatOnly
+            ? cloudTrainingUnlocked ? "local_plus_cloud" : "local"
+            : cloudTrainingUnlocked ? "cloud" : "locked"
+        );
       // Cache only a server-reported platform. Unauthenticated responses fall
       // back to the browser platform, which can differ from the host (WSL,
       // SSH); keeping fetched=false retries once a token exists.
@@ -94,6 +173,13 @@ export async function fetchDeviceType(options?: {
         cloudflareUrl: data.cloudflare_url ?? null,
         serverUrl: data.server_url ?? null,
         secure: data.secure ?? false,
+        cloudTrainingUnlocked,
+        cloudTrainingProviders,
+        trainingAccess,
+        trainingMode,
+        trainingModeUnlocked,
+        trainingLocalAvailable: data.training_local_available ?? !chatOnly,
+        trainingCloudAvailable: data.training_cloud_available ?? cloudTrainingUnlocked,
         fetched: data.device_type !== undefined,
       });
       return deviceType;
@@ -104,7 +190,18 @@ export async function fetchDeviceType(options?: {
     // call retries against the backend.
     const deviceType = detectLocalPlatform();
     const chatOnly = deviceType === "mac";
-    usePlatformStore.setState({ deviceType, chatOnly, fetched: false });
+    usePlatformStore.setState({
+      deviceType,
+      chatOnly,
+      cloudTrainingUnlocked: false,
+      cloudTrainingProviders: [],
+      trainingAccess: "local",
+      trainingMode: chatOnly ? "locked" : "local",
+      trainingModeUnlocked: !chatOnly,
+      trainingLocalAvailable: !chatOnly,
+      trainingCloudAvailable: false,
+      fetched: false,
+    });
     return deviceType;
   }
 

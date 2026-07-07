@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
+import {
+  loadRememberedLoadSettings,
+  rememberedLoadSettingsKey,
+} from "@/components/assistant-ui/model-selector/remembered-load-settings";
 import { useHubInventory } from "@/features/hub/inventory";
 import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { useGpuInfo } from "@/hooks/use-gpu-info";
@@ -11,10 +15,16 @@ import {
 } from "@/features/hub/hooks/use-hub-model-search";
 import { useOnlineStatus } from "@/features/hub/hooks/use-online-status";
 import { useHubInfiniteScroll } from "@/features/hub/hooks/use-hub-infinite-scroll";
-import { ggufVariantsMatch, modelIdsMatch } from "@/features/hub/lib/model-identity";
+import {
+  ggufVariantsMatch,
+  modelIdsMatch,
+} from "@/features/hub/lib/model-identity";
 import { cn } from "@/lib/utils";
 import { usePlatformStore } from "@/config/env";
-import { useHfTokenStore } from "@/features/hub/stores/hf-token-store";
+import {
+  hfApiToken,
+  useHfTokenStore,
+} from "@/features/hub/stores/hf-token-store";
 import {
   getInferenceStatus,
   isExternalModelId,
@@ -56,6 +66,7 @@ import { useFeedWriteBack } from "./hooks/use-feed-write-back";
 import { useHubFeed } from "./hooks/use-hub-feed";
 import { useHubModelVram } from "./hooks/use-hub-model-vram";
 import { useModelsSelection } from "./hooks/use-models-selection";
+import { InternalSkillsMarketplace } from "./internal-skills-marketplace";
 import {
   CHANNEL_TO_SECTION,
   type ChannelId,
@@ -84,24 +95,26 @@ import type {
   ResourceTypeFilter,
   SelectedModelView,
 } from "./types";
+import { AdaptiveQuantizationPanel } from "./catalog/adaptive-quantization-panel";
 
 const MODELS_TAB_STORAGE_KEY = "unsloth.hub.modelsTab";
 const ALL_MODELS_VIEW_STORAGE_KEY = "unsloth.hub.allModelsView";
 const INVENTORY_SORT_STORAGE_KEY = "unsloth.hub.inventorySort";
 const OWNER_SCOPE_STORAGE_KEY = "unsloth.hub.ownerScope";
 
-/** Discover browsing scope: only the unsloth org (default) or the whole Hub. */
+/** Discover browsing scope: the whole Hub (default) or only the unsloth org. */
 export type OwnerScope = "unsloth" | "all";
 
 function readOwnerScopePreference(): OwnerScope {
   if (typeof window === "undefined") {
-    return "unsloth";
+    return "all";
   }
   try {
     const value = window.localStorage.getItem(OWNER_SCOPE_STORAGE_KEY);
-    return value === "all" ? "all" : "unsloth";
+    // Default to the whole Hub; only honor an explicit "unsloth" preference.
+    return value === "unsloth" ? "unsloth" : "all";
   } catch {
-    return "unsloth";
+    return "all";
   }
 }
 
@@ -550,6 +563,7 @@ export function ModelsPage() {
   const deferredDebouncedQuery = useDeferredValue(debouncedQuery);
   const hfToken = useHfTokenStore((s) => s.token);
   const debouncedHfToken = useDebouncedValue(hfToken, 500);
+  const apiHfToken = hfApiToken(debouncedHfToken);
   const deferredFormatFilter = useDeferredValue(formatFilter);
   const deferredCapabilityFilter = useDeferredValue(capabilityFilter);
 
@@ -604,7 +618,7 @@ export function ModelsPage() {
     handleRetrySearch,
   } = useDiscoverSearch({
     debouncedQuery,
-    accessToken: debouncedHfToken || undefined,
+    accessToken: apiHfToken,
     isDiscoverTab,
     isDatasetMode,
     sortBy: effectiveSort,
@@ -618,7 +632,7 @@ export function ModelsPage() {
     channelId: isChannelListMode ? activeChannelId : null,
     results,
     isLoading,
-    accessToken: debouncedHfToken || undefined,
+    accessToken: apiHfToken,
   });
 
   const {
@@ -686,7 +700,10 @@ export function ModelsPage() {
     return discoverRows.filter(
       (row) =>
         !isHiddenModelId(row.id) &&
-        matchesFormat(detectResultFormat(row.result), effectiveDiscoverFormat) &&
+        matchesFormat(
+          detectResultFormat(row.result),
+          effectiveDiscoverFormat,
+        ) &&
         matchesCapability(row.capabilities, deferredCapabilityFilter) &&
         (!activeChannel?.finetunableOnly || isUnslothFinetunable(row.result)),
     );
@@ -701,7 +718,7 @@ export function ModelsPage() {
   const listRows = filteredDiscoverRows;
 
   const hubFeed = useHubFeed({
-    accessToken: debouncedHfToken || undefined,
+    accessToken: apiHfToken,
     online,
     enabled: isFeedMode,
     deviceType,
@@ -729,7 +746,10 @@ export function ModelsPage() {
     }
     return merged;
   }, [isFeedMode, feedTrendingRows, filteredDiscoverRows]);
-  const feedResults = useMemo(() => feedRows.map((row) => row.result), [feedRows]);
+  const feedResults = useMemo(
+    () => feedRows.map((row) => row.result),
+    [feedRows],
+  );
   const selectionDiscoverRows = isFeedMode ? feedRows : discoverRows;
   const selectionFilteredDiscoverRows = isFeedMode
     ? feedRows
@@ -907,7 +927,7 @@ export function ModelsPage() {
     filteredCachedRows,
     filteredLocalRows,
     results: selectionResults,
-    accessToken: debouncedHfToken || undefined,
+    accessToken: apiHfToken,
     online,
   });
 
@@ -1083,11 +1103,30 @@ export function ModelsPage() {
         openNewChat();
         return;
       }
+      // Detach any leftover staged pick first so its edited knobs (e.g. a custom
+      // context length) don't leak into this load; keepDownload keeps any staged
+      // download running.
+      useChatRuntimeStore.getState().abandonStagedModel({ keepDownload: true });
+      // Load-on-selection skips the chat sheet, so seed this GGUF pick's saved
+      // load knobs here the way the sheet's restore effect would.
+      const remembered =
+        opts.ggufVariant != null || selectedModel.isGguf
+          ? loadRememberedLoadSettings(
+              rememberedLoadSettingsKey({
+                id: runId,
+                ggufVariant: opts.ggufVariant,
+              }),
+            )
+          : null;
+      if (remembered) {
+        useChatRuntimeStore.getState().applyRememberedLoadSettings(remembered);
+      }
       void selectModel({
         id: runId,
         ggufVariant: opts.ggufVariant,
         isDownloaded,
         expectedBytes: opts.expectedBytes,
+        keepSpeculative: remembered != null,
         throwOnError: true,
       })
         .then(() => {
@@ -1321,7 +1360,9 @@ export function ModelsPage() {
       <div className="flex flex-col gap-3 pt-6">
         {isChannelListMode ? (
           <HubListHeader
-            title={channelSection ? HUB_SECTION_TITLE[channelSection] : "Models"}
+            title={
+              channelSection ? HUB_SECTION_TITLE[channelSection] : "Models"
+            }
             count={listCount}
             view={allModelsView}
             onViewChange={setAllModelsView}
@@ -1422,6 +1463,14 @@ export function ModelsPage() {
           onOpenFineTune={() => handleOpenList("finetune")}
         />
       </HubTopBar>
+      <AdaptiveQuantizationPanel
+        activeModelId={activeCheckpoint}
+        activeGgufVariant={activeGgufVariant}
+        hidden={isDatasetMode || detailOpen}
+      />
+      {!detailOpen && !splitMode && isDiscoverTab && isFeedMode && (
+        <InternalSkillsMarketplace />
+      )}
 
       <div
         className={cn(

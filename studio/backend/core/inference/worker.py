@@ -843,7 +843,7 @@ def run_inference_process(*, cmd_queue: Any, resp_queue: Any, cancel_event, conf
             resp_queue,
             {
                 "type": "status",
-                "message": "Importing Unsloth...",
+                "message": "Importing inference runtime...",
             },
         )
 

@@ -629,9 +629,10 @@ export function SharedComposer({
     ? reasoningLockedOn || (effectiveReasoningVisualEnabled && !reasoningDisabled)
     : reasoningLockedOn || (effectiveReasoningEnabled && !reasoningDisabled);
   // Two-pill gating: Search lights up on a local tool runtime (supportsTools:
-  // Code/python + local web_search) OR a provider-run server-side web_search
-  // (supportsBuiltinWebSearch: OpenAI/Anthropic/OpenRouter/Kimi). Code lights
-  // up on the local runtime OR Anthropic with a model accepting the
+  // Code/python + local web_search) OR provider-enabled web search from CogniX
+  // (native hosted tools on OpenAI/Anthropic/Gemini/OpenRouter/Kimi, CogniX
+  // pre-search context for Hugging Face/Ollama/custom-compatible providers).
+  // Code lights up on the local runtime OR Anthropic with a model accepting the
   // server-side code_execution_20250825 tool (see
   // providerSupportsBuiltinCodeExecution). Anthropic is the only external
   // provider shipping a code-execution tool today.

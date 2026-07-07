@@ -77,7 +77,7 @@ app.command()(inference)
 app.command()(chat)
 app.command()(export)
 app.command("list-checkpoints")(list_checkpoints)
-app.add_typer(studio_app, name = "studio", help = "Unsloth Studio commands.")
+app.add_typer(studio_app, name = "studio", help = "CogniX desktop commands.")
 app.add_typer(
     connect_app,
     name = "connect",

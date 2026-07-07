@@ -3,8 +3,15 @@
 
 import { ShimmerButton } from "@/components/ui/shimmer-button";
 import { Spinner } from "@/components/ui/spinner";
+import {
+  COGNIX_PLAN_OPTIONS,
+  RECOMMENDED_COGNIX_PLAN_ID,
+  saveCogniXPlanConfig,
+  type CogniXPlanId,
+} from "@/features/cognix-plan";
 import type { BackendStatus } from "@/hooks/use-tauri-backend";
 import type { CopySupportDiagnosticsResult } from "@/lib/tauri-diagnostics";
+import { cn } from "@/lib/utils";
 import { AnimatePresence, motion } from "motion/react";
 import { useState } from "react";
 
@@ -43,11 +50,13 @@ function DiagnosticsCopyActions({
         setManualMessage(null);
       } else {
         setManualReport(result.report);
-        setManualMessage(result.error ?? "Clipboard copy failed. Select and copy the diagnostics below.");
+        setManualMessage(
+          result.error ?? "Impossible de copier le diagnostic. Selectionne puis copie le rapport ci-dessous.",
+        );
       }
     } catch (error) {
       setManualReport(null);
-      setManualMessage(`Diagnostics copy failed: ${String(error)}`);
+      setManualMessage(`Copie du diagnostic impossible : ${String(error)}`);
     } finally {
       setCopying(false);
     }
@@ -60,7 +69,7 @@ function DiagnosticsCopyActions({
           variant="secondary"
           onClick={() => void handleCopyDiagnostics()}
         >
-          {copying ? "Copying..." : "Copy Diagnostics"}
+          {copying ? "Copie..." : "Copier le diagnostic"}
         </ActionButton>
         {children}
       </div>
@@ -84,13 +93,13 @@ function DiagnosticsCopyActions({
 // ---------------------------------------------------------------------------
 
 const INSTALL_STEPS = [
-  "Detecting your system",
-  "Checking dependencies",
-  "Setting up package manager",
-  "Creating Python environment",
-  "Installing ML framework",
-  "Installing Unsloth",
-  "Finalizing setup",
+  "Analyse du systeme",
+  "Verification des dependances",
+  "Preparation du gestionnaire de paquets",
+  "Creation de l'environnement Python",
+  "Installation du moteur IA",
+  "Installation de CogniX",
+  "Finalisation de la configuration",
 ] as const;
 
 const EASE_OUT_QUART: [number, number, number, number] = [0.165, 0.84, 0.44, 1];
@@ -101,9 +110,20 @@ const EASE_OUT_QUART: [number, number, number, number] = [0.165, 0.84, 0.44, 1];
 
 function Logo() {
   return (
-    <div className="flex flex-col items-center gap-4">
-      <img src="/sticker.png" alt="Unsloth" className="h-[72px] w-[72px] object-contain" />
-      <img src="/studio.png" alt="Unsloth Studio" className="h-auto w-[250px] object-contain dark:invert" />
+    <div className="flex flex-col items-center gap-3">
+      <img
+        src="/cognix-logo-512.png"
+        alt="CogniX"
+        className="cognix-logo-mark h-[92px] w-[92px] object-contain"
+      />
+      <div className="flex flex-col items-center gap-1">
+        <span className="font-heading text-[34px] font-semibold leading-none text-foreground">
+          CogniX
+        </span>
+        <span className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
+          Desktop
+        </span>
+      </div>
     </div>
   );
 }
@@ -141,29 +161,110 @@ function CheckingContent() {
       </div>
       <div className="mb-10 flex flex-col items-center gap-2">
         <Spinner className="size-6 text-primary" />
-        <p className="text-sm text-muted-foreground">Checking...</p>
+        <p className="text-sm text-muted-foreground">Verification...</p>
       </div>
     </div>
   );
 }
 
 function NotInstalledContent({ onInstall }: { onInstall: () => void }) {
+  const [selectedPlanId, setSelectedPlanId] = useState<CogniXPlanId>(
+    RECOMMENDED_COGNIX_PLAN_ID,
+  );
+  const selectedPlan =
+    COGNIX_PLAN_OPTIONS.find((plan) => plan.id === selectedPlanId) ??
+    COGNIX_PLAN_OPTIONS[0];
+
+  function handleInstall() {
+    saveCogniXPlanConfig(selectedPlanId);
+    onInstall();
+  }
+
   return (
-    <div className="flex h-full flex-col items-center">
-      <div className="flex flex-1 flex-col items-center justify-center">
+    <div className="flex h-full min-h-0 w-full flex-col items-center overflow-y-auto px-1 py-5">
+      <div className="flex shrink-0 flex-col items-center">
         <Logo />
-        <p className="mt-4 text-xs font-bold text-muted-foreground">
-          To install Unsloth, click Get Started.
+        <p className="mt-4 max-w-xl text-center text-sm font-semibold text-foreground">
+          Configure ton espace CogniX avant l'installation.
+        </p>
+        <p className="mt-1 max-w-xl text-center text-xs text-muted-foreground">
+          Le profil choisi définit les outils affichés par défaut dans cette installation.
         </p>
       </div>
-      <div className="mb-10">
+
+      <div className="mt-5 grid w-full grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+        {COGNIX_PLAN_OPTIONS.map((plan) => {
+          const selected = plan.id === selectedPlanId;
+          return (
+            <button
+              key={plan.id}
+              type="button"
+              onClick={() => setSelectedPlanId(plan.id)}
+              className={cn(
+                "rounded-lg border px-3 py-3 text-left transition-all",
+                "bg-card/60 hover:border-primary/50 hover:bg-card",
+                selected
+                  ? "border-primary shadow-sm ring-1 ring-primary/35"
+                  : "border-border/60",
+              )}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <p className="text-sm font-semibold text-foreground">
+                    {plan.label}
+                  </p>
+                  <p className="mt-0.5 text-[11px] font-medium text-primary">
+                    {plan.audience}
+                  </p>
+                </div>
+                {plan.id === RECOMMENDED_COGNIX_PLAN_ID && (
+                  <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary">
+                    conseillé
+                  </span>
+                )}
+              </div>
+              <p className="mt-2 min-h-[32px] text-xs leading-4 text-muted-foreground">
+                {plan.summary}
+              </p>
+              <ul className="mt-2 space-y-1">
+                {plan.highlights.slice(0, 3).map((highlight) => (
+                  <li
+                    key={highlight}
+                    className="flex gap-1.5 text-[11px] leading-4 text-muted-foreground"
+                  >
+                    <span className="mt-[6px] size-1 shrink-0 rounded-full bg-primary/70" />
+                    <span>{highlight}</span>
+                  </li>
+                ))}
+              </ul>
+            </button>
+          );
+        })}
+      </div>
+
+      <motion.div
+        key={selectedPlan.id}
+        initial={{ opacity: 0, y: 6 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.18, ease: EASE_OUT_QUART }}
+        className="mt-3 w-full rounded-lg border border-border/60 bg-muted/25 px-4 py-3 text-left"
+      >
+        <p className="text-xs font-semibold text-foreground">
+          Pourquoi choisir {selectedPlan.label}
+        </p>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">
+          {selectedPlan.guidance}
+        </p>
+      </motion.div>
+
+      <div className="mt-4 shrink-0 pb-2">
         <ShimmerButton
-          onClick={onInstall}
+          onClick={handleInstall}
           shimmerColor="#a7f3d0"
           background="oklch(0.696 0.17 162.48)"
           className="text-sm font-medium"
         >
-          Get Started
+          Installer avec {selectedPlan.label}
         </ShimmerButton>
       </div>
     </div>
@@ -187,13 +288,13 @@ function InstallingContent({
       </div>
       <div className="mb-10 flex flex-col items-center gap-2">
         <Spinner className="size-6 text-primary" />
-        <p className="text-sm font-bold text-foreground">Installing...</p>
+        <p className="text-sm font-bold text-foreground">Installation de CogniX...</p>
         <p className="text-sm font-bold text-muted-foreground">
-          Please wait a few mins, then you can start training.
+          Preparation de ton espace local. Le chat sera pret juste apres.
         </p>
         {currentStepIndex >= 0 && (
           <p className="mt-1 text-xs font-bold text-muted-foreground">
-            Step {stepNum} of {INSTALL_STEPS.length}: {stepLabel}
+            Etape {stepNum} sur {INSTALL_STEPS.length} : {stepLabel}
           </p>
         )}
         {progressDetail && (
@@ -220,7 +321,7 @@ function RepairingContent({
       </div>
       <div className="mb-10 flex flex-col items-center gap-2">
         <Spinner className="size-6 text-primary" />
-        <p className="text-sm font-bold text-foreground">Updating existing Unsloth install...</p>
+        <p className="text-sm font-bold text-foreground">Mise a jour de l'installation CogniX...</p>
         {latest && (
           <p className="max-w-xs text-center text-xs text-muted-foreground">{latest}</p>
         )}
@@ -242,12 +343,12 @@ function InstallErrorContent({
     <>
       <Logo />
       <div className="mt-8 flex flex-col items-center gap-2">
-        <p className="text-sm font-medium text-destructive">Setup ran into a problem</p>
+        <p className="text-sm font-medium text-destructive">L'installation a rencontre un probleme</p>
         {error && (
           <p className="max-w-xs text-center text-xs text-muted-foreground">{error}</p>
         )}
         <DiagnosticsCopyActions onCopyDiagnostics={onCopyDiagnostics}>
-          <ActionButton onClick={onRetryInstall}>Try Again</ActionButton>
+          <ActionButton onClick={onRetryInstall}>Reessayer</ActionButton>
         </DiagnosticsCopyActions>
       </div>
     </>
@@ -267,12 +368,12 @@ function RepairErrorContent({
     <>
       <Logo />
       <div className="mt-8 flex flex-col items-center gap-2">
-        <p className="text-sm font-medium text-destructive">Update failed</p>
+        <p className="text-sm font-medium text-destructive">Mise a jour echouee</p>
         {error && (
           <p className="max-w-md text-center text-xs text-muted-foreground">{error}</p>
         )}
         <DiagnosticsCopyActions onCopyDiagnostics={onCopyDiagnostics}>
-          <ActionButton onClick={onRetry}>Retry</ActionButton>
+          <ActionButton onClick={onRetry}>Reessayer</ActionButton>
         </DiagnosticsCopyActions>
       </div>
     </>
@@ -292,9 +393,9 @@ function NeedsElevationContent({
     <>
       <Logo />
       <div className="mt-8 flex flex-col items-center gap-2">
-        <p className="text-sm font-medium text-foreground">Permission needed</p>
+        <p className="text-sm font-medium text-foreground">Permission requise</p>
         <p className="text-xs text-muted-foreground">
-          The following system packages need to be installed:
+          Les paquets systeme suivants doivent etre installes :
         </p>
         <div className="mt-2 w-full max-w-xs rounded-lg bg-muted p-3 font-mono text-xs">
           {elevationPackages.map((pkg) => (
@@ -302,8 +403,8 @@ function NeedsElevationContent({
           ))}
         </div>
         <div className="mt-4 flex gap-3">
-          <ActionButton variant="secondary" onClick={onRetryInstall}>Cancel</ActionButton>
-          <ActionButton onClick={onApproveElevation}>Allow</ActionButton>
+          <ActionButton variant="secondary" onClick={onRetryInstall}>Annuler</ActionButton>
+          <ActionButton onClick={onApproveElevation}>Autoriser</ActionButton>
         </div>
       </div>
     </>
@@ -318,7 +419,7 @@ function StartingContent() {
       </div>
       <div className="mb-10 flex flex-col items-center gap-2">
         <Spinner className="size-6 text-primary" />
-        <p className="text-sm text-muted-foreground">Starting server...</p>
+        <p className="text-sm text-muted-foreground">Demarrage du serveur...</p>
       </div>
     </div>
   );
@@ -329,9 +430,9 @@ function StoppedContent({ onStartServer }: { onStartServer: () => void }) {
     <>
       <Logo />
       <div className="mt-8 flex flex-col items-center gap-2">
-        <p className="text-sm font-medium text-foreground">Server stopped</p>
+        <p className="text-sm font-medium text-foreground">Serveur arrete</p>
         <div className="mt-4">
-          <ActionButton onClick={onStartServer}>Start Server</ActionButton>
+          <ActionButton onClick={onStartServer}>Demarrer le serveur</ActionButton>
         </div>
       </div>
     </>
@@ -351,12 +452,12 @@ function ErrorContent({
     <>
       <Logo />
       <div className="mt-8 flex flex-col items-center gap-2">
-        <p className="text-sm font-medium text-destructive">Something went wrong</p>
+        <p className="text-sm font-medium text-destructive">Un probleme est survenu</p>
         {error && (
           <p className="max-w-md text-center text-xs text-muted-foreground">{error}</p>
         )}
         <DiagnosticsCopyActions onCopyDiagnostics={onCopyDiagnostics}>
-          <ActionButton onClick={onRetry}>Retry</ActionButton>
+          <ActionButton onClick={onRetry}>Reessayer</ActionButton>
         </DiagnosticsCopyActions>
       </div>
     </>
@@ -434,7 +535,7 @@ export function StartupScreen({
 
   return (
     <div className="flex h-full w-full flex-col items-center bg-background">
-      <div className="flex flex-1 w-full max-w-md items-center justify-center px-6">
+      <div className="flex flex-1 min-h-0 w-full max-w-[940px] items-center justify-center px-6">
         <AnimatePresence mode="wait">
           <motion.div
             key={status}

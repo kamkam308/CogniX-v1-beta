@@ -400,10 +400,11 @@ def identity(nonce: str, request: Request) -> dict:
 async def auth_status() -> AuthStatusResponse:
     """Auth initialization state; ``default_username`` is exposed for first-boot UI prefill only."""
     initialized = storage.is_initialized()
+    admin_username = storage.get_default_admin_username()
     return AuthStatusResponse(
         initialized = initialized,
         default_username = "" if initialized else storage.DEFAULT_ADMIN_USERNAME,
-        requires_password_change = storage.requires_password_change(storage.DEFAULT_ADMIN_USERNAME)
+        requires_password_change = storage.requires_password_change(admin_username)
         if initialized
         else True,
     )

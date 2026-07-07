@@ -519,6 +519,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "cognix"
+version = "2026.4.8"
+dependencies = [
+ "base64 0.22.1",
+ "dirs",
+ "elevated-command",
+ "fix-path-env",
+ "hmac",
+ "libc",
+ "log",
+ "open",
+ "process-wrap",
+ "rand 0.10.1",
+ "regex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "simplelog",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-clipboard-manager",
+ "tauri-plugin-dialog",
+ "tauri-plugin-notification",
+ "tauri-plugin-opener",
+ "tauri-plugin-process",
+ "tauri-plugin-single-instance",
+ "tauri-plugin-updater",
+ "tauri-plugin-window-state",
+ "tokio",
+ "windows 0.62.2",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "combine"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5476,41 +5511,6 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
-
-[[package]]
-name = "unsloth-studio"
-version = "2026.4.8"
-dependencies = [
- "base64 0.22.1",
- "dirs",
- "elevated-command",
- "fix-path-env",
- "hmac",
- "libc",
- "log",
- "open",
- "process-wrap",
- "rand 0.10.1",
- "regex",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha2",
- "simplelog",
- "tauri",
- "tauri-build",
- "tauri-plugin-clipboard-manager",
- "tauri-plugin-dialog",
- "tauri-plugin-notification",
- "tauri-plugin-opener",
- "tauri-plugin-process",
- "tauri-plugin-single-instance",
- "tauri-plugin-updater",
- "tauri-plugin-window-state",
- "tokio",
- "windows 0.62.2",
- "windows-sys 0.59.0",
-]
 
 [[package]]
 name = "untrusted"

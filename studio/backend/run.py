@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
-"""Run script for Unsloth UI Backend.
+"""Run script for the CogniX backend.
 
 Self-contained; can be moved to any directory.
 """
@@ -86,7 +86,7 @@ def _resolve_external_ip() -> str:
 def _install_uvicorn_startup_log_rewrite(bind_host: str, display_host: str) -> None:
     """Rewrite Uvicorn's startup log line: swap wildcard bind for the
     externally-reachable address, use our Mac-aware stop hint, and rename the
-    prefix to "Unsloth Studio running on"."""
+    prefix to "CogniX running on"."""
     import logging
     import re
 
@@ -96,7 +96,7 @@ def _install_uvicorn_startup_log_rewrite(bind_host: str, display_host: str) -> N
     new_suffix = "(To stop: press Ctrl+C -- on macOS, Control+C not Command+C)"
     old_suffix_re = re.compile(r"\(Press CTRL\+C to quit\)")
     old_prefix = "Uvicorn running on "
-    new_prefix = "Unsloth Studio running on "
+    new_prefix = "CogniX running on "
 
     def _rewrite(text: str) -> str:
         if text.startswith(old_prefix):
@@ -220,8 +220,8 @@ def _print_localhost_ipv6_mismatch_warning(local_url: str, port: int) -> None:
     reset = "\033[0m" if use_color else ""
 
     print(
-        f"{warn_c}  Warning: localhost resolves to IPv6 (::1), but Unsloth "
-        f"Studio is listening on 127.0.0.1 only. Open {local_url} instead of "
+        f"{warn_c}  Warning: localhost resolves to IPv6 (::1), but CogniX "
+        f"is listening on 127.0.0.1 only. Open {local_url} instead of "
         f"http://localhost:{port}.{reset}",
         flush = True,
     )
@@ -363,7 +363,7 @@ def _verify_global_reachability(display_host: str, port: int) -> None:
             local_url = _working_local_url(port)
             if local_url:
                 print(
-                    f"{local_url_c}  You can access Unsloth Studio locally "
+                    f"{local_url_c}  You can access CogniX locally "
                     f"in the meantime: {local_url}{reset}",
                     flush = True,
                 )
@@ -414,7 +414,7 @@ def _emit_tool_policy_notice(host: str, secure: bool, enable_tools: "Optional[bo
 def _emit_secure_startup_output(port: int, enable_tools: "Optional[bool]" = None) -> None:
     """Secure-mode banner: only the Cloudflare link (loopback has no public raw URL)."""
     print("")
-    print("🦥 Unsloth Studio is running (secure)")
+    print("CogniX is running (secure)")
     print("─" * 52)
     _print_cloudflare_line()
     print(f"  On this machine only: http://127.0.0.1:{port}/")
@@ -1032,7 +1032,7 @@ def run_server(
                 print(f"Port {original_port} is already in use by " f"{name} (PID {pid}).")
             else:
                 print(f"Port {original_port} is already in use.")
-            print(f"Unsloth Studio will use port {port} instead.")
+            print(f"CogniX will use port {port} instead.")
             print(f"Open http://localhost:{port} in your browser.")
             print("=" * 50)
             print("")
@@ -1075,7 +1075,7 @@ def run_server(
                 f"  - run the installer's binary directly: {installer_bin} studio\n"
                 "  - pass --frontend <path/to/studio/frontend/dist>\n"
                 "  - pass --api-only to skip serving the web UI\n"
-                "  - reinstall: curl -fsSL https://unsloth.ai/install.sh | sh"
+                "  - reinstall: curl -fsSL https://raw.githubusercontent.com/kamkam308/CogniX-v1-beta/main/install.sh | sh"
             )
 
     # Resolve once; shared by the log rewrite and banner.
@@ -1249,7 +1249,7 @@ def _build_arg_parser():
     """
     import argparse
 
-    parser = argparse.ArgumentParser(description = "Run Unsloth UI Backend server")
+    parser = argparse.ArgumentParser(description = "Run CogniX backend server")
     parser.add_argument(
         "--host",
         default = "127.0.0.1",
@@ -1372,7 +1372,7 @@ if __name__ == "__main__":
     except Exception:
         sys.stderr.write("\n")
         sys.stderr.write("=" * 60 + "\n")
-        sys.stderr.write("ERROR: Unsloth Studio failed to start.\n")
+        sys.stderr.write("ERROR: CogniX failed to start.\n")
         sys.stderr.write("=" * 60 + "\n")
         traceback.print_exc(file = sys.stderr)
         sys.stderr.write("\n")

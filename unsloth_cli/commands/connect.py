@@ -413,7 +413,7 @@ def _merge_codex_config(existing: str, base: str) -> str:
         text += "\n"
     return text + (
         f"{_PROVIDER_HEADER}\n"
-        'name = "Unsloth Studio"\n'
+        'name = "CogniX"\n'
         f"base_url = {json.dumps(base + '/v1')}\n"
         f'env_key = "{_CODEX_ENV_KEY}"\n'
         'wire_api = "responses"\n'
@@ -607,7 +607,7 @@ def write_opencode_config(base: str, key: str, model: dict) -> None:
     config.setdefault("$schema", "https://opencode.ai/config.json")
     _subdict(config, "provider")["unsloth"] = {
         "npm": "@ai-sdk/openai-compatible",
-        "name": "Unsloth Studio",
+        "name": "CogniX",
         "options": {"baseURL": f"{base}/v1", "apiKey": key},
         "models": {model["id"]: {"name": model["id"]}},
     }

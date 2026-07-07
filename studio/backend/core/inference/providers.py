@@ -326,8 +326,8 @@ PROVIDER_REGISTRY: dict[str, dict[str, Any]] = {
         "auth_header": "Authorization",
         "auth_prefix": "Bearer ",
         "extra_headers": {
-            "HTTP-Referer": "https://unsloth.ai",
-            "X-Title": "Unsloth Studio",
+            "HTTP-Referer": "https://github.com/kamkam308/CogniX-v1-beta",
+            "X-Title": "CogniX",
         },
         "notes": "Unified gateway to 300+ models across all major providers. HTTP-Referer and X-Title headers sent for attribution.",
         "model_list_mode": "curated",

@@ -1,0 +1,1139 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
+
+"""CogniX native integration planning.
+
+The integration manager turns declarative tool manifests into connector status
+and activation plans without reading secrets, enabling connectors, or executing
+external calls.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from typing import Any
+
+from core.cognix import tool_registry as cognix_tool_registry
+
+
+COGNIX_INTEGRATION_MANAGER_VERSION = "cognix_integration_manager_v1"
+COGNIX_INTEGRATION_ACTIVATION_CONTRACT_VERSION = "cognix_integration_activation_contract_v1"
+COGNIX_CONNECTOR_PREFLIGHT_CONTRACT_VERSION = "cognix_connector_preflight_contract_v1"
+COGNIX_CONNECTOR_ROADMAP_READINESS_VERSION = "cognix_connector_roadmap_readiness_v1"
+COGNIX_SECRET_ROTATION_CONTRACT_VERSION = "cognix_secret_rotation_contract_v1"
+
+MVP_CONNECTOR_TARGETS: list[dict[str, Any]] = [
+    {
+        "id": "github",
+        "label": "GitHub",
+        "roadmapName": "GitHub",
+        "toolIds": ["github"],
+        "purpose": "code_repositories_issues_pull_requests",
+    },
+    {
+        "id": "google-drive",
+        "label": "Google Drive",
+        "roadmapName": "Google Drive",
+        "toolIds": ["google-drive"],
+        "purpose": "drive_documents_for_rag_and_context",
+    },
+    {
+        "id": "microsoft-365",
+        "label": "Microsoft 365",
+        "roadmapName": "Microsoft 365",
+        "toolIds": ["microsoft-365", "sharepoint"],
+        "purpose": "enterprise_calendar_documents_sharepoint",
+    },
+    {
+        "id": "notion",
+        "label": "Notion",
+        "roadmapName": "Notion",
+        "toolIds": ["notion"],
+        "purpose": "workspace_docs_and_project_notes",
+    },
+    {
+        "id": "moodle",
+        "label": "Moodle",
+        "roadmapName": "Moodle",
+        "toolIds": ["moodle"],
+        "purpose": "education_courses_assignments_grades",
+    },
+    {
+        "id": "slack-teams",
+        "label": "Slack / Teams",
+        "roadmapName": "Slack/Teams",
+        "toolIds": ["slack", "microsoft-teams"],
+        "purpose": "team_channels_messages_drafts",
+    },
+]
+
+CONNECTOR_AUTH_PROFILES: dict[str, dict[str, Any]] = {
+    "github": {"authMode": "oauth_user_token", "tokenBoundary": "user"},
+    "google-drive": {"authMode": "oauth_user_token", "tokenBoundary": "user"},
+    "gmail": {"authMode": "oauth_user_token", "tokenBoundary": "user"},
+    "notion": {"authMode": "oauth_user_token", "tokenBoundary": "user"},
+    "microsoft-365": {"authMode": "oauth_user_token_or_graph_app", "tokenBoundary": "organization"},
+    "google-workspace": {"authMode": "oauth_user_token_or_service_account", "tokenBoundary": "organization"},
+    "sharepoint": {"authMode": "microsoft_graph_connector", "tokenBoundary": "organization"},
+    "microsoft-teams": {"authMode": "microsoft_graph_connector", "tokenBoundary": "organization"},
+    "slack": {"authMode": "slack_bot_or_user_token", "tokenBoundary": "organization"},
+    "moodle": {"authMode": "moodle_service_token", "tokenBoundary": "organization"},
+    "crm": {"authMode": "crm_api_token", "tokenBoundary": "organization"},
+    "erp": {"authMode": "erp_api_token", "tokenBoundary": "organization"},
+    "internal-tools": {"authMode": "internal_gateway_token", "tokenBoundary": "workspace"},
+    "local-codex": {"authMode": "local_workspace_trust", "tokenBoundary": "workspace"},
+    "isolated-container": {"authMode": "sandbox_runtime_trust", "tokenBoundary": "workspace"},
+}
+
+
+def _normalize_permission(permission: str) -> str:
+    return (permission or "").strip().lower()
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _permission_set(
+    *,
+    is_admin: bool,
+    has_developer_mode: bool,
+    granted_permissions: set[str] | None,
+) -> set[str]:
+    permissions = {
+        _normalize_permission(item)
+        for item in (granted_permissions or set())
+        if item
+    }
+    permissions.add(cognix_tool_registry.IMPLICIT_AUTHENTICATED_PERMISSION)
+    if is_admin:
+        permissions.add(cognix_tool_registry.ADMIN_PERMISSION)
+        permissions.add(cognix_tool_registry.DEVELOPER_MODE_PERMISSION)
+    if has_developer_mode:
+        permissions.add(cognix_tool_registry.DEVELOPER_MODE_PERMISSION)
+    return permissions
+
+
+def _risk_rank(risk_level: str) -> int:
+    return cognix_tool_registry.RISK_ORDER.get(str(risk_level or "").lower(), 0)
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 0 else default
+
+
+def _max_risk(actions: list[dict[str, Any]]) -> str:
+    ranked = sorted(
+        (str(action.get("riskLevel") or "low") for action in actions),
+        key = _risk_rank,
+        reverse = True,
+    )
+    return ranked[0] if ranked else "low"
+
+
+def _required_permissions(actions: list[dict[str, Any]]) -> set[str]:
+    required: set[str] = set()
+    for action in actions:
+        for permission in action.get("permissions") or []:
+            normalized = _normalize_permission(str(permission))
+            if normalized and normalized != cognix_tool_registry.IMPLICIT_AUTHENTICATED_PERMISSION:
+                required.add(normalized)
+    return required
+
+
+def _action_preflight(action: dict[str, Any], permissions: set[str]) -> dict[str, Any]:
+    required_permissions = [
+        _normalize_permission(str(item))
+        for item in action.get("permissions") or []
+        if item
+    ]
+    missing_permissions = [
+        item
+        for item in required_permissions
+        if item != cognix_tool_registry.IMPLICIT_AUTHENTICATED_PERMISSION and item not in permissions
+    ]
+    risk_level = str(action.get("riskLevel") or "low")
+    return {
+        "actionId": action.get("id"),
+        "mode": action.get("mode"),
+        "riskLevel": risk_level,
+        "requiresConfirmation": bool(action.get("requiresConfirmation")),
+        "auditRequired": bool(action.get("auditRequired")),
+        "sandboxRequired": bool(action.get("sandboxRequired")),
+        "rateLimitKey": action.get("rateLimitKey"),
+        "secretsRequired": bool(action.get("secretsRequired")),
+        "requiredPermissions": required_permissions,
+        "missingPermissions": missing_permissions,
+        "readyForExecutorPlanning": not missing_permissions and bool(action.get("auditRequired")),
+    }
+
+
+def _next_actions(
+    *,
+    enabled: bool,
+    secrets_required: bool,
+    missing_permissions: list[str],
+    max_risk: str,
+) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    if not enabled:
+        actions.append(
+            {
+                "id": "enable_connector",
+                "label": "Activer le connecteur",
+                "requiresAdmin": True,
+                "status": "planned",
+            }
+        )
+    if secrets_required:
+        actions.append(
+            {
+                "id": "configure_server_secret",
+                "label": "Configurer le secret cote serveur",
+                "requiresAdmin": True,
+                "status": "planned",
+            }
+        )
+    if missing_permissions:
+        actions.append(
+            {
+                "id": "request_permissions",
+                "label": "Demander les permissions manquantes",
+                "requiresAdmin": False,
+                "status": "planned",
+                "permissions": missing_permissions,
+            }
+        )
+    if _risk_rank(max_risk) >= _risk_rank("high"):
+        actions.append(
+            {
+                "id": "review_risk_policy",
+                "label": "Revoir la politique de risque",
+                "requiresAdmin": True,
+                "status": "planned",
+            }
+        )
+    if not actions:
+        actions.append(
+            {
+                "id": "ready_for_guarded_planning",
+                "label": "Pret pour planification controlee",
+                "requiresAdmin": False,
+                "status": "ready",
+            }
+        )
+    return actions
+
+
+def build_connector_preflight_contract(
+    *,
+    tool_id: str,
+    username: str,
+    is_admin: bool = False,
+    has_developer_mode: bool = False,
+    granted_permissions: set[str] | None = None,
+) -> dict[str, Any]:
+    permissions = _permission_set(
+        is_admin = is_admin,
+        has_developer_mode = has_developer_mode,
+        granted_permissions = granted_permissions,
+    )
+    registry = cognix_tool_registry.build_tool_registry()
+    tool = next(
+        (item for item in registry.get("tools") or [] if isinstance(item, dict) and item.get("id") == tool_id),
+        None,
+    )
+    side_effects = {
+        "integrationActivation": False,
+        "secretRead": False,
+        "secretWrite": False,
+        "toolExecution": False,
+        "networkToolCall": False,
+        "externalWrite": False,
+        "permissionWrite": False,
+        "auditWrite": False,
+    }
+    if tool is None:
+        return {
+            "contractVersion": COGNIX_CONNECTOR_PREFLIGHT_CONTRACT_VERSION,
+            "mode": "connector_preflight_dry_run",
+            "username": username,
+            "toolId": tool_id,
+            "connector": None,
+            "status": "unknown_integration",
+            "readyForActivationRequest": False,
+            "readyForConnectorActivation": False,
+            "nextRequiredGate": "manifest_missing",
+            "gates": [
+                {
+                    "id": "manifest_declared",
+                    "status": "blocked",
+                    "severity": "error",
+                    "reason": "Connector manifest is not declared in the Tool Registry.",
+                }
+            ],
+            "blockedActions": [
+                "secret_read",
+                "network_tool_call",
+                "connector_activation",
+                "tool_execution",
+                "external_write",
+                "permission_write",
+            ],
+            "sideEffects": side_effects,
+        }
+
+    actions = [action for action in tool.get("actions") or [] if isinstance(action, dict)]
+    connector = str(tool.get("connector") or "unknown")
+    auth_profile = CONNECTOR_AUTH_PROFILES.get(
+        connector,
+        {"authMode": "connector_secret", "tokenBoundary": tool.get("dataIsolation") or "unknown"},
+    )
+    action_contracts = [_action_preflight(action, permissions) for action in actions]
+    required_permissions = sorted(_required_permissions(actions))
+    missing_permissions = sorted(
+        permission
+        for permission in required_permissions
+        if permission not in permissions
+    )
+    secret_names = list(cognix_tool_registry.SECRET_SOURCE_BY_CONNECTOR.get(connector, []))
+    max_risk = _max_risk(actions)
+    high_risk = _risk_rank(max_risk) >= _risk_rank("high")
+    enabled = bool(tool.get("enabled"))
+    gates = [
+        {
+            "id": "manifest_declared",
+            "status": "pass",
+            "severity": "info",
+            "reason": "Connector manifest is declared in the Tool Registry.",
+        },
+        {
+            "id": "connector_declared",
+            "status": "pass" if connector != "unknown" else "blocked",
+            "severity": "info" if connector != "unknown" else "error",
+            "reason": "Connector id is declared." if connector != "unknown" else "Connector id is missing.",
+            "detail": connector,
+        },
+        {
+            "id": "permissions_declared",
+            "status": "pass" if required_permissions else "warning",
+            "severity": "info" if required_permissions else "warning",
+            "reason": "Action permissions are declared." if required_permissions else "No explicit connector permissions are declared.",
+            "detail": required_permissions,
+        },
+        {
+            "id": "secret_reference_declared",
+            "status": "pass" if secret_names or not any(item.get("secretsRequired") for item in actions) else "blocked",
+            "severity": "info" if secret_names or not any(item.get("secretsRequired") for item in actions) else "error",
+            "reason": "Secret source names are declared server-side." if secret_names else "No secret source required.",
+            "detail": secret_names,
+        },
+        {
+            "id": "risk_policy_declared",
+            "status": "warning" if high_risk else "pass",
+            "severity": "warning" if high_risk else "info",
+            "reason": "High-risk connector actions require admin review." if high_risk else "Risk policy is declared.",
+            "detail": max_risk,
+        },
+        {
+            "id": "audit_policy_declared",
+            "status": "pass" if all(bool(action.get("auditRequired")) for action in actions) else "blocked",
+            "severity": "info" if all(bool(action.get("auditRequired")) for action in actions) else "error",
+            "reason": "All connector actions require audit logs." if actions else "Connector actions are not declared.",
+        },
+        {
+            "id": "executor_boundary_declared",
+            "status": "pass",
+            "severity": "info",
+            "reason": "Connector execution is delegated to guarded backend executors only.",
+        },
+    ]
+    blocked_gate_ids = [str(item["id"]) for item in gates if item.get("severity") == "error"]
+    warning_gate_ids = [str(item["id"]) for item in gates if item.get("severity") == "warning"]
+    next_required_gate = (
+        "manifest_review"
+        if blocked_gate_ids
+        else "enable_connector"
+        if not enabled
+        else "resolve_missing_permissions"
+        if missing_permissions
+        else "configure_server_secret"
+        if secret_names
+        else "human_approval"
+    )
+    return {
+        "contractVersion": COGNIX_CONNECTOR_PREFLIGHT_CONTRACT_VERSION,
+        "mode": "connector_preflight_dry_run",
+        "username": username,
+        "toolId": tool.get("id"),
+        "connector": connector,
+        "status": "ready_for_admin_review" if not blocked_gate_ids else "blocked_manifest_review",
+        "readyForActivationRequest": not blocked_gate_ids,
+        "readyForConnectorActivation": False,
+        "nextRequiredGate": next_required_gate,
+        "authProfile": {
+            **auth_profile,
+            "actualSecretValuesIncluded": False,
+            "clientSideSecretAccessAllowed": False,
+            "serverSideOnly": True,
+        },
+        "secretContract": {
+            "secretSourceNames": secret_names,
+            "required": bool(secret_names),
+            "actualSecretValuesIncluded": False,
+            "secretReadPlanned": False,
+            "secretWritePlanned": False,
+        },
+        "permissionContract": {
+            "requiredPermissions": required_permissions,
+            "missingPermissions": missing_permissions,
+            "grantedPermissionsUsed": sorted(permissions),
+            "permissionWritePlanned": False,
+        },
+        "dataBoundary": {
+            "dataIsolation": tool.get("dataIsolation"),
+            "tokenBoundary": auth_profile.get("tokenBoundary"),
+            "crossUserReadAllowed": False,
+            "rawExternalContentStoredByPreflight": False,
+            "networkRequiredForRealConnector": bool(secret_names or actions),
+            "networkCallPlanned": False,
+        },
+        "riskContract": {
+            "maxRiskLevel": max_risk,
+            "highRiskReviewRequired": high_risk,
+            "humanConfirmationRequiredForWrites": any(
+                str(action.get("mode") or "") in {"write", "delete"} for action in actions
+            ),
+            "criticalActionIds": [
+                str(action.get("id"))
+                for action in actions
+                if _risk_rank(str(action.get("riskLevel") or "low")) >= _risk_rank("critical")
+            ],
+        },
+        "actions": action_contracts,
+        "gates": gates,
+        "summary": {
+            "actionCount": len(action_contracts),
+            "readActionCount": sum(1 for item in action_contracts if item.get("mode") == "read"),
+            "writeActionCount": sum(1 for item in action_contracts if item.get("mode") in {"write", "delete"}),
+            "blockedGateIds": blocked_gate_ids,
+            "warningGateIds": warning_gate_ids,
+        },
+        "blockedActions": [
+            "secret_read",
+            "network_tool_call",
+            "connector_activation",
+            "tool_execution",
+            "external_write",
+            "permission_write",
+            "frontend_direct_connector_call",
+        ],
+        "sideEffects": side_effects,
+    }
+
+
+def build_secret_rotation_contract(
+    *,
+    tool_id: str,
+    username: str,
+    rotation_reason: str | None = None,
+    current_secret_age_days: int | None = None,
+    last_rotation_at: str | None = None,
+    is_admin: bool = False,
+    has_developer_mode: bool = False,
+    granted_permissions: set[str] | None = None,
+) -> dict[str, Any]:
+    preflight = build_connector_preflight_contract(
+        tool_id = tool_id,
+        username = username,
+        is_admin = is_admin,
+        has_developer_mode = has_developer_mode,
+        granted_permissions = granted_permissions,
+    )
+    side_effects = {
+        "secretRead": False,
+        "secretWrite": False,
+        "secretRotation": False,
+        "connectorActivation": False,
+        "toolExecution": False,
+        "networkToolCall": False,
+        "externalWrite": False,
+        "permissionWrite": False,
+        "auditWrite": False,
+    }
+    secret_names = [
+        str(item).strip()
+        for item in preflight.get("secretContract", {}).get("secretSourceNames", [])
+        if str(item or "").strip()
+    ]
+    connector = preflight.get("connector")
+    max_risk = str(preflight.get("riskContract", {}).get("maxRiskLevel") or "low")
+    age_days = _as_int(current_secret_age_days, 0)
+    normalized_reason = str(rotation_reason or "").strip().casefold()
+    immediate_reason = normalized_reason in {
+        "suspected_leak",
+        "credential_exposure",
+        "incident",
+        "employee_offboarding",
+        "admin_requested",
+    }
+    high_risk = _risk_rank(max_risk) >= _risk_rank("high")
+    age_exceeded = age_days >= 90
+    rotation_recommended = bool(secret_names and (immediate_reason or high_risk or age_exceeded))
+    preflight_blocked = bool(preflight.get("summary", {}).get("blockedGateIds")) or preflight.get("status") == "unknown_integration"
+    ready_for_rotation_request = bool(secret_names and not preflight_blocked)
+    status = (
+        "unknown_integration"
+        if preflight.get("status") == "unknown_integration"
+        else "blocked_missing_secret_source"
+        if not secret_names
+        else "blocked_preflight"
+        if preflight_blocked
+        else "rotation_recommended"
+        if rotation_recommended
+        else "rotation_review_optional"
+    )
+    gates = [
+        {
+            "id": "connector_preflight_ready",
+            "status": "pass" if not preflight_blocked else "blocked",
+            "severity": "info" if not preflight_blocked else "error",
+            "reason": "Connector preflight is available before secret rotation.",
+            "detail": preflight.get("status"),
+        },
+        {
+            "id": "secret_sources_declared",
+            "status": "pass" if secret_names else "blocked",
+            "severity": "info" if secret_names else "error",
+            "reason": "Server-side secret source names must be declared.",
+            "detail": secret_names,
+        },
+        {
+            "id": "secret_value_not_read",
+            "status": "pass",
+            "severity": "info",
+            "reason": "This contract never reads or returns current secret values.",
+        },
+        {
+            "id": "human_approval_required",
+            "status": "planned",
+            "severity": "warning",
+            "reason": "Secret rotation requires an explicit admin or owner approval.",
+        },
+        {
+            "id": "secret_manager_executor_required",
+            "status": "planned",
+            "severity": "warning",
+            "reason": "Only a guarded backend secret manager executor may rotate the secret.",
+        },
+    ]
+    blocked_gate_ids = [str(item["id"]) for item in gates if item.get("severity") == "error"]
+    warning_gate_ids = [str(item["id"]) for item in gates if item.get("severity") == "warning"]
+    return {
+        "secretRotationContractVersion": COGNIX_SECRET_ROTATION_CONTRACT_VERSION,
+        "integrationManagerVersion": COGNIX_INTEGRATION_MANAGER_VERSION,
+        "preflightContractVersion": preflight.get("contractVersion"),
+        "mode": "secret_rotation_contract_dry_run",
+        "username": username,
+        "toolId": preflight.get("toolId") or tool_id,
+        "connector": connector,
+        "status": status,
+        "readyForRotationRequest": ready_for_rotation_request,
+        "readyForSecretRotation": False,
+        "rotationRecommended": rotation_recommended,
+        "rotationPolicy": {
+            "maxSecretAgeDays": 90,
+            "currentSecretAgeDays": age_days if current_secret_age_days is not None else None,
+            "lastRotationAt": last_rotation_at,
+            "rotationReason": normalized_reason or "routine_review",
+            "immediateRotationReason": immediate_reason,
+            "highRiskConnector": high_risk,
+            "ageExceeded": age_exceeded,
+            "requiresHumanApproval": True,
+            "requiresAuditLog": True,
+            "requiresServerSideSecretManager": True,
+        },
+        "secretSources": [
+            {
+                "name": name,
+                "sourceRefHash": "secret_ref_" + hashlib.sha256(f"{connector}:{name}".encode("utf-8")).hexdigest()[:12],
+                "currentValueIncluded": False,
+                "newValueIncluded": False,
+                "clientSideAccessAllowed": False,
+            }
+            for name in secret_names
+        ],
+        "preflightSummary": {
+            "status": preflight.get("status"),
+            "readyForActivationRequest": preflight.get("readyForActivationRequest"),
+            "blockedGateIds": preflight.get("summary", {}).get("blockedGateIds", []),
+            "warningGateIds": preflight.get("summary", {}).get("warningGateIds", []),
+            "maxRiskLevel": max_risk,
+        },
+        "executorContract": {
+            "plannedExecutor": "cognix_secret_manager:rotate_connector_secret" if ready_for_rotation_request else None,
+            "readyForExecutor": False,
+            "secretReadAllowedHere": False,
+            "secretWriteAllowedHere": False,
+            "networkReauthAllowedHere": False,
+            "frontendDirectSecretRotationAllowed": False,
+            "requiresConfirmationId": True,
+            "requiresRollbackSecretVersion": True,
+            "requiresPostRotationConnectorTest": True,
+            "nextRequiredGate": blocked_gate_ids[0] if blocked_gate_ids else "human_approval_required",
+        },
+        "gates": gates,
+        "summary": {
+            "secretSourceCount": len(secret_names),
+            "blockedGateIds": blocked_gate_ids,
+            "warningGateIds": warning_gate_ids,
+            "rotationRecommended": rotation_recommended,
+            "readyForRotationRequest": ready_for_rotation_request,
+        },
+        "blockedActions": [
+            "secret_read",
+            "secret_write",
+            "secret_rotation",
+            "connector_reauth",
+            "network_tool_call",
+            "frontend_secret_access",
+            "secret_value_logging",
+        ],
+        "sideEffects": side_effects,
+    }
+
+
+def _activation_contract(
+    *,
+    integration: dict[str, Any] | None,
+    username: str,
+    status_side_effects: dict[str, Any],
+) -> dict[str, Any]:
+    if integration is None:
+        return {
+            "contractVersion": COGNIX_INTEGRATION_ACTIVATION_CONTRACT_VERSION,
+            "mode": "activation_contract_dry_run",
+            "username": username,
+            "toolId": None,
+            "connector": None,
+            "allowedToPrepareActivation": False,
+            "readyForActivation": False,
+            "automaticActivationAllowed": False,
+            "frontendDirectActivationAllowed": False,
+            "nextRequiredGate": "unknown_integration",
+            "preconditions": {
+                "manifestPresent": False,
+                "connectorDeclared": False,
+                "permissionsResolved": False,
+                "serverSecretConfigured": False,
+                "riskReviewed": False,
+                "humanApprovalRequired": True,
+                "auditRequired": True,
+            },
+            "blockedWhen": ["unknown_integration"],
+            "blockedActions": [
+                "connector_activation",
+                "secret_read",
+                "network_tool_call",
+                "external_write",
+                "permission_write",
+                "frontend_direct_activation",
+            ],
+            "sideEffects": status_side_effects,
+        }
+
+    missing_permissions = list(integration.get("missingPermissions") or [])
+    secrets_required = bool(integration.get("secretsRequired"))
+    enabled = bool(integration.get("enabled"))
+    high_risk = _risk_rank(str(integration.get("maxRiskLevel") or "low")) >= _risk_rank("high")
+    blocked_when: list[str] = []
+    if not enabled:
+        blocked_when.append("connector_disabled")
+    if missing_permissions:
+        blocked_when.append("missing_permissions")
+    if secrets_required:
+        blocked_when.append("server_secret_required")
+    if high_risk:
+        blocked_when.append("risk_review_required")
+    if not blocked_when:
+        blocked_when.append("human_approval_required")
+    ready_for_activation = enabled and not missing_permissions and not secrets_required and not high_risk
+    return {
+        "contractVersion": COGNIX_INTEGRATION_ACTIVATION_CONTRACT_VERSION,
+        "mode": "activation_contract_dry_run",
+        "username": username,
+        "toolId": integration.get("id"),
+        "connector": integration.get("connector"),
+        "allowedToPrepareActivation": bool(integration.get("id")),
+        "readyForActivation": False,
+        "automaticActivationAllowed": False,
+        "frontendDirectActivationAllowed": False,
+        "nextRequiredGate": blocked_when[0],
+        "preconditions": {
+            "manifestPresent": True,
+            "connectorDeclared": bool(integration.get("connector")),
+            "connectorEnabled": enabled,
+            "permissionsResolved": not missing_permissions,
+            "missingPermissions": missing_permissions,
+            "serverSecretConfigured": not secrets_required,
+            "secretsRequired": secrets_required,
+            "riskReviewed": not high_risk,
+            "maxRiskLevel": integration.get("maxRiskLevel"),
+            "humanApprovalRequired": True,
+            "auditRequired": True,
+            "wouldBeActivationReadyAfterApproval": ready_for_activation,
+        },
+        "activationExecutor": "cognix_integration_executor:activate_connector",
+        "allowedActions": [
+            "record_activation_plan",
+            "request_missing_permissions",
+            "configure_server_secret_reference",
+            "request_human_approval",
+            "enable_connector_after_approval",
+        ],
+        "blockedWhen": blocked_when,
+        "blockedActions": [
+            "connector_activation",
+            "secret_read",
+            "network_tool_call",
+            "external_write",
+            "permission_write",
+            "frontend_direct_activation",
+        ],
+        "dataBoundary": {
+            "dataIsolation": integration.get("dataIsolation"),
+            "secretsStayServerSide": True,
+            "rawSecretLoggingAllowed": False,
+        },
+        "sideEffects": status_side_effects,
+    }
+
+
+def _integration_record(tool: dict[str, Any], permissions: set[str]) -> dict[str, Any]:
+    actions = [action for action in tool.get("actions") or [] if isinstance(action, dict)]
+    enabled = bool(tool.get("enabled"))
+    required = _required_permissions(actions)
+    missing = sorted(permission for permission in required if permission not in permissions)
+    secrets_required = any(bool(action.get("secretsRequired")) for action in actions)
+    max_risk = _max_risk(actions)
+    allowed_action_count = 0
+    for action in actions:
+        action_permissions = {
+            _normalize_permission(str(item))
+            for item in action.get("permissions") or []
+            if item
+        }
+        if enabled and action_permissions.issubset(permissions):
+            allowed_action_count += 1
+
+    status = "enabled_ready"
+    if not enabled:
+        status = "declared_disabled"
+    elif missing:
+        status = "enabled_needs_permissions"
+
+    return {
+        "id": tool.get("id"),
+        "name": tool.get("name"),
+        "category": tool.get("category"),
+        "connector": tool.get("connector"),
+        "enabled": enabled,
+        "status": status,
+        "dataIsolation": tool.get("dataIsolation"),
+        "actionCount": len(actions),
+        "allowedActionCount": allowed_action_count,
+        "maxRiskLevel": max_risk,
+        "secretsRequired": secrets_required,
+        "secretState": "required_unverified" if secrets_required else "not_required",
+        "missingPermissions": missing,
+        "nextActions": _next_actions(
+            enabled = enabled,
+            secrets_required = secrets_required,
+            missing_permissions = missing,
+            max_risk = max_risk,
+        ),
+    }
+
+
+def build_integration_status(
+    *,
+    username: str,
+    is_admin: bool = False,
+    has_developer_mode: bool = False,
+    granted_permissions: set[str] | None = None,
+) -> dict[str, Any]:
+    permissions = _permission_set(
+        is_admin = is_admin,
+        has_developer_mode = has_developer_mode,
+        granted_permissions = granted_permissions,
+    )
+    registry = cognix_tool_registry.build_tool_registry()
+    integrations = [
+        _integration_record(tool, permissions)
+        for tool in registry.get("tools") or []
+        if isinstance(tool, dict)
+    ]
+    return {
+        "username": username,
+        "integrationManagerVersion": COGNIX_INTEGRATION_MANAGER_VERSION,
+        "mode": "dry_run",
+        "integrations": integrations,
+        "summary": {
+            "integrationCount": len(integrations),
+            "enabledCount": sum(1 for item in integrations if item.get("enabled")),
+            "disabledCount": sum(1 for item in integrations if not item.get("enabled")),
+            "secretsRequiredCount": sum(1 for item in integrations if item.get("secretsRequired")),
+            "highRiskIntegrationCount": sum(
+                1 for item in integrations if _risk_rank(str(item.get("maxRiskLevel"))) >= _risk_rank("high")
+            ),
+            "directFrontendExecutionAllowed": False,
+            "activationContractRequired": True,
+        },
+        "policies": {
+            "secretsStayServerSide": True,
+            "humanConfirmationForWrites": True,
+            "auditRequired": True,
+            "rateLimitsRequired": True,
+            "toolExecutionRequiresSeparateExecutor": True,
+            "activationRequiresSeparateExecutor": True,
+        },
+        "sideEffects": {
+            "integrationActivation": False,
+            "secretRead": False,
+            "toolExecution": False,
+            "networkToolCall": False,
+            "externalWrite": False,
+        },
+    }
+
+
+def _tool_lookup(integrations: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {
+        str(item.get("id")): item
+        for item in integrations
+        if isinstance(item, dict) and item.get("id")
+    }
+
+
+def _tool_manifest_lookup() -> dict[str, dict[str, Any]]:
+    registry = cognix_tool_registry.build_tool_registry()
+    return {
+        str(item.get("id")): item
+        for item in registry.get("tools") or []
+        if isinstance(item, dict) and item.get("id")
+    }
+
+
+def _all_actions_for_tools(tool_ids: list[str], manifests: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    for tool_id in tool_ids:
+        tool = manifests.get(tool_id)
+        if not tool:
+            continue
+        actions.extend(action for action in tool.get("actions") or [] if isinstance(action, dict))
+    return actions
+
+
+def _roadmap_connector_record(
+    target: dict[str, Any],
+    *,
+    status_by_tool: dict[str, dict[str, Any]],
+    manifests: dict[str, dict[str, Any]],
+    preflight_by_tool: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    tool_ids = [str(item) for item in target.get("toolIds") or [] if str(item).strip()]
+    declared = [tool_id for tool_id in tool_ids if tool_id in manifests]
+    missing = [tool_id for tool_id in tool_ids if tool_id not in manifests]
+    actions = _all_actions_for_tools(declared, manifests)
+    integrations = [status_by_tool[tool_id] for tool_id in declared if tool_id in status_by_tool]
+    preflights = [preflight_by_tool[tool_id] for tool_id in declared if tool_id in preflight_by_tool]
+    missing_permissions = sorted(
+        {
+            str(permission)
+            for integration in integrations
+            for permission in integration.get("missingPermissions") or []
+            if str(permission).strip()
+        }
+    )
+    connector_ids = sorted(
+        {
+            str(integration.get("connector"))
+            for integration in integrations
+            if str(integration.get("connector") or "").strip()
+        }
+    )
+    data_boundaries = sorted(
+        {
+            str(integration.get("dataIsolation"))
+            for integration in integrations
+            if str(integration.get("dataIsolation") or "").strip()
+        }
+    )
+    blocked_gates = sorted(
+        {
+            str(gate_id)
+            for preflight in preflights
+            for gate_id in _as_dict(preflight.get("summary")).get("blockedGateIds", [])
+            if str(gate_id).strip()
+        }
+    )
+    warning_gates = sorted(
+        {
+            str(gate_id)
+            for preflight in preflights
+            for gate_id in _as_dict(preflight.get("summary")).get("warningGateIds", [])
+            if str(gate_id).strip()
+        }
+    )
+    audit_complete = bool(actions) and all(bool(action.get("auditRequired")) for action in actions)
+    rate_limits_complete = bool(actions) and all(bool(action.get("rateLimitKey")) for action in actions)
+    confirmation_for_writes = all(
+        bool(action.get("requiresConfirmation"))
+        for action in actions
+        if str(action.get("mode") or "").lower() in {"write", "delete"}
+        or _risk_rank(str(action.get("riskLevel") or "low")) >= _risk_rank("medium")
+    )
+    policy_ready = bool(declared) and not missing and audit_complete and rate_limits_complete and confirmation_for_writes
+    activation_blockers = []
+    if missing:
+        activation_blockers.append("missing_tool_manifest")
+    if any(not integration.get("enabled") for integration in integrations):
+        activation_blockers.append("connector_disabled")
+    if any(integration.get("secretsRequired") for integration in integrations):
+        activation_blockers.append("server_secret_unverified")
+    if missing_permissions:
+        activation_blockers.append("missing_permissions")
+    if blocked_gates:
+        activation_blockers.append("preflight_blocked")
+    status = (
+        "blocked_missing_manifest"
+        if missing
+        else "blocked_policy_gap"
+        if not policy_ready
+        else "ready_for_execution_handoff"
+        if not activation_blockers
+        else "manifest_ready_activation_pending"
+    )
+    return {
+        "id": target["id"],
+        "label": target["label"],
+        "roadmapName": target["roadmapName"],
+        "purpose": target["purpose"],
+        "status": status,
+        "readyForMvpConnectorLayer": policy_ready,
+        "readyForExecution": False,
+        "toolIds": tool_ids,
+        "declaredToolIds": declared,
+        "missingToolIds": missing,
+        "connectorIds": connector_ids,
+        "actionCount": len(actions),
+        "readActionCount": sum(1 for action in actions if action.get("mode") == "read"),
+        "writeActionCount": sum(1 for action in actions if action.get("mode") in {"write", "delete"}),
+        "maxRiskLevel": _max_risk(actions),
+        "missingPermissions": missing_permissions,
+        "activationBlockers": sorted(set(activation_blockers)),
+        "preflight": {
+            "contractVersion": COGNIX_CONNECTOR_PREFLIGHT_CONTRACT_VERSION,
+            "blockedGateIds": blocked_gates,
+            "warningGateIds": warning_gates,
+        },
+        "securityContract": {
+            "auditRequiredForAllActions": audit_complete,
+            "rateLimitsDeclaredForAllActions": rate_limits_complete,
+            "humanConfirmationForWrites": confirmation_for_writes,
+            "secretsStayServerSide": True,
+            "actualSecretValuesIncluded": False,
+            "frontendDirectToolCallAllowed": False,
+            "toolExecutionRequiresHandoff": True,
+            "networkCallAllowedHere": False,
+            "dataIsolationBoundaries": data_boundaries,
+        },
+    }
+
+
+def build_connector_roadmap_readiness(
+    *,
+    username: str,
+    is_admin: bool = False,
+    has_developer_mode: bool = False,
+    granted_permissions: set[str] | None = None,
+) -> dict[str, Any]:
+    status = build_integration_status(
+        username = username,
+        is_admin = is_admin,
+        has_developer_mode = has_developer_mode,
+        granted_permissions = granted_permissions,
+    )
+    status_by_tool = _tool_lookup(status.get("integrations") or [])
+    manifests = _tool_manifest_lookup()
+    preflight_by_tool = {
+        tool_id: build_connector_preflight_contract(
+            tool_id = tool_id,
+            username = username,
+            is_admin = is_admin,
+            has_developer_mode = has_developer_mode,
+            granted_permissions = granted_permissions,
+        )
+        for target in MVP_CONNECTOR_TARGETS
+        for tool_id in target.get("toolIds") or []
+        if tool_id in manifests
+    }
+    connectors = [
+        _roadmap_connector_record(
+            target,
+            status_by_tool = status_by_tool,
+            manifests = manifests,
+            preflight_by_tool = preflight_by_tool,
+        )
+        for target in MVP_CONNECTOR_TARGETS
+    ]
+    missing = [item for item in connectors if item["missingToolIds"]]
+    ready = [item for item in connectors if item["readyForMvpConnectorLayer"]]
+    activation_pending = [
+        item
+        for item in connectors
+        if item["readyForMvpConnectorLayer"] and item["activationBlockers"]
+    ]
+    return {
+        "connectorRoadmapReadinessVersion": COGNIX_CONNECTOR_ROADMAP_READINESS_VERSION,
+        "integrationManagerVersion": COGNIX_INTEGRATION_MANAGER_VERSION,
+        "mode": "connector_roadmap_readiness_dry_run",
+        "sourceOfTruth": "roadmap_phase_7_connectors",
+        "username": username,
+        "summary": {
+            "roadmapConnectorCount": len(connectors),
+            "declaredConnectorCount": len(connectors) - len(missing),
+            "mvpPlanningReadyCount": len(ready),
+            "activationPendingCount": len(activation_pending),
+            "missingManifestCount": len(missing),
+            "readyForMvpConnectorLayer": not missing and len(ready) == len(connectors),
+            "readyForExternalExecution": False,
+        },
+        "connectors": connectors,
+        "policies": {
+            "toolRegistrySourceOfTruth": True,
+            "connectorPreflightRequired": True,
+            "activationContractRequired": True,
+            "secretsStayServerSide": True,
+            "rawSecretExposureAllowed": False,
+            "frontendDirectToolCallAllowed": False,
+            "networkToolCallAllowedHere": False,
+            "toolExecutionAllowedHere": False,
+            "humanConfirmationForWrites": True,
+            "auditRequired": True,
+            "rateLimitsRequired": True,
+        },
+        "sideEffects": {
+            "integrationActivation": False,
+            "secretRead": False,
+            "secretWrite": False,
+            "toolExecution": False,
+            "networkToolCall": False,
+            "externalWrite": False,
+            "permissionWrite": False,
+            "auditWrite": False,
+        },
+    }
+
+
+def build_integration_plan(
+    *,
+    tool_id: str,
+    username: str,
+    is_admin: bool = False,
+    has_developer_mode: bool = False,
+    granted_permissions: set[str] | None = None,
+) -> dict[str, Any]:
+    status = build_integration_status(
+        username = username,
+        is_admin = is_admin,
+        has_developer_mode = has_developer_mode,
+        granted_permissions = granted_permissions,
+    )
+    integration = next(
+        (item for item in status["integrations"] if item.get("id") == tool_id),
+        None,
+    )
+    if integration is None:
+        return {
+            "username": username,
+            "integrationManagerVersion": COGNIX_INTEGRATION_MANAGER_VERSION,
+            "mode": "dry_run",
+            "toolId": tool_id,
+            "status": "unknown_integration",
+            "allowedToActivate": False,
+            "humanApprovalRequired": True,
+            "activationContract": _activation_contract(
+                integration = None,
+                username = username,
+                status_side_effects = status["sideEffects"],
+            ),
+            "steps": [
+                {
+                    "id": "verify_manifest",
+                    "status": "blocked",
+                    "detail": "Integration absente du registre CogniX.",
+                }
+            ],
+            "sideEffects": status["sideEffects"],
+        }
+
+    next_actions = integration.get("nextActions") or []
+    max_risk = str(integration.get("maxRiskLevel") or "low")
+    allowed_to_activate = bool(
+        integration.get("enabled")
+        and not integration.get("missingPermissions")
+        and not integration.get("secretsRequired")
+    )
+    return {
+        "username": username,
+        "integrationManagerVersion": COGNIX_INTEGRATION_MANAGER_VERSION,
+        "activationContractVersion": COGNIX_INTEGRATION_ACTIVATION_CONTRACT_VERSION,
+        "mode": "dry_run",
+        "toolId": integration.get("id"),
+        "connector": integration.get("connector"),
+        "status": integration.get("status"),
+        "allowedToActivate": allowed_to_activate,
+        "humanApprovalRequired": True if next_actions else _risk_rank(max_risk) >= _risk_rank("medium"),
+        "integration": integration,
+        "activationContract": _activation_contract(
+            integration = integration,
+            username = username,
+            status_side_effects = status["sideEffects"],
+        ),
+        "steps": [
+            {
+                "id": "verify_manifest",
+                "status": "complete",
+                "detail": "Manifest declaratif charge depuis le Tool Registry.",
+            },
+            {
+                "id": "verify_server_secret",
+                "status": "planned" if integration.get("secretsRequired") else "skipped",
+                "detail": "Aucun secret lu; configuration serveur a faire hors plan dry-run.",
+            },
+            {
+                "id": "verify_permissions",
+                "status": "planned" if integration.get("missingPermissions") else "complete",
+                "detail": "Permissions utilisateur comparees aux actions declarees.",
+            },
+            {
+                "id": "enable_guarded_connector",
+                "status": "planned" if not integration.get("enabled") else "complete",
+                "detail": "Activation separee, auditee, reservee aux garde-fous CogniX.",
+            },
+            {
+                "id": "dry_run_guard",
+                "status": "complete",
+                "detail": "Aucun appel reseau, secret ou action outil pendant ce plan.",
+            },
+        ],
+        "nextActions": next_actions,
+        "sideEffects": status["sideEffects"],
+    }

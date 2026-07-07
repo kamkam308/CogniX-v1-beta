@@ -34,9 +34,9 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 
-def _require_admin(current_subject: str) -> None:
-    if not auth_storage.is_admin(current_subject):
-        raise HTTPException(status_code = 403, detail = "Admin access required")
+def _require_training_operator(current_subject: str) -> None:
+    if not auth_storage.is_training_operator(current_subject):
+        raise HTTPException(status_code = 403, detail = "Training access required")
 
 
 @router.get("/runs", response_model = TrainingRunListResponse)
@@ -46,7 +46,7 @@ async def list_training_runs(
     current_subject: str = Depends(get_current_jwt_subject),
 ):
     """List training runs, newest first."""
-    _require_admin(current_subject)
+    _require_training_operator(current_subject)
     result = list_runs(limit = limit, offset = offset)
     return TrainingRunListResponse(
         runs = [TrainingRunSummary(**{**r, "can_resume": can_resume_run(r)}) for r in result["runs"]],
@@ -57,7 +57,7 @@ async def list_training_runs(
 @router.get("/runs/{run_id}", response_model = TrainingRunDetailResponse)
 async def get_training_run_detail(run_id: str, current_subject: str = Depends(get_current_jwt_subject)):
     """Get a single training run with full config and metrics."""
-    _require_admin(current_subject)
+    _require_training_operator(current_subject)
     run = get_run(run_id)
     if run is None:
         raise HTTPException(status_code = 404, detail = f"Run {run_id} not found")
@@ -89,7 +89,7 @@ async def update_training_run(
     current_subject: str = Depends(get_current_jwt_subject),
 ):
     """Update mutable fields on a training run (currently only display_name)."""
-    _require_admin(current_subject)
+    _require_training_operator(current_subject)
     run = get_run(run_id)
     if run is None:
         raise HTTPException(status_code = 404, detail = f"Run {run_id} not found")
@@ -114,7 +114,7 @@ async def update_training_run(
 @router.delete("/runs/{run_id}", response_model = TrainingRunDeleteResponse)
 async def delete_training_run(run_id: str, current_subject: str = Depends(get_current_jwt_subject)):
     """Delete a training run and its metrics (CASCADE)."""
-    _require_admin(current_subject)
+    _require_training_operator(current_subject)
     run = get_run(run_id)
     if run is None:
         raise HTTPException(status_code = 404, detail = f"Run {run_id} not found")

@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import List, Optional
 import typer
 
-studio_app = typer.Typer(help = "Unsloth Studio commands.")
+studio_app = typer.Typer(help = "CogniX desktop commands.")
 
 
 def _enable_verbose_access_logs() -> None:
@@ -725,7 +725,7 @@ def studio_default(
         "every request. Default: on for every bind, with the per-chat UI toggle honored.",
     ),
 ):
-    """Launch the Unsloth Studio server."""
+    """Launch the CogniX server."""
     # Back-compat: --not-secure is a deprecated alias for --no-secure.
     secure = _resolve_secure(secure, not_secure)
     # Runs before every subcommand (run/setup/update/...).
@@ -821,7 +821,7 @@ def studio_default(
         run_py = _find_run_py()
         if studio_python and run_py:
             if not silent:
-                typer.echo("Launching Unsloth Studio... Please wait...")
+                typer.echo("Launching CogniX... Please wait...")
             args = [
                 str(studio_python),
                 str(run_py),
@@ -885,7 +885,7 @@ def studio_default(
 
     if not silent:
         display_host = run_mod._resolve_external_ip() if host == "0.0.0.0" else host
-        typer.echo(f"Starting Unsloth Studio on http://{display_host}:{port}")
+        typer.echo(f"Starting CogniX on http://{display_host}:{port}")
 
     run_kwargs = dict(
         host = host,
@@ -1309,7 +1309,7 @@ def run(
     try:
         # 3. Wait for server health.
         if not silent:
-            typer.echo("Starting Unsloth Studio...")
+            typer.echo("Starting CogniX...")
         if not _wait_for_server(actual_port):
             typer.echo("Error: server did not become healthy within 30 seconds.", err = True)
             raise typer.Exit(1)
@@ -1380,10 +1380,10 @@ def run(
         typer.echo("")
         typer.echo("=" * 56)
         if secure and _cf_url:
-            typer.echo(f"  Unsloth Studio running (secure) at {_cf_url}")
+            typer.echo(f"  CogniX running (secure) at {_cf_url}")
             typer.echo(f"  On this machine only: {base_url}")
         else:
-            typer.echo(f"  Unsloth Studio running at {base_url}")
+            typer.echo(f"  CogniX running at {base_url}")
             if _cf_url:
                 typer.echo(f"  Secure link access via Cloudflare: {_cf_url}")
         typer.echo(f"  Model loaded: {loaded_model}{display_variant}")
@@ -1481,7 +1481,7 @@ def _pid_alive(pid: int) -> bool:
 
 @studio_app.command()
 def stop():
-    """Stop a running Unsloth Studio server.
+    """Stop a running CogniX server.
 
     Reads the PID from ~/.unsloth/studio/studio.pid and sends SIGTERM
     (or TerminateProcess on Windows) to shut it down gracefully.
@@ -1761,7 +1761,7 @@ def update(
         help = "Full pip/build output during update for troubleshooting.",
     ),
 ):
-    """Update Unsloth Studio dependencies and rebuild."""
+    """Update CogniX dependencies and rebuild."""
     # Re-export UNSLOTH_STUDIO_HOME for env-mode installs so the refresh
     # subprocess resolves the same install root the user originally chose.
     _ensure_studio_env_exported()
@@ -1927,4 +1927,4 @@ def reset_password():
         typer.echo("No auth database found -- nothing to reset.")
         raise typer.Exit(0)
 
-    typer.echo("Auth database deleted. Restart Unsloth Studio to get a new password.")
+    typer.echo("Auth database deleted. Restart CogniX to get a new password.")

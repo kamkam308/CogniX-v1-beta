@@ -56,6 +56,64 @@ from routes.inference import (
 from state.tool_policy import reset_tool_policy
 
 
+def test_huggingface_proxy_requires_hf_token_before_network():
+    async def _run():
+        payload = ChatCompletionRequest(
+            model = "deepseek-ai/DeepSeek-V4-Pro",
+            messages = [ChatMessage(role = "user", content = "hey")],
+            provider_type = "huggingface",
+            provider_base_url = "https://router.huggingface.co/v1",
+            external_model = "deepseek-ai/DeepSeek-V4-Pro",
+            stream = True,
+        )
+        request = SimpleNamespace(
+            state = SimpleNamespace(skip_api_monitor = True),
+            url = SimpleNamespace(path = "/v1/chat/completions"),
+            method = "POST",
+        )
+
+        with pytest.raises(HTTPException) as exc:
+            await _proxy_to_external_provider(
+                payload,
+                request = request,
+                current_subject = "test",
+            )
+
+        assert exc.value.status_code == 401
+        assert "Hugging Face requires a valid hf_ token" in str(exc.value.detail)
+
+    asyncio.run(_run())
+
+
+def test_huggingface_router_base_url_uses_hf_guard_before_network():
+    async def _run():
+        payload = ChatCompletionRequest(
+            model = "deepseek-ai/DeepSeek-V4-Pro",
+            messages = [ChatMessage(role = "user", content = "hey")],
+            provider_type = "openai",
+            provider_base_url = "https://router.huggingface.co/v1",
+            external_model = "deepseek-ai/DeepSeek-V4-Pro",
+            stream = True,
+        )
+        request = SimpleNamespace(
+            state = SimpleNamespace(skip_api_monitor = True),
+            url = SimpleNamespace(path = "/v1/chat/completions"),
+            method = "POST",
+        )
+
+        with pytest.raises(HTTPException) as exc:
+            await _proxy_to_external_provider(
+                payload,
+                request = request,
+                current_subject = "test",
+            )
+
+        assert exc.value.status_code == 401
+        assert "Hugging Face requires a valid hf_ token" in str(exc.value.detail)
+
+    asyncio.run(_run())
+
+
 # =====================================================================
 # ChatMessage — tool role, tool_calls, optional content
 # =====================================================================

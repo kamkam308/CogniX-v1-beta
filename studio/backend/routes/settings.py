@@ -135,12 +135,15 @@ def _is_bundled_avatar_url(value: str) -> bool:
     if parsed.scheme or parsed.netloc:
         return False
     path = unquote(parsed.path).lstrip("/")
-    if ".." in path.split("/"):
+    parts = path.split("/")
+    if ".." in parts:
         return False
-    marker = "Sloth emojis/"
-    if marker not in path:
+    if parts[-1] in {"cognix-logo.png", "cognix-logo-512.png"}:
+        return True
+    legacy_marker = "Sloth emojis/"
+    if legacy_marker not in path:
         return False
-    return path[path.index(marker) :].lower().endswith(".png")
+    return path[path.index(legacy_marker) :].lower().endswith(".png")
 
 
 class PersonalizationProfile(BaseModel):

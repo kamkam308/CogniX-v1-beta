@@ -1,0 +1,38 @@
+name: CogniX Native Guard
+
+on:
+  push:
+    branches:
+      - feature/cognix-strategy-mvp
+  pull_request:
+
+jobs:
+  cognix-native-guard:
+    name: Guard CogniX native customizations
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: studio/frontend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: studio/frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Check CogniX native guard
+        run: npm run cognix:check
+
+      - name: Typecheck frontend
+        run: npm run typecheck
+
+      - name: Check locale parity
+        run: npm run i18n:check

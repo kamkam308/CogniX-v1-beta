@@ -2,6 +2,7 @@
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
 import { isTauri } from "@/lib/api-base";
+import { fetchDeviceType } from "@/config/env";
 import {
   hasAuthToken,
   hasRefreshToken,
@@ -26,7 +27,7 @@ let pending: { promise: Promise<boolean>; force: boolean } | null = null;
 let lastTauriAuthFailure: string | null = null;
 
 const TAURI_AUTH_FAILURE_FALLBACK =
-  "Desktop authentication failed. Update or repair the managed Unsloth install, then restart Unsloth.";
+  "Desktop authentication failed. Update or repair the managed CogniX install, then restart CogniX.";
 const BACKEND_NOT_READY_MESSAGE = "Backend is not ready";
 
 function authFailureMessage(error: unknown): string {
@@ -75,6 +76,7 @@ async function doTauriAutoAuth(options: TauriAutoAuthOptions): Promise<boolean> 
     const tokens = await invoke<DesktopAuthResponse>("desktop_auth");
     storeAuthTokens(tokens.access_token, tokens.refresh_token);
     setMustChangePassword(false);
+    void fetchDeviceType({ force: true }).catch(() => undefined);
     clearTauriAuthFailure();
     return true;
   } catch (error) {
