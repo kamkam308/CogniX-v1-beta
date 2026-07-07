@@ -14,23 +14,74 @@
 const CURRENCY_REGEX =
   /(?<![\\$])\$(?!\$)(?=\d+(?:,\d{3})*(?:\.\d+)?[KMBkmb]?(?:\s|$|[^a-zA-Z\d]))/g;
 
+const LATEX_COMMAND_NAMES = [
+  "alpha",
+  "beta",
+  "boxed",
+  "cdot",
+  "cos",
+  "Delta",
+  "delta",
+  "frac",
+  "gamma",
+  "int",
+  "left",
+  "omega",
+  "Omega",
+  "pi",
+  "right",
+  "sin",
+  "sqrt",
+  "sum",
+  "tag",
+  "tan",
+  "theta",
+  "times",
+  "varphi",
+];
+
+const LATEX_COMMAND_PATTERN = LATEX_COMMAND_NAMES.join("|");
+const LATEX_COMMAND_RE = new RegExp(
+  `\\\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])`,
+);
+const DELIMITED_MATH_RE =
+  /(\$\$[\s\S]*?\$\$|\$[^$\n]*?\$|\\\[[\s\S]*?\\\]|\\\([^)\n]*?\\\))/g;
+const BRACKETED_BARE_LATEX_LINE_RE = new RegExp(
+  `(^|\\n)([ \\t]*)\\[\\s*([^\\n\\]]*\\\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])[^\\n\\]]*)\\s*\\](?=\\s*(?:\\n|$))`,
+  "g",
+);
+const PARENTHESIZED_BARE_LATEX_RE = new RegExp(
+  `\\(([^()\\n]*\\\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])[^()\\n]*)\\)`,
+  "g",
+);
+const SENTENCE_BARE_LATEX_RE = new RegExp(
+  `(^|[\\s:;,.])((?:\\\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])|[A-Za-z][A-Za-z0-9_]*\\s*=)(?:[^\\n.!?;:,()[\\]]|\\{[^\\n{}]*\\})*)`,
+  "g",
+);
+const URL_IN_TEXT_RE = /\shttps?:\/\//i;
+const BARE_LATEX_MATH_CHAR_RE = /[\\^_{}=+\-*/<>]/;
+const LEADING_SPACE_RE = /^\s*/;
+const TRAILING_SPACE_RE = /\s*$/;
+
 /**
  * Find code-block regions (``` ... ``` and ` ... `) to skip.
  * Returns a sorted array of [start, end] index pairs.
  */
-function findCodeBlockRegions(content: string): Array<[number, number]> {
-  const regions: Array<[number, number]> = [];
+function findCodeBlockRegions(content: string): [number, number][] {
+  const regions: [number, number][] = [];
 
   // Fenced code blocks: ```...```
   const fencedRe = /```[\s\S]*?```/g;
-  let match: RegExpExecArray | null;
-  while ((match = fencedRe.exec(content)) !== null) {
+  let match: RegExpExecArray | null = fencedRe.exec(content);
+  while (match !== null) {
     regions.push([match.index, match.index + match[0].length]);
+    match = fencedRe.exec(content);
   }
 
   // Inline code: `...` (skip spans inside fenced blocks, filtered below)
   const inlineRe = /`[^`\n]+`/g;
-  while ((match = inlineRe.exec(content)) !== null) {
+  match = inlineRe.exec(content);
+  while (match !== null) {
     const start = match.index;
     const end = start + match[0].length;
     let inside = false;
@@ -43,6 +94,7 @@ function findCodeBlockRegions(content: string): Array<[number, number]> {
     if (!inside) {
       regions.push([start, end]);
     }
+    match = inlineRe.exec(content);
   }
 
   // Sort by start position for binary search.
@@ -53,10 +105,7 @@ function findCodeBlockRegions(content: string): Array<[number, number]> {
 /**
  * Binary search to check if a position falls inside any code region.
  */
-function isInCodeBlock(
-  position: number,
-  regions: Array<[number, number]>,
-): boolean {
+function isInCodeBlock(position: number, regions: [number, number][]): boolean {
   let lo = 0;
   let hi = regions.length - 1;
   while (lo <= hi) {
@@ -71,6 +120,112 @@ function isInCodeBlock(
     }
   }
   return false;
+}
+
+function processOutsideRegions(
+  content: string,
+  regions: [number, number][],
+  process: (value: string) => string,
+): string {
+  if (regions.length === 0) {
+    return process(content);
+  }
+  let out = "";
+  let cursor = 0;
+  for (const [start, end] of regions) {
+    if (cursor < start) {
+      out += process(content.slice(cursor, start));
+    }
+    out += content.slice(start, end);
+    cursor = end;
+  }
+  if (cursor < content.length) {
+    out += process(content.slice(cursor));
+  }
+  return out;
+}
+
+function processOutsideMathDelimiters(
+  content: string,
+  process: (value: string) => string,
+): string {
+  let out = "";
+  let cursor = 0;
+  DELIMITED_MATH_RE.lastIndex = 0;
+  let match: RegExpExecArray | null = DELIMITED_MATH_RE.exec(content);
+  while (match !== null) {
+    if (cursor < match.index) {
+      out += process(content.slice(cursor, match.index));
+    }
+    out += match[0];
+    cursor = match.index + match[0].length;
+    match = DELIMITED_MATH_RE.exec(content);
+  }
+  if (cursor < content.length) {
+    out += process(content.slice(cursor));
+  }
+  return out;
+}
+
+function looksLikeBareLatexMath(value: string): boolean {
+  if (!LATEX_COMMAND_RE.test(value)) {
+    return false;
+  }
+  if (URL_IN_TEXT_RE.test(value)) {
+    return false;
+  }
+  return BARE_LATEX_MATH_CHAR_RE.test(value);
+}
+
+function wrapInlineBareLatex(value: string): string {
+  const trimmed = value.trim();
+  if (!(trimmed && looksLikeBareLatexMath(trimmed))) {
+    return value;
+  }
+  const leading = value.match(LEADING_SPACE_RE)?.[0] ?? "";
+  const trailing = value.match(TRAILING_SPACE_RE)?.[0] ?? "";
+  const body = value.slice(leading.length, value.length - trailing.length);
+  if (
+    body.startsWith("$") ||
+    body.startsWith("\\(") ||
+    body.startsWith("\\[")
+  ) {
+    return value;
+  }
+  return `${leading}$${body}$${trailing}`;
+}
+
+function wrapBareLaTeX(content: string): string {
+  if (!content.includes("\\")) return content;
+
+  const withDisplayBlocks = processOutsideMathDelimiters(content, (segment) =>
+    segment.replace(
+      BRACKETED_BARE_LATEX_LINE_RE,
+      (match, prefix: string, indent: string, body: string) => {
+        if (!looksLikeBareLatexMath(body)) return match;
+        return `${prefix}${indent}$$\n${body.trim()}\n$$`;
+      },
+    ),
+  );
+
+  const withParentheses = processOutsideMathDelimiters(
+    withDisplayBlocks,
+    (segment) =>
+      segment.replace(PARENTHESIZED_BARE_LATEX_RE, (match, body: string) => {
+        if (!looksLikeBareLatexMath(body)) return match;
+        return `(${wrapInlineBareLatex(body)})`;
+      }),
+  );
+
+  return processOutsideMathDelimiters(withParentheses, (segment) =>
+    segment.replace(
+      SENTENCE_BARE_LATEX_RE,
+      (match, prefix: string, body: string) => {
+        if (!looksLikeBareLatexMath(body)) return match;
+        return `${prefix}${wrapInlineBareLatex(body)}`;
+      },
+    ),
+  );
 }
 
 /** A whitespace-free token that looks purely like currency, e.g. `5`, `1,000`, `5.99`, `100K`, `3.5M`. */
@@ -140,8 +295,8 @@ function looksLikeMathBody(body: string): boolean {
  * and the heuristic would otherwise reject prose-shaped bodies like "90 - x".
  */
 function hasInlineMathCloser(content: string, offset: number): boolean {
-  const MAX_SPAN = 200;
-  const limit = Math.min(content.length, offset + 1 + MAX_SPAN);
+  const maxSpan = 200;
+  const limit = Math.min(content.length, offset + 1 + maxSpan);
   for (let i = offset + 1; i < limit; i++) {
     const c = content[i];
     if (c === "\n") return false;
@@ -185,17 +340,18 @@ function hasInlineMathCloser(content: string, offset: number): boolean {
  * - Currency inside code blocks/spans is untouched
  */
 export function preprocessLaTeX(content: string): string {
-  if (!content.includes("$")) return content;
-
   const codeRegions = findCodeBlockRegions(content);
+  const withBareLatex = processOutsideRegions(
+    content,
+    codeRegions,
+    wrapBareLaTeX,
+  );
+  if (!withBareLatex.includes("$")) return withBareLatex;
+  const updatedCodeRegions = findCodeBlockRegions(withBareLatex);
 
-  return content.replace(CURRENCY_REGEX, (match, offset) => {
-    if (isInCodeBlock(offset, codeRegions)) {
-      return match;
-    }
-    if (hasInlineMathCloser(content, offset)) {
-      return match;
-    }
-    return "\\" + match;
+  return withBareLatex.replace(CURRENCY_REGEX, (match, offset) => {
+    if (isInCodeBlock(offset, updatedCodeRegions)) return match;
+    if (hasInlineMathCloser(withBareLatex, offset)) return match;
+    return `\\${match}`;
   });
 }
