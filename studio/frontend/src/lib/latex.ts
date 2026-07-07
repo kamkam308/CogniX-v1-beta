@@ -33,6 +33,7 @@ const LATEX_COMMAND_NAMES = [
   "left",
   "ln",
   "Longrightarrow",
+  "mathcal",
   "mathbf",
   "mathit",
   "mathrm",
@@ -64,10 +65,6 @@ const BRACKETED_BARE_LATEX_LINE_RE = new RegExp(
   `(^|\\n)([ \\t]*)\\[\\s*([^\\n\\]]*\\\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])[^\\n\\]]*)\\s*\\](?=\\s*(?:\\n|$))`,
   "g",
 );
-const PARENTHESIZED_BARE_LATEX_RE = new RegExp(
-  `\\(([^()\\n]*\\\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])[^()\\n]*)\\)`,
-  "g",
-);
 const SENTENCE_BARE_LATEX_RE = new RegExp(
   `(^|[\\s:;,.])((?:\\\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])|[A-Za-z][A-Za-z0-9_]*\\s*=)(?:[^\\n.!?;:,()[\\]]|\\{[^\\n{}]*\\})*)`,
   "g",
@@ -78,6 +75,9 @@ const LEADING_SPACE_RE = /^\s*/;
 const TRAILING_SPACE_RE = /\s*$/;
 const BACKSLASH_DISPLAY_MATH_RE = /\\\[([\s\S]*?)\\\]/g;
 const BACKSLASH_INLINE_MATH_RE = /\\\(([^)\n]*?)\\\)/g;
+const MATH_LEADING_BODY_RE = new RegExp(
+  `^\\s*(?:\\\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])|[A-Za-z][A-Za-z0-9_]*\\s*=|[A-Za-z][A-Za-z0-9_]*\\s*[+\\-*/^_=<>])`,
+);
 
 /**
  * Find code-block regions (``` ... ``` and ` ... `) to skip.
@@ -230,6 +230,52 @@ function wrapInlineBareLatex(value: string): string {
   return `${leading}$${body}$${trailing}`;
 }
 
+function findClosingParenthesis(content: string, openIndex: number): number {
+  let depth = 0;
+  for (let i = openIndex; i < content.length; i++) {
+    const char = content[i];
+    if (char === "(") {
+      depth += 1;
+      continue;
+    }
+    if (char !== ")") {
+      continue;
+    }
+    depth -= 1;
+    if (depth === 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function wrapParenthesizedBareLatex(content: string): string {
+  let out = "";
+  let cursor = 0;
+  while (cursor < content.length) {
+    const openIndex = content.indexOf("(", cursor);
+    if (openIndex < 0) {
+      out += content.slice(cursor);
+      break;
+    }
+    const closeIndex = findClosingParenthesis(content, openIndex);
+    if (closeIndex < 0) {
+      out += content.slice(cursor);
+      break;
+    }
+    const body = content.slice(openIndex + 1, closeIndex);
+    out += content.slice(cursor, openIndex + 1);
+    if (looksLikeBareLatexMath(body) && MATH_LEADING_BODY_RE.test(body)) {
+      out += wrapInlineBareLatex(body);
+    } else {
+      out += body.includes("(") ? wrapParenthesizedBareLatex(body) : body;
+    }
+    out += ")";
+    cursor = closeIndex + 1;
+  }
+  return out;
+}
+
 function wrapBareLaTeX(content: string): string {
   if (!content.includes("\\")) return content;
   const normalizedDelimiters = normalizeBackslashMathDelimiters(content);
@@ -248,11 +294,7 @@ function wrapBareLaTeX(content: string): string {
 
   const withParentheses = processOutsideMathDelimiters(
     withDisplayBlocks,
-    (segment) =>
-      segment.replace(PARENTHESIZED_BARE_LATEX_RE, (match, body: string) => {
-        if (!looksLikeBareLatexMath(body)) return match;
-        return `(${wrapInlineBareLatex(body)})`;
-      }),
+    wrapParenthesizedBareLatex,
   );
 
   return processOutsideMathDelimiters(withParentheses, (segment) =>
