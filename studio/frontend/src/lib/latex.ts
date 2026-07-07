@@ -181,6 +181,7 @@ const LEADING_SPACE_RE = /^\s*/;
 const TRAILING_SPACE_RE = /\s*$/;
 const BACKSLASH_DISPLAY_MATH_RE = /\\\[([\s\S]*?)\\\]/g;
 const BACKSLASH_INLINE_MATH_RE = /\\\(([^)\n]*?)\\\)/g;
+const EXPLICIT_BACKSLASH_MATH_DELIMITER_RE = /\\[([]/;
 const UNESCAPED_DOLLAR_GLOBAL_RE = /(?<!\\)\$/g;
 const SPACED_TABLE_SEPARATOR_RE = /\s+\|\s+/;
 const TABLE_LINE_SPLIT_RE = /(\s+\|\s+)/;
@@ -368,14 +369,14 @@ function normalizeBackslashMathDelimiters(content: string): string {
   return content
     .replace(BACKSLASH_DISPLAY_MATH_RE, (_match, body: string) => {
       const trimmed = body.trim();
-      if (!looksLikeBareLatexMath(trimmed)) {
+      if (!trimmed) {
         return _match;
       }
-      return `$$\n${trimmed}\n$$`;
+      return `\n\n$$\n${trimmed}\n$$\n\n`;
     })
     .replace(BACKSLASH_INLINE_MATH_RE, (_match, body: string) => {
       const trimmed = body.trim();
-      if (!looksLikeBareLatexMath(trimmed)) {
+      if (!trimmed) {
         return _match;
       }
       return `$${trimmed}$`;
@@ -413,6 +414,7 @@ function looksLikeBareLatexMath(value: string): boolean {
 
 function hasBareMathSignal(value: string): boolean {
   return (
+    EXPLICIT_BACKSLASH_MATH_DELIMITER_RE.test(value) ||
     ANY_LATEX_COMMAND_RE.test(value) ||
     SUBSCRIPT_OR_SUPERSCRIPT_RE.test(value) ||
     UNICODE_MATH_SIGNAL_RE.test(value) ||
@@ -912,13 +914,13 @@ function normalizeFragmentedDelimitedMath(content: string): string {
         end: string,
       ) => {
         const normalizedBody = body.replace(UNESCAPED_DOLLAR_GLOBAL_RE, "");
-        return `$$\n${begin}${normalizedBody.trim() ? ` ${normalizedBody.trim()} ` : ""}${end}\n$$`;
+        return `\n\n$$\n${begin}${normalizedBody.trim() ? ` ${normalizedBody.trim()} ` : ""}${end}\n$$\n\n`;
       },
     )
     .replace(
       SPLIT_TAGGED_INLINE_MATH_RE,
       (_match, body: string, tag: string) =>
-        `$$\n${normalizeBareLatexBody(`${body.trim()}${tag}`)}\n$$`,
+        `\n\n$$\n${normalizeBareLatexBody(`${body.trim()}${tag}`)}\n$$\n\n`,
     );
 }
 

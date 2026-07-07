@@ -128,6 +128,14 @@ $\begin{aligned}$ m_{2}\,a &=2\bigl(m_{1}g-2m_{1}a\bigr)-m_{2}g, $\qquad a\equiv
 $\boxed{a=\ddot x_{2}=g\,\frac{2m_{1}-m_{2}}{m_{2}+4m_{1}}}. $\tag{20}$`,
   },
   {
+    name: "prose comment before fragmented aligned environment",
+    markdown: String.raw`En substituant \(T\) dans l'équation de la poulie, on obtient : $\begin{aligned}$ m_{2}\,a &=2\bigl(m_{1}g-2m_{1}a\bigr)-m_{2}g, $\qquad a\equiv\ddot x_{2}$,\\[2mm] $\bigl(m_{2}+4m_{1}\bigr)a &=g\,(2m_{1}-m_{2}), $\end{aligned}$`,
+  },
+  {
+    name: "prose comment before explicit display delimiter",
+    markdown: String.raw`Le résultat final s'écrit donc : \[\boxed{x(t)=l+R\cos\theta}\] et cette approximation sera utilisée ensuite.`,
+  },
+  {
     name: "physics prose continuation with boxed and differential equation",
     markdown: String.raw`Le point (5) du sujet fournit la valeur numérique de (E). || 3 – Expression de la résistance totale (R) | Le circuit vu par la source comprend les deux résistances extérieures et la résistance interne de la bobine :
 
@@ -148,6 +156,24 @@ La poulie descend si 2m_1 > m_2 et monte si m_2 < 4m_1.`,
 Comme \vec F_{t\to p} = -\vec F_{p\to t}, le module est exactement le même.
 
 Le résultat devient \boxed{F_{t\to p}=F_p}. \tag{9}$`,
+  },
+  {
+    name: "physics comments with explicit simple delimiters",
+    markdown: String.raw`* **Poulie mobile (masse \(m_{2}\))** : la corde tire la poulie par **deux** segments, chaque segment exerce une tension \(T\) vers le haut.
+
+Projection de \(\vec F_{t\to p}\!\cdot\!\vec\rho = -F_{p}\cos\beta\).
+
+La force dépend du rayon \(r\), de l'angle \(\theta\), puis de la constante \(k\).`,
+  },
+  {
+    name: "prose comment before tagged boxed equation",
+    markdown: String.raw`On en déduit le module de la force exercée par la tige :
+
+$\boxed{F_{t\to p}=m_p\bigl(g+\ddot x\bigr)+\lambda\dot x+F_0\sin\theta }. $\tag{8}$
+
+Comme \(\vec F_{t\to p}=-\vec F_{p\to t}\), le module est exactement le même :
+
+$\boxed{F_{t\to p}=F_p}. $\tag{9}$`,
   },
   {
     name: "escaped parenthesis summary table",
