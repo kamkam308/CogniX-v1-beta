@@ -111,10 +111,12 @@ const LATEX_COMMAND_NAMES = [
   "Rightarrow",
   "rightarrow",
   "right",
+  "rho",
   "rm",
   "rvert",
   "sec",
   "sim",
+  "simeq",
   "sin",
   "sinh",
   "sqrt",
@@ -144,6 +146,7 @@ const LATEX_COMMAND_PATTERN = LATEX_COMMAND_NAMES.join("|");
 const LATEX_IDENTIFIER_PATTERN = String.raw`[A-Za-z](?:[A-Za-z0-9]|_\{?[^{}\s]+\}?|\^\{?[^{}\s]+\}?)*`;
 const LATEX_ASSIGNMENT_LEFT_PATTERN = String.raw`${LATEX_IDENTIFIER_PATTERN}(?:\s*/\s*${LATEX_IDENTIFIER_PATTERN})?`;
 const LATEX_ASSIGNMENT_PATTERN = String.raw`${LATEX_ASSIGNMENT_LEFT_PATTERN}(?:\s*['’])?(?:\s*\([^()\n]{0,80}\))?\s*=`;
+const LATEX_COMMAND_START_PATTERN = String.raw`(?:${LATEX_IDENTIFIER_PATTERN}\s*;\s*)?\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])`;
 const LATEX_COMMAND_RE = new RegExp(
   `\\\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])`,
 );
@@ -154,7 +157,7 @@ const BRACKETED_BARE_LATEX_LINE_RE = new RegExp(
   "g",
 );
 const SENTENCE_BARE_LATEX_RE = new RegExp(
-  `(^|[\\s:;,.])((?:\\\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])|${LATEX_ASSIGNMENT_PATTERN})(?:\\.(?=\\d)|\\\\[,;:!]|[^\\n.!?;:,|[\\]]|\\([^()\\n]*\\)|\\{[^\\n{}]*\\})*)`,
+  `(^|[\\s:;,.])((?:${LATEX_COMMAND_START_PATTERN}|${LATEX_ASSIGNMENT_PATTERN})(?:\\.(?=\\d)|\\\\[,;:!]|[^\\n.!?;:,|[\\]]|\\([^()\\n]*\\)|\\{[^\\n{}]*\\})*)`,
   "g",
 );
 const URL_IN_TEXT_RE = /\shttps?:\/\//i;
@@ -186,7 +189,7 @@ const MARKDOWN_TABLE_SEPARATOR_RE = /^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*$/;
 const PROSE_WORD_RE =
   /\b(?:avec|alors|aucun|comme|condition|dans|de|des|donc|du|en|est|et|la|le|les|nom|on|ou|par|pour|regime|régime|sur|une|un|valeur|voir)\b/i;
 const MATH_LEADING_BODY_RE = new RegExp(
-  `^\\s*(?:\\\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])|${LATEX_ASSIGNMENT_PATTERN}|[A-Za-z0-9_{}\\\\^]+\\s*[+\\-*/=<>])`,
+  `^\\s*(?:${LATEX_COMMAND_START_PATTERN}|${LATEX_ASSIGNMENT_PATTERN}|[A-Za-z0-9_{}\\\\^]+\\s*[+\\-*/=<>])`,
 );
 const TABLE_CELL_DISPLAYSTYLE_RE = /^\(?\s*\\displaystyle\b/;
 const NEWLINE_SPLIT_RE = /(\n)/;
@@ -202,6 +205,32 @@ const ORPHAN_DISPLAY_CLOSER_RE =
 const DOUBLE_PIPE_DISPLAY_RE = /\$\$\s+\|\|\s+/g;
 const WORD_RE = /[\p{L}]+/gu;
 const WRAPPABLE_COMMANDS_WITH_ARGUMENT_RE = /\\boxed\{(?:[^{}]|\{[^{}]*\})*\}/g;
+const TABLE_CELL_LABELED_DISPLAY_MATH_RE = new RegExp(
+  String.raw`^(\s*)\$?([^$\\\n]*?[\p{L}][^$\\\n]*?)\s*\$\$\s*([^$\n]*\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])[^$\n]*?)\s*\$\$+\s*$`,
+  "u",
+);
+const TABLE_CELL_LABEL_COMMAND_ORPHAN_RE = new RegExp(
+  String.raw`^(\s*)([^$\\\n]*?[\p{L}][^$\\\n]*?)(\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])[^$\n]*?)\s*\$\$+\s*$`,
+  "u",
+);
+const TABLE_LINE_LABELED_DISPLAY_MATH_RE = new RegExp(
+  String.raw`(^|\|\s*)\$?([^$\\|\n]*?[\p{L}][^$\\|\n]*?)\s*\$\$\s*([^$|\n]*\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])[^$|\n]*?)\s*\$\$+(\s*)(?=\||$)`,
+  "gu",
+);
+const TABLE_LINE_LABEL_COMMAND_ORPHAN_RE = new RegExp(
+  String.raw`(^|\|\s*)([^$\\|\n]*?[\p{L}][^$\\|\n]*?)(\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])[^$|\n]*?)\s*\$\$+(\s*)(?=\||$)`,
+  "gu",
+);
+const FRAGMENTED_ENV_MATH_RE =
+  /(?<!\\)\$(\\begin\{(aligned|align|gathered|gather|cases|matrix|pmatrix|bmatrix|vmatrix)\})(?<!\\)\$([\s\S]*?)(?<!\\)\$(\\end\{\2\})(?<!\\)\$/g;
+const BARE_TAGGED_EQUATION_LINE_RE = new RegExp(
+  String.raw`(^|\n)([ \t>]*)([^$\n|]*?(?:${LATEX_COMMAND_START_PATTERN}|${LATEX_ASSIGNMENT_PATTERN})[^$\n|]*?\\tag\{[^{}]+\})(?=\s*(?:\n|$))`,
+  "g",
+);
+const SPLIT_TAGGED_INLINE_MATH_RE =
+  /(?<!\\)\$([^$\n]*\\(?:boxed|frac|sqrt|vec|dot|ddot|displaystyle)[^$\n]*?)\s*(?<!\\)\$\s*(\\tag\{[^{}]+\})(?<!\\)\$/g;
+const ESCAPED_OPEN_PAREN_RE = /^\\\(/;
+const ESCAPED_CLOSE_PAREN_RE = /\\\)$/g;
 const FORMULA_CONNECTOR_SPLIT_RE = new RegExp(
   String.raw`(\s+(?:et|ou|donc|avec)\s+)(?=${LATEX_ASSIGNMENT_LEFT_PATTERN}(?:\s*['’])?(?:\s*\([^()\n]{0,80}\))?\s*=)`,
   "i",
@@ -393,6 +422,22 @@ function hasOddUnescapedDollars(value: string): boolean {
   return count % 2 === 1;
 }
 
+function isInsideDisplayMathAt(content: string, index: number): boolean {
+  let count = 0;
+  let cursor = 0;
+  while (cursor < index) {
+    const next = content.indexOf("$$", cursor);
+    if (next < 0 || next >= index) {
+      break;
+    }
+    if (content[next - 1] !== "\\") {
+      count += 1;
+    }
+    cursor = next + 2;
+  }
+  return count % 2 === 1;
+}
+
 function closeUnbalancedInlineMath(value: string): string {
   if (!(hasOddUnescapedDollars(value) && hasBareMathSignal(value))) {
     return value;
@@ -424,9 +469,12 @@ function normalizeBareLatexBody(
     DANGLING_DELIMITER_SIZE_RE,
     "",
   );
+  const withoutEscapedParenCloser = withoutDanglingDelimiters
+    .replace(ESCAPED_OPEN_PAREN_RE, "(")
+    .replace(ESCAPED_CLOSE_PAREN_RE, ")");
   return options.tableCell
-    ? normalizeTableVerticalBars(withoutDanglingDelimiters)
-    : withoutDanglingDelimiters;
+    ? normalizeTableVerticalBars(withoutEscapedParenCloser)
+    : withoutEscapedParenCloser;
 }
 
 function wrapSplitBareLatexBody(
@@ -639,8 +687,42 @@ function splitCellChrome(part: string): {
   return { body, leading, trailing };
 }
 
+function normalizeMalformedTableCellMath(body: string): string {
+  const labeledDisplayMatch = body.match(TABLE_CELL_LABELED_DISPLAY_MATH_RE);
+  if (labeledDisplayMatch) {
+    const [, leading, label, math] = labeledDisplayMatch;
+    const normalizedMath = normalizeBareLatexBody(math.trim(), {
+      tableCell: true,
+    });
+    if (looksLikeBareLatexMath(normalizedMath)) {
+      return `${leading}${label.trim()} $${normalizedMath}$`;
+    }
+  }
+
+  const orphanDisplayMatch = body.match(TABLE_CELL_LABEL_COMMAND_ORPHAN_RE);
+  if (orphanDisplayMatch) {
+    const [, leading, label, math] = orphanDisplayMatch;
+    const normalizedMath = normalizeBareLatexBody(math.trim(), {
+      tableCell: true,
+    });
+    if (looksLikeBareLatexMath(normalizedMath)) {
+      return `${leading}${label.trim()} $${normalizedMath}$`;
+    }
+  }
+
+  return body;
+}
+
+function hasDelimitedMathSpan(value: string): boolean {
+  DELIMITED_MATH_RE.lastIndex = 0;
+  return DELIMITED_MATH_RE.test(value);
+}
+
 function shouldWrapWholeTableCell(body: string): boolean {
   const trimmed = body.trim();
+  if (hasDelimitedMathSpan(trimmed)) {
+    return false;
+  }
   if (!looksLikeBareLatexMath(trimmed)) {
     return false;
   }
@@ -657,22 +739,68 @@ function wrapTableCell(part: string): string {
   }
 
   const { body, leading, trailing } = splitCellChrome(part);
-  const closedBody = closeUnbalancedInlineMath(body);
+  const normalizedBody = normalizeMalformedTableCellMath(body);
+  const closedBody = closeUnbalancedInlineMath(normalizedBody);
   const wrappedBody = shouldWrapWholeTableCell(closedBody)
     ? wrapInlineBareLatex(closedBody, { tableCell: true })
     : wrapBareLatexSegments(closedBody, { tableCell: true });
   return `${leading}${wrappedBody}${trailing}`;
 }
 
+function normalizeMalformedTableLineMath(line: string): string {
+  return line
+    .replace(
+      TABLE_LINE_LABELED_DISPLAY_MATH_RE,
+      (
+        match,
+        prefix: string,
+        label: string,
+        math: string,
+        trailing: string,
+      ) => {
+        const normalizedMath = normalizeBareLatexBody(math.trim(), {
+          tableCell: true,
+        });
+        if (!looksLikeBareLatexMath(normalizedMath)) {
+          return match;
+        }
+        return `${prefix}${label.trim()} $${normalizedMath}$${trailing}`;
+      },
+    )
+    .replace(
+      TABLE_LINE_LABEL_COMMAND_ORPHAN_RE,
+      (
+        match,
+        prefix: string,
+        label: string,
+        math: string,
+        trailing: string,
+      ) => {
+        const normalizedMath = normalizeBareLatexBody(math.trim(), {
+          tableCell: true,
+        });
+        if (!looksLikeBareLatexMath(normalizedMath)) {
+          return match;
+        }
+        return `${prefix}${label.trim()} $${normalizedMath}$${trailing}`;
+      },
+    );
+}
+
 function wrapSpacedMarkdownTableLines(content: string): string {
   return content
     .split(NEWLINE_SPLIT_RE)
     .map((part) => {
-      if (part === "\n" || !isSpacedMarkdownTableLine(part)) {
+      if (part === "\n" || !hasBareMathSignal(part)) {
         return part;
       }
 
-      const protectedLine = protectMathPipesInTableLine(part);
+      const normalizedLine = normalizeMalformedTableLineMath(part);
+      if (!isSpacedMarkdownTableLine(normalizedLine)) {
+        return normalizedLine;
+      }
+
+      const protectedLine = protectMathPipesInTableLine(normalizedLine);
       return splitTableLine(protectedLine)
         .map((cellOrSeparator, index) =>
           index % 2 === 1 ? cellOrSeparator : wrapTableCell(cellOrSeparator),
@@ -686,7 +814,10 @@ function normalizeOrphanDisplayClosers(content: string): string {
   return content
     .replace(
       ORPHAN_DISPLAY_CLOSER_RE,
-      (match, prefix: string, body: string) => {
+      (match, prefix: string, body: string, offset: number) => {
+        if (isInsideDisplayMathAt(content, offset)) {
+          return match;
+        }
         if (!looksLikeBareLatexMath(body)) {
           return match;
         }
@@ -694,6 +825,48 @@ function normalizeOrphanDisplayClosers(content: string): string {
       },
     )
     .replace(DOUBLE_PIPE_DISPLAY_RE, () => "$$\n\n");
+}
+
+function normalizeFragmentedDelimitedMath(content: string): string {
+  return content
+    .replace(
+      FRAGMENTED_ENV_MATH_RE,
+      (
+        _match,
+        begin: string,
+        _environment: string,
+        body: string,
+        end: string,
+      ) => {
+        const normalizedBody = body.replace(UNESCAPED_DOLLAR_GLOBAL_RE, "");
+        return `$$\n${begin}${normalizedBody.trim() ? ` ${normalizedBody.trim()} ` : ""}${end}\n$$`;
+      },
+    )
+    .replace(
+      SPLIT_TAGGED_INLINE_MATH_RE,
+      (_match, body: string, tag: string) =>
+        `$$\n${normalizeBareLatexBody(`${body.trim()}${tag}`)}\n$$`,
+    );
+}
+
+function formatDisplayMathBlock(prefix: string, body: string): string {
+  const normalizedBody = normalizeBareLatexBody(body.trim());
+  if (prefix.includes(">")) {
+    return `${prefix}$$\n${prefix}${normalizedBody}\n${prefix}$$`;
+  }
+  return `${prefix}$$\n${normalizedBody}\n${prefix}$$`;
+}
+
+function normalizeBareTaggedEquationLines(content: string): string {
+  return content.replace(
+    BARE_TAGGED_EQUATION_LINE_RE,
+    (match, lineStart: string, prefix: string, body: string) => {
+      if (!looksLikeBareLatexMath(body)) {
+        return match;
+      }
+      return `${lineStart}${formatDisplayMathBlock(prefix, body)}`;
+    },
+  );
 }
 
 function wrapWrappableCommandExpressions(content: string): string {
@@ -749,9 +922,24 @@ function wrapBareLaTeX(content: string): string {
   if (!hasBareMathSignal(content)) {
     return content;
   }
-  const normalizedDisplayClosers = normalizeOrphanDisplayClosers(content);
-  const withTableRows = wrapSpacedMarkdownTableLines(normalizedDisplayClosers);
-  return wrapBareLatexSegments(withTableRows);
+  const normalizedInitialClosers = normalizeOrphanDisplayClosers(content);
+  const normalizedFragments = normalizeFragmentedDelimitedMath(
+    normalizedInitialClosers,
+  );
+  const normalizedTaggedEquations = processOutsideMathDelimiters(
+    normalizedFragments,
+    normalizeBareTaggedEquationLines,
+  );
+  const withInitialDisplayClosers = processOutsideMathDelimiters(
+    normalizedTaggedEquations,
+    normalizeOrphanDisplayClosers,
+  );
+  const withTableRows = wrapSpacedMarkdownTableLines(withInitialDisplayClosers);
+  const normalizedDisplayClosers = processOutsideMathDelimiters(
+    withTableRows,
+    normalizeOrphanDisplayClosers,
+  );
+  return wrapBareLatexSegments(normalizedDisplayClosers);
 }
 
 function escapeCurrencyDollars(content: string): string {

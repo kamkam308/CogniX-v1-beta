@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
+import { createMathPlugin } from "@streamdown/math";
 import katex from "katex";
 import { liteAdaptor } from "mathjax-full/js/adaptors/liteAdaptor.js";
 import { RegisterHTMLHandler } from "mathjax-full/js/handlers/html.js";
@@ -7,8 +8,13 @@ import "mathjax-full/js/input/tex/AllPackages.js";
 import { TeX } from "mathjax-full/js/input/tex.js";
 import { mathjax } from "mathjax-full/js/mathjax.js";
 import { SVG } from "mathjax-full/js/output/svg.js";
+import { parseFragment } from "parse5";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { Streamdown } from "streamdown";
 import { preprocessLaTeX } from "../src/lib/latex.ts";
 import {
+  COGNIX_KATEX_STREAMING_OPTIONS,
   COGNIX_MATHJAX_SVG_OPTIONS,
   COGNIX_MATHJAX_TEX_OPTIONS,
 } from "../src/lib/math-rendering.ts";
@@ -86,11 +92,43 @@ const PREPROCESS_FIXTURES = [
 | (\displaystyle \int\frac{dx}{\sqrt{x^{2}+a}}=\ln\!\bigl(x+\sqrt{x^{2}+a}\bigr)+C) | Racine carrée simple |
 | $\displaystyle \int\frac{dx}{a\cos x+b\sin x}=\frac{1}{\sqrt{a^{2}+b^{2}}} | a\cos x+b\sin x\bigr |`,
   },
+  {
+    name: "labeled physics table display math",
+    markdown: String.raw`| Action | Direction | Expression (module) |
+|---|---|---|
+| $Poids $$\displaystyle\vec P =-m_{p}g;\vec\rho$$ | $-\vec\rho$ | $m_pg$ |
+| Frottement\displaystyle\vec f_x = -\lambda \dot x;\vec\rho$$ | $-\vec\rho$ | $\lambda\dot x$ |
+| $Force supplémentaire $$\displaystyle\vec F = -F_{0}\sin\theta;\vec\rho$$$ | $-\vec\rho$ | $F_0\sin\theta$ |`,
+  },
+  {
+    name: "pulley equations with tags",
+    markdown: String.raw`On utilise les deux équations de dynamique :
+
+m_{1};\ddot{x}_1 = m_1g - T . \tag{18}
+
+**Poulie mobile (masse $m_{2}$)** : la corde tire la poulie par deux segments.
+m_{2};\ddot{x}_2 = 2T - m_2g . \tag{19}
+
+$\begin{aligned}$ m_{2}\,a &=2\bigl(m_{1}g-2m_{1}a\bigr)-m_{2}g, $\qquad a\equiv\ddot x_{2}$,\\[2mm] $\bigl(m_{2}+4m_{1}\bigr)a &=g\,(2m_{1}-m_{2}), $\end{aligned}$
+
+$\boxed{a=\ddot x_{2}=g\,\frac{2m_{1}-m_{2}}{m_{2}+4m_{1}}}. $\tag{20}$`,
+  },
+  {
+    name: "escaped parenthesis summary table",
+    markdown: String.raw`| # | Formule |
+|---|---|
+| (3) | (\displaystyle x\simeq l+R\cos\theta; A=R;B=l\) |
+| (4) | (\displaystyle v(t)=-R\omega_{0}\sin(\omega_{0}t)\) |
+| (5) | (\displaystyle \gamma(t)=-R\omega_{0}^{2}\cos(\omega_{0}t)\) |`,
+  },
 ];
 
 const RAW_LATEX_OUTSIDE_MATH_RE =
   /\\(?![$\\])(?:[a-zA-Z]+|[,;:!])|(?:^|[\s([{])(?:[A-Za-z](?:_\{?[^{}\s]+\}?|\^\{?[^{}\s]+\}?|\([^)\n]{0,80}\))*|[A-Za-z]{1,4}_\{?[^{}\s]+\}?)\s*(?:=|<|>|≤|≥|≈|⇒|→)/;
+const VISIBLE_RAW_LATEX_RE =
+  /\\[a-zA-Z]+|(?:^|[\s([{])(?:[A-Za-z](?:_\{?[^{}\s]+\}?|\^\{?[^{}\s]+\}?|\([^)\n]{0,80}\))*|[A-Za-z]{1,4}_\{?[^{}\s]+\}?)\s*(?:=|<|>|≤|≥|≈|⇒|→)/;
 const SPLIT_TEX_SPACING_RE = /\\\$[,;:!]/;
+const CLASS_NAME_SPLIT_RE = /\s+/;
 
 const NON_MATH_FIXTURES = [
   {
@@ -180,6 +218,60 @@ function assertMathJaxRenders(formula: string, label: string): void {
   }
 }
 
+type ParseNode = {
+  attrs?: Array<{ name: string; value: string }>;
+  childNodes?: ParseNode[];
+  nodeName?: string;
+  tagName?: string;
+  value?: string;
+};
+
+const streamdownMath = createMathPlugin(COGNIX_KATEX_STREAMING_OPTIONS);
+
+function getAttr(node: ParseNode, name: string): string {
+  return node.attrs?.find((attr) => attr.name === name)?.value ?? "";
+}
+
+function shouldSkipVisibleText(node: ParseNode): boolean {
+  const tagName = node.tagName ?? "";
+  if (
+    tagName === "annotation" ||
+    tagName === "math" ||
+    tagName === "mjx-container" ||
+    tagName === "script" ||
+    tagName === "style" ||
+    tagName === "svg"
+  ) {
+    return true;
+  }
+  return getAttr(node, "class").split(CLASS_NAME_SPLIT_RE).includes("katex");
+}
+
+function collectVisibleText(node: ParseNode): string {
+  if (node.nodeName === "#text") {
+    return node.value ?? "";
+  }
+  if (shouldSkipVisibleText(node)) {
+    return "";
+  }
+  return (node.childNodes ?? []).map(collectVisibleText).join(" ");
+}
+
+function renderMarkdownVisibleText(markdown: string): string {
+  const html = renderToStaticMarkup(
+    React.createElement(
+      Streamdown,
+      {
+        mode: "streaming",
+        plugins: { math: streamdownMath },
+      },
+      markdown,
+    ),
+  );
+  const fragment = parseFragment(html) as ParseNode;
+  return collectVisibleText(fragment).replace(/\s+/g, " ").trim();
+}
+
 function assertPreprocessedMarkdownHasNoRawLatex(): void {
   for (const fixture of PREPROCESS_FIXTURES) {
     const processed = preprocessLaTeX(fixture.markdown);
@@ -196,6 +288,12 @@ function assertPreprocessedMarkdownHasNoRawLatex(): void {
     }
     for (const formula of collectMathSpans(processed)) {
       assertMathJaxRenders(formula, fixture.name);
+    }
+    const visibleText = renderMarkdownVisibleText(processed);
+    if (VISIBLE_RAW_LATEX_RE.test(visibleText)) {
+      throw new Error(
+        `Raw LaTeX remained visible after Streamdown render in ${fixture.name}:\n${visibleText}\n\nProcessed markdown:\n${processed}`,
+      );
     }
   }
 
