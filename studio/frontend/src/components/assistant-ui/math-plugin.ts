@@ -1,44 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
+import {
+  COGNIX_KATEX_STREAMING_OPTIONS,
+  COGNIX_MATHJAX_SVG_OPTIONS,
+  COGNIX_MATHJAX_TEX_OPTIONS,
+  COGNIX_MATH_HINT_RE,
+} from "@/lib/math-rendering";
 import { createMathPlugin } from "@streamdown/math";
 import { useEffect, useState } from "react";
 import type { MathPlugin } from "streamdown";
 
-const TEX_PACKAGES = [
-  "base",
-  "ams",
-  "newcommand",
-  "bbox",
-  "boldsymbol",
-  "braket",
-  "cancel",
-  "color",
-  "configmacros",
-  "enclose",
-  "extpfeil",
-  "html",
-  "mathtools",
-  "mhchem",
-  "noerrors",
-  "noundefined",
-  "physics",
-  "tagformat",
-  "textcomp",
-  "unicode",
-  "upgreek",
-  "verb",
-];
-
-export const katexMath = createMathPlugin({
-  errorColor: "var(--color-muted-foreground)",
-  singleDollarTextMath: true,
-});
+export const katexMath = createMathPlugin(COGNIX_KATEX_STREAMING_OPTIONS);
 
 let mathJaxMathPromise: Promise<MathPlugin> | null = null;
-
-const MATH_HINT_RE =
-  /(?:\$\$?|\\\(|\\\[|\\(?:begin|boxed|frac|sqrt|sum|int|lim|theta|alpha|beta|gamma|Delta|Omega|omega|mathbf|mathcal|mathrm|displaystyle|overline|underline|vec|dot|ddot|times|cdot|tag|qquad)\b)/;
 
 function createMathJaxPlugin(): Promise<MathPlugin> {
   mathJaxMathPromise ??= Promise.all([
@@ -56,25 +31,8 @@ function createMathJaxPlugin(): Promise<MathPlugin> {
     rehypePlugin: [
       rehypeMathJaxModule.default,
       {
-        svg: {
-          fontCache: "global",
-          internalSpeechTitles: false,
-        },
-        tex: {
-          displayMath: [
-            ["$$", "$$"],
-            ["\\[", "\\]"],
-          ],
-          inlineMath: [
-            ["$", "$"],
-            ["\\(", "\\)"],
-          ],
-          packages: TEX_PACKAGES,
-          processEscapes: true,
-          processEnvironments: true,
-          processRefs: true,
-          tags: "ams",
-        },
+        svg: COGNIX_MATHJAX_SVG_OPTIONS,
+        tex: COGNIX_MATHJAX_TEX_OPTIONS,
       },
     ],
   }));
@@ -86,10 +44,12 @@ export function useMathPlugin(
   content: string,
 ): MathPlugin {
   const [mathJaxMath, setMathJaxMath] = useState<MathPlugin | null>(null);
-  const shouldUseMathJax = !isStreaming && MATH_HINT_RE.test(content);
+  const shouldUseMathJax = !isStreaming && COGNIX_MATH_HINT_RE.test(content);
 
   useEffect(() => {
-    if (!shouldUseMathJax) return;
+    if (!shouldUseMathJax) {
+      return;
+    }
 
     let isActive = true;
     createMathJaxPlugin().then((plugin) => {
