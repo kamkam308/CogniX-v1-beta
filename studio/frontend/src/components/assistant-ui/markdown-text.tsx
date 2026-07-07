@@ -18,16 +18,15 @@ import { INTERNAL, useAuiState, useMessagePartText } from "@assistant-ui/react";
 import { Tick02Icon } from "@/lib/tick-icon";
 import { Copy01Icon, Download01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { createMathPlugin } from "@streamdown/math";
 import { mermaid } from "@streamdown/mermaid";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Block, type BlockProps, Streamdown, defaultUrlTransform, type UrlTransform } from "streamdown";
 import { createCodePlugin } from "./code-plugin";
+import { useMathPlugin } from "./math-plugin";
 import "katex/dist/katex.min.css";
 import { AudioPlayer } from "./audio-player";
 import { unslothDarkTheme, unslothLightTheme } from "./code-themes";
 
-const math = createMathPlugin({ singleDollarTextMath: true });
 const code = createCodePlugin({
   themes: [unslothLightTheme, unslothDarkTheme],
 });
@@ -386,11 +385,13 @@ const safeImageUrl: UrlTransform = (url, _key, node) => {
 
 const MarkdownTextImpl = () => {
   const { text, status } = useMessagePartText();
-  const displayText = useRafCoalescedText(text, status.type === "running");
+  const isStreaming = status.type === "running";
+  const displayText = useRafCoalescedText(text, isStreaming);
   const processedText = useMemo(
     () => preprocessLaTeX(displayText),
     [displayText],
   );
+  const math = useMathPlugin(isStreaming, processedText);
 
   const audioMatch = displayText.match(AUDIO_PLAYER_RE);
   if (audioMatch) {
@@ -401,7 +402,7 @@ const MarkdownTextImpl = () => {
     <div data-status={status.type} className="min-w-0 max-w-full">
       <Streamdown
         mode="streaming"
-        isAnimating={status.type === "running"}
+        isAnimating={isStreaming}
         plugins={{ code, math, mermaid }}
         components={STREAMDOWN_COMPONENTS}
         urlTransform={safeImageUrl}
