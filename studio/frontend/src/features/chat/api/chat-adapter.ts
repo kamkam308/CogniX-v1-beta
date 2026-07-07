@@ -1653,7 +1653,8 @@ async function autoLoadSmallestModel(): Promise<{
               supportsPreserveThinking:
                 loadResp.supports_preserve_thinking ?? false,
               supportsTools: loadResp.supports_tools ?? false,
-              ...resolveToolsEnabledOnLoad(loadResp.supports_tools ?? false),
+              supportsBuiltinWebSearch: true,
+              ...resolveToolsEnabledOnLoad(loadResp.supports_tools ?? false, true),
               kvCacheDtype: loadResp.cache_type_kv ?? null,
               loadedKvCacheDtype: loadResp.cache_type_kv ?? null,
               tensorParallel: loadResp.tensor_parallel ?? false,
@@ -1721,8 +1722,9 @@ async function autoLoadSmallestModel(): Promise<{
             supportsPreserveThinking:
               sfLoadResp.supports_preserve_thinking ?? false,
             supportsTools: sfLoadResp.supports_tools ?? false,
+            supportsBuiltinWebSearch: true,
             // Parity with the GGUF branch above.
-            ...resolveToolsEnabledOnLoad(sfLoadResp.supports_tools ?? false),
+            ...resolveToolsEnabledOnLoad(sfLoadResp.supports_tools ?? false, true),
             defaultChatTemplate: sfLoadResp.chat_template ?? null,
             chatTemplateOverride: null,
             loadedChatTemplateOverride: null,
@@ -1824,7 +1826,8 @@ async function autoLoadSmallestModel(): Promise<{
         ...reasoningCapsFromLoad(loadResp),
         supportsPreserveThinking: loadResp.supports_preserve_thinking ?? false,
         supportsTools: loadResp.supports_tools ?? false,
-        ...resolveToolsEnabledOnLoad(loadResp.supports_tools ?? false),
+        supportsBuiltinWebSearch: true,
+        ...resolveToolsEnabledOnLoad(loadResp.supports_tools ?? false, true),
         kvCacheDtype: loadResp.cache_type_kv ?? null,
         loadedKvCacheDtype: loadResp.cache_type_kv ?? null,
         tensorParallel: loadResp.tensor_parallel ?? false,
@@ -1980,6 +1983,7 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
       }
       const {
         supportsTools,
+        supportsBuiltinWebSearch,
         toolsEnabled,
         codeToolsEnabled,
         imageToolsEnabled,
@@ -2356,6 +2360,17 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
           supportsTools &&
           artifactsEnabled &&
           !hasOutboundImage,
+      );
+      const localWebSearchEnabledForThisTurn = Boolean(
+        !isExternalRequest &&
+          toolsEnabled &&
+          (supportsTools || supportsBuiltinWebSearch),
+      );
+      const localCodeToolsEnabledForThisTurn = Boolean(
+        !isExternalRequest && supportsTools && codeToolsEnabled,
+      );
+      const localRagEnabledForThisTurn = Boolean(
+        !isExternalRequest && supportsTools && (ragEnabled || projectRagEnabled),
       );
       const artifactInstruction = artifactsEnabled
         ? renderHtmlToolEnabledForThisTurn
@@ -3012,27 +3027,27 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
             ...(supportsPreserveThinking
               ? { preserve_thinking: preserveThinking }
               : {}),
-            ...(supportsTools &&
-            (toolsEnabled ||
-              codeToolsEnabled ||
+            ...((localWebSearchEnabledForThisTurn ||
+              localCodeToolsEnabledForThisTurn ||
               renderHtmlToolEnabledForThisTurn ||
-              mcpEnabledForChat ||
-              ragEnabled ||
-              projectRagEnabled)
+              (supportsTools && mcpEnabledForChat) ||
+              localRagEnabledForThisTurn)
               ? {
                   enable_tools: true,
                   enabled_tools: [
                     // First so retrieval is the primary tool when Docs is on.
-                    ...(ragEnabled || projectRagEnabled
+                    ...(localRagEnabledForThisTurn
                       ? ["search_knowledge_base"]
                       : []),
-                    ...(toolsEnabled ? ["web_search"] : []),
-                    ...(codeToolsEnabled ? ["python", "terminal"] : []),
+                    ...(localWebSearchEnabledForThisTurn ? ["web_search"] : []),
+                    ...(localCodeToolsEnabledForThisTurn
+                      ? ["python", "terminal"]
+                      : []),
                     ...(renderHtmlToolEnabledForThisTurn
                       ? ["render_html"]
                       : []),
                   ],
-                  mcp_enabled: mcpEnabledForChat,
+                  mcp_enabled: supportsTools && mcpEnabledForChat,
                   // Bypass Permissions wins: never request the confirm gate
                   // while bypassing, and tell the backend to drop the sandbox.
                   confirm_tool_calls: confirmToolCalls && !bypassPermissions,
@@ -3040,7 +3055,7 @@ export function createOpenAIStreamAdapter(): ChatModelAdapter {
                   // Scope: thread_id = this thread's docs, kb_id = a KB,
                   // project_id = the thread's project sources (auto-on whenever
                   // the project has indexed sources, no Docs pill needed).
-                  ...(ragEnabled || projectRagEnabled
+                  ...(localRagEnabledForThisTurn
                     ? {
                         rag_scope: {
                           ...(ragEnabled && ragSource.type === "kb"

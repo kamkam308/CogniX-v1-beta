@@ -363,14 +363,21 @@ export function loadOptionalBool(key: string): boolean | null {
  * re-enables a pill the user turned off; falls back to the model's capability
  * only when no preference has been expressed.
  */
-export function resolveToolsEnabledOnLoad(supportsTools: boolean): {
+export function resolveToolsEnabledOnLoad(
+  supportsTools: boolean,
+  supportsManagedWebSearch = supportsTools,
+): {
   toolsEnabled: boolean;
   codeToolsEnabled: boolean;
 } {
-  if (!supportsTools) return { toolsEnabled: false, codeToolsEnabled: false };
+  if (!supportsTools && !supportsManagedWebSearch) {
+    return { toolsEnabled: false, codeToolsEnabled: false };
+  }
   return {
     toolsEnabled: loadOptionalBool(CHAT_TOOLS_ENABLED_KEY) ?? true,
-    codeToolsEnabled: loadOptionalBool(CHAT_CODE_TOOLS_ENABLED_KEY) ?? true,
+    codeToolsEnabled: supportsTools
+      ? (loadOptionalBool(CHAT_CODE_TOOLS_ENABLED_KEY) ?? true)
+      : false,
   };
 }
 
@@ -635,10 +642,10 @@ type ChatRuntimeStore = {
   preserveThinking: boolean;
   supportsTools: boolean;
   /**
-   * Whether the active external provider exposes a server-side web_search tool
-   * (OpenAI's /v1/responses today). Distinct from `supportsTools` (the local
-   * tool runtime): this only enables the composer's Search pill for external
-   * models. Local models keep `supportsTools` only.
+   * Whether the active provider/session can satisfy the Search pill without the
+   * local tool-call loop: provider-native hosted tools on cloud models, or
+   * CogniX-managed pre-search context for Hugging Face/Ollama/custom/local
+   * models that cannot emit tool calls themselves.
    */
   supportsBuiltinWebSearch: boolean;
   /**

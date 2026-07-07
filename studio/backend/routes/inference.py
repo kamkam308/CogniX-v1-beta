@@ -4450,7 +4450,17 @@ def _with_cognix_web_search_context(
     query: str,
     result: str,
 ) -> list[dict[str, Any]]:
-    context = (
+    context = _cognix_web_search_system_context(query = query, result = result)
+    injected = list(messages)
+    insert_at = 0
+    while insert_at < len(injected) and injected[insert_at].get("role") == "system":
+        insert_at += 1
+    injected.insert(insert_at, {"role": "system", "content": context})
+    return injected
+
+
+def _cognix_web_search_system_context(*, query: str, result: str) -> str:
+    return (
         f"CogniX web_search results for the latest user request.\n"
         f"Current date: {_date.today().isoformat()}.\n"
         f"Search query: {query}\n\n"
@@ -4458,12 +4468,18 @@ def _with_cognix_web_search_context(
         "results, and say when the search result is insufficient.\n\n"
         f"{result}"
     )
-    injected = list(messages)
-    insert_at = 0
-    while insert_at < len(injected) and injected[insert_at].get("role") == "system":
-        insert_at += 1
-    injected.insert(insert_at, {"role": "system", "content": context})
-    return injected
+
+
+def _append_cognix_web_search_system_context(
+    system_prompt: str,
+    *,
+    query: str,
+    result: str,
+) -> str:
+    context = _cognix_web_search_system_context(query = query, result = result)
+    if system_prompt.strip():
+        return system_prompt.rstrip() + "\n\n" + context
+    return context
 
 
 def _external_tool_event_sse(provider_type: str, payload: dict[str, Any]) -> str:
@@ -4488,20 +4504,12 @@ def _external_tool_event_sse(provider_type: str, payload: dict[str, Any]) -> str
     return f"data: {json.dumps(chunk, ensure_ascii = False)}"
 
 
-async def _build_external_cognix_web_search_context(
+async def _build_cognix_web_search_context(
     messages: list[dict[str, Any]],
     *,
     provider_type: str,
-    enabled_tools: Optional[list[str]],
-    tool_choice: Any,
     timeout: Optional[int],
 ) -> Optional[dict[str, Any]]:
-    if not _external_provider_needs_cognix_web_search(
-        provider_type,
-        enabled_tools,
-        tool_choice,
-    ):
-        return None
     query = _external_latest_user_text(messages)
     if not query:
         return None
@@ -4545,12 +4553,64 @@ async def _build_external_cognix_web_search_context(
     return {
         "start": start,
         "end": end,
-        "messages": _with_cognix_web_search_context(
-            messages,
-            query = query,
-            result = result,
-        ),
+        "query": query,
+        "result": result,
     }
+
+
+async def _build_external_cognix_web_search_context(
+    messages: list[dict[str, Any]],
+    *,
+    provider_type: str,
+    enabled_tools: Optional[list[str]],
+    tool_choice: Any,
+    timeout: Optional[int],
+) -> Optional[dict[str, Any]]:
+    if not _external_provider_needs_cognix_web_search(
+        provider_type,
+        enabled_tools,
+        tool_choice,
+    ):
+        return None
+    context = await _build_cognix_web_search_context(
+        messages,
+        provider_type = provider_type,
+        timeout = timeout,
+    )
+    if not context:
+        return None
+    context["messages"] = _with_cognix_web_search_context(
+        messages,
+        query = context["query"],
+        result = context["result"],
+    )
+    return context
+
+
+def _local_request_needs_cognix_web_search(
+    tools_on: Optional[bool],
+    enabled_tools: Optional[list[str]],
+    tool_choice: Any = None,
+    *,
+    tool_loop_active: bool,
+) -> bool:
+    if tool_loop_active or not tools_on:
+        return False
+    if _tool_choice_blocks_cognix_web_search(tool_choice):
+        return False
+    return enabled_tools is None or "web_search" in enabled_tools
+
+
+async def _build_local_cognix_web_search_context(
+    payload: ChatCompletionRequest,
+    *,
+    timeout: Optional[int],
+) -> Optional[dict[str, Any]]:
+    return await _build_cognix_web_search_context(
+        [m.model_dump(exclude_none = True) for m in payload.messages],
+        provider_type = "local",
+        timeout = timeout,
+    )
 
 
 async def _proxy_to_external_provider(
@@ -5440,6 +5500,25 @@ async def openai_chat_completions(
             if not tools_to_use:
                 use_tools = False
 
+        local_web_context = None
+        if _local_request_needs_cognix_web_search(
+            _tools_on,
+            payload.enabled_tools,
+            payload.tool_choice,
+            tool_loop_active = use_tools,
+        ):
+            local_web_context = await _build_local_cognix_web_search_context(
+                payload,
+                timeout = payload.tool_call_timeout,
+            )
+            if local_web_context:
+                system_prompt = _append_cognix_web_search_system_context(
+                    system_prompt,
+                    query = local_web_context["query"],
+                    result = local_web_context["result"],
+                )
+                gguf_messages = _set_or_prepend_system_message(gguf_messages, system_prompt)
+
         if use_tools:
             # Bypass Permissions suppresses confirm, so the stream requirement
             # (the gate needs streaming to prompt) no longer applies.
@@ -5840,6 +5919,9 @@ async def openai_chat_completions(
                 )
                 try:
                     yield _chat_role_chunk(completion_id, created, model_name)
+                    if local_web_context:
+                        yield f"{local_web_context['start']}\n\n"
+                        yield f"{local_web_context['end']}\n\n"
 
                     # Iterate the sync generator in a thread so the event loop
                     # stays free for disconnect detection.
@@ -6134,6 +6216,24 @@ async def openai_chat_completions(
         # empty allow-list.
         if not _sf_tools_to_use:
             _sf_use_tools = False
+
+    sf_local_web_context = None
+    if _local_request_needs_cognix_web_search(
+        _sf_tools_on,
+        payload.enabled_tools,
+        payload.tool_choice,
+        tool_loop_active = _sf_use_tools,
+    ):
+        sf_local_web_context = await _build_local_cognix_web_search_context(
+            payload,
+            timeout = payload.tool_call_timeout,
+        )
+        if sf_local_web_context:
+            system_prompt = _append_cognix_web_search_system_context(
+                system_prompt,
+                query = sf_local_web_context["query"],
+                result = sf_local_web_context["result"],
+            )
 
     if _sf_use_tools:
         # Bypass Permissions suppresses confirm, so the stream requirement
@@ -6442,6 +6542,9 @@ async def openai_chat_completions(
             )
             try:
                 yield _chat_role_chunk(completion_id, created, model_name)
+                if sf_local_web_context:
+                    yield f"{sf_local_web_context['start']}\n\n"
+                    yield f"{sf_local_web_context['end']}\n\n"
 
                 prev_text = ""
                 # Run the sync generator in a thread pool to avoid blocking the

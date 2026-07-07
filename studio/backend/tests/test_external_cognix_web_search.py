@@ -2,6 +2,7 @@ from routes.inference import (
     _external_enabled_tools_after_cognix_web_search,
     _external_latest_user_text,
     _external_provider_needs_cognix_web_search,
+    _local_request_needs_cognix_web_search,
     _with_cognix_web_search_context,
 )
 
@@ -49,6 +50,39 @@ def test_forwarded_enabled_tools_remove_cognix_web_search_only():
         "openai",
         ["web_search"],
     ) == ["web_search"]
+
+
+def test_local_cognix_web_search_runs_when_tool_loop_is_unavailable():
+    assert _local_request_needs_cognix_web_search(
+        True,
+        ["web_search"],
+        None,
+        tool_loop_active = False,
+    )
+    assert _local_request_needs_cognix_web_search(
+        True,
+        None,
+        None,
+        tool_loop_active = False,
+    )
+    assert not _local_request_needs_cognix_web_search(
+        True,
+        ["web_search"],
+        None,
+        tool_loop_active = True,
+    )
+    assert not _local_request_needs_cognix_web_search(
+        False,
+        ["web_search"],
+        None,
+        tool_loop_active = False,
+    )
+    assert not _local_request_needs_cognix_web_search(
+        True,
+        ["python"],
+        None,
+        tool_loop_active = False,
+    )
 
 
 def test_latest_user_text_extracts_plain_and_multimodal_messages():
