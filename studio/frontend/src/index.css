@@ -1850,6 +1850,44 @@
 		border: 1px solid oklch(1 0 0 / 0.08);
 	}
 
+	@keyframes cognix-stream-token-in {
+		0% {
+			opacity: 0;
+			transform: translate3d(0, 0.18em, 0);
+			filter: blur(1.5px);
+		}
+
+		64% {
+			opacity: 0.86;
+			filter: blur(0.25px);
+		}
+
+		100% {
+			opacity: 1;
+			transform: translate3d(0, 0, 0);
+			filter: blur(0);
+		}
+	}
+
+	.aui-thread-root .aui-assistant-message-content [data-sd-animate] {
+		animation: cognix-stream-token-in 220ms var(--ease-out-cubic) both;
+		will-change: opacity, transform, filter;
+	}
+
+	.aui-thread-root
+		.aui-assistant-message-content
+		:where(
+			.katex,
+			table,
+			[data-streamdown="code-block"],
+			[data-streamdown="code-block"] *
+		)
+		[data-sd-animate] {
+		animation: none !important;
+		filter: none !important;
+		transform: none !important;
+	}
+
 	/* Streamdown code-block stability hardening.
 	 *
 	 * Two streamdown internals cause a visible "reload"-style flicker on

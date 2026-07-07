@@ -14,13 +14,20 @@ import {
 import { copyToClipboard } from "@/lib/copy-to-clipboard";
 import { preprocessLaTeX } from "@/lib/latex";
 import { openLink } from "@/lib/open-link";
-import { INTERNAL, useAuiState, useMessagePartText } from "@assistant-ui/react";
 import { Tick02Icon } from "@/lib/tick-icon";
+import { INTERNAL, useAuiState, useMessagePartText } from "@assistant-ui/react";
 import { Copy01Icon, Download01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { mermaid } from "@streamdown/mermaid";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Block, type BlockProps, Streamdown, defaultUrlTransform, type UrlTransform } from "streamdown";
+import type { ComponentProps } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Block,
+  type BlockProps,
+  Streamdown,
+  type UrlTransform,
+  defaultUrlTransform,
+} from "streamdown";
 import { createCodePlugin } from "./code-plugin";
 import { useMathPlugin } from "./math-plugin";
 import "katex/dist/katex.min.css";
@@ -33,7 +40,7 @@ const code = createCodePlugin({
 const { withSmoothContextProvider } = INTERNAL;
 
 const STREAMDOWN_COMPONENTS = {
-  a: ({ href, children, ...props }: React.ComponentProps<"a">) => (
+  a: ({ href, children, ...props }: ComponentProps<"a">) => (
     <a
       href={href}
       rel="noopener noreferrer"
@@ -93,11 +100,27 @@ function getCodeFilename(language: string | null) {
 
 const UNSAFE_SVG_RE =
   /<script[\s>]|on\w+\s*=|javascript:|<foreignObject[\s>]|<iframe[\s>]|<embed[\s>]|<object[\s>]/i;
+const SVG_XML_DECLARATION_RE = /^\s*<\?xml[^?]*\?>\s*/i;
+const PROTOCOL_RELATIVE_URL_RE = /^[/\\]{2}/;
+const URL_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+\-.]*:/;
+
+function stripAsciiControls(value: string): string {
+  let result = "";
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if ((code >= 0x20 && code !== 0x7f) || code > 0x7f) {
+      result += character;
+    }
+  }
+  return result;
+}
 
 function sanitizeSvg(source: string): string | null {
-  if (UNSAFE_SVG_RE.test(source)) return null;
+  if (UNSAFE_SVG_RE.test(source)) {
+    return null;
+  }
   // Strip XML declaration: unneeded for data URIs and breaks some renderers.
-  return source.replace(/^\s*<\?xml[^?]*\?>\s*/i, "");
+  return source.replace(SVG_XML_DECLARATION_RE, "");
 }
 
 function SvgPreview({ source }: { source: string }) {
@@ -323,14 +346,51 @@ function StreamdownBlock(props: BlockProps) {
 }
 const AUDIO_PLAYER_RE = /<audio-player\s+src="([^"]+)"\s*\/>/;
 
-// Coalesce markdown re-parses to one per frame while streaming: tokens arrive
-// hundreds/sec, faster than the monitor can paint. When not streaming we return
-// live text (not the throttled state) so final text never lags and a reused
-// instance (parts keyed by index) shows completed text instead of a stale frame.
-function useRafCoalescedText(text: string, isStreaming: boolean): string {
+const STREAM_MIN_CHARS_PER_FRAME = 2;
+const STREAM_MAX_CHARS_PER_FRAME = 96;
+const STREAM_CATCHUP_DIVISOR = 7;
+
+function nextStreamSliceLength(remaining: number): number {
+  if (remaining <= STREAM_MIN_CHARS_PER_FRAME) {
+    return remaining;
+  }
+  return Math.min(
+    STREAM_MAX_CHARS_PER_FRAME,
+    Math.max(
+      STREAM_MIN_CHARS_PER_FRAME,
+      Math.ceil(remaining / STREAM_CATCHUP_DIVISOR),
+    ),
+  );
+}
+
+// Smooth streamed text instead of repainting every raw provider chunk. The
+// displayed text catches up on animation frames, so small token bursts land
+// softly while large backend chunks still resolve quickly.
+function useSmoothStreamingText(text: string, isStreaming: boolean): string {
   const [displayed, setDisplayed] = useState(text);
   const pendingRef = useRef(text);
   const rafRef = useRef<number | null>(null);
+
+  const tick = useCallback(() => {
+    rafRef.current = null;
+    setDisplayed((current) => {
+      const pending = pendingRef.current;
+      if (!pending.startsWith(current)) {
+        return pending;
+      }
+      const remaining = pending.length - current.length;
+      if (remaining <= 0) {
+        return current;
+      }
+      const sliceLength = nextStreamSliceLength(remaining);
+      const next =
+        current + pending.slice(current.length, current.length + sliceLength);
+      if (next.length < pending.length && rafRef.current === null) {
+        rafRef.current = requestAnimationFrame(tick);
+      }
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     pendingRef.current = text;
@@ -339,15 +399,13 @@ function useRafCoalescedText(text: string, isStreaming: boolean): string {
         cancelAnimationFrame(rafRef.current);
         rafRef.current = null;
       }
+      setDisplayed(text);
       return;
     }
     if (rafRef.current === null) {
-      rafRef.current = requestAnimationFrame(() => {
-        rafRef.current = null;
-        setDisplayed(pendingRef.current);
-      });
+      rafRef.current = requestAnimationFrame(tick);
     }
-  }, [text, isStreaming]);
+  }, [text, isStreaming, tick]);
 
   // Unmount cleanup: cancel the in-flight rAF and null the handle so a
   // StrictMode remount isn't gated by a stale id. Separate from the scheduling
@@ -361,32 +419,36 @@ function useRafCoalescedText(text: string, isStreaming: boolean): string {
     };
   }, []);
 
-  if (isStreaming && text.startsWith(displayed)) {
-    return displayed;
-  }
-  return text;
+  return isStreaming ? displayed : text;
 }
 
 const safeImageUrl: UrlTransform = (url, _key, node) => {
   // Only images are restricted; links/other nodes use the default transform.
-  if (node.tagName !== "img") return defaultUrlTransform(url, _key, node);
+  if (node.tagName !== "img") {
+    return defaultUrlTransform(url, _key, node);
+  }
 
   // Strip ASCII controls first: browsers drop them mid-parse, so a value like
   // "\t//attacker.com" would otherwise slip past the guards below.
-  // eslint-disable-next-line no-control-regex
-  const normalized = url.replace(/[\x00-\x1f\x7f]/g, "").trim();
+  const normalized = stripAsciiControls(url).trim();
   const lower = normalized.toLowerCase();
 
-  if (lower.startsWith("data:") || lower.startsWith("blob:")) return normalized;
-  if (/^[/\\]{2}/.test(normalized)) return null; // protocol-relative: // \\ /\ \/
-  if (/^[a-zA-Z][a-zA-Z0-9+\-.]*:/.test(normalized)) return null; // scheme prefix (colon later in path is fine)
+  if (lower.startsWith("data:") || lower.startsWith("blob:")) {
+    return normalized;
+  }
+  if (PROTOCOL_RELATIVE_URL_RE.test(normalized)) {
+    return null;
+  }
+  if (URL_SCHEME_RE.test(normalized)) {
+    return null;
+  }
   return normalized; // relative -> same-origin
 };
 
 const MarkdownTextImpl = () => {
   const { text, status } = useMessagePartText();
   const isStreaming = status.type === "running";
-  const displayText = useRafCoalescedText(text, isStreaming);
+  const displayText = useSmoothStreamingText(text, isStreaming);
   const processedText = useMemo(
     () => preprocessLaTeX(displayText),
     [displayText],
