@@ -1853,13 +1853,14 @@
 	@keyframes cognix-stream-token-in {
 		0% {
 			opacity: 0;
-			transform: translate3d(0, 0.18em, 0);
-			filter: blur(1.5px);
+			transform: translate3d(0, 0.32em, 0);
+			filter: blur(2px);
 		}
 
-		64% {
-			opacity: 0.86;
-			filter: blur(0.25px);
+		56% {
+			opacity: 0.78;
+			transform: translate3d(0, 0.08em, 0);
+			filter: blur(0.45px);
 		}
 
 		100% {
@@ -1870,7 +1871,7 @@
 	}
 
 	.aui-thread-root .aui-assistant-message-content [data-sd-animate] {
-		animation: cognix-stream-token-in 220ms var(--ease-out-cubic) both;
+		animation: cognix-stream-token-in 360ms var(--ease-out-quart) both;
 		will-change: opacity, transform, filter;
 	}
 

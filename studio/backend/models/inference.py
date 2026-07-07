@@ -761,8 +761,10 @@ class ChatCompletionRequest(BaseModel):
             "accept ['web_search', 'python', 'terminal', 'render_html']. External "
             "providers accept ['web_search', 'web_fetch', 'code_execution'] for "
             "Anthropic and ['web_search', 'code_execution', 'image_generation'] for "
-            "OpenAI Responses. If None, all local tools are enabled and no "
-            "server-side tools are forwarded."
+            "OpenAI Responses. Hugging Face, Ollama, llama.cpp/vLLM and custom "
+            "OpenAI-compatible external providers use CogniX server-side "
+            "web_search context when 'web_search' is enabled. If None, all local "
+            "tools are enabled and no server-side tools are forwarded."
         ),
     )
     mcp_enabled: Optional[bool] = Field(

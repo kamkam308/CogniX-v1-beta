@@ -4366,10 +4366,191 @@ def _build_external_messages(
                         entry["tool_call_id"] = msg.tool_call_id
                     if msg.name:
                         entry["name"] = msg.name
-                if emit_extra_content and msg.role == "assistant" and msg.extra_content:
-                    entry["extra_content"] = msg.extra_content
+            if emit_extra_content and msg.role == "assistant" and msg.extra_content:
+                entry["extra_content"] = msg.extra_content
                 result.append(entry)
     return result
+
+
+_NATIVE_WEB_SEARCH_PROVIDERS = frozenset(
+    {"openai", "anthropic", "gemini", "openrouter", "kimi"}
+)
+
+
+def _tool_choice_blocks_cognix_web_search(tool_choice: Any) -> bool:
+    """Return True when a request explicitly disables hosted/builtin tools.
+
+    A forced function tool is treated the same as provider-native web-search
+    gates: the caller asked for one specific tool, so CogniX should not run a
+    hidden pre-search beside it.
+    """
+    if isinstance(tool_choice, str):
+        return tool_choice.strip().lower() == "none"
+    return (
+        isinstance(tool_choice, dict)
+        and tool_choice.get("type") == "function"
+        and isinstance(tool_choice.get("function"), dict)
+        and bool(tool_choice["function"].get("name"))
+    )
+
+
+def _external_provider_needs_cognix_web_search(
+    provider_type: str,
+    enabled_tools: Optional[list[str]],
+    tool_choice: Any = None,
+) -> bool:
+    return (
+        provider_type not in _NATIVE_WEB_SEARCH_PROVIDERS
+        and bool(enabled_tools)
+        and "web_search" in (enabled_tools or [])
+        and not _tool_choice_blocks_cognix_web_search(tool_choice)
+    )
+
+
+def _external_enabled_tools_after_cognix_web_search(
+    provider_type: str,
+    enabled_tools: Optional[list[str]],
+    tool_choice: Any = None,
+) -> Optional[list[str]]:
+    """Remove `web_search` before forwarding to providers where CogniX ran it.
+
+    Non-native providers either ignore `enabled_tools` or reject provider-native
+    search envelopes. Keeping the rest of the list preserves future provider
+    capabilities without letting this fallback request an unsupported connector.
+    """
+    if not _external_provider_needs_cognix_web_search(provider_type, enabled_tools, tool_choice):
+        return enabled_tools
+    remaining = [name for name in (enabled_tools or []) if name != "web_search"]
+    return remaining or None
+
+
+def _external_latest_user_text(messages: list[dict[str, Any]]) -> str:
+    for msg in reversed(messages):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts: list[str] = []
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") in ("text", "input_text"):
+                    text = part.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+            return "\n".join(parts).strip()
+    return ""
+
+
+def _with_cognix_web_search_context(
+    messages: list[dict[str, Any]],
+    *,
+    query: str,
+    result: str,
+) -> list[dict[str, Any]]:
+    context = (
+        f"CogniX web_search results for the latest user request.\n"
+        f"Current date: {_date.today().isoformat()}.\n"
+        f"Search query: {query}\n\n"
+        "Use these web results when they are relevant, cite URLs from the "
+        "results, and say when the search result is insufficient.\n\n"
+        f"{result}"
+    )
+    injected = list(messages)
+    insert_at = 0
+    while insert_at < len(injected) and injected[insert_at].get("role") == "system":
+        insert_at += 1
+    injected.insert(insert_at, {"role": "system", "content": context})
+    return injected
+
+
+def _external_tool_event_sse(provider_type: str, payload: dict[str, Any]) -> str:
+    if payload.get("type") == "tool_start":
+        args = payload.get("arguments")
+        if not isinstance(args, dict):
+            args = {}
+            payload["arguments"] = args
+        args["_server_tool"] = True
+    chunk = {
+        "id": f"chatcmpl-{provider_type}-cognix-web",
+        "object": "chat.completion.chunk",
+        "choices": [
+            {
+                "index": 0,
+                "delta": {},
+                "finish_reason": None,
+            }
+        ],
+        "_toolEvent": payload,
+    }
+    return f"data: {json.dumps(chunk, ensure_ascii = False)}"
+
+
+async def _build_external_cognix_web_search_context(
+    messages: list[dict[str, Any]],
+    *,
+    provider_type: str,
+    enabled_tools: Optional[list[str]],
+    tool_choice: Any,
+    timeout: Optional[int],
+) -> Optional[dict[str, Any]]:
+    if not _external_provider_needs_cognix_web_search(
+        provider_type,
+        enabled_tools,
+        tool_choice,
+    ):
+        return None
+    query = _external_latest_user_text(messages)
+    if not query:
+        return None
+    query = query[:500]
+    tool_call_id = "cognix_web_search_" + uuid.uuid4().hex[:12]
+    start = _external_tool_event_sse(
+        provider_type,
+        {
+            "type": "tool_start",
+            "tool_name": "web_search",
+            "tool_call_id": tool_call_id,
+            "arguments": {"query": query},
+        },
+    )
+    from core.inference.tools import execute_tool
+
+    effective_timeout = timeout if timeout is not None else 300
+    try:
+        result = await asyncio.to_thread(
+            execute_tool,
+            "web_search",
+            {"query": query},
+            timeout = effective_timeout,
+        )
+    except Exception as exc:
+        logger.warning(
+            "external_provider.cognix_web_search_failed",
+            provider_type = provider_type,
+            error = str(exc),
+        )
+        result = f"CogniX web_search failed: {_friendly_error(exc)}"
+    end = _external_tool_event_sse(
+        provider_type,
+        {
+            "type": "tool_end",
+            "tool_name": "web_search",
+            "tool_call_id": tool_call_id,
+            "result": result,
+        },
+    )
+    return {
+        "start": start,
+        "end": end,
+        "messages": _with_cognix_web_search_context(
+            messages,
+            query = query,
+            result = result,
+        ),
+    }
 
 
 async def _proxy_to_external_provider(
@@ -4487,31 +4668,49 @@ async def _proxy_to_external_provider(
     _top_k_explicit = payload.top_k if "top_k" in payload.model_fields_set else None
 
     async def _stream():
-        gen = client.stream_chat_completion(
-            messages = chat_messages,
-            model = model,
-            temperature = payload.temperature,
-            top_p = payload.top_p,
-            # Honor max_completion_tokens when max_tokens is absent, so a
-            # provider-routed request capped only by the newer field still gets
-            # a limit instead of falling back to the provider default.
-            max_tokens = _effective_max_tokens(payload),
-            presence_penalty = payload.presence_penalty,
-            top_k = _top_k_explicit,
-            enable_thinking = payload.enable_thinking,
-            reasoning_effort = payload.reasoning_effort,
-            enabled_tools = payload.enabled_tools,
-            enable_prompt_caching = payload.enable_prompt_caching,
-            openai_code_exec_container_id = payload.openai_code_exec_container_id,
-            anthropic_code_exec_container_id = payload.anthropic_code_exec_container_id,
-            prompt_cache_ttl = payload.prompt_cache_ttl,
-            compaction_threshold = payload.compaction_threshold,
-            tools = payload.tools,
-            tool_choice = payload.tool_choice,
-            fast_mode = payload.fast_mode,
-            stream = payload.stream,
-        )
+        gen = None
         try:
+            effective_messages = chat_messages
+            forwarded_enabled_tools = _external_enabled_tools_after_cognix_web_search(
+                effective_provider_type,
+                payload.enabled_tools,
+                payload.tool_choice,
+            )
+            web_context = await _build_external_cognix_web_search_context(
+                effective_messages,
+                provider_type = effective_provider_type,
+                enabled_tools = payload.enabled_tools,
+                tool_choice = payload.tool_choice,
+                timeout = payload.tool_call_timeout,
+            )
+            if web_context:
+                yield f"{web_context['start']}\n\n"
+                yield f"{web_context['end']}\n\n"
+                effective_messages = web_context["messages"]
+            gen = client.stream_chat_completion(
+                messages = effective_messages,
+                model = model,
+                temperature = payload.temperature,
+                top_p = payload.top_p,
+                # Honor max_completion_tokens when max_tokens is absent, so a
+                # provider-routed request capped only by the newer field still gets
+                # a limit instead of falling back to the provider default.
+                max_tokens = _effective_max_tokens(payload),
+                presence_penalty = payload.presence_penalty,
+                top_k = _top_k_explicit,
+                enable_thinking = payload.enable_thinking,
+                reasoning_effort = payload.reasoning_effort,
+                enabled_tools = forwarded_enabled_tools,
+                enable_prompt_caching = payload.enable_prompt_caching,
+                openai_code_exec_container_id = payload.openai_code_exec_container_id,
+                anthropic_code_exec_container_id = payload.anthropic_code_exec_container_id,
+                prompt_cache_ttl = payload.prompt_cache_ttl,
+                compaction_threshold = payload.compaction_threshold,
+                tools = payload.tools,
+                tool_choice = payload.tool_choice,
+                fast_mode = payload.fast_mode,
+                stream = payload.stream,
+            )
             sent_done = False
             stream_failed = False
             async for line in gen:
@@ -4537,10 +4736,11 @@ async def _proxy_to_external_provider(
             logger.error("external_provider.stream_error", error = str(exc))
             api_monitor.fail(monitor_id, _friendly_error(exc))
         finally:
-            try:
-                await gen.aclose()
-            except RuntimeError:
-                pass  # suppress httpcore asyncgen cleanup error (Python 3.13 + httpcore 1.0.x)
+            if gen is not None:
+                try:
+                    await gen.aclose()
+                except RuntimeError:
+                    pass  # suppress httpcore asyncgen cleanup error (Python 3.13 + httpcore 1.0.x)
             await client.close()
 
     return StreamingResponse(

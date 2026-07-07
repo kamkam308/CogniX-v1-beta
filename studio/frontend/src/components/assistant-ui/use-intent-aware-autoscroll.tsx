@@ -49,6 +49,10 @@ const UPWARD_DETACH_THRESHOLD_PX = 2;
 // on every resize/mutation, so streaming keeps it pinned; settles this
 // long after the last change.
 const FOLLOW_SETTLE_MS = 600;
+// After a run starts, reveal the response area once, then suppress automatic
+// re-attach long enough for the first streaming mutations to grow below the
+// reader instead of dragging the viewport with them.
+const STREAM_READING_REATTACH_SUPPRESS_MS = 1200;
 // Max stabilizer compensation. Absorbs sub-frame transients (~5-15px shiki
 // re-renders, ~8px action-bar drift). Larger shrinks are intentional
 // content removals (delete, regenerate clear, reasoning collapse); padding
@@ -124,9 +128,13 @@ export function useIntentAwareAutoScroll(): {
   const scrollImplRef = useRef<ScrollToBottom>(() => {
     /* no viewport mounted */
   });
+  const revealImplRef = useRef<ScrollToBottom>(() => {
+    /* no viewport mounted */
+  });
   const detachImplRef = useRef<() => void>(() => {
     /* no viewport mounted */
   });
+  const suppressAutoReattachUntilRef = useRef(0);
 
   const getIsAtBottom = useCallback(() => isAtBottomRef.current, []);
 
@@ -268,12 +276,24 @@ export function useIntentAwareAutoScroll(): {
       };
 
       scrollImplRef.current = (behavior = "auto") => {
+        suppressAutoReattachUntilRef.current = 0;
         userDetachedRef.current = false;
         followUntilRef.current = performance.now() + FOLLOW_SETTLE_MS;
         if (el.scrollHeight > el.clientHeight) {
           el.scrollTo({ top: el.scrollHeight, behavior });
         }
         setIsAtBottom(true);
+        requestTick();
+      };
+
+      revealImplRef.current = (behavior = "auto") => {
+        suppressAutoReattachUntilRef.current =
+          performance.now() + STREAM_READING_REATTACH_SUPPRESS_MS;
+        detach();
+        if (el.scrollHeight > el.clientHeight) {
+          el.scrollTo({ top: el.scrollHeight, behavior });
+        }
+        setIsAtBottom(atBottomStrict());
         requestTick();
       };
 
@@ -330,7 +350,8 @@ export function useIntentAwareAutoScroll(): {
           upwardAccumulator = 0;
           if (
             userDetachedRef.current &&
-            distanceNow <= RE_ATTACH_THRESHOLD_PX
+            distanceNow <= RE_ATTACH_THRESHOLD_PX &&
+            performance.now() >= suppressAutoReattachUntilRef.current
           ) {
             userDetachedRef.current = false;
             extendFollow();
@@ -412,10 +433,7 @@ export function useIntentAwareAutoScroll(): {
         const needed = Math.max(0, shrink);
         if (needed !== stabilizerPx) {
           stabilizerPx = needed;
-          el.style.setProperty(
-            "--aui-scroll-stabilizer",
-            `${stabilizerPx}px`,
-          );
+          el.style.setProperty("--aui-scroll-stabilizer", `${stabilizerPx}px`);
         }
         return currentContent + stabilizerPx;
       };
@@ -515,6 +533,9 @@ export function useIntentAwareAutoScroll(): {
         scrollImplRef.current = () => {
           /* no viewport mounted */
         };
+        revealImplRef.current = () => {
+          /* no viewport mounted */
+        };
         detachImplRef.current = () => {
           /* no viewport mounted */
         };
@@ -523,15 +544,20 @@ export function useIntentAwareAutoScroll(): {
     [setIsAtBottom],
   );
 
-  // Thread lifecycle moments that always pin, regardless of detach state.
-  // "auto" respects CSS smooth scroll for runStart (new turns glide in);
-  // "instant" snaps for load/switch where animation is wasted.
+  // Thread lifecycle: loads/switches pin hard, while run start enters a
+  // reading mode. It reveals the new answer area once, then lets streaming
+  // continue below the viewport until the user clicks the bottom arrow or
+  // scrolls down intentionally.
   const pinToBottom = useCallback((behavior: ScrollBehavior) => {
     userDetachedRef.current = false;
     scrollImplRef.current(behavior);
   }, []);
 
-  useAuiEvent("thread.runStart", () => pinToBottom("auto"));
+  const revealRunStart = useCallback((behavior: ScrollBehavior) => {
+    revealImplRef.current(behavior);
+  }, []);
+
+  useAuiEvent("thread.runStart", () => revealRunStart("auto"));
   useAuiEvent("thread.initialize", () => pinToBottom("instant"));
   useAuiEvent("threadListItem.switchedTo", () => pinToBottom("instant"));
 

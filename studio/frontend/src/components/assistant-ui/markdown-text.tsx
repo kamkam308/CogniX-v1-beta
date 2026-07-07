@@ -15,6 +15,10 @@ import { copyToClipboard } from "@/lib/copy-to-clipboard";
 import { preprocessLaTeX } from "@/lib/latex";
 import { openLink } from "@/lib/open-link";
 import { Tick02Icon } from "@/lib/tick-icon";
+import {
+  parseStructuredResponse,
+  renderStructuredResponseToMarkdown,
+} from "@/tools/structured-response";
 import { INTERNAL, useAuiState, useMessagePartText } from "@assistant-ui/react";
 import { Copy01Icon, Download01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -346,9 +350,9 @@ function StreamdownBlock(props: BlockProps) {
 }
 const AUDIO_PLAYER_RE = /<audio-player\s+src="([^"]+)"\s*\/>/;
 
-const STREAM_MIN_CHARS_PER_FRAME = 2;
-const STREAM_MAX_CHARS_PER_FRAME = 96;
-const STREAM_CATCHUP_DIVISOR = 7;
+const STREAM_MIN_CHARS_PER_FRAME = 1;
+const STREAM_MAX_CHARS_PER_FRAME = 48;
+const STREAM_CATCHUP_DIVISOR = 16;
 
 function nextStreamSliceLength(remaining: number): number {
   if (remaining <= STREAM_MIN_CHARS_PER_FRAME) {
@@ -364,10 +368,11 @@ function nextStreamSliceLength(remaining: number): number {
 }
 
 // Smooth streamed text instead of repainting every raw provider chunk. The
-// displayed text catches up on animation frames, so small token bursts land
-// softly while large backend chunks still resolve quickly.
+// displayed text keeps easing even after a very fast provider has finished,
+// so small token bursts land softly while large chunks still resolve quickly.
 function useSmoothStreamingText(text: string, isStreaming: boolean): string {
   const [displayed, setDisplayed] = useState(text);
+  const displayedRef = useRef(text);
   const pendingRef = useRef(text);
   const rafRef = useRef<number | null>(null);
 
@@ -376,15 +381,18 @@ function useSmoothStreamingText(text: string, isStreaming: boolean): string {
     setDisplayed((current) => {
       const pending = pendingRef.current;
       if (!pending.startsWith(current)) {
+        displayedRef.current = pending;
         return pending;
       }
       const remaining = pending.length - current.length;
       if (remaining <= 0) {
+        displayedRef.current = current;
         return current;
       }
       const sliceLength = nextStreamSliceLength(remaining);
       const next =
         current + pending.slice(current.length, current.length + sliceLength);
+      displayedRef.current = next;
       if (next.length < pending.length && rafRef.current === null) {
         rafRef.current = requestAnimationFrame(tick);
       }
@@ -394,12 +402,20 @@ function useSmoothStreamingText(text: string, isStreaming: boolean): string {
 
   useEffect(() => {
     pendingRef.current = text;
-    if (!isStreaming) {
+    const current = displayedRef.current;
+    if (!text.startsWith(current)) {
       if (rafRef.current !== null) {
         cancelAnimationFrame(rafRef.current);
         rafRef.current = null;
       }
+      displayedRef.current = text;
       setDisplayed(text);
+      return;
+    }
+    if (!isStreaming) {
+      if (current !== text && rafRef.current === null) {
+        rafRef.current = requestAnimationFrame(tick);
+      }
       return;
     }
     if (rafRef.current === null) {
@@ -419,7 +435,7 @@ function useSmoothStreamingText(text: string, isStreaming: boolean): string {
     };
   }, []);
 
-  return isStreaming ? displayed : text;
+  return text.startsWith(displayed) ? displayed : text;
 }
 
 const safeImageUrl: UrlTransform = (url, _key, node) => {
@@ -449,13 +465,24 @@ const MarkdownTextImpl = () => {
   const { text, status } = useMessagePartText();
   const isStreaming = status.type === "running";
   const displayText = useSmoothStreamingText(text, isStreaming);
-  const processedText = useMemo(
-    () => preprocessLaTeX(displayText),
+  const structuredResponse = useMemo(
+    () => parseStructuredResponse(displayText),
     [displayText],
+  );
+  const responseText = useMemo(
+    () =>
+      structuredResponse
+        ? renderStructuredResponseToMarkdown(structuredResponse)
+        : displayText,
+    [structuredResponse, displayText],
+  );
+  const processedText = useMemo(
+    () => preprocessLaTeX(responseText),
+    [responseText],
   );
   const math = useMathPlugin(isStreaming, processedText);
 
-  const audioMatch = displayText.match(AUDIO_PLAYER_RE);
+  const audioMatch = responseText.match(AUDIO_PLAYER_RE);
   if (audioMatch) {
     return <AudioPlayer src={audioMatch[1]} />;
   }

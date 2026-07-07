@@ -1276,11 +1276,11 @@ const ThreadScrollToBottom: FC = () => {
   const scrollToBottom = useScrollThreadToBottom();
   return (
     <TooltipIconButton
-      tooltip="Scroll to bottom"
+      tooltip="Aller en bas"
       variant="outline"
       onClick={() => scrollToBottom("auto")}
       className={cn(
-        "aui-thread-scroll-to-bottom pointer-events-auto rounded-full p-4 bg-background hover:bg-accent dark:bg-background dark:hover:bg-accent",
+        "aui-thread-scroll-to-bottom pointer-events-auto size-10 rounded-full border-border/70 bg-background/90 p-0 shadow-md backdrop-blur transition-all hover:bg-accent dark:bg-background/90 dark:hover:bg-accent",
         isAtBottom && "invisible pointer-events-none",
       )}
     >

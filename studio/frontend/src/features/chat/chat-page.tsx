@@ -2048,10 +2048,12 @@ export function ChatPage({
         : state.reasoningEnabled,
       supportsPreserveThinking: false,
       // External models have no local tool runtime, so `supportsTools` is
-      // false. The `supportsBuiltin*` flags cover providers that run tools
-      // server-side: WebSearch lights the Search pill (OpenAI/Anthropic/
-      // OpenRouter/Kimi), CodeExecution the Code pill (Claude 4.x, gpt-5.5),
-      // ImageGeneration the Images pill (OpenAI cloud Responses-API only).
+      // false. The `supportsBuiltin*` flags cover server-side capabilities:
+      // native hosted tools where providers expose them, or CogniX-managed
+      // web_search context for Hugging Face/Ollama/custom-compatible models.
+      // CodeExecution lights the Code pill (Claude 4.x, gpt-5.5), and
+      // ImageGeneration lights the Images pill (OpenAI cloud Responses-API
+      // plus Gemini image families).
       supportsTools: false,
       supportsBuiltinWebSearch,
       supportsBuiltinCodeExecution,
@@ -2531,10 +2533,11 @@ export function ChatPage({
               : true
             : store.reasoningEnabled,
           supportsPreserveThinking: false,
-          // External models have no local tool runtime → supportsTools false.
+          // External models have no local tool runtime, so supportsTools false.
           // The supportsBuiltin* flags carry server-side capability per pill:
-          // Search, Code (Claude 4.x + gpt-5.5), Images (OpenAI cloud
-          // Responses-API).
+          // Search via provider-native tools or CogniX web_search context,
+          // Code (Claude 4.x + gpt-5.5), Images (OpenAI cloud Responses-API
+          // plus Gemini image families).
           supportsTools: false,
           supportsBuiltinWebSearch,
           supportsBuiltinCodeExecution,
