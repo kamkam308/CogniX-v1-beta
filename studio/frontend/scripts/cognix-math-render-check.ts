@@ -72,6 +72,13 @@ const PREPROCESS_FIXTURES = [
 | 2 – Valeur de l’EMF (E) | En régime permanent (t \to \infty), I_\infty = E/(R_1+R_2+r). La tension vaut u_1(\infty)=I_\infty R_1. |`,
   },
   {
+    name: "physics table with prose comments and small scripted variables",
+    markdown: String.raw`| Question | Réponse & développement |
+|---|---|
+| 1 – Quelle grandeur est tracée sous le nom (u_{1}(t)) ? | La courbe montre une tension qui augmente de façon exponentielle. C’est donc la tension aux bornes de la résistance (R_{1}). |
+| 2 – Valeur de l’EMF (E) | En régime permanent (t \to \infty) le courant est constant. Le courant total est I_\infty = E/(R_1+R_2+r). La tension aux bornes de (R_{1}) vaut alors (\displaystyle u_1(\infty)=I_\infty R_1). La lecture du graphe donne u_{1}(\infty)=6.0\,{\rm V}. |`,
+  },
+  {
     name: "physics continuation after broken table",
     markdown: String.raw`\boxed{\,R = R_{1}+R_{2}+r\,} $$ || **4** – Expression de (u_{1}(t)) | En écrivant la loi des mailles pour la boucle contenant (R_{1}) et la bobine, on obtient \frac{{\rm d}u_1}{{\rm d}t}+\frac{1}{\tau}u_1=\frac{E}{\tau}, \qquad \tau=\frac{L}{R}.`,
   },
@@ -127,6 +134,8 @@ const RAW_LATEX_OUTSIDE_MATH_RE =
   /\\(?![$\\])(?:[a-zA-Z]+|[,;:!])|(?:^|[\s([{])(?:[A-Za-z](?:_\{?[^{}\s]+\}?|\^\{?[^{}\s]+\}?|\([^)\n]{0,80}\))*|[A-Za-z]{1,4}_\{?[^{}\s]+\}?)\s*(?:=|<|>|≤|≥|≈|⇒|→)/;
 const VISIBLE_RAW_LATEX_RE =
   /\\[a-zA-Z]+|(?:^|[\s([{])(?:[A-Za-z](?:_\{?[^{}\s]+\}?|\^\{?[^{}\s]+\}?|\([^)\n]{0,80}\))*|[A-Za-z]{1,4}_\{?[^{}\s]+\}?)\s*(?:=|<|>|≤|≥|≈|⇒|→)/;
+const RAW_SCRIPTED_IDENTIFIER_RE =
+  /(?:^|[\s([{;:,|])(?:[A-Za-z]{1,4}|\\[a-zA-Z]+)(?:_\{[^{}\s]+\}|_\\[a-zA-Z]+|_[0-9A-Za-z](?![A-Za-z])|\^\{[^{}\s]+\}|\^\\[a-zA-Z]+|\^[0-9A-Za-z](?![A-Za-z]))+(?:\([^)\n]{0,80}\))?/;
 const SPLIT_TEX_SPACING_RE = /\\\$[,;:!]/;
 const CLASS_NAME_SPLIT_RE = /\s+/;
 
@@ -140,6 +149,11 @@ const NON_MATH_FIXTURES = [
     name: "config assignments stay prose",
     markdown: "Use repo=foo and branch=main in the config.",
     expected: "Use repo=foo and branch=main in the config.",
+  },
+  {
+    name: "snake case identifiers stay prose",
+    markdown: "Use repo_name and branch_name in the config.",
+    expected: "Use repo_name and branch_name in the config.",
   },
 ];
 
@@ -276,7 +290,10 @@ function assertPreprocessedMarkdownHasNoRawLatex(): void {
   for (const fixture of PREPROCESS_FIXTURES) {
     const processed = preprocessLaTeX(fixture.markdown);
     const outsideMath = stripMathSpans(processed);
-    if (RAW_LATEX_OUTSIDE_MATH_RE.test(outsideMath)) {
+    if (
+      RAW_LATEX_OUTSIDE_MATH_RE.test(outsideMath) ||
+      RAW_SCRIPTED_IDENTIFIER_RE.test(outsideMath)
+    ) {
       throw new Error(
         `Raw LaTeX remained outside math spans in ${fixture.name}:\n${processed}`,
       );
@@ -290,7 +307,10 @@ function assertPreprocessedMarkdownHasNoRawLatex(): void {
       assertMathJaxRenders(formula, fixture.name);
     }
     const visibleText = renderMarkdownVisibleText(processed);
-    if (VISIBLE_RAW_LATEX_RE.test(visibleText)) {
+    if (
+      VISIBLE_RAW_LATEX_RE.test(visibleText) ||
+      RAW_SCRIPTED_IDENTIFIER_RE.test(visibleText)
+    ) {
       throw new Error(
         `Raw LaTeX remained visible after Streamdown render in ${fixture.name}:\n${visibleText}\n\nProcessed markdown:\n${processed}`,
       );

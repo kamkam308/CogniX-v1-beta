@@ -235,6 +235,11 @@ const FORMULA_CONNECTOR_SPLIT_RE = new RegExp(
   String.raw`(\s+(?:et|ou|donc|avec)\s+)(?=${LATEX_ASSIGNMENT_LEFT_PATTERN}(?:\s*['’])?(?:\s*\([^()\n]{0,80}\))?\s*=)`,
   "i",
 );
+const LATEX_SCRIPT_SUFFIX_PATTERN = String.raw`(?:_\{[^{}\s]+\}|_\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])|_[0-9A-Za-z](?![A-Za-z])|\^\{[^{}\s]+\}|\^\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z])|\^[0-9A-Za-z](?![A-Za-z]))`;
+const STANDALONE_SCRIPTED_IDENTIFIER_RE = new RegExp(
+  String.raw`(^|[\s([{;:,|])((?:[A-Za-z]{1,4}|\\(?:${LATEX_COMMAND_PATTERN})(?![a-zA-Z]))${LATEX_SCRIPT_SUFFIX_PATTERN}+(?:\([^()\n]{0,80}\))?)`,
+  "g",
+);
 
 /**
  * Find code-block regions (``` ... ``` and ` ... `) to skip.
@@ -875,6 +880,21 @@ function wrapWrappableCommandExpressions(content: string): string {
   );
 }
 
+function wrapStandaloneScriptedIdentifiers(
+  content: string,
+  options: { tableCell?: boolean } = {},
+): string {
+  return content.replace(
+    STANDALONE_SCRIPTED_IDENTIFIER_RE,
+    (match, prefix: string, body: string) => {
+      if (!looksLikeBareLatexMath(body)) {
+        return match;
+      }
+      return `${prefix}${wrapInlineBareLatex(body, options)}`;
+    },
+  );
+}
+
 function wrapBareLatexSegments(
   content: string,
   options: { tableCell?: boolean } = {},
@@ -905,16 +925,22 @@ function wrapBareLatexSegments(
     (segment) => wrapParenthesizedBareLatex(segment, options),
   );
 
-  return processOutsideMathDelimiters(withParentheses, (segment) =>
-    segment.replace(
-      SENTENCE_BARE_LATEX_RE,
-      (match, prefix: string, body: string) => {
-        if (!looksLikeBareLatexMath(body)) {
-          return match;
-        }
-        return `${prefix}${wrapInlineBareLatex(body, options)}`;
-      },
-    ),
+  const withSentenceMath = processOutsideMathDelimiters(
+    withParentheses,
+    (segment) =>
+      segment.replace(
+        SENTENCE_BARE_LATEX_RE,
+        (match, prefix: string, body: string) => {
+          if (!looksLikeBareLatexMath(body)) {
+            return match;
+          }
+          return `${prefix}${wrapInlineBareLatex(body, options)}`;
+        },
+      ),
+  );
+
+  return processOutsideMathDelimiters(withSentenceMath, (segment) =>
+    wrapStandaloneScriptedIdentifiers(segment, options),
   );
 }
 
